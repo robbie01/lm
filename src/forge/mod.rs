@@ -132,6 +132,7 @@ pub const SYSTEM: &[&str] = &[
     "lisp/runtime.lisp",
     "lisp/core.lisp",
     "lisp/macros.lisp",
+    "lisp/table.lisp",
     "lisp/print.lisp",
     "lisp/gc.lisp",
     "lisp/hw.lisp",

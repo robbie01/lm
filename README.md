@@ -182,6 +182,26 @@ The price is the same bargain open-coding `car` makes: redefining a function
 does not reach the calls already inside it. A recursive function that redefines
 itself mid-flight will finish in the version it started in.
 
+## Symbols have identities
+
+Interning hands every symbol a small dense integer, packed into the flags word
+that was sitting empty, and the counter lives in low memory so that a symbol
+made by the forge and one made by the running machine can never collide. It is
+a **perfect hash**: no collisions, nothing to recompute, and nothing a
+collector could invalidate by moving something.
+
+That is what `lisp/table.lisp` is built on — open addressing over two parallel
+vectors rather than buckets of pairs, because a chain costs two conses an entry
+before it has stored anything. Looking up one of two hundred symbols takes 244
+cycles against 9,256 for the `assq` it replaces.
+
+The compiler was the first customer. It used to walk two lists, ninety entries
+between them, at every call site it looked at; now the emitter for an
+open-coded operator hangs off the symbol's function slot, which was also
+sitting empty. **Compiling on the machine went from 236k cycles to 145k**, and
+between that and the direct self-calls the compiler is about 40% faster than it
+was.
+
 ## Finding every pointer
 
 Compiled code contains **no heap addresses at all**. Each function reaches its
@@ -431,7 +451,7 @@ to hardware from Lisp is peek and poke.
 lmdev all             every suite
 lmdev cpu             96 processor conformance cases
 lmdev asm             the Lisp assembler against an independent Rust encoder
-lmdev compiler        133 end-to-end cases: source in, machine code out, compare
+lmdev compiler        139 end-to-end cases: source in, machine code out, compare
 lmdev bench           measure the interpreter
 lmdev inspect [IMG]   look inside an image without running it
 lmdev eval EXPR       compile and run one expression, for debugging the compiler

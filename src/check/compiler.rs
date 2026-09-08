@@ -155,6 +155,35 @@ fn cases() -> Vec<Case> {
         // A string is an object, so this is the type check rather than the
         // tag check doing the work.
         Case("(%vector-ref \"abc\" 0)", "TRAP: wrong type"),
+        // ---- hash tables, keyed by identity ----
+        Case(
+            "(let ((tb (make-table))) (table-set! tb 'a 1) (table-set! tb 'b 2)              (list (table-ref tb 'a) (table-ref tb 'b) (table-ref tb 'c 'none)))",
+            "(1 2 none)",
+        ),
+        // Mixed keys: a symbol hashes by identity, a fixnum by value, a
+        // character by its code.
+        Case(
+            "(let ((tb (make-table))) (table-set! tb 'k 1) (table-set! tb 7 2)              (table-set! tb #\\z 3) (list (table-ref tb 'k) (table-ref tb 7)              (table-ref tb #\\z) (table-count tb)))",
+            "(1 2 3 3)",
+        ),
+        // Replacing a key does not add one.
+        Case(
+            "(let ((tb (make-table))) (table-set! tb 'a 1) (table-set! tb 'a 2)              (list (table-count tb) (table-ref tb 'a)))",
+            "(1 2)",
+        ),
+        // A deleted slot is a hole, not an empty one: the keys that probed
+        // past it must still be found.
+        Case(
+            "(let ((tb (make-table))) (table-set! tb 'a 1) (table-set! tb 'b 2)              (table-del! tb 'a) (list (table-count tb) (table-has? tb 'a)              (table-ref tb 'b)))",
+            "(1 nil 2)",
+        ),
+        // Growing rehashes everything and drops the holes.
+        Case(
+            "(let ((tb (make-table)) (i 0)) (while (< i 200) (table-set! tb i (* i i))              (set! i (+ i 1))) (list (table-count tb) (table-ref tb 199)              (table-ref tb 0) (> (table-capacity tb) 200)))",
+            "(200 39601 0 t)",
+        ),
+        Case("(symbol-index 'car)", "292"),
+
         // ---- functions know their own names ----
         // The name lives in the code object, which is also what every frame
         // holds in s1, so this is the same word a backtrace reads.
