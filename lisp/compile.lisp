@@ -1636,6 +1636,26 @@
     (set! *boot-thunks* (%cons clo *boot-thunks*))
     clo))
 
+;; A macro expander takes the form's argument list as a single argument and
+;; picks it apart itself. The obvious alternative - call it with one argument
+;; per element - runs into the calling convention at eight, which is a strange
+;; place for a cond to stop working.
+(define (macro-binder params var body)
+  (if (%symbol? params)
+      (%cons 'let (%cons (list (list params var)) body))
+      (let ((binds nil) (p params) (path var))
+        (while (%cons? p)
+          (if (%symbol? (%car p))
+              nil
+              (error "defmacro: this parameter list is too clever" params))
+          (set! binds (append binds (list (list (%car p) (list 'car path)))))
+          (set! path (list 'cdr path))
+          (set! p (%cdr p)))
+        (if (%symbol? p)
+            (set! binds (append binds (list (list p path))))
+            nil)
+        (%cons 'let* (%cons binds body)))))
+
 (define (compile-top form)
   (set! form (macroexpand form))
   (if (%cons? form)
@@ -1664,7 +1684,10 @@
          ((%eq? h 'defmacro)
           (register-macro form)
           (let* ((name (cadr form))
-                 (r (compile-function (caddr form) (cdddr form) name nil))
+                 (r (compile-function (list 'macro-args)
+                                      (list (macro-binder (caddr form) 'macro-args
+                                                          (cdddr form)))
+                                      name nil))
                  (clo (make-closure (%cdr r) 0)))
             (%set-symbol-function! name clo)
             (%set-symbol-flags! name (%logior (%symbol-flags name) sym-macro))

@@ -528,11 +528,49 @@
          (clo (make-closure (%cdr r) 0)))
     (%funcall clo)))
 
-;; On the machine there is no boot list to add to: a top level form is simply
-;; run, and a variable initialiser has already been run by compile-top.
-(define (top-level-form form) (eval-thunk form))
-(define (record-initialiser name expr) nil)
+;; A top level form is normally just run: at a prompt there is no image being
+;; built and nothing to remember it for. During a rebuild there is, and then
+;; the same form is compiled onto the boot list of the image being made as
+;; well as run here - which is the whole difference between a machine using
+;; its compiler and a machine building its successor.
+(define *recording* nil)
+
+(define (top-level-form form)
+  (if *recording*
+      (%funcall (add-boot-thunk form))
+      (eval-thunk form)))
+
+(define (record-initialiser name expr)
+  ;; compile-top has already given the variable its value; this is so that the
+  ;; image being built gives it that value again when it boots.
+  (if *recording* (add-boot-thunk (list 'set! name expr)) nil))
+
 (define (register-macro form) nil)
+
+;; ---------------------------------------------------------------- rebuild
+;; The machine compiling its own successor. Source arrives on the console the
+;; way anything else does; every form is compiled into a fresh boot list until
+;; the sentinel, and then the image can be written out.
+;;
+;; Nothing here is clever. The compiler being recompiled is the compiler doing
+;; the compiling, and calls go through symbol value cells, so the new one
+;; takes over partway through and finishes the job. That is what self-hosting
+;; is; if the new compiler is broken, the way you find out is that the build
+;; goes wrong in a confusing place.
+(define (rebuild)
+  (set! *boot-thunks* nil)
+  (set! *recording* t)
+  (let ((go t) (n 0))
+    (while go
+      (let ((form (read-form)))
+        (if (%eq? form 'rebuild-end)
+            (set! go nil)
+            (begin (compile-top form) (set! n (%+ n 1))))))
+    (set! *recording* nil)
+    (emit-str "rebuilt ")
+    (emit-str (number->string n))
+    (emit-str " forms\n")
+    n))
 
 (define (eval-form form) (compile-top form))
 (define (eval form) (eval-form form))
@@ -560,8 +598,10 @@
       nil))
 
 (define (expand-macro form)
+  ;; One argument: the form's arguments, as a list. The expander was compiled
+  ;; to take them that way.
   (let ((m (macro-symbol? (%car form))))
-    (if m (apply-list m (%cdr form)) form)))
+    (if m (%funcall m (%cdr form)) form)))
 
 ;; ---------------------------------------------------------------- repl
 (define *repl-depth* 0)
@@ -629,6 +669,9 @@
   (if (%raw-ld lg-startup)
       (%funcall (%raw-ld lg-startup))
       nil)
+  ;; A prompt starts in user, whatever package the boot list happened to leave
+  ;; the reader in on its way through.
+  (set-current-package! (make-package "user"))
   ;; The first prompt is the machine's own: when it says goodbye, so does the
   ;; machine. One in a window is a task, and only ends its task.
   (repl)

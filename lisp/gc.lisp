@@ -712,6 +712,15 @@
 ;; ---------------------------------------------------------------- collect
 (define *gc-ready* nil)
 
+;; The popcount table, the mark bitmap and the mark stack all live above
+;; fast-base, which no image saves - they are scratch, rebuilt on demand. The
+;; flag saying the table has been built is an ordinary Lisp global, and that
+;; one does get saved. An image written without this call comes back claiming
+;; a table it does not have, and the collector then computes forwarding
+;; addresses out of a page of zeroes: everything still looks like a pointer,
+;; and nothing points where it used to.
+(define (gc-forget-scratch) (set! *gc-ready* nil))
+
 (define (gc-collect)
   (let ((t0 (%cycles)))
     (%disable)

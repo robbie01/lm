@@ -36,6 +36,29 @@ enum Cmd {
         verbose: bool,
     },
 
+    /// Build an image by having a previous image build it
+    ///
+    /// The machine has a reader, a compiler and an image writer; the sources
+    /// are typed at its console and it writes its own successor. This is the
+    /// self-hosting path, and it does not go near the bootstrap interpreter.
+    Rebuild {
+        /// The image to build with
+        #[arg(short, long, default_value = "kick.img")]
+        from: String,
+
+        /// Where to write the new image
+        #[arg(short, long, default_value = "next.img")]
+        out: String,
+
+        /// Report what is being fed in and how long it took
+        #[arg(short, long)]
+        verbose: bool,
+
+        /// Compile everything and collect, but write nothing
+        #[arg(short, long)]
+        check: bool,
+    },
+
     /// Regenerate lisp/layout.lisp from the Rust definitions
     ///
     /// The memory map and object layout are defined once, in Rust, and emitted
@@ -48,6 +71,7 @@ fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     let code = match cli.command {
         Cmd::Build { out, verbose } => lm::forge::build(&out, verbose),
+        Cmd::Rebuild { from, out, verbose, check } => lm::forge::rebuild(&from, &out, verbose, check),
         Cmd::Layout => {
             lm::forge::write_layout();
             println!("wrote lisp/layout.lisp");

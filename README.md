@@ -473,44 +473,46 @@ The effect on an image is the whole reason for the exercise:
 That last figure is 10,340 live pairs out of the 3.4 million the compiler
 allocated to build itself.
 
-## The bootstrap
+## The bootstrap, and building without it
 
-There is one compiler, written once, in Lisp.
+There are two ways to make an image.
 
-At build time a small interpreter in Rust runs it. That interpreter evaluates
-over the *target* representation — its conses are real conses at real target
-addresses in the machine's RAM — so what the compiler builds while being
-interpreted is already exactly what the machine will run. The compiler compiles
-the whole system, itself included, into that same heap. What is left in memory
-at the end is the image.
+`lmforge build` is the one that needs nothing: a small interpreter in Rust
+brings up the Lisp sources, and then the compiler — one of those sources,
+written in Lisp — compiles the whole system including itself into the same
+heap the interpreter has been filling all along. What is left in memory at the
+end is the image.
 
-```
-lmforge build
-  bring up the interpreter, load lisp/*.lisp
-  claim the reset vector
-  compile layout, runtime, core, macros, print, gc, hw, asm, compile, sys,
-          exec, snap, demo
-  wire the kickstart, assemble the three stubs that have to be assembly
-  write out the non-empty pages
-```
+`lmforge rebuild` is the one that needs an image: it boots a previous one,
+**types the sources at its console**, and lets the machine compile them into a
+fresh boot list and write its own successor. The machine already has a reader,
+a compiler and an image writer; what it does not have is a filesystem, and a
+console is a perfectly good substitute.
 
-A handful of names mean different things on either side of that line — reading
-a file, expanding a macro, evaluating a constant — so each is a one-line
-function defined twice: once in `hostio.lisp` for the forge, once in `sys.lisp`
-for the machine. Everything else is shared, and the build fails loudly if
-compiled code refers to a global that nothing defines.
-
-Once booted, the image can save itself:
+The measurement that decides which is which: the machine compiles a five-line
+function in **108,600 cycles, 0.26 ms**. Over 1,427 top-level forms that is
+about a second of machine time — so the self-hosted path is **faster than the
+bootstrap it replaces**, not a sacrifice:
 
 ```
-> (define (greet who) (string-append "hello, " who))
-> (save-image)
-saved 4270 blocks
-$ ./target/release/lm snap.img
-LM resumed, 284k of code
-> (greet "again")
-"hello, again"
+lmforge build                       kick.img in 7.0s
+lmforge rebuild --from kick.img     next.img in 2.2s, 1427 forms
+lmforge rebuild --check             compile everything, collect, write nothing
 ```
+
+What that buys is the end of mirroring. A change to the Lisp reader used to
+need a matching change in `src/forge/read.rs`, because both readers have to
+agree about what a name means. With `rebuild` they only have to agree when
+somebody builds from scratch — and layout is already single-sourced out of
+`map.rs` and `heap.rs`.
+
+Two things to know. The compiler being recompiled is the compiler doing the
+compiling, and calls go through symbol value cells, so the new one takes over
+partway through and finishes the job; if it is broken, the way you find out is
+that the build goes wrong somewhere confusing. And a rebuilt image is a **used
+machine** rather than a fresh one — it carries the holes left by the code it
+replaced, so it is bigger, and each generation is a little bigger again.
+`lmforge build` is how you renormalise.
 
 ## Exec
 
@@ -537,19 +539,35 @@ registers are already saved.
 
 ## The Workbench
 
+A window owns the part of the bitmap it may draw on, and nothing else. Its
+**region** is its own rectangle less the rectangle of every window in front of
+it, recomputed whenever a window opens, closes, moves or comes forward. All
+drawing goes through a **rastport** — an origin and a region — and the current
+one travels with the task the way its streams do, so a task that draws is
+clipped to its own window without being told.
+
+That is the difference between an ordering and a guarantee. Before it, z-order
+held only until the next repaint: a task at the back would paint over the
+window in front two milliseconds later, and `xeyes` behind another window drew
+its eye straight across it. Now it cannot.
+
+It also means repainting is **only what was uncovered**. Closing a window
+repaints the strip it vacated rather than the screen, and drawing order stops
+mattering at all, because the regions do not overlap.
+
+`region-subtract` is the whole of the machinery: one rectangle minus another is
+at most four rectangles, and everything else is that in a loop.
+
 `(workbench)` opens a desktop with a shell in a window, and `(new-shell)` opens
 another. Each shell is a task with a prompt of its own, reading from its own
 window and printing into it — the same compiler, the same collector, the same
 everything, just not on the serial line.
 
-**No window has a backing store.** There is one bitmap, every window draws
-straight into it, and repainting is back to front over the window list. That
-is the entire occlusion model: no clip rectangles, no damage regions, an order
-and the willingness to redraw. It costs a window a few hundred bytes instead of
-a quarter of a megabyte, and it costs a drag one full repaint, which at blitter
-speed lands well inside a frame. The price is that a window has to be able to
-draw itself again on demand — a shell can, because it keeps the characters
-rather than the pixels, in a grid it scrolls with the blitter.
+**No window has a backing store.** There is one bitmap and every window draws
+straight into it, clipped to its own region. That costs a window a few hundred
+bytes instead of a quarter of a megabyte, and the price is that a window has to
+be able to draw itself again on demand — a shell can, because it keeps the
+characters rather than the pixels, in a grid it scrolls with the blitter.
 
 The font is five columns by seven in an eight-pixel cell, written as eight
 small numbers a glyph so the whole thing is legible in `lisp/font.lisp`, and
@@ -601,6 +619,7 @@ lmdev asm             the Lisp assembler against an independent Rust encoder
 lmdev compiler        146 end-to-end cases: source in, machine code out, compare
 lmdev bench           measure the interpreter
 lmdev readers         the two readers, resolving names to the same symbol
+lmforge rebuild --check   compile every source on the machine, then collect
 lmdev inspect [IMG]   look inside an image without running it
 lmdev eval EXPR       compile and run one expression, for debugging the compiler
 lmdev repl            a prompt on the bootstrap interpreter
@@ -629,9 +648,9 @@ anything in the heap.
   which handles the usual case where sizes repeat.
 - A fault inside a task with a prompt behind it restarts that prompt; one
   without a prompt ends the task. Neither unwinds anything on the way.
-- Window contents are not clipped against each other: a window draws its whole
-  interior and the ones in front are drawn after it. Correct, and more work
-  than a clip rectangle would be.
+- A rebuilt image carries the holes left by the code it replaced, so it is
+  bigger than a freshly built one and grows a little each generation.
+  `lmforge build` renormalises it.
 - Thirty-two words per suspended task are scanned conservatively, and what they
   reach is pinned for that cycle. `(room)` reports how many.
 - A collection walks the whole used heap, so it costs proportional to the high

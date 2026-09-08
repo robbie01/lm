@@ -16,7 +16,15 @@
 
 (define (region-blocks len) (%lsh (%+ len 511) -9))
 
-(define (save-image)
+(define (save-image) (save-image-with (%symbol-value 'resume-kickstart)))
+
+;; An image built by a rebuild starts from the beginning rather than resuming:
+;; the boot list the rebuild recorded is exactly what it has to run.
+(define (save-rebuilt)
+  (%raw-st! lg-bootlist (reverse compiler:*boot-thunks*))
+  (save-image-with (%symbol-value 'kickstart)))
+
+(define (save-image-with top)
   ;; The allocator's current run lives in registers, so it has to be written
   ;; back to memory before the memory is what gets saved. Without this the
   ;; resumed machine would start handing out pairs it had already given away.
@@ -28,6 +36,9 @@
   ;; are one contiguous block at the bottom of cons space, and everything
   ;; above it has been blanked.
   (gc-for-image)
+  ;; What is about to be written does not include the collector's scratch
+  ;; memory, so the image must not come back believing it is set up.
+  (gc-forget-scratch)
   (disable)
   (let* ((hdr (alloc-pool 512))
          (live-top (%global lg-cons-ptr))
@@ -43,7 +54,7 @@
          (i 0))
     ;; A resumed image re-enters through here rather than through the boot
     ;; list: every global it would have set is already set.
-    (%raw-st! lg-toplevel (%symbol-value 'resume-kickstart))
+    (%raw-st! lg-toplevel top)
     ;; The collection above already left the allocator pointing at the single
     ;; run above the live data, so there is nothing to arrange here.
     (poke hdr snap-magic)
@@ -74,6 +85,7 @@
   ;; rebuilt, because the task that saved is not the task that resumes.
   (%raw-st! lg-traphook (%symbol-value 'handle-trap))
   (exec-init)
+  (set-current-package! (make-package "user"))
   (emit-str "\n")
   (emit-str system-name)
   (emit-str " resumed, ")

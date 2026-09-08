@@ -118,7 +118,8 @@
 ;; 18 public, out of 100 definitions.
 (export '(
   alloc-code alloc-object frame-ok? gc gc-collect gc-extra-roots
-  gc-for-image gc-scan-conservative gc-scan-frames gc-slot in-stub?
+  gc-for-image gc-forget-scratch gc-scan-conservative gc-scan-frames
+  gc-slot in-stub?
   refill-cons register-code room stub-args-off stub-frame-size
   stub-mask-off stub-raw-off
 ))
@@ -172,7 +173,8 @@
   *peeked* *repl-restart* *return-addr-fn* *stack-top-fn* *task-abort-fn*
   bye compile-time-eval eval eval-form expand-macro handle-trap
   int-external int-software int-timer kickstart macro-form? print-backtrace
-  read-form record-initialiser register-macro repl resume-kickstart
+  read-form rebuild rebuild-end record-initialiser register-macro repl
+  resume-kickstart
   start-repl system-name top-level-form trap-reschedule
 ))
 
@@ -187,7 +189,7 @@
 (in-package snap)
 ;; 1 public, out of 5 definitions.
 (export '(
-  save-image
+  save-image save-rebuilt
 ))
 
 (in-package wb)
