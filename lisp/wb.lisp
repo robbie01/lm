@@ -11,6 +11,8 @@
 ;;; the willingness to draw the lot. At blitter speed a whole screen is well
 ;;; inside a frame, and the code that results is a page rather than a chapter.
 
+(in-package wb)
+
 ;; ---------------------------------------------------------------- palette
 (define wb-desktop 13)
 (define wb-face 12)

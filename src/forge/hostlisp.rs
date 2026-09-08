@@ -436,7 +436,7 @@ impl<'a> Lisp<'a> {
 
     /// Look up a build-time global by name.
     pub fn global(&mut self, name: &str) -> V {
-        let s = self.h.intern(name);
+        let s = self.h.intern_path(name);
         self.globals.get(&s).copied().unwrap_or(UNBOUND)
     }
 
@@ -618,7 +618,10 @@ impl<'a> Lisp<'a> {
 
     // ---------------------------------------------------------- primitives
     fn defprim(&mut self, name: &str, idx: u32) {
+        // Primitives are the machine's own vocabulary and belong to everyone:
+        // every package can say %car without asking.
         let sym = self.h.intern(name);
+        self.h.set_exported(sym);
         let p = self.h.alloc_obj(T_PRIM, 2);
         self.h.set_slot(p, 0, idx);
         self.h.set_slot(p, 1, sym);
@@ -1151,6 +1154,52 @@ impl<'a> Lisp<'a> {
                 }
                 bail!("{msg}")
             }
+            // The package forms. The reader has already acted on the first
+            // two by the time they are evaluated - it has to, since what
+            // follows them in the file is read in the package they name - so
+            // these exist for the forge's sake, and to keep `export` from
+            // needing the library that has not been loaded yet.
+            "in-package" => {
+                need!(1);
+                let name = self.h.str_of(a[0]);
+                let p = self.h.package(&name);
+                self.h.set_cur_package(p);
+                NIL
+            }
+            "defpackage" => {
+                need!(1);
+                let name = self.h.str_of(a[0]);
+                let p = self.h.package(&name);
+                let mut names: Vec<String> = Vec::new();
+                let mut in_use = false;
+                for x in &a[1..] {
+                    if self.h.otype_is_string(*x) {
+                        let sx = self.h.str_of(*x);
+                        if sx == "use" {
+                            in_use = true;
+                        } else if in_use {
+                            names.push(sx);
+                        }
+                    }
+                }
+                let mut list = NIL;
+                for nm in names.iter().rev() {
+                    let used = self.h.package(nm);
+                    list = self.h.cons(used, list);
+                }
+                self.h.set_slot(p, PKG_USE, list);
+                p
+            }
+            "export" => {
+                need!(1);
+                let mut l = a[0];
+                while l != NIL {
+                    let s = self.h.car(l);
+                    self.h.set_exported(s);
+                    l = self.h.cdr(l);
+                }
+                NIL
+            }
             "%read-file" => {
                 need!(1);
                 let path = self.h.str_of(a[0]);
@@ -1324,6 +1373,9 @@ pub static PRIMS: &[(&str, u32)] = &[
     ("%newline", 0),
     ("%flush", 0),
     ("%error", 1),
+    ("in-package", 1),
+    ("defpackage", 1),
+    ("export", 1),
     ("%read-file", 1),
     ("%read-from-string", 1),
     ("%load", 1),

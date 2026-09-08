@@ -5,6 +5,8 @@
 ;;; does the same jobs against the serial port and the heap rather than against
 ;;; the host's stdio. This file exists so that core.lisp can stay compilable.
 
+(in-package hostio)
+
 (define (write x) (%write x))
 (define (display x) (%display x))
 (define (newline) (%newline))

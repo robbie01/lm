@@ -9,6 +9,8 @@
 ;;; context, on purpose. Taking a trap and switching tasks are the same
 ;;; operation seen from two directions.
 
+(in-package boot)
+
 ;; ---------------------------------------------------------------- context
 ;; 32 words: word 0 is the pc, words 1..31 are x1..x31.
 (define ctx-words 32)

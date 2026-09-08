@@ -1,5 +1,7 @@
 ;;; sys.lisp - the kickstart proper: what the machine does when it wakes up.
 
+(in-package sys)
+
 ;; ---------------------------------------------------------------- banner
 (define system-name "LM")
 (define system-version "0.1")
@@ -372,7 +374,8 @@
      (else (read-atom)))))
 
 (define (read-list)
-  (let ((acc nil) (go t) (tail nil))
+  (let ((acc nil) (go t) (tail nil) (outer-raw *read-raw*))
+    (set! *read-depth* (%+ *read-depth* 1))
     (while go
       (skip-space)
       (let ((c (peek-char)))
@@ -384,7 +387,20 @@
           (skip-space)
           (wait-char)
           (set! go nil))
-         (else (set! acc (%cons (read-form) acc))))))
+         (else
+          (let ((v (read-form)))
+            ;; The head of an outermost form decides how the rest is read.
+            (if (if (%null? acc) (%= *read-depth* 1) nil)
+                (if (%symbol? v)
+                    (if (if (string=? (%symbol-name v) "defpackage") t
+                            (string=? (%symbol-name v) "in-package"))
+                        (set! *read-raw* t)
+                        nil)
+                    nil)
+                nil)
+            (set! acc (%cons v acc)))))))
+    (set! *read-raw* outer-raw)
+    (set! *read-depth* (%- *read-depth* 1))
     (revappend acc tail)))
 
 (define (dot-follows?)
@@ -444,14 +460,42 @@
             (set! acc (%cons (wait-char) acc)))))
     (list->string (reverse acc))))
 
+;; Inside a defpackage or in-package form the names are the names of packages
+;; that may not exist yet, so they are read as names and not as symbols -
+;; interning them would put them in whatever package happens to be current,
+;; which is exactly the wrong one. Only the outermost form counts: a define of
+;; defpackage is a definition of it, not a use.
+(define *read-raw* nil)
+(define *read-depth* 0)
+
+(define (token->symbol tok)
+  ;; pkg:name is the exported symbol of that name in that package; pkg::name
+  ;; is any symbol of that name, interning one if there is none.
+  (let ((i (string-index tok #\:)))
+    (if (if i (%> i 0) nil)
+        (let* ((internal (if (%< (%+ i 1) (%string-length tok))
+                             (%eq? (%string-ref tok (%+ i 1)) #\:)
+                             nil))
+               (pname (substring tok 0 i))
+               (name (substring tok (%+ i (if internal 2 1)) (%string-length tok)))
+               (pkg (find-package pname)))
+          (if (%null? pkg) (error "no package named" pname) nil)
+          (let ((sym (find-symbol-in pkg name)))
+            (cond ((if sym (if internal t (symbol-exported? sym)) nil) sym)
+                  (internal (intern-in pkg name))
+                  (else (error "not exported" tok)))))
+        (intern-visible (current-package) tok))))
+
 (define (read-atom)
   (let ((tok (read-token)))
     (if (%= 0 (%string-length tok))
         (begin (wait-char) nil)
-        (let ((n (string->number tok)))
-          (cond (n n)
-                ((string=? tok "nil") nil)
-                (else (intern-string tok)))))))
+        (if *read-raw*
+            tok
+            (let ((n (string->number tok)))
+              (cond (n n)
+                    ((string=? tok "nil") nil)
+                    (else (token->symbol tok))))))))
 
 (define (string->number-radix s radix)
   (let ((i 0) (n (%string-length s)) (acc 0) (neg nil))
@@ -495,9 +539,14 @@
 
 ;; On the machine a macro is a symbol with bit 0 of its flags set, whose
 ;; function cell holds the compiled expander the forge left there.
+;; The function slot holds two different things depending on the flag: a macro
+;; expander, or the compiler's note of how to open-code a call. The bit is
+;; what tells them apart, and no name is ever both.
 (define (macro-symbol? s)
   (if (%symbol? s)
-      (if (%= 1 (%logand 1 (%symbol-flags s))) (%symbol-function s) nil)
+      (if (%= sym-macro (%logand sym-macro (%symbol-flags s)))
+          (%symbol-function s)
+          nil)
       nil))
 
 (define (macro-form? form)

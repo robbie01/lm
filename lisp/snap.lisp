@@ -9,6 +9,8 @@
 ;;; The file starts with one block describing the regions, then the regions
 ;;; themselves, each rounded up to a whole number of blocks.
 
+(in-package snap)
+
 (define snap-magic 827542860)     ; "LMS1" as a little-endian word
 (define snap-header-blocks 1)
 

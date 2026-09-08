@@ -53,6 +53,7 @@ tests.
 | `lisp/compile.lisp` | Lisp → RISC-V compiler, in Lisp |
 | `lisp/gc.lisp` | the collector |
 | `lisp/exec.lisp` | Amiga Exec-style kernel |
+| `lisp/packages.lisp` | every module, and the names it makes public |
 | `lisp/hw.lisp` | the custom chips |
 | `lisp/sys.lisp` | reader, printer, REPL, trap handling |
 
@@ -181,6 +182,66 @@ variadic, since the rest-list code reads that count out of `t1`.
 The price is the same bargain open-coding `car` makes: redefining a function
 does not reach the calls already inside it. A recursive function that redefines
 itself mid-flight will finish in the version it started in.
+
+## Packages
+
+Every name used to land in one global namespace, and the code leaned on
+prefixes - `gc-`, `win-`, `tc-`, `i-` - to keep out of its own way. It now has
+Common Lisp's packages, in their small form: a namespace per module, an
+explicit export list, and `pkg:name` / `pkg::name` to say when you are reaching
+outside your own.
+
+They fit this machine unusually well, because a package here is a **reading**
+concern and nothing else. The reader resolves a bare name in the current
+package, then in whatever the packages it uses have exported, and interns one
+of its own if neither has it. After that it is all symbol objects: the compiler
+already resolves a global to a symbol at compile time, so **packages cost the
+running machine not one instruction**.
+
+`lisp/packages.lisp` is the whole module structure in one file, read first on
+both sides of the bootstrap - which matters, because the forge and the machine
+load the sources in different orders and a name has to mean the same thing in
+both. The export lists were computed from actual cross-package use rather than
+guessed, which is why they are as small as they are:
+
+```
+compiler     9 public of  79 definitions
+gc          17 of 100
+exec        18 of 179
+sys         24 of  84
+wb          13 of  80
+lm         429 of 302 definitions plus the primitives and special forms
+```
+
+Roughly seven definitions in ten are now private. The prelude is the exception
+and should be: it is a library, so its interface is the library.
+
+The current package is **per task**, swapped by the scheduler along with the
+streams, so one shell can be in `wb` while another is in `user`:
+
+```
+> (current-package)
+#<package user>
+> (in-package wb)
+> (length *windows*)
+1
+> wb::title-height
+10
+```
+
+Two things fell out of doing this that were worth the trip on their own. The
+first is that the collector was not tracing the package list, which would have
+quietly collected the reader's world out from under it. The second is that the
+compiler was interning `make-closure` and `t` *by name at compile time*, in
+whatever package happened to be current - so compiling `wb.lisp` was quietly
+creating `wb::make-closure`. Both were invisible in a flat namespace.
+
+`lmdev readers` is the check that keeps the two implementations of "what does
+this name mean" honest, the same way `lmdev asm` does for the two instruction
+encoders. It resolves the same names on both sides and compares the **address**
+of the symbol each settled on, so a hash that disagreed - which would silently
+intern a second symbol of the same name - shows up as a different number rather
+than as the same text.
 
 ## Symbols have identities
 
@@ -453,6 +514,7 @@ lmdev cpu             96 processor conformance cases
 lmdev asm             the Lisp assembler against an independent Rust encoder
 lmdev compiler        139 end-to-end cases: source in, machine code out, compare
 lmdev bench           measure the interpreter
+lmdev readers         the two readers, resolving names to the same symbol
 lmdev inspect [IMG]   look inside an image without running it
 lmdev eval EXPR       compile and run one expression, for debugging the compiler
 lmdev repl            a prompt on the bootstrap interpreter

@@ -11,6 +11,8 @@
 ;;; conses an entry before it has stored anything. Two parallel vectors and
 ;;; linear probing store nothing but the keys and the values.
 
+(in-package lm)
+
 (define tbl-keys 1)
 (define tbl-vals 2)
 (define tbl-count 3)

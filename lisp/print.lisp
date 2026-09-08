@@ -4,6 +4,8 @@
 ;;; it is deliberately written against a "put one character" function so the
 ;;; same printer serves the serial console, a string, or later a window.
 
+(in-package lm)
+
 ;; ---------------------------------------------------------------- streams
 ;; A stream is three closures: put a character, take one or answer nil, and
 ;; block until there might be one. The printer was always written against the
@@ -95,6 +97,18 @@
 (define (emit-code-label c)
   (if (code-object? c) (emit-name (%slot c code-name)) (emit-str "?")))
 
+;; Short if the package we are in would read this name back as this symbol,
+;; and qualified otherwise - with two colons for one that was never exported,
+;; which is the reader's own spelling for reaching past an interface.
+(define (print-symbol x)
+  (let ((name (%symbol-name x)))
+    (if (%eq? (find-visible (current-package) name) x)
+        (emit-str name)
+        (let ((p (symbol-package x)))
+          (emit-str (if p (package-name p) "?"))
+          (emit-str (if (symbol-exported? x) ":" "::"))
+          (emit-str name)))))
+
 (define (write-char-name c)
   (let ((n (%char->int c)))
     (emit-str "#\\")
@@ -126,7 +140,7 @@
    ((%object? x)
     (let ((ty (%obj-type x)))
       (cond
-       ((%= ty t-symbol) (emit-str (%symbol-name x)))
+       ((%= ty t-symbol) (print-symbol x))
        ((%= ty t-string) (if quoted (write-string-quoted x) (emit-str x)))
        ((%= ty t-vector) (print-vector x quoted depth))
        ((%= ty t-closure)
@@ -137,7 +151,10 @@
         (emit-str "#<bytes ")
         (emit-str (number->string (%obj-len x)))
         (emit-ch 62))
-       ((%= ty t-record) (print-record x quoted depth))
+       ((%= ty t-record)
+        (if (package? x)
+            (begin (emit-str "#<package ") (emit-str (package-name x)) (emit-ch 62))
+            (print-record x quoted depth)))
        (else (emit-str "#<object>")))))
    (else (emit-str "#<immediate>"))))
 

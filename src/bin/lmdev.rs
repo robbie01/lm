@@ -39,6 +39,12 @@ enum Cmd {
         verbose: bool,
     },
 
+    /// The two readers, in Rust and in Lisp, resolving names to the same symbol
+    ///
+    /// Two implementations of what a name means agreeing is evidence; one
+    /// agreeing with itself is not.
+    Readers,
+
     /// Run every suite
     All,
 
@@ -81,11 +87,13 @@ fn main() -> std::process::ExitCode {
         Cmd::Cpu => lm::check::cpu::run_all(),
         Cmd::Asm => lm::check::asm::run(),
         Cmd::Compiler { verbose } => lm::check::compiler::run_all(verbose),
+        Cmd::Readers => lm::check::readers::run(),
         Cmd::All => {
             let a = lm::check::cpu::run_all();
             let b = lm::check::asm::run();
             let c = lm::check::compiler::run_all(false);
-            a && b && c
+            let d = lm::check::readers::run();
+            a && b && c && d
         }
         Cmd::Bench => {
             lm::check::cpu::bench();

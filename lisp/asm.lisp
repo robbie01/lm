@@ -10,6 +10,8 @@
 ;;; fit in one, and every encoder here builds a low half and a high half. Only
 ;;; rs1 straddles the boundary, at bit 15.
 
+(in-package asm)
+
 ;; ---------------------------------------------------------------- registers
 (define $zero 0) (define $ra 1)  (define $sp 2)  (define $gp 3)
 (define $tp 4)   (define $t0 5)  (define $t1 6)  (define $t2 7)

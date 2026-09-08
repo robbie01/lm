@@ -8,6 +8,8 @@
 ;;; The list is unpacked into a byte vector at startup and then dropped: it is
 ;;; there to be read, not to be indexed.
 
+(in-package wb)
+
 (define font-first 32)
 (define font-cell 8)      ; the cell is eight rows tall
 (define font-advance 6)   ; and six pixels wide including the gap

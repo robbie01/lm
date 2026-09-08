@@ -2,6 +2,8 @@
 ;;; The single source of truth for these numbers is src/map.rs
 ;;; and src/heap.rs; this file is regenerated on every build.
 
+(in-package mem)
+
 ;; ---- memory map ----
 (define ram-size #x10000000)
 (define chip-size #x8000000)
@@ -72,6 +74,8 @@
 (define lg-scratch3 #x1a8)
 (define lg-symcount #x1c4)
 (define lg-pool-free #x1c8)
+(define lg-packages #x1cc)
+(define lg-package #x1d0)
 
 ;; ---- object representation ----
 (define t-symbol #x1)
@@ -87,11 +91,18 @@
 (define code-len #x1)
 (define code-name #x2)
 (define code-lits #x3)
-(define sym-slots #x5)
+(define sym-slots #x6)
 (define sym-name #x0)
 (define sym-value #x1)
 (define sym-function #x2)
 (define sym-plist #x3)
+(define sym-package #x5)
+(define sym-macro #x1)
+(define sym-exported #x2)
+(define pkg-tag #x0)
+(define pkg-name #x1)
+(define pkg-use #x2)
+(define pkg-slots #x3)
 (define sym-flags #x4)
 (define clo-entry #x0)
 (define clo-code #x1)

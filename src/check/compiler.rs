@@ -182,7 +182,10 @@ fn cases() -> Vec<Case> {
             "(let ((tb (make-table)) (i 0)) (while (< i 200) (table-set! tb i (* i i))              (set! i (+ i 1))) (list (table-count tb) (table-ref tb 199)              (table-ref tb 0) (> (table-capacity tb) 200)))",
             "(200 39601 0 t)",
         ),
-        Case("(symbol-index 'car)", "292"),
+        // Identities are handed out in interning order, so this pins the
+        // order rather than the number; it moves when the sources do.
+        Case("(< (symbol-index 'car) (symbol-index 'workbench))", "t"),
+        Case("(eq? (symbol-package 'car) (find-package \"lm\"))", "t"),
 
         // ---- functions know their own names ----
         // The name lives in the code object, which is also what every frame
@@ -301,18 +304,18 @@ pub fn run_one(l: &mut Lisp, src: &str) -> String {
     // Read the source, compile every form but the last as a definition, and
     // wrap the last one in a thunk we can call.
     let script = format!(
-        r#"(let* ((forms (%read-from-string {src:?}))
+        r#"(let* ((forms (lm:%read-from-string {src:?}))
                   (n (length forms))
                   (defs (if (%> n 1) (reverse (%cdr (reverse forms))) nil))
                   (final (last forms)))
-             (dolist (d defs) (compile-top d))
-             (compile-top (list 'define (list '%ctest-entry) final))
+             (dolist (d defs) (compiler:compile-top d))
+             (compiler:compile-top (list 'define (list 'lm:%ctest-entry) final))
              nil)"#
     );
     if let Err(e) = l.eval_string(&script, "<ctest>") {
         return format!("COMPILE ERROR: {}", e.msg);
     }
-    let entry_sym = l.h.intern("%ctest-entry");
+    let entry_sym = l.h.intern_path("lm:%ctest-entry");
     let closure = l.h.sym_value(entry_sym);
     if closure == UNBOUND || closure == NIL {
         return "COMPILE ERROR: no entry".into();
@@ -378,7 +381,7 @@ pub fn eval_one(exprs: &[String]) -> i32 {
     }
     let script: String = crate::forge::SYSTEM
         .iter()
-        .map(|f| format!("(compile-file {f:?})
+        .map(|f| format!("(hostio:compile-file {f:?})
 "))
         .collect();
     if let Err(e) = l.eval_string(&script, "<eval>") {
@@ -405,7 +408,7 @@ pub fn run_all(verbose: bool) -> bool {
     let t = std::time::Instant::now();
     let script: String = crate::forge::SYSTEM
         .iter()
-        .map(|f| format!("(compile-file {f:?})
+        .map(|f| format!("(hostio:compile-file {f:?})
 "))
         .collect();
     if let Err(e) = l.eval_string(&script, "<ctest-library>") {
@@ -419,7 +422,7 @@ pub fn run_all(verbose: bool) -> bool {
     );
     // Anything compiled code will call that nothing ever defined shows up
     // here rather than as a wild jump at run time.
-    if let Ok(v) = l.eval_string("(undefined-globals)", "<ctest>") {
+    if let Ok(v) = l.eval_string("(lm:undefined-globals)", "<ctest>") {
         if v != NIL {
             println!("undefined globals: {}", l.h.write(v));
         }

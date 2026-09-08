@@ -18,6 +18,8 @@
 ;;; points at, and restores from there on the way out. So switching tasks is
 ;;; one CSR write: point mscratch at a different task's context and return.
 
+(in-package exec)
+
 ;; ---------------------------------------------------------------- Node
 (define ln-succ 0)
 (define ln-pred 4)
@@ -244,12 +246,13 @@
 ;; the scheduler, saving them into the task leaving the processor and loading
 ;; the arriving one's. That is what a context switch is for, and it is why two
 ;; REPLs can read from two different windows without either knowing.
-(define env-slots 5)
+(define env-slots 6)
 (define env-out 0)
 (define env-in 1)
 (define env-wait 2)
 (define env-peeked 3)
 (define env-restart 4)
+(define env-package 5)
 
 (define (task-env task) (%raw-ld (%+ task tc-userdata)))
 (define (set-task-env! task e) (%raw-st! (%+ task tc-userdata) e))
@@ -260,6 +263,7 @@
     (%vector-set! e env-out *out*)
     (%vector-set! e env-in *in*)
     (%vector-set! e env-wait *wait*)
+    (%vector-set! e env-package (current-package))
     e))
 
 (define (save-task-env task)
@@ -270,7 +274,8 @@
           (%vector-set! e env-in *in*)
           (%vector-set! e env-wait *wait*)
           (%vector-set! e env-peeked *peeked*)
-          (%vector-set! e env-restart *repl-restart*))
+          (%vector-set! e env-restart *repl-restart*)
+          (%vector-set! e env-package (current-package)))
         nil)))
 
 (define (load-task-env task)
@@ -281,7 +286,8 @@
           (set! *in* (%vector-ref e env-in))
           (set! *wait* (%vector-ref e env-wait))
           (set! *peeked* (%vector-ref e env-peeked))
-          (set! *repl-restart* (%vector-ref e env-restart)))
+          (set! *repl-restart* (%vector-ref e env-restart))
+          (set-current-package! (%vector-ref e env-package)))
         nil)))
 
 ;; Dead tasks waiting to be reclaimed. A task cannot free the stack it is

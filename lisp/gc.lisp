@@ -33,6 +33,8 @@
 ;;; not, and calling anything that conses would be a recursion into the very
 ;;; condition being handled.
 
+(in-package gc)
+
 ;; ---------------------------------------------------------------- geometry
 (define gc-heap-lo cons-base)
 (define gc-heap-hi obj-limit)
@@ -315,6 +317,10 @@
   ;; points into the old heap after everything has moved.
   (gc-slot lg-symlist)
   (gc-slot lg-obarray)
+  ;; Without these the packages are collected out from under the reader, and
+  ;; the next name it reads lands in a package nobody else can see.
+  (gc-slot lg-packages)
+  (gc-slot lg-package)
   (gc-slot lg-bootlist)
   (gc-slot lg-roots)
   (gc-slot lg-toplevel)

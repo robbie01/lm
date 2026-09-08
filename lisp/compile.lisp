@@ -48,6 +48,8 @@
 ;;;   Anything that is not a pair traps with the offending value in mtval, and
 ;;;   sys.lisp turns that into a sentence naming the value.
 
+(in-package compiler)
+
 (define frame-fixed 20)
 (define (local-off n) (%- (%- 0 frame-fixed) (%* 4 n)))
 (define clo-slot -12)
@@ -373,7 +375,10 @@
     (emit-bool-from-flag c $t3 $a0)))
 
 (define (emit-bool-from-flag c flag-reg dst)
-  (let ((a (cx-asm c)) (tsym (intern-string "t")))
+  ;; 't rather than (intern-string "t"): the symbol has to be the one this
+  ;; source means, resolved once when this file was read, not whichever one
+  ;; the package that happens to be current would give us at compile time.
+  (let ((a (cx-asm c)) (tsym 't))
     (i-sub a flag-reg $zero flag-reg)   ; 0 -> 0, 1 -> all ones
     (emit-literal c tsym dst)
     (i-and a dst dst flag-reg)))
@@ -1380,7 +1385,7 @@
     ;; can be moved later without patching this call site.
     (emit-literal c code $a0)
     (i-li a $a1 (%logior (%lsh nfree 1) 1))
-    (emit-load c (list 'global (intern-string "make-closure")) $t0)
+    (emit-load c (list 'global 'make-closure) $t0)
     (i-li a $t1 2)
     (i-lw a $t2 $t0 0)
     (i-call-reg a $t2)
@@ -1536,7 +1541,7 @@
                  (r (compile-function (caddr form) (cdddr form) name nil))
                  (clo (make-closure (%cdr r) 0)))
             (%set-symbol-function! name clo)
-            (%set-symbol-flags! name (%logior (%symbol-flags name) 1))
+            (%set-symbol-flags! name (%logior (%symbol-flags name) sym-macro))
             name))
          ((%eq? h 'begin)
           (let ((last nil))

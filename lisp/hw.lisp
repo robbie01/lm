@@ -6,6 +6,8 @@
 ;;; reach the display or the blitter directly. That is the Amiga bargain -
 ;;; nothing protects you, and in exchange nothing gets in the way.
 
+(in-package hw)
+
 (define (dev-addr dev reg) (%+ mmio-base (%+ (%lsh dev 12) reg)))
 (define (peek a) (%ld32 a))
 (define (poke a v) (%st32! a v))

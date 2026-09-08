@@ -105,12 +105,27 @@ pub const T_PORT: u32 = 8; // len tagged words
 pub const T_CODE: u32 = 10; // word0 raw entry, word1 raw length, word2 name,
                             // then the literal vector - all tagged from 2 on
 
-pub const SYM_SLOTS: u32 = 5;
+pub const SYM_SLOTS: u32 = 6;
 pub const SYM_NAME: u32 = 0;
 pub const SYM_VALUE: u32 = 1;
 pub const SYM_FUNCTION: u32 = 2;
 pub const SYM_PLIST: u32 = 3;
 pub const SYM_FLAGS: u32 = 4;
+pub const SYM_PACKAGE: u32 = 5;
+
+/// Flags, in the low eight bits of SYM_FLAGS. The symbol's identity lives
+/// above them. Bit 0 says the symbol names a macro, which the compiler sets
+/// and reads; bit 1 says the package it belongs to has made it public.
+pub const SYM_MACRO: i32 = 1;
+pub const SYM_EXPORTED: i32 = 2;
+
+/// A package: a name, and the list of packages whose exports it inherits.
+/// What a package holds is not stored here - the obarray is keyed by package
+/// and name together, and a symbol knows which package is its home.
+pub const PKG_TAG: u32 = 0;
+pub const PKG_NAME: u32 = 1;
+pub const PKG_USE: u32 = 2;
+pub const PKG_SLOTS: u32 = 3;
 
 /// Closure slot 0 is the raw entry address; slot 1 is the code object; free
 /// variables start at slot 2. An entry of 0 marks a closure the build-time
@@ -433,18 +448,124 @@ impl<'a> Heap<'a> {
         h
     }
 
-    pub fn intern(&mut self, name: &str) -> V {
+    /// djb2 again, but over the package name, a colon, and the symbol name,
+    /// so that two packages can each have a `draw-char` without colliding.
+    /// `qualified_hash` in Lisp computes exactly this, and the two agreeing is
+    /// what makes a symbol read at build time eq to one read by the machine.
+    pub fn qual_hash(pkg: &str, name: &str) -> u32 {
+        let mut h: u32 = 5381;
+        for &b in pkg.as_bytes() {
+            h = (h.wrapping_mul(33).wrapping_add(b as u32)) & 0x3fff_ffff;
+        }
+        h = (h.wrapping_mul(33).wrapping_add(b':' as u32)) & 0x3fff_ffff;
+        for &b in name.as_bytes() {
+            h = (h.wrapping_mul(33).wrapping_add(b as u32)) & 0x3fff_ffff;
+        }
+        h
+    }
+
+    pub fn package_name(&self, p: V) -> String {
+        self.str_of(self.slot(p, PKG_NAME))
+    }
+
+    /// Find a package by name, or make one. The first one made is `lm`, which
+    /// has to exist before any symbol can, so its tag is filled in afterwards.
+    pub fn package(&mut self, name: &str) -> V {
+        let mut p = self.g(LG_PACKAGES);
+        while p != NIL {
+            let pkg = self.car(p);
+            if self.package_name(pkg) == name {
+                return pkg;
+            }
+            p = self.cdr(p);
+        }
+        let nm = self.string(name);
+        let pkg = self.alloc_obj(T_RECORD, PKG_SLOTS);
+        self.set_slot(pkg, PKG_TAG, NIL);
+        self.set_slot(pkg, PKG_NAME, nm);
+        self.set_slot(pkg, PKG_USE, NIL);
+        let all = self.g(LG_PACKAGES);
+        let cell = self.cons(pkg, all);
+        self.set_g(LG_PACKAGES, cell);
+        let tag = self.intern("package");
+        self.set_slot(pkg, PKG_TAG, tag);
+        pkg
+    }
+
+    /// The package everything lands in until something says otherwise.
+    pub fn base_package(&mut self) -> V {
+        self.package("lm")
+    }
+
+    /// The package a bare name is read in. One cell, so the forge's reader
+    /// and the machine's reader cannot drift apart about it.
+    pub fn cur_package(&mut self) -> V {
+        let p = self.g(LG_PACKAGE);
+        if p != NIL {
+            return p;
+        }
+        let base = self.base_package();
+        self.set_g(LG_PACKAGE, base);
+        base
+    }
+
+    pub fn set_cur_package(&mut self, p: V) {
+        self.set_g(LG_PACKAGE, p);
+    }
+
+    pub fn find_package(&mut self, name: &str) -> Option<V> {
+        let mut p = self.g(LG_PACKAGES);
+        while p != NIL {
+            let pkg = self.car(p);
+            if self.package_name(pkg) == name {
+                return Some(pkg);
+            }
+            p = self.cdr(p);
+        }
+        None
+    }
+
+    pub fn otype_is_string(&self, v: V) -> bool {
+        is_obj(v) && self.otype(v) == T_STRING
+    }
+
+    pub fn is_package(&self, v: V) -> bool {
+        is_obj(v) && self.otype(v) == T_RECORD && self.olen(v) == PKG_SLOTS
+    }
+
+    pub fn exported(&self, s: V) -> bool {
+        unfix(self.slot(s, SYM_FLAGS)) & SYM_EXPORTED != 0
+    }
+
+    pub fn set_exported(&mut self, s: V) {
+        let f = unfix(self.slot(s, SYM_FLAGS));
+        self.set_slot(s, SYM_FLAGS, fix(f | SYM_EXPORTED));
+    }
+
+    /// The symbol of this name in this package, if it is already there.
+    pub fn find_in(&mut self, pkg: V, name: &str) -> V {
         let ob = self.obarray();
         let n = self.olen(ob);
-        let b = Heap::sym_hash(name) % n;
+        let b = Heap::qual_hash(&self.package_name(pkg), name) % n;
         let mut chain = self.slot(ob, b);
         while chain != NIL {
             let s = self.car(chain);
-            if self.str_of(self.slot(s, SYM_NAME)) == name {
+            if self.slot(s, SYM_PACKAGE) == pkg && self.str_of(self.slot(s, SYM_NAME)) == name {
                 return s;
             }
             chain = self.cdr(chain);
         }
+        NIL
+    }
+
+    pub fn intern_in(&mut self, pkg: V, name: &str) -> V {
+        let found = self.find_in(pkg, name);
+        if found != NIL {
+            return found;
+        }
+        let ob = self.obarray();
+        let n = self.olen(ob);
+        let b = Heap::qual_hash(&self.package_name(pkg), name) % n;
         let nm = self.string(name);
         let s = self.alloc_obj(T_SYMBOL, SYM_SLOTS);
         self.set_slot(s, SYM_NAME, nm);
@@ -458,6 +579,7 @@ impl<'a> Heap<'a> {
         let idx = self.g(LG_SYMCOUNT);
         self.set_g(LG_SYMCOUNT, idx + 1);
         self.set_slot(s, SYM_FLAGS, fix((idx << 8) as i32));
+        self.set_slot(s, SYM_PACKAGE, pkg);
         let head = self.slot(ob, b);
         let cell = self.cons(s, head);
         self.set_slot(ob, b, cell);
@@ -465,6 +587,94 @@ impl<'a> Heap<'a> {
         let cell2 = self.cons(s, all);
         self.set_g(LG_SYMLIST, cell2);
         s
+    }
+
+    /// The read-only halves, for the printer, which must not create a package
+    /// or an obarray as a side effect of describing something.
+    pub fn find_in_ro(&self, pkg: V, name: &str) -> V {
+        let ob = self.g(LG_OBARRAY);
+        if ob == NIL || pkg == NIL {
+            return NIL;
+        }
+        let n = self.olen(ob);
+        let b = Heap::qual_hash(&self.package_name(pkg), name) % n;
+        let mut chain = self.slot(ob, b);
+        while chain != NIL {
+            let s = self.car(chain);
+            if self.slot(s, SYM_PACKAGE) == pkg && self.str_of(self.slot(s, SYM_NAME)) == name {
+                return s;
+            }
+            chain = self.cdr(chain);
+        }
+        NIL
+    }
+
+    pub fn find_visible_ro(&self, pkg: V, name: &str) -> V {
+        if pkg == NIL {
+            return NIL;
+        }
+        let here = self.find_in_ro(pkg, name);
+        if here != NIL {
+            return here;
+        }
+        let mut u = self.slot(pkg, PKG_USE);
+        while u != NIL {
+            let used = self.car(u);
+            let s = self.find_in_ro(used, name);
+            if s != NIL && self.exported(s) {
+                return s;
+            }
+            u = self.cdr(u);
+        }
+        NIL
+    }
+
+    /// What a bare name would resolve to here, without making anything.
+    pub fn find_visible(&mut self, pkg: V, name: &str) -> V {
+        let here = self.find_in(pkg, name);
+        if here != NIL {
+            return here;
+        }
+        let mut u = self.slot(pkg, PKG_USE);
+        while u != NIL {
+            let used = self.car(u);
+            let s = self.find_in(used, name);
+            if s != NIL && self.exported(s) {
+                return s;
+            }
+            u = self.cdr(u);
+        }
+        NIL
+    }
+
+    /// Resolve a bare name the way a reader does: this package first, then
+    /// whatever the packages it uses have exported, and failing both a new
+    /// symbol of its own.
+    pub fn intern_visible(&mut self, pkg: V, name: &str) -> V {
+        let v = self.find_visible(pkg, name);
+        if v != NIL {
+            return v;
+        }
+        self.intern_in(pkg, name)
+    }
+
+    pub fn intern(&mut self, name: &str) -> V {
+        let p = self.base_package();
+        self.intern_in(p, name)
+    }
+
+    /// `pkg:name`, for the places on the Rust side that reach into the Lisp
+    /// by name. A bare name means the prelude, which is where the primitives
+    /// and the special forms live.
+    pub fn intern_path(&mut self, path: &str) -> V {
+        match path.split_once(':') {
+            Some((pkg, name)) => {
+                let p = self.package(pkg);
+                let name = name.strip_prefix(':').unwrap_or(name);
+                self.intern_in(p, name)
+            }
+            None => self.intern(path),
+        }
     }
 
     pub fn sym_name(&self, s: V) -> String {
@@ -607,7 +817,26 @@ impl<'a> Heap<'a> {
         }
         if is_obj(v) {
             match self.otype(v) {
-                T_SYMBOL => out.push_str(&self.sym_name(v)),
+                T_SYMBOL => {
+                    // Short if the current package would read this name back
+                    // as this symbol; qualified otherwise, with two colons
+                    // for one that was never exported.
+                    let name = self.sym_name(v);
+                    let cur = self.g(LG_PACKAGE);
+                    if self.find_visible_ro(cur, &name) == v {
+                        out.push_str(&name);
+                    } else {
+                        let pkg = self.slot(v, SYM_PACKAGE);
+                        let pn = if pkg == NIL {
+                            "?".to_string()
+                        } else {
+                            self.package_name(pkg)
+                        };
+                        out.push_str(&pn);
+                        out.push_str(if self.exported(v) { ":" } else { "::" });
+                        out.push_str(&name);
+                    }
+                }
                 T_STRING => {
                     let s = self.str_of(v);
                     if quoted {

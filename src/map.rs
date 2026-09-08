@@ -139,4 +139,6 @@ globals! {
     LG_SYMCOUNT   = 0xc4, "symcount";    // symbols interned so far: the next
                                          // symbol's identity, and its hash
     LG_POOLFREE   = 0xc8, "pool-free";   // free list head, exec pool
+    LG_PACKAGES   = 0xcc, "packages";    // every package, as a list
+    LG_PACKAGE    = 0xd0, "package";     // the one a bare name is read in
 }

@@ -6,6 +6,8 @@
 ;;; most of these when it sees them in operator position; the definitions here
 ;;; are what you get when you pass one around as a value.
 
+(in-package lm)
+
 ;; ---------------------------------------------------------------- identity
 (define (not x) (if x nil t))
 (define (eq? a b) (%eq? a b))

@@ -8,6 +8,8 @@
 ;;; quasiquote has to be built without quasiquote, which is why the expander
 ;;; below spells out every list it constructs.
 
+(in-package lm)
+
 (defmacro quasiquote (template)
   (qq-expand template 1))
 

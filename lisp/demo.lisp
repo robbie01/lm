@@ -6,6 +6,8 @@
 ;;; own pixels, the blitter for the parts that move whole rectangles, the
 ;;; vertical blank for timing, and the compiler itself for the last one.
 
+(in-package user)
+
 
 (define (screen)
   (if *screen*
@@ -172,6 +174,8 @@
 
 (define (help)
   (emit-str "\n")
+  (emit-str "  (in-package wb)        read names in another package\n")
+  (emit-str "  (all-packages)         what there is to be in\n")
   (emit-str "  (room)                 heap and code usage\n")
   (emit-str "  (gc)                   collect now\n")
   (emit-str "  (tasks)                what every task is doing\n")
