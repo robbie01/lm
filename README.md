@@ -245,6 +245,13 @@ is still in `t0` and the count in `t1`. A tail call leaves no frame and so
 appears in no trace — which is the honest answer, since there is no frame left
 to describe.
 
+A prompt is per task, not per machine. Everything that makes one — where its
+characters come from, where they go, what it half-read, where an error puts it
+back — is five globals, and the scheduler swaps them on a context switch, the
+same way it swaps the registers. The common case stays one load, and two REPLs
+in two windows do not interfere: an error in one prints its own backtrace and
+restarts its own reader on its own stack.
+
 The restart is a **return, not a call**. An error rewrites the interrupted
 context — pc, `sp`, `t0`, `s0` — to look as though the reader had just been
 entered on a clean stack, and lets the trap stub put it back. Calling the
@@ -362,6 +369,32 @@ Preemption is the timer interrupt; a task that blocks asks for a reschedule
 with an `ecall`, so the switch always happens inside the handler where the
 registers are already saved.
 
+## The Workbench
+
+`(workbench)` opens a desktop with a shell in a window, and `(new-shell)` opens
+another. Each shell is a task with a prompt of its own, reading from its own
+window and printing into it — the same compiler, the same collector, the same
+everything, just not on the serial line.
+
+**No window has a backing store.** There is one bitmap, every window draws
+straight into it, and repainting is back to front over the window list. That
+is the entire occlusion model: no clip rectangles, no damage regions, an order
+and the willingness to redraw. It costs a window a few hundred bytes instead of
+a quarter of a megabyte, and it costs a drag one full repaint, which at blitter
+speed lands well inside a frame. The price is that a window has to be able to
+draw itself again on demand — a shell can, because it keeps the characters
+rather than the pixels, in a grid it scrolls with the blitter.
+
+The font is five columns by seven in an eight-pixel cell, written as eight
+small numbers a glyph so the whole thing is legible in `lisp/font.lisp`, and
+unpacked into a byte vector at startup. A glyph is drawn a pixel at a time,
+which sounds extravagant until you count it: a full screen of text is about a
+millisecond.
+
+One task turns events into window operations — click to raise, drag the title
+bar to move, the close box to close — and keys go to whichever window is in
+front. Nothing else in the system knows a mouse exists.
+
 ## The chips
 
 Every device is a 4 KiB page of naturally aligned 32-bit registers, so talking
@@ -384,6 +417,8 @@ to hardware from Lisp is peek and poke.
 (room)                heap and code usage
 (gc)                  collect now
 (tasks)               what every task is doing
+(workbench)           a desktop, with a shell in a window
+(new-shell)           another shell window
 (mandelbrot)          fixed point, straight to the bitmap
 (life 200)            Conway, with the blitter for the copy
 (balls 6)             six preemptive tasks sharing one framebuffer
@@ -394,9 +429,9 @@ to hardware from Lisp is peek and poke.
 
 ```
 lmdev all             every suite
-lmdev cpu             87 processor conformance cases
+lmdev cpu             96 processor conformance cases
 lmdev asm             the Lisp assembler against an independent Rust encoder
-lmdev compiler        126 end-to-end cases: source in, machine code out, compare
+lmdev compiler        133 end-to-end cases: source in, machine code out, compare
 lmdev bench           measure the interpreter
 lmdev inspect [IMG]   look inside an image without running it
 lmdev eval EXPR       compile and run one expression, for debugging the compiler
@@ -424,11 +459,11 @@ anything in the heap.
 - Objects and code are collected but never moved, so object space can still
   fragment over a long session. Its free lists are exact-fit and segregated,
   which handles the usual case where sizes repeat.
-- A fault inside a task restarts the reader in *that task's* context rather
-  than killing the task and leaving the rest of the system running.
-- `car` and `cdr` check their argument because the processor does it for free.
-  `vector-ref` and friends do not check their index, and will read whatever is
-  at the address they compute.
+- A fault inside a task with a prompt behind it restarts that prompt; one
+  without a prompt ends the task. Neither unwinds anything on the way.
+- Window contents are not clipped against each other: a window draws its whole
+  interior and the ones in front are drawn after it. Correct, and more work
+  than a clip rectangle would be.
 - Thirty-two words per suspended task are scanned conservatively, and what they
   reach is pinned for that cycle. `(room)` reports how many.
 - A collection walks the whole used heap, so it costs proportional to the high

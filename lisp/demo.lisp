@@ -6,8 +6,6 @@
 ;;; own pixels, the blitter for the parts that move whole rectangles, the
 ;;; vertical blank for timing, and the compiler itself for the last one.
 
-(define screen-width 640)
-(define screen-height 400)
 
 (define (screen)
   (if *screen*
@@ -179,6 +177,8 @@
   (emit-str "  (tasks)                what every task is doing\n")
   (emit-str "  (selftest)             compile a function and run it\n")
   (emit-str "  (screen)               open the display\n")
+  (emit-str "  (workbench)            windows, with a shell in each\n")
+  (emit-str "  (new-shell)            another shell window\n")
   (emit-str "  (balls 6)              six tasks, one framebuffer\n")
   (emit-str "  (mandelbrot)           fixed point, straight to the bitmap\n")
   (emit-str "  (life 200)             life, with the blitter for the copy\n")

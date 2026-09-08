@@ -939,27 +939,31 @@
 
 ;; ---------------------------------------------------------------- reporting
 (define (room)
-  (uart-string "cons free ")
-  (uart-num (%global lg-cons-free-n))
-  (uart-string " of ")
-  (uart-num (%lsh (%- cons-limit cons-base) -3))
-  (uart-string ", object bytes used ")
-  (uart-num (%- (%global lg-obj-ptr) obj-base))
-  (uart-string ", code bytes used ")
-  (uart-num (%- (%- (%global lg-code-ptr) code-base) (%global lg-code-free-n)))
-  (uart-string ", collections ")
-  (uart-num *gc-count*)
-  (uart-nl)
+  ;; This one goes to whatever the caller is talking to, unlike the collector's
+  ;; own messages: it is a question somebody asked, not a report from inside a
+  ;; collection.
+  (emit-str "cons free ")
+  (emit-str (number->string (%global lg-cons-free-n)))
+  (emit-str " of ")
+  (emit-str (number->string (%lsh (%- cons-limit cons-base) -3)))
+  (emit-str ", object bytes used ")
+  (emit-str (number->string (%- (%global lg-obj-ptr) obj-base)))
+  (emit-str ", code bytes used ")
+  (emit-str (number->string
+             (%- (%- (%global lg-code-ptr) code-base) (%global lg-code-free-n))))
+  (emit-str ", collections ")
+  (emit-str (number->string *gc-count*))
+  (newline)
   ;; The pool is the other heap: raw, unmoving, and nothing to do with the
   ;; collector, but it is where stacks and bitmaps come from and it is the one
   ;; that runs out quietly.
-  (uart-string "pool bytes claimed ")
-  (uart-num (pool-used))
-  (uart-string ", free ")
-  (uart-num (pool-free-bytes))
-  (uart-string " of ")
-  (uart-num (%- pool-limit pool-base))
-  (uart-nl)
+  (emit-str "pool bytes claimed ")
+  (emit-str (number->string (pool-used)))
+  (emit-str ", free ")
+  (emit-str (number->string (pool-free-bytes)))
+  (emit-str " of ")
+  (emit-str (number->string (%- pool-limit pool-base)))
+  (newline)
   nil)
 
 (define (gc) (gc-collect))

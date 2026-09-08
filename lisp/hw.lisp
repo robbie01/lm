@@ -76,6 +76,10 @@
 (define gfx-on 1)
 (define gfx-vbirq 2)
 
+;; The size the machine comes up in. Nothing depends on it but the defaults.
+(define screen-width 640)
+(define screen-height 400)
+
 (define *screen* nil)      ; the bitmap address currently being displayed
 (define *screen-w* 0)
 (define *screen-h* 0)

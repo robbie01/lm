@@ -236,6 +236,54 @@
 
 (define (reschedule) (%ecall trap-reschedule))
 
+;; ---------------------------------------------------------------- task state
+;; Five globals are per-task in truth: where output goes, where input comes
+;; from, how to wait for it, the character the reader put back, and where an
+;; error should restart. They stay globals because everything reads them
+;; constantly and the common case has to be one load; what makes them local is
+;; the scheduler, saving them into the task leaving the processor and loading
+;; the arriving one's. That is what a context switch is for, and it is why two
+;; REPLs can read from two different windows without either knowing.
+(define env-slots 5)
+(define env-out 0)
+(define env-in 1)
+(define env-wait 2)
+(define env-peeked 3)
+(define env-restart 4)
+
+(define (task-env task) (%raw-ld (%+ task tc-userdata)))
+(define (set-task-env! task e) (%raw-st! (%+ task tc-userdata) e))
+
+(define (new-task-env)
+  ;; A new task starts out talking to whatever its creator was talking to.
+  (let ((e (make-vector-n env-slots nil)))
+    (%vector-set! e env-out *out*)
+    (%vector-set! e env-in *in*)
+    (%vector-set! e env-wait *wait*)
+    e))
+
+(define (save-task-env task)
+  (let ((e (task-env task)))
+    (if (%vector? e)
+        (begin
+          (%vector-set! e env-out *out*)
+          (%vector-set! e env-in *in*)
+          (%vector-set! e env-wait *wait*)
+          (%vector-set! e env-peeked *peeked*)
+          (%vector-set! e env-restart *repl-restart*))
+        nil)))
+
+(define (load-task-env task)
+  (let ((e (task-env task)))
+    (if (%vector? e)
+        (begin
+          (set! *out* (%vector-ref e env-out))
+          (set! *in* (%vector-ref e env-in))
+          (set! *wait* (%vector-ref e env-wait))
+          (set! *peeked* (%vector-ref e env-peeked))
+          (set! *repl-restart* (%vector-ref e env-restart)))
+        nil)))
+
 ;; Dead tasks waiting to be reclaimed. A task cannot free the stack it is
 ;; standing on, so it goes on this list instead and the next context switch
 ;; does the work - that runs on the trap stack, with the corpse saved and
@@ -267,6 +315,7 @@
           (if (%null? next)
               nil
               (begin
+                (save-task-env cur)
                 (if (%= (peek (%+ cur tc-state)) ts-run)
                     (task-ready! cur)
                     nil)
@@ -274,6 +323,7 @@
                 (poke (%+ next tc-state) ts-run)
                 (poke (%+ next tc-switches) (%+ (peek (%+ next tc-switches)) 1))
                 (poke (%+ *sysbase* eb-thistask) next)
+                (load-task-env next)
                 (poke (%+ *sysbase* eb-switchcount)
                       (%+ (peek (%+ *sysbase* eb-switchcount)) 1))
                 (%set-context (peek (%+ next tc-context)))
@@ -370,6 +420,7 @@
     (poke (%+ task tc-spupper) (%+ sp stack))
     (poke (%+ task tc-context) ctx)
     (%raw-st! (%+ task tc-fn) fn)
+    (set-task-env! task (new-task-env))
     (poke (%+ task tc-quantum) default-quantum)
     (poke (%+ task tc-sigalloc) 65535)
     ;; The context is built to look as though the task had just been
@@ -447,6 +498,9 @@
 (define (task-finished)
   (let ((task (this-task)))
     (%raw-st! (%+ task tc-result) 0)
+    ;; The last task to finish takes the machine with it: there is nothing
+    ;; left to schedule, and pretending otherwise is a hang.
+    (if (%<= (task-count) 1) (begin (emit-str "\n") (%halt 0)) nil)
     (rem-task task)
     ;; rem-task on the current task never returns, but if it somehow did,
     ;; spinning is better than running off the end of the world.
@@ -686,10 +740,20 @@
       (poke (%+ boot tc-splower) (%global lg-stackbot))
       (poke (%+ boot tc-spupper) (%global lg-stacktop))
       (poke (%+ boot tc-sigalloc) 65535)
+      (set-task-env! boot (new-task-env))
       (poke (%+ sb eb-thistask) boot)
       (poke (%+ sb eb-taskcount) 1))
 
     (build-task-exit-stub)
+    ;; Now the two things sys.lisp had to leave blank: a task restarts on its
+    ;; own stack, and a task that faults with no prompt behind it ends rather
+    ;; than halting the machine.
+    (set! *stack-top-fn* (lambda () (peek (%+ (this-task) tc-spupper))))
+    (set! *return-addr-fn* (lambda () *task-exit-stub*))
+    (set! *task-abort-fn*
+          (lambda ()
+            (emit-str "task ended by an error\n")
+            (task-finished)))
     sb))
 
 (define (exec-start)
@@ -709,6 +773,7 @@
 (define (gc-scan-task task)
   (gc-slot (%+ task ln-name))
   (gc-slot (%+ task tc-fn))
+  (gc-slot (%+ task tc-userdata))
   (let ((ctx (peek (%+ task tc-context))))
     (if (%> ctx 0)
         (begin
@@ -755,6 +820,7 @@
         ;; The running task, whose stack gc-roots already walked.
         (gc-slot (%+ (this-task) ln-name))
         (gc-slot (%+ (this-task) tc-fn))
+        (gc-slot (%+ (this-task) tc-userdata))
         (gc-scan-list-of (ready-list) gc-scan-task)
         (gc-scan-list-of (wait-list) gc-scan-task)
         (gc-scan-list-of (%+ *sysbase* eb-portlist) gc-scan-port)

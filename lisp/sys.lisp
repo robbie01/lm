@@ -280,16 +280,40 @@
 ;; reason.
 (define *repl-restart* nil)
 
+;; Two things sys.lisp cannot know about because Exec is compiled after it:
+;; whose stack to restart on, and what to do with a task that faults without a
+;; prompt to go back to. Exec fills these in when it starts.
+(define *stack-top-fn* nil)
+(define *task-abort-fn* nil)
+(define *return-addr-fn* nil)
+
+(define (restart-stack)
+  ;; A task must restart on its own stack. Putting it back on the boot task's
+  ;; would be two tasks standing on one stack, which goes wrong immediately
+  ;; and mysteriously.
+  (if *stack-top-fn* (%funcall *stack-top-fn*) (%global lg-stacktop)))
+
+(define (restart-ra)
+  ;; Where a restarted closure returns to when it finally does. On the machine
+  ;; that is the task exit stub, so a prompt in a window that is dismissed
+  ;; ends its task instead of returning to nowhere.
+  (if *return-addr-fn* (%funcall *return-addr-fn*) 0))
+
+(define (enter-closure ctx f sp)
+  (%st32! (%+ ctx (ctx-word 0)) (%ld32 (%addr-of f)))  ; pc = its entry
+  (%raw-st! (%+ ctx (ctx-word 5)) f)                   ; t0 = the closure
+  (%st32! (%+ ctx (ctx-word 6)) 0)                     ; t1 = no arguments
+  (%st32! (%+ ctx (ctx-word 2)) sp)                    ; a whole stack
+  (%st32! (%+ ctx (ctx-word 1)) (restart-ra))          ; where it ends up
+  (%st32! (%+ ctx (ctx-word 8)) 0)                     ; and no caller
+  nil)
+
 (define (abort-to-repl ctx)
-  (if *repl-restart*
-      (let ((f *repl-restart*))
-        (%st32! (%+ ctx (ctx-word 0)) (%ld32 (%addr-of f)))  ; pc = its entry
-        (%raw-st! (%+ ctx (ctx-word 5)) f)                   ; t0 = the closure
-        (%st32! (%+ ctx (ctx-word 6)) 0)                     ; t1 = no arguments
-        (%st32! (%+ ctx (ctx-word 2)) (%global lg-stacktop)) ; a whole stack
-        (%st32! (%+ ctx (ctx-word 1)) 0)                     ; nowhere to return
-        (%st32! (%+ ctx (ctx-word 8)) 0))                    ; and no caller
-      (begin (emit-str "no repl to return to; halting\n") (%halt 1))))
+  (cond (*repl-restart* (enter-closure ctx *repl-restart* (restart-stack)))
+        ;; A task with no prompt behind it does not get to take the machine
+        ;; down with it; it just stops being a task.
+        (*task-abort-fn* (enter-closure ctx *task-abort-fn* (restart-stack)))
+        (else (emit-str "no repl to return to; halting\n") (%halt 1))))
 
 ;; ---------------------------------------------------------------- reader
 ;; The machine's own reader. Text arrives from the serial port a character at
@@ -300,14 +324,13 @@
 (define (read-char-or-nil)
   (if *peeked*
       (let ((c *peeked*)) (set! *peeked* nil) c)
-      (let ((v (%ld32 uart-data)))
-        (if (%= v -1) nil (%int->char v)))))
+      (get-char)))
 
 (define (wait-char)
   (let ((c nil))
     (while (%null? c)
       (set! c (read-char-or-nil))
-      (if (%null? c) (%wait-for-input) nil))
+      (if (%null? c) (await-char) nil))
     c))
 
 (define (peek-char)
@@ -493,16 +516,41 @@
   (set! *repl-restart* (lambda () (repl-loop)))
   (repl-loop))
 
+;; Swallow the newline the reader stopped just short of, so that what the form
+;; prints starts on a line of its own. Best effort and never blocking: if the
+;; character has not arrived yet, the next read will skip it as whitespace,
+;; which is what used to happen every time.
+(define (finish-line)
+  (let ((c (read-char-or-nil)) (go t))
+    (while go
+      (cond ((%null? c) (set! go nil))
+            ((%eq? c #\newline) (set! go nil))
+            ((char-whitespace? c) (set! c (read-char-or-nil)))
+            (else (set! *peeked* c) (set! go nil))))
+    nil))
+
 (define (repl-loop)
   (let ((go t))
     (while go
       (emit-str "\n> ")
       (let ((form (read-form)))
+        (finish-line)
         (if (%eq? form 'bye)
-            (begin (emit-str "\n") (set! go nil) (%halt 0))
+            (begin (emit-str "\n") (set! go nil))
             (let ((v (eval-form form)))
               (emit-str "\n")
-              (write v)))))))
+              (write v)))))
+    nil))
+
+;; A prompt of its own, in a task of its own, talking to a stream of its own.
+;; Everything that makes a REPL a REPL - where its characters come from, what
+;; it half-read, where an error puts it back - now travels with the task, so
+;; two of these do not interfere.
+(define (start-repl name stream)
+  (add-task name 0
+            (lambda ()
+              (use-stream! stream)
+              (repl))))
 
 ;; ---------------------------------------------------------------- kickstart
 (define (run-boot-list)
@@ -527,5 +575,8 @@
   (if (%raw-ld lg-startup)
       (%funcall (%raw-ld lg-startup))
       nil)
+  ;; The first prompt is the machine's own: when it says goodbye, so does the
+  ;; machine. One in a window is a task, and only ends its task.
   (repl)
+  (%halt 0)
   0)
