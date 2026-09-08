@@ -125,7 +125,7 @@ impl Machine {
             fuel_start: 0,
             now: 0,
             rng: 0x2545_F491_4F6C_DD1D,
-            trace_traps: std::env::var("LM_TRAP_TRACE").is_ok(),
+            trace_traps: false,
         })
     }
 

@@ -1,4 +1,5 @@
-//! The forge: the build-time driver.
+//! The forge: everything needed to build an image, and nothing needed to run
+//! one.
 //!
 //! It brings up a machine, loads the Lisp sources into that machine's heap
 //! with the bootstrap interpreter, and then hands control to the Lisp compiler
@@ -6,8 +7,11 @@
 //! itself included, into native RISC-V in the same heap. What falls out is the
 //! kickstart image.
 
+pub mod hostlisp;
+pub mod read;
+
 use crate::heap::*;
-use crate::hostlisp::{LErr, Lisp};
+use crate::forge::hostlisp::{LErr, Lisp};
 use crate::mach::Machine;
 use crate::map::*;
 
@@ -207,7 +211,7 @@ pub fn host_run(files: &[String]) -> i32 {
 /// interpreter, let it read the compiler, then let the compiler compile the
 /// system - itself included - into the heap the interpreter has been building
 /// all along. What is left in memory at the end is the image.
-pub fn build(out: &str) -> i32 {
+pub fn build(out: &str, verbose: bool) -> i32 {
     write_layout();
     let mut m = Machine::new();
     let mut l = Lisp::new(&mut m);
@@ -217,7 +221,7 @@ pub fn build(out: &str) -> i32 {
         return 1;
     }
     let note = |l: &Lisp, what: &str| {
-        if std::env::var("LM_VERBOSE").is_ok() {
+        if verbose {
             eprintln!(
                 "{what}: {} pairs, {} obj bytes, {} code bytes",
                 (l.h.g(LG_CONS_PTR) - CONS_BASE) / 8,
@@ -236,7 +240,6 @@ pub fn build(out: &str) -> i32 {
     }
 
     note(&l, "reset reserved");
-    let verbose = std::env::var("LM_VERBOSE").is_ok();
     for f in SYSTEM {
         let script = if verbose {
             format!("(set! *compile-trace* t)(compile-file {f:?})")
@@ -305,7 +308,7 @@ pub fn build(out: &str) -> i32 {
     // trees, assembler buffers, analysis lists - is garbage the moment the
     // code is placed, and there is nothing left that can see it except the
     // interpreter, which is about to be thrown away.
-    let reclaimed = collect_before_saving(&mut l, entry);
+    collect_before_saving(&mut l, verbose);
 
     // The collection above already left the allocator pointing at the one run
     // above the live data, so there is nothing to set here; overwriting it
@@ -387,7 +390,7 @@ fn call_on_machine(l: &mut Lisp, name: &str, entry_stub: u32) -> Option<u32> {
     Some(l.h.m.x[10])
 }
 
-fn collect_before_saving(l: &mut Lisp, _entry: u32) -> u32 {
+fn collect_before_saving(l: &mut Lisp, verbose: bool) -> u32 {
     let trap = l.h.g(LG_SCRATCH3);
     let before = l.h.g(LG_CONS_PTR);
     // Everything up to now was allocated by the forge's own bump pointer. The
@@ -400,7 +403,7 @@ fn collect_before_saving(l: &mut Lisp, _entry: u32) -> u32 {
         Some(v) => {
             let n = crate::heap::unfix(v) as u32;
             let _ = before;
-            if std::env::var("LM_VERBOSE").is_ok() {
+            if verbose {
                 eprintln!("collected: {n} free pairs blanked");
             }
             n

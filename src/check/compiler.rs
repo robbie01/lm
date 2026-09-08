@@ -6,7 +6,7 @@
 
 use crate::forge::{boot_host, write_layout};
 use crate::heap::*;
-use crate::hostlisp::Lisp;
+use crate::forge::hostlisp::Lisp;
 use crate::mach::{Machine, Stop};
 use crate::map::*;
 use crate::run;
@@ -326,7 +326,7 @@ pub fn eval_one(exprs: &[String]) -> i32 {
     0
 }
 
-pub fn run_all() -> bool {
+pub fn run_all(verbose: bool) -> bool {
     write_layout();
     let mut m = Machine::new();
     let mut l = Lisp::new(&mut m);
@@ -361,7 +361,6 @@ pub fn run_all() -> bool {
     }
     let mut pass = 0;
     let mut fail = 0;
-    let verbose = std::env::var("LM_VERBOSE").is_ok();
     for Case(src, want) in cases() {
         if verbose {
             let cons = (l.h.g(LG_CONS_PTR) - CONS_BASE) / 8;

@@ -15,6 +15,7 @@ pub struct Options {
     pub disk: Option<String>,
     pub trace_exit: bool,
     pub screenshot: Option<String>,
+    pub trace_traps: bool,
 }
 
 impl Default for Options {
@@ -29,6 +30,7 @@ impl Default for Options {
             disk: None,
             trace_exit: false,
             screenshot: None,
+            trace_traps: false,
         }
     }
 }
@@ -43,6 +45,7 @@ pub fn boot(o: &Options) -> i32 {
         }
     };
     m.pc = loaded.entry;
+    m.trace_traps = o.trace_traps;
 
     if let Some(path) = &o.disk {
         if let Err(e) = m.disk.attach(path) {

@@ -5,8 +5,7 @@ use crate::image;
 use crate::mach::Machine;
 use crate::map::*;
 
-pub fn run(args: &[String]) -> i32 {
-    let path = args.first().map(|s| s.as_str()).unwrap_or("kick.img");
+pub fn run(path: &str, names: &[String]) -> i32 {
     let mut m = Machine::new();
     let loaded = match image::load(&mut m, path) {
         Ok(l) => l,
@@ -119,7 +118,7 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     // Anything named on the command line gets reported in full.
-    for want in &args[1..] {
+    for want in names {
         let mut p = h.g(LG_SYMLIST);
         let mut found = false;
         while is_cons(p) {

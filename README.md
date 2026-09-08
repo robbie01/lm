@@ -7,8 +7,8 @@ Lisp compiled to native RV32.
 
 ```
 $ cargo build --release
-$ ./target/release/lm build        # forge the kickstart image
-$ ./target/release/lm run          # boot it
+$ ./target/release/lmforge build   # compile the Lisp sources into an image
+$ ./target/release/lm              # boot it
 
 LM 0.1 - a lisp machine
 cons space 16384k pairs, object space 65536k, code 272k used
@@ -26,19 +26,42 @@ RISC-V machine code, sitting in the image you just booted.
 
 ## What is here
 
-| | |
+Three things, and they are deliberately separable — a machine, a forge that
+builds images for it, and a bench that checks both. The binaries follow the
+same seam, so the runtime carries neither the bootstrap interpreter nor the
+tests.
+
+| binary | |
+|---|---|
+| `lm` | boot an image. The runtime, and only the runtime |
+| `lmforge` | compile the Lisp sources into an image |
+| `lmdev` | conformance tests, benchmarks, and tools for looking inside |
+
+| the machine | |
 |---|---|
 | `src/cpu.rs` | token-threaded RV32IMC core, explicit tail calls |
 | `src/mach.rs` `src/run.rs` | registers, memory, CSRs, traps, the outer loop |
 | `src/dev/` | uart, timer, framebuffer, blitter, input, block storage |
-| `src/hostlisp.rs` `src/read.rs` | the bootstrap interpreter, build time only |
-| `src/forge.rs` `src/image.rs` | the build driver and the image format |
+| `src/heap.rs` `src/image.rs` | object memory and the image format |
+| `src/boot.rs` | loading an image and letting it run |
+
+| the forge | |
+|---|---|
+| `src/forge/hostlisp.rs` `src/forge/read.rs` | the bootstrap interpreter |
+| `src/forge/mod.rs` | the build driver |
 | `lisp/asm.lisp` | RV32 assembler, in Lisp |
 | `lisp/compile.lisp` | Lisp → RISC-V compiler, in Lisp |
-| `lisp/gc.lisp` | conservative mark-sweep collector |
+| `lisp/gc.lisp` | the collector |
 | `lisp/exec.lisp` | Amiga Exec-style kernel |
 | `lisp/hw.lisp` | the custom chips |
 | `lisp/sys.lisp` | reader, printer, REPL, trap handling |
+
+| the bench | |
+|---|---|
+| `src/check/cpu.rs` | processor conformance |
+| `src/check/asm.rs` | the Lisp assembler against an independent Rust encoder |
+| `src/check/compiler.rs` | source in, machine code out, run, compare |
+| `src/check/inspect.rs` | what is actually in an image |
 
 ## The processor
 
@@ -175,7 +198,7 @@ the whole system, itself included, into that same heap. What is left in memory
 at the end is the image.
 
 ```
-lm build
+lmforge build
   bring up the interpreter, load lisp/*.lisp
   claim the reset vector
   compile layout, runtime, core, macros, print, gc, hw, asm, compile, sys,
@@ -196,7 +219,7 @@ Once booted, the image can save itself:
 > (define (greet who) (string-append "hello, " who))
 > (save-image)
 saved 4270 blocks
-$ ./target/release/lm run snap.img
+$ ./target/release/lm snap.img
 LM resumed, 284k of code
 > (greet "again")
 "hello, again"
@@ -256,18 +279,24 @@ to hardware from Lisp is peek and poke.
 ## Testing
 
 ```
-lm test        79 processor conformance cases
-lm asmdiff     the Lisp assembler against an independent Rust encoder
-lm ctest       118 end-to-end cases: source in, machine code out, run, compare
-lm bench       measure the interpreter
-lm inspect     look inside an image without running it
-lm eval EXPR   compile and run one expression, for debugging the compiler
+lmdev all             every suite
+lmdev cpu             79 processor conformance cases
+lmdev asm             the Lisp assembler against an independent Rust encoder
+lmdev compiler        118 end-to-end cases: source in, machine code out, compare
+lmdev bench           measure the interpreter
+lmdev inspect [IMG]   look inside an image without running it
+lmdev eval EXPR       compile and run one expression, for debugging the compiler
+lmdev repl            a prompt on the bootstrap interpreter
 ```
 
-`asmdiff` is worth explaining: the same instruction sequence is written twice,
-once in Lisp and once with Rust encoders, and the two byte streams must match.
-Two independent readings of the RISC-V manual agreeing is evidence; one
+`lmdev asm` is worth explaining: the same instruction sequence is written
+twice, once in Lisp and once with Rust encoders, and the two byte streams must
+match. Two independent readings of the RISC-V manual agreeing is evidence; one
 encoding agreeing with itself is not.
+
+`lmdev inspect` checks the invariant the collector depends on, by decoding
+every `lui`/`addi` pair in code space and asserting that none of them names
+anything in the heap.
 
 ## Known limits
 

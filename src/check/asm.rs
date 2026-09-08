@@ -6,7 +6,7 @@
 //! agreeing is real evidence, one encoding agreeing with itself is not.
 
 use crate::forge::boot_host;
-use crate::hostlisp::Lisp;
+use crate::forge::hostlisp::Lisp;
 use crate::mach::Machine;
 use crate::rvenc::*;
 

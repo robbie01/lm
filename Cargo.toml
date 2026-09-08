@@ -3,11 +3,29 @@ name = "lm"
 version = "0.1.0"
 edition = "2021"
 
+# The machine, the forge that builds images for it, and the bench that checks
+# both. The three binaries follow the same seam.
+[lib]
+name = "lm"
+path = "src/lib.rs"
+
+# The runtime. Boots an image; knows nothing about building one.
 [[bin]]
 name = "lm"
-path = "src/main.rs"
+path = "src/bin/lm.rs"
+
+# The build tool.
+[[bin]]
+name = "lmforge"
+path = "src/bin/lmforge.rs"
+
+# The test bench.
+[[bin]]
+name = "lmdev"
+path = "src/bin/lmdev.rs"
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
 minifb = { version = "0.27", default-features = false, features = ["x11"] }
 
 [profile.release]
