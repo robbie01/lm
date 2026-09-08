@@ -1,0 +1,643 @@
+//! Processor conformance tests. Each case assembles a small program, runs it,
+//! and checks a register or a memory word. The point is to catch decode bugs
+//! before anything is built on top of the core.
+
+use crate::mach::*;
+use crate::map::*;
+use crate::run;
+use crate::rvenc::*;
+
+const BASE: u32 = 0x0010_0000;
+
+struct Case {
+    name: &'static str,
+    code: Vec<u32>,
+    want: u32,
+    reg: u32,
+}
+
+/// Assemble a word list into memory. Values below 0x10000 with the low two
+/// bits not equal to 3 are emitted as 16-bit compressed instructions.
+fn emit(m: &mut Machine, at: u32, code: &[u32]) -> u32 {
+    let mut pc = at;
+    for &w in code {
+        if w & 3 == 3 || w > 0xffff {
+            m.poke32(pc, w);
+            pc += 4;
+        } else {
+            m.poke32(pc, (m.peek32(pc) & 0xffff_0000) | (w & 0xffff));
+            m.poke8(pc, w as u8);
+            m.poke8(pc + 1, (w >> 8) as u8);
+            pc += 2;
+        }
+    }
+    pc
+}
+
+fn go(code: &[u32]) -> Box<Machine> {
+    let mut m = Machine::new();
+    let end = emit(&mut m, BASE, code);
+    // Park on a store to SYS_HALT so the machine stops itself and the budget
+    // can stay generous. t0 is not used by any test body.
+    let mut tail = vec![];
+    li32(&mut tail, T0, MMIO_BASE);
+    tail.push(sw(ZERO, T0, 0));
+    emit(&mut m, end, &tail);
+    m.pc = BASE;
+    m.mtimecmp = u64::MAX;
+    m.gfx.next_vbl = u64::MAX;
+    run::run(&mut m, 100_000);
+    m
+}
+
+fn cases() -> Vec<Case> {
+    let mut v: Vec<Case> = Vec::new();
+    let mut c = |name: &'static str, code: Vec<u32>, reg: u32, want: u32| {
+        v.push(Case {
+            name,
+            code,
+            want,
+            reg,
+        })
+    };
+
+    // ---- arithmetic and immediates ----
+    c("addi", vec![addi(A0, ZERO, 42)], A0, 42);
+    c("addi neg", vec![addi(A0, ZERO, -1)], A0, 0xffff_ffff);
+    c(
+        "add",
+        vec![addi(A0, ZERO, 7), addi(A1, ZERO, 35), add(A0, A0, A1)],
+        A0,
+        42,
+    );
+    c(
+        "sub wrap",
+        vec![addi(A0, ZERO, 1), addi(A1, ZERO, 2), sub(A0, A0, A1)],
+        A0,
+        0xffff_ffff,
+    );
+    c("lui", vec![lui(A0, 0xabcde)], A0, 0xabcd_e000);
+    c("auipc", vec![auipc(A0, 1)], A0, BASE + 0x1000);
+    c("x0 stays zero", vec![addi(ZERO, ZERO, 99), add(A0, ZERO, ZERO)], A0, 0);
+    c(
+        "slti signed",
+        vec![addi(A0, ZERO, -5), slti(A1, A0, -4)],
+        A1,
+        1,
+    );
+    c(
+        "sltiu unsigned",
+        vec![addi(A0, ZERO, -5), sltiu(A1, A0, -4)],
+        A1,
+        1,
+    );
+    c(
+        "sltiu vs zero",
+        vec![addi(A0, ZERO, -1), sltiu(A1, A0, 1)],
+        A1,
+        0,
+    );
+    c(
+        "shifts",
+        vec![addi(A0, ZERO, -16), srai(A1, A0, 2), srli(A2, A0, 28)],
+        A1,
+        0xffff_fffc,
+    );
+    c(
+        "srli high",
+        vec![addi(A0, ZERO, -16), srli(A2, A0, 28)],
+        A2,
+        0xf,
+    );
+    c(
+        "sll by reg mod32",
+        vec![addi(A0, ZERO, 1), addi(A1, ZERO, 33), sll(A2, A0, A1)],
+        A2,
+        2,
+    );
+    c(
+        "sra by reg",
+        vec![lui(A0, 0x80000), addi(A1, ZERO, 31), sra(A2, A0, A1)],
+        A2,
+        0xffff_ffff,
+    );
+    c(
+        "xori inverts",
+        vec![addi(A0, ZERO, 0x55), xori(A1, A0, -1)],
+        A1,
+        0xffff_ffaa,
+    );
+
+    // ---- M extension ----
+    c(
+        "mul",
+        vec![addi(A0, ZERO, -6), addi(A1, ZERO, 7), mul(A2, A0, A1)],
+        A2,
+        (-42i32) as u32,
+    );
+    c(
+        "mulh",
+        vec![lui(A0, 0x10000), addi(A1, ZERO, 16), mulh(A2, A0, A1)],
+        A2,
+        // 0x10000000 * 16 = 0x1_00000000, high word 1
+        1,
+    );
+    c(
+        "mulhu",
+        vec![addi(A0, ZERO, -1), addi(A1, ZERO, -1), mulhu(A2, A0, A1)],
+        A2,
+        0xffff_fffe,
+    );
+    c(
+        "mulhsu",
+        vec![addi(A0, ZERO, -1), addi(A1, ZERO, -1), mulhsu(A2, A0, A1)],
+        A2,
+        0xffff_ffff,
+    );
+    c(
+        "div signed",
+        vec![addi(A0, ZERO, -7), addi(A1, ZERO, 2), div(A2, A0, A1)],
+        A2,
+        (-3i32) as u32,
+    );
+    c(
+        "rem signed",
+        vec![addi(A0, ZERO, -7), addi(A1, ZERO, 2), rem(A2, A0, A1)],
+        A2,
+        (-1i32) as u32,
+    );
+    c(
+        "div by zero",
+        vec![addi(A0, ZERO, 5), div(A2, A0, ZERO)],
+        A2,
+        0xffff_ffff,
+    );
+    c(
+        "rem by zero",
+        vec![addi(A0, ZERO, 5), rem(A2, A0, ZERO)],
+        A2,
+        5,
+    );
+    c(
+        "div overflow",
+        vec![lui(A0, 0x80000), addi(A1, ZERO, -1), div(A2, A0, A1)],
+        A2,
+        0x8000_0000,
+    );
+    c(
+        "rem overflow",
+        vec![lui(A0, 0x80000), addi(A1, ZERO, -1), rem(A2, A0, A1)],
+        A2,
+        0,
+    );
+    c(
+        "divu",
+        vec![addi(A0, ZERO, -1), addi(A1, ZERO, 2), divu(A2, A0, A1)],
+        A2,
+        0x7fff_ffff,
+    );
+
+    // ---- branches ----
+    c(
+        "beq taken",
+        vec![
+            addi(A0, ZERO, 1),
+            beq(ZERO, ZERO, 8),
+            addi(A0, ZERO, 2),
+            addi(A1, ZERO, 0),
+        ],
+        A0,
+        1,
+    );
+    c(
+        "bne backwards loop",
+        vec![
+            addi(A0, ZERO, 0),
+            addi(A1, ZERO, 5),
+            // loop:
+            addi(A0, A0, 3),
+            addi(A1, A1, -1),
+            bne(A1, ZERO, -8),
+        ],
+        A0,
+        15,
+    );
+    c(
+        "blt signed",
+        vec![
+            addi(A0, ZERO, -1),
+            addi(A1, ZERO, 1),
+            addi(A2, ZERO, 0),
+            blt(A0, A1, 8),
+            addi(A2, ZERO, 9),
+        ],
+        A2,
+        0,
+    );
+    c(
+        "bltu unsigned",
+        vec![
+            addi(A0, ZERO, -1),
+            addi(A1, ZERO, 1),
+            addi(A2, ZERO, 0),
+            bltu(A0, A1, 8),
+            addi(A2, ZERO, 9),
+        ],
+        A2,
+        9,
+    );
+    c(
+        "bgeu",
+        vec![
+            addi(A0, ZERO, -1),
+            addi(A2, ZERO, 0),
+            bgeu(A0, ZERO, 8),
+            addi(A2, ZERO, 9),
+        ],
+        A2,
+        0,
+    );
+
+    // ---- jumps ----
+    c(
+        "jal links",
+        vec![jal(RA, 8), addi(A0, ZERO, 1), addi(A0, ZERO, 2)],
+        RA,
+        BASE + 4,
+    );
+    c(
+        "jalr clears bit 0",
+        vec![
+            auipc(A1, 0),
+            addi(A1, A1, 13), // odd target, 12 bytes ahead + 1
+            jalr(RA, A1, 0),
+            addi(A0, ZERO, 1),
+            addi(A0, ZERO, 7),
+        ],
+        A0,
+        7,
+    );
+    c("jal negative", vec![jal(ZERO, 8), jal(ZERO, 8), jal(ZERO, -4)], ZERO, 0);
+
+    // ---- memory ----
+    {
+        let mut code = vec![];
+        li32(&mut code, A1, 0x2000);
+        li32(&mut code, A0, 0x1234_5678);
+        code.push(sw(A0, A1, 0));
+        code.push(lw(A2, A1, 0));
+        code.push(lbu(A3, A1, 0));
+        code.push(lb(A4, A1, 3));
+        code.push(lhu(A5, A1, 2));
+        c("store/load word", code.clone(), A2, 0x1234_5678);
+        c("lbu low byte", code.clone(), A3, 0x78);
+        c("lb sign extends", code.clone(), A4, 0x12);
+        c("lhu high half", code, A5, 0x1234);
+    }
+    {
+        let mut code = vec![];
+        li32(&mut code, A1, 0x2000);
+        li32(&mut code, A0, -1i32 as u32);
+        code.push(sw(A0, A1, 0));
+        code.push(addi(A0, ZERO, 0));
+        code.push(sh(A0, A1, 0));
+        code.push(lw(A2, A1, 0));
+        c("sh writes half only", code, A2, 0xffff_0000);
+    }
+    {
+        // unaligned access is serviced, not trapped
+        let mut code = vec![];
+        li32(&mut code, A1, 0x2001);
+        li32(&mut code, A0, 0xdead_beef);
+        code.push(sw(A0, A1, 0));
+        code.push(lw(A2, A1, 0));
+        c("unaligned word", code, A2, 0xdead_beef);
+    }
+    {
+        // negative store offset
+        let mut code = vec![];
+        li32(&mut code, A1, 0x2000);
+        code.push(addi(A0, ZERO, 99));
+        code.push(sw(A0, A1, -8));
+        code.push(lw(A2, A1, -8));
+        c("negative offset", code, A2, 99);
+    }
+
+    // ---- compressed forms ----
+    c("c.li", vec![c_li(A0, -3)], A0, 0xffff_fffd);
+    c("c.addi", vec![c_li(A0, 5), c_addi(A0, 31)], A0, 36);
+    c("c.addi neg", vec![c_li(A0, 5), c_addi(A0, -32)], A0, (-27i32) as u32);
+    c("c.mv", vec![c_li(A1, 21), c_mv(A0, A1)], A0, 21);
+    c("c.add", vec![c_li(A0, 20), c_li(A1, 22), c_add(A0, A1)], A0, 42);
+    c("c.lui", vec![c_lui(A0, 1)], A0, 0x1000);
+    c("c.lui neg", vec![c_lui(A0, -1)], A0, 0xffff_f000);
+    c("c.slli", vec![c_li(A0, 1), c_slli(A0, 31)], A0, 0x8000_0000);
+    c("c.srli", vec![c_li(S0, -1), c_srli(S0, 28)], S0, 0xf);
+    c("c.srai", vec![c_li(S0, -16), c_srai(S0, 2)], S0, 0xffff_fffc);
+    c("c.andi", vec![c_li(S0, -1), c_andi(S0, 12)], S0, 12);
+    c("c.sub", vec![c_li(S0, 10), c_li(S1, 3), c_sub(S0, S1)], S0, 7);
+    c("c.xor", vec![c_li(S0, 12), c_li(S1, 10), c_xor(S0, S1)], S0, 6);
+    c("c.or", vec![c_li(S0, 12), c_li(S1, 3), c_or(S0, S1)], S0, 15);
+    c("c.and", vec![c_li(S0, 12), c_li(S1, 10), c_and(S0, S1)], S0, 8);
+    c(
+        "c.j skips",
+        vec![c_li(A0, 1), c_j(4), c_li(A0, 2)],
+        A0,
+        1,
+    );
+    c(
+        "c.jal links",
+        vec![c_jal(4), c_li(A0, 1)],
+        RA,
+        BASE + 2,
+    );
+    c(
+        "c.beqz taken",
+        vec![c_li(S0, 0), c_li(A0, 1), c_beqz(S0, 4), c_li(A0, 2)],
+        A0,
+        1,
+    );
+    c(
+        "c.bnez not taken",
+        vec![c_li(S0, 0), c_li(A0, 1), c_bnez(S0, 4), c_li(A0, 2)],
+        A0,
+        2,
+    );
+    c(
+        "c.addi16sp",
+        vec![c_li(SP, 0), c_addi16sp(-64)],
+        SP,
+        (-64i32) as u32,
+    );
+    c(
+        "c.addi4spn",
+        vec![c_li(SP, 16), c_addi4spn(S0, 1020)],
+        S0,
+        1036,
+    );
+    {
+        let mut code = vec![];
+        li32(&mut code, SP, 0x3000);
+        code.push(c_li(A0, 31));
+        code.push(c_swsp(A0, 8));
+        code.push(c_lwsp(A1, 8));
+        code.push(c_li(S0, 0));
+        code.push(c_addi4spn(S0, 8));
+        code.push(c_lw(S1, S0, 0));
+        c("c.swsp/c.lwsp", code.clone(), A1, 31);
+        c("c.lw via sp", code, S1, 31);
+    }
+    {
+        let mut code = vec![];
+        li32(&mut code, S0, 0x3100);
+        code.push(c_li(S1, 21));
+        code.push(c_sw(S1, S0, 4));
+        code.push(c_li(S1, 0));
+        code.push(c_lw(S1, S0, 4));
+        c("c.sw/c.lw", code, S1, 21);
+    }
+    c("c.jr", vec![auipc(A1, 0), c_addi(A1, 8), c_jr(A1), c_li(A0, 1), c_li(A0, 9)], A0, 9);
+
+    // mixing 16- and 32-bit encodings must keep the pc in step
+    c(
+        "mixed widths",
+        vec![c_li(A0, 1), addi(A0, A0, 1), c_addi(A0, 1), addi(A0, A0, 1)],
+        A0,
+        4,
+    );
+
+    // ---- CSRs ----
+    c(
+        "csrrw round trip",
+        vec![
+            addi(A0, ZERO, 0x123),
+            csrrw(ZERO, 0x340, A0),
+            csrrs(A1, 0x340, ZERO),
+        ],
+        A1,
+        0x123,
+    );
+    c(
+        "csrrs sets bits",
+        vec![
+            addi(A0, ZERO, 0x0f),
+            csrrw(ZERO, 0x340, A0),
+            addi(A0, ZERO, 0x30),
+            csrrs(A1, 0x340, A0),
+            csrrs(A2, 0x340, ZERO),
+        ],
+        A2,
+        0x3f,
+    );
+    c(
+        "csrrc clears bits",
+        vec![
+            addi(A0, ZERO, 0x3f),
+            csrrw(ZERO, 0x340, A0),
+            addi(A0, ZERO, 0x0f),
+            csrrc(A1, 0x340, A0),
+            csrrs(A2, 0x340, ZERO),
+        ],
+        A2,
+        0x30,
+    );
+    c(
+        "csrrwi",
+        vec![csrrwi(ZERO, 0x340, 21), csrrs(A1, 0x340, ZERO)],
+        A1,
+        21,
+    );
+
+    v
+}
+
+pub fn run_all() -> bool {
+    let mut pass = 0;
+    let mut fail = 0;
+    for t in cases() {
+        let m = go(&t.code);
+        let got = m.x[t.reg as usize];
+        if got == t.want {
+            pass += 1;
+        } else {
+            fail += 1;
+            println!(
+                "FAIL {:<24} x{} = 0x{:08x}, want 0x{:08x}",
+                t.name, t.reg, got, t.want
+            );
+        }
+    }
+
+    // ---- traps and interrupts, which need more than a register check ----
+    let mut extra: Vec<(&str, bool)> = Vec::new();
+
+    {
+        // An illegal instruction vectors to mtvec with the right cause.
+        let mut m = Machine::new();
+        let mut code = vec![];
+        li32(&mut code, A0, 0x2000);
+        code.push(csrrw(ZERO, 0x305, A0)); // mtvec = 0x2000
+        code.push(0xffff_ffff); // illegal
+        let end = emit(&mut m, BASE, &code);
+        m.poke32(end, jal(ZERO, 0));
+        // handler at 0x2000 records mcause
+        let h = vec![csrrs(A1, 0x342, ZERO), jal(ZERO, 0)];
+        emit(&mut m, 0x2000, &h);
+        m.pc = BASE;
+        m.mtimecmp = u64::MAX;
+        m.gfx.next_vbl = u64::MAX;
+        run::run(&mut m, 40);
+        extra.push(("illegal traps to mtvec", m.x[A1 as usize] == C_ILLEGAL));
+        extra.push(("mepc points at the fault", m.mepc == BASE + 8));
+    }
+
+    {
+        // ecall, then mret returns to the instruction after it.
+        let mut m = Machine::new();
+        let mut code = vec![];
+        li32(&mut code, A0, 0x2000);
+        code.push(csrrw(ZERO, 0x305, A0));
+        code.push(ecall());
+        code.push(addi(A2, ZERO, 77));
+        let end = emit(&mut m, BASE, &code);
+        m.poke32(end, jal(ZERO, 0));
+        let h = vec![
+            csrrs(A1, 0x341, ZERO), // mepc
+            addi(A1, A1, 4),
+            csrrw(ZERO, 0x341, A1),
+            mret(),
+        ];
+        emit(&mut m, 0x2000, &h);
+        m.pc = BASE;
+        m.mtimecmp = u64::MAX;
+        m.gfx.next_vbl = u64::MAX;
+        run::run(&mut m, 60);
+        extra.push(("ecall + mret resumes", m.x[A2 as usize] == 77));
+    }
+
+    {
+        // A timer interrupt preempts a spin loop.
+        let mut m = Machine::new();
+        let mut code = vec![];
+        li32(&mut code, A0, 0x2000);
+        code.push(csrrw(ZERO, 0x305, A0));
+        li32(&mut code, A0, 1 << 7); // MTIE
+        code.push(csrrw(ZERO, 0x304, A0));
+        li32(&mut code, A0, 8); // MIE
+        code.push(csrrw(ZERO, 0x300, A0));
+        code.push(jal(ZERO, 0)); // spin forever
+        emit(&mut m, BASE, &code);
+        let h = vec![addi(A2, ZERO, 55), jal(ZERO, 0)];
+        emit(&mut m, 0x2000, &h);
+        m.pc = BASE;
+        m.mtimecmp = 20;
+        m.gfx.next_vbl = u64::MAX;
+        run::run(&mut m, 400);
+        extra.push(("timer interrupt fires", m.x[A2 as usize] == 55));
+        extra.push((
+            "interrupt cause is the timer",
+            m.mcause == 0x8000_0000 | IRQ_TIMER,
+        ));
+    }
+
+    {
+        // Devices: the uart echoes into memory and SYS_HALT stops the machine.
+        let mut m = Machine::new();
+        let mut code = vec![];
+        li32(&mut code, A0, MMIO_BASE + (DEV_UART << 12));
+        code.push(lw(A1, A0, 0x00)); // read a byte
+        li32(&mut code, A2, MMIO_BASE);
+        code.push(sw(A1, A2, 0x00)); // halt with it as the exit code
+        emit(&mut m, BASE, &code);
+        m.uart.feed(b"K");
+        m.pc = BASE;
+        m.mtimecmp = u64::MAX;
+        m.gfx.next_vbl = u64::MAX;
+        run::run(&mut m, 60);
+        extra.push(("uart receive", m.exit_code == b'K' as u32));
+        extra.push(("sys halt", m.halted));
+    }
+
+    {
+        // The blitter fills and copies.
+        let mut m = Machine::new();
+        let b = MMIO_BASE + (DEV_BLIT << 12);
+        let mut code = vec![];
+        li32(&mut code, A0, b);
+        li32(&mut code, A1, 0x4000);
+        code.push(sw(A1, A0, 0x04)); // dst
+        li32(&mut code, A1, 16);
+        code.push(sw(A1, A0, 0x08)); // w
+        li32(&mut code, A1, 4);
+        code.push(sw(A1, A0, 0x0c)); // h
+        li32(&mut code, A1, 16);
+        code.push(sw(A1, A0, 0x14)); // dmod
+        li32(&mut code, A1, 0xAB);
+        code.push(sw(A1, A0, 0x18)); // val
+        li32(&mut code, A1, 1); // OP_FILL
+        code.push(sw(A1, A0, 0x1c));
+        let end = emit(&mut m, BASE, &code);
+        m.poke32(end, jal(ZERO, 0));
+        m.pc = BASE;
+        m.mtimecmp = u64::MAX;
+        m.gfx.next_vbl = u64::MAX;
+        run::run(&mut m, 200);
+        let ok = (0..64).all(|i| m.peek8(0x4000 + i) == 0xAB) && m.peek8(0x4040) == 0;
+        extra.push(("blitter fill", ok));
+    }
+
+    for (name, ok) in extra {
+        if ok {
+            pass += 1;
+        } else {
+            fail += 1;
+            println!("FAIL {name}");
+        }
+    }
+
+    println!("{pass} passed, {fail} failed");
+    fail == 0
+}
+
+pub fn bench() {
+    // A tight loop that exercises dispatch, arithmetic, memory and branches,
+    // in roughly the mix a compiled Lisp program produces.
+    let mut m = Machine::new();
+    let mut code = vec![];
+    li32(&mut code, A0, 0); // accumulator
+    li32(&mut code, A1, 40_000_000); // trip count
+    li32(&mut code, A3, 0x8000); // scratch buffer
+    li32(&mut code, A4, 1);
+    // loop:
+    let loop_at = code.len();
+    code.push(add(A0, A0, A4));
+    code.push(xor(A2, A0, A1));
+    code.push(sw(A2, A3, 0));
+    code.push(lw(A5, A3, 0));
+    code.push(add(A0, A0, A5));
+    code.push(srli(A0, A0, 1));
+    code.push(addi(A1, A1, -1));
+    let back = -(((code.len() - loop_at) * 4) as i32);
+    code.push(bne(A1, ZERO, back));
+    let n = code.len();
+    let mut mm = Machine::new();
+    std::mem::swap(&mut m, &mut mm);
+    let end = emit(&mut m, BASE, &code);
+    m.poke32(end, jal(ZERO, 0));
+    m.pc = BASE;
+    m.mtimecmp = u64::MAX;
+    m.gfx.next_vbl = u64::MAX;
+
+    let iters = 40_000_000u64;
+    let total = iters * 8 + n as u64;
+    let t = std::time::Instant::now();
+    run::run(&mut m, total);
+    let el = t.elapsed();
+    let mips = (m.cycles as f64) / el.as_secs_f64() / 1e6;
+    println!(
+        "{} instructions in {:.3}s = {:.1} MIPS",
+        m.cycles,
+        el.as_secs_f64(),
+        mips
+    );
+}

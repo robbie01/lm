@@ -1,0 +1,21 @@
+[package]
+name = "lm"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "lm"
+path = "src/main.rs"
+
+[dependencies]
+minifb = { version = "0.27", default-features = false, features = ["x11"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
+
+[profile.dev]
+opt-level = 1
