@@ -916,9 +916,11 @@ impl<'a> Lisp<'a> {
             // collector to scan it; an empty range keeps the shared source
             // honest without pretending otherwise.
             "%stack-pointer" => fix(0),
+            "%frame-pointer" => fix(0),
             "%wait-for-input" => NIL,
             "%ecall" => NIL,
             "%sync-cons-run" => NIL,
+            "%reload-cons-run" => NIL,
             "%set-context" => NIL,
             "%enable-timer" => NIL,
             "%cycles" => fix(0),
@@ -1270,9 +1272,11 @@ pub static PRIMS: &[(&str, u32)] = &[
     ("%raw-ld", 1),
     ("%raw-st!", 2),
     ("%stack-pointer", 0),
+    ("%frame-pointer", 0),
     ("%wait-for-input", 0),
     ("%ecall", 1),
     ("%sync-cons-run", 0),
+    ("%reload-cons-run", 0),
     ("%set-context", 1),
     ("%enable-timer", 0),
     ("%cycles", 0),

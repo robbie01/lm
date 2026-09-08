@@ -67,6 +67,10 @@ pub fn write_layout() {
     def!("t-record", T_RECORD);
     def!("t-float", T_FLOAT);
     def!("t-port", T_PORT);
+    def!("t-code", T_CODE);
+    def!("code-entry", CODE_ENTRY);
+    def!("code-len", CODE_LEN);
+    def!("code-lits", CODE_LITS);
     def!("sym-slots", SYM_SLOTS);
     def!("sym-name", SYM_NAME);
     def!("sym-value", SYM_VALUE);
@@ -303,17 +307,16 @@ pub fn build(out: &str) -> i32 {
     // interpreter, which is about to be thrown away.
     let reclaimed = collect_before_saving(&mut l, entry);
 
-    // Whatever is left of cons space becomes the free run the inline
-    // allocator will bump through. Setting the current run empty makes the
-    // first cons take the slow path once and pick up the first real run.
-    l.h.set_g(LG_CONS_RUN, 0);
-    l.h.set_g(LG_CONSRUNEND, 0);
+    // The collection above already left the allocator pointing at the one run
+    // above the live data, so there is nothing to set here; overwriting it
+    // would throw away what the compactor decided.
+    let _ = cons_ptr;
 
     let stats = format!(
-        "code {} KiB, objects {} KiB, pairs {}",
+        "code {} KiB, objects {} KiB, live pairs {}",
         (l.h.g(LG_CODE_PTR) - CODE_BASE) / 1024,
         (l.h.g(LG_OBJ_PTR) - OBJ_BASE) / 1024,
-        (cons_ptr - CONS_BASE) / 8
+        (l.h.g(LG_CONS_PTR) - CONS_BASE) / 8
     );
     match crate::image::save(l.h.m, out, entry) {
         Ok((pages, bytes)) => {
@@ -355,7 +358,12 @@ fn call_on_machine(l: &mut Lisp, name: &str, entry_stub: u32) -> Option<u32> {
     c.push(csrrw(ZERO, 0x340, T0)); // mscratch
     li32(&mut c, T0, entry_stub);
     c.push(csrrw(ZERO, 0x305, T0)); // mtvec: the image's own trap stub
-    li32(&mut c, T0, closure);
+    // The closure is handed over through a global rather than baked into the
+    // instruction stream. This trampoline is dead code once the build is over,
+    // but a pointer sitting in code space is a pointer the collector cannot
+    // see, and `lm inspect` checks that there are none.
+    l.h.set_g(LG_SCRATCH2, closure);
+    c.push(lw(T0, ZERO, LG_SCRATCH2 as i32));
     c.push(addi(T1, ZERO, 0));
     c.push(lw(T2, T0, 0));
     c.push(jalr(RA, T2, 0));
@@ -382,6 +390,12 @@ fn call_on_machine(l: &mut Lisp, name: &str, entry_stub: u32) -> Option<u32> {
 fn collect_before_saving(l: &mut Lisp, _entry: u32) -> u32 {
     let trap = l.h.g(LG_SCRATCH3);
     let before = l.h.g(LG_CONS_PTR);
+    // Everything up to now was allocated by the forge's own bump pointer. The
+    // machine's allocator lives in a register, so hand it a run that starts
+    // exactly where the forge stopped: the collector reads gp to find out how
+    // much of the heap has been used.
+    l.h.set_g(LG_CONS_RUN, before);
+    l.h.set_g(LG_CONSRUNEND, CONS_END);
     match call_on_machine(l, "gc-for-image", trap) {
         Some(v) => {
             let n = crate::heap::unfix(v) as u32;

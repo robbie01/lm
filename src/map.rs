@@ -125,6 +125,12 @@ globals! {
     LG_CONS_RUN   = 0x8c, "cons-run";     // start of the run being bumped
     LG_CONSRUNEND = 0x90, "cons-run-end"; // and its end
     LG_REFILL     = 0x94, "refill";      // closure: take the next cons run
+    LG_CODEFREE   = 0xb4, "code-free";   // free blocks in code space
+    LG_CODEREG    = 0xb8, "code-reg";    // registry of every code object
+    LG_CODEREGN   = 0xbc, "code-reg-n";
+    LG_CODEFREEN  = 0xc0, "code-free-n";
+    LG_STUBLO     = 0xac, "stub-lo";     // extent of the cons refill stub,
+    LG_STUBHI     = 0xb0, "stub-hi";     // which is not a lisp frame
     LG_STARTUP    = 0x98, "startup";     // closure run before the repl
     LG_SCRATCH0   = 0x9c, "scratch0";
     LG_SCRATCH1   = 0xa0, "scratch1";

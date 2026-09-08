@@ -47,13 +47,14 @@
 ;;   5 literals objects the code refers to, kept alive by the code object
 
 (define (asm-new)
-  (let ((a (make-vector-n 6 nil)))
+  (let ((a (make-vector-n 7 nil)))
     (%vector-set! a 0 (make-bytes-n 512))
     (%vector-set! a 1 0)
     (%vector-set! a 2 nil)
     (%vector-set! a 3 nil)
     (%vector-set! a 4 0)
     (%vector-set! a 5 nil)
+    (%vector-set! a 6 0)
     a))
 
 (define (asm-len a) (%vector-ref a 1))
@@ -61,10 +62,35 @@
 (define (asm-literals a) (%vector-ref a 5))
 
 (define (asm-literal a obj)
-  ;; Remember a heap object the code embeds the address of, so the collector
-  ;; can see it through the code object and not free it under our feet.
-  (%vector-set! a 5 (%cons obj (%vector-ref a 5)))
-  obj)
+  ;; Record a heap object the code refers to, and answer the slot it will
+  ;; occupy in the code object. Code does not contain addresses any more, it
+  ;; contains offsets into this vector, which is what lets the collector move
+  ;; the object without touching a single instruction.
+  ;;
+  ;; Repeats share a slot. A function that mentions the same symbol ten times
+  ;; gets one word and one load offset, not ten.
+  (let ((lits (%vector-ref a 5))
+        (n (%vector-ref a 6))
+        (found nil)
+        (k 0)
+        (p nil))
+    (set! p lits)
+    (while (if found nil (%cons? p))
+      (if (%eq? (%car p) obj) (set! found (%- (%- n 1) k)) nil)
+      (set! k (%+ k 1))
+      (set! p (%cdr p)))
+    (if found
+        found
+        (begin
+          (%vector-set! a 5 (%cons obj lits))
+          (%vector-set! a 6 (%+ n 1))
+          n))))
+
+;; Byte offset of literal `i` from the code object pointer, which is what the
+;; s1 register holds while a compiled function is running.
+(define (literal-offset i) (%* 4 (%+ code-lits i)))
+
+(define (literal-count a) (%vector-ref a 6))
 
 (define (asm-grow a need)
   (let ((buf (%vector-ref a 0)))
@@ -416,12 +442,18 @@
 ;; Turn the assembler's output into a heap object, so the collector can see
 ;; both the machine code and every literal the code refers to.
 (define (asm-code-object a)
-  (let* ((lits (%vector-ref a 5))
-         (v (make-vector-n (%+ 2 (length lits)) nil))
-         (i 2))
-    (%vector-set! v 0 (%vector-ref a 4))
-    (%vector-set! v 1 (%vector-ref a 1))
-    (dolist (l lits)
-      (%vector-set! v i l)
-      (set! i (%+ i 1)))
+  ;; The literals list is in reverse, so it fills the vector from the far end.
+  (let* ((n (%vector-ref a 6))
+         (v (alloc-object t-code (%+ code-lits n)))
+         (i (%- (%+ code-lits n) 1)))
+    (%st32! (%addr-of v) (%vector-ref a 4))          ; raw entry address
+    (%st32! (%+ (%addr-of v) 4) (%vector-ref a 1))   ; raw byte length
+    (dolist (l (%vector-ref a 5))
+      (%set-slot! v i l)
+      (set! i (%- i 1)))
+    ;; The collector finds code through this, not by scanning code space,
+    ;; which has no headers to walk.
+    (register-code v)
     v))
+
+(define (code-object-entry v) (%addr-of (%raw-ld (%addr-of v))))

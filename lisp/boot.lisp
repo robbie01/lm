@@ -39,7 +39,9 @@
     (i-csrrw a $zero csr-mscratch $t0)
     (i-li a $t0 (asm-origin *trap-asm*))
     (i-csrrw a $zero csr-mtvec $t0)
-    ;; Enter Lisp.
+    ;; Enter Lisp. s0 is zeroed first: it is the frame link, and a zero there
+    ;; is what tells the collector it has reached the bottom of the stack.
+    (i-mv a $s0 $zero)
     (i-lw a $t0 $zero lg-toplevel)
     (i-li a $t1 0)
     (i-lw a $t2 $t0 0)
@@ -58,18 +60,26 @@
 ;; up. Every caller-saved register is pushed before the collector can run, so
 ;; the conservative stack scan sees everything that is live - that spill is not
 ;; housekeeping, it is how the collector finds its roots.
-(define save-regs
-  (list $ra $t0 $t1 $t2 $t3 $t4 $t5 $t6
-        $a0 $a1 $a2 $a3 $a4 $a5 $a6 $a7))
+(define arg-regs (list $a0 $a1 $a2 $a3 $a4 $a5 $a6 $a7))
+(define raw-regs (list $ra $t0 $t1 $t2 $t3 $t4 $t6))
 
 (define (emit-cons-refill)
+  ;; The frame this builds is laid out to match what gc.lisp expects: the live
+  ;; mask first, then the eight argument registers, then the return address
+  ;; and the temporaries. The walker steps over the second half and takes only
+  ;; the masked part of the first, which is what keeps the collector precise
+  ;; across an allocation.
   (let* ((a (asm-new))
-         (n (length save-regs))
-         (frame (%logand (%+ (%* 4 n) 15) -8))
          (i 0))
-    (i-addi a $sp $sp (%- 0 frame))
-    (dolist (r save-regs)
-      (i-sw a r $sp (%* 4 i))
+    (i-addi a $sp $sp (%- 0 stub-frame-size))
+    (i-sw a $t5 $sp stub-mask-off)      ; the live-register mask
+    (set! i 0)
+    (dolist (r arg-regs)
+      (i-sw a r $sp (%+ stub-args-off (%* 4 i)))
+      (set! i (%+ i 1)))
+    (set! i 0)
+    (dolist (r raw-regs)
+      (i-sw a r $sp (%+ stub-raw-off (%* 4 i)))
       (set! i (%+ i 1)))
     ;; refill-cons takes a run off the free list, collecting first if it has to.
     (i-lw a $t0 $zero lg-refill)
@@ -80,12 +90,19 @@
     (i-lw a $gp $zero lg-cons-run)
     (i-lw a $tp $zero lg-cons-run-end)
     (set! i 0)
-    (dolist (r save-regs)
-      (i-lw a r $sp (%* 4 i))
+    (dolist (r arg-regs)
+      (i-lw a r $sp (%+ stub-args-off (%* 4 i)))
       (set! i (%+ i 1)))
-    (i-addi a $sp $sp frame)
+    (set! i 0)
+    (dolist (r raw-regs)
+      (i-lw a r $sp (%+ stub-raw-off (%* 4 i)))
+      (set! i (%+ i 1)))
+    (i-lw a $t5 $sp stub-mask-off)
+    (i-addi a $sp $sp stub-frame-size)
     (i-ret a)
     (asm-place a)
+    (%set-global! lg-stub-lo (asm-origin a))
+    (%set-global! lg-stub-hi (%+ (asm-origin a) (asm-len a)))
     a))
 
 ;; ---------------------------------------------------------------- traps

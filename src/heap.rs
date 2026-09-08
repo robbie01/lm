@@ -102,6 +102,7 @@ pub const T_CLOSURE: u32 = 5; // word0 raw entry address, rest tagged
 pub const T_RECORD: u32 = 6; // len tagged words, word0 is a type tag
 pub const T_FLOAT: u32 = 7; // one raw word
 pub const T_PORT: u32 = 8; // len tagged words
+pub const T_CODE: u32 = 10; // word0 raw entry, word1 raw length, rest tagged
 
 pub const SYM_SLOTS: u32 = 5;
 pub const SYM_NAME: u32 = 0;
@@ -113,6 +114,10 @@ pub const SYM_FLAGS: u32 = 4;
 /// Closure slot 0 is the raw entry address; slot 1 is the code object; free
 /// variables start at slot 2. An entry of 0 marks a closure the build-time
 /// interpreter made, whose slots are (0, params, body, env, name).
+pub const CODE_ENTRY: u32 = 0;
+pub const CODE_LEN: u32 = 1;
+pub const CODE_LITS: u32 = 2;
+
 pub const CLO_ENTRY: u32 = 0;
 pub const CLO_CODE: u32 = 1;
 pub const CLO_FREE: u32 = 2;
@@ -628,6 +633,14 @@ impl<'a> Heap<'a> {
                 }
                 T_BYTES => {
                     out.push_str(&format!("#<bytes {} @{:#x}>", self.olen(v), v));
+                }
+                T_CODE => {
+                    out.push_str(&format!(
+                        "#<code {:#x} {} bytes, {} literals>",
+                        self.slot(v, CODE_ENTRY),
+                        self.slot(v, CODE_LEN),
+                        self.olen(v).saturating_sub(2)
+                    ));
                 }
                 T_CLOSURE => {
                     let entry = self.slot(v, CLO_ENTRY);

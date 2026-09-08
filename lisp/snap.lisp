@@ -22,10 +22,13 @@
   ;; Collect before saving, and blank what was reclaimed. Whatever the machine
   ;; has been doing since it booted is mostly garbage by now, and there is no
   ;; sense writing it to disk.
+  ;; Compacting first is what makes an image small: afterwards the live pairs
+  ;; are one contiguous block at the bottom of cons space, and everything
+  ;; above it has been blanked.
   (gc-for-image)
   (disable)
   (let* ((hdr (alloc-pool 512))
-         (live-top (%global lg-cons-live-top))
+         (live-top (%global lg-cons-ptr))
          (saved-top (%raw-ld lg-toplevel))
          ;; Five regions: low memory, the Exec pool, code, pairs, objects.
          (regions (list (list 0 4096)
@@ -39,13 +42,8 @@
     ;; A resumed image re-enters through here rather than through the boot
     ;; list: every global it would have set is already set.
     (%raw-st! lg-toplevel (%symbol-value 'resume-kickstart))
-    ;; The resumed machine starts with one run covering everything above the
-    ;; live data. The fragmented free space below it is not described in the
-    ;; image at all; the next collection finds it again.
-    (%set-global! lg-cons-run live-top)
-    (%set-global! lg-cons-run-end cons-limit)
-    (%set-global! lg-cons-ptr cons-limit)
-    (%set-global! lg-cons-free 0)
+    ;; The collection above already left the allocator pointing at the single
+    ;; run above the live data, so there is nothing to arrange here.
     (poke hdr snap-magic)
     (poke (%+ hdr 4) (%global lg-imgentry))
     (poke (%+ hdr 8) n)

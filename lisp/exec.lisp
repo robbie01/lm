@@ -670,6 +670,71 @@
   (%enable)
   nil)
 
+
+;; ---------------------------------------------------------------- gc roots
+;; Exec structures live in the pool, which the collector does not scan, so the
+;; kernel has to hand over the Lisp values it is holding. Nothing here may
+;; allocate: these run inside a collection, so the list walks are done by hand
+;; rather than through list-nodes, which conses.
+
+(define (gc-scan-task task)
+  (gc-slot (%+ task ln-name))
+  (gc-slot (%+ task tc-fn))
+  (let ((ctx (peek (%+ task tc-context))))
+    (if (%> ctx 0)
+        (begin
+          ;; Its stack, precisely, from where it was suspended.
+          (gc-scan-frames (%ld32 (%+ ctx (%* 4 reg-sp)))
+                          (%ld32 (%+ ctx (%* 4 8))))
+          ;; And its saved registers. This is the one place left that has to
+          ;; guess: a task preempted mid-expression has live values in
+          ;; registers whose types nothing recorded. Thirty-two words per
+          ;; suspended task, and the compactor pins whatever they reach.
+          (gc-scan-conservative ctx (%+ ctx ctx-bytes)))
+        nil)))
+
+(define (gc-scan-port port)
+  (gc-slot (%+ port ln-name))
+  (let ((m (list-first (%+ port mp-msglist))))
+    (while m
+      (gc-slot (%+ m ln-name))
+      (gc-slot (%+ m mn-body))
+      (set! m (node-next m)))))
+
+(define (gc-scan-library base)
+  (gc-slot (%+ base ln-name))
+  (let ((i 1) (n (peek (%+ base lib-vectors))))
+    (while (%<= i n)
+      (gc-slot (%- base (%* 8 i)))
+      (set! i (%+ i 1)))))
+
+(define (gc-scan-int-server s)
+  (gc-slot (%+ s ln-name))
+  (gc-slot (%+ s is-code))
+  (gc-slot (%+ s is-data)))
+
+(define (gc-scan-list-of l fn)
+  (let ((p (list-first l)))
+    (while p
+      (%funcall fn p)
+      (set! p (node-next p)))))
+
+(define (gc-extra-roots)
+  (if (%= *sysbase* 0)
+      nil
+      (begin
+        ;; The running task, whose stack gc-roots already walked.
+        (gc-slot (%+ (this-task) ln-name))
+        (gc-slot (%+ (this-task) tc-fn))
+        (gc-scan-list-of (ready-list) gc-scan-task)
+        (gc-scan-list-of (wait-list) gc-scan-task)
+        (gc-scan-list-of (%+ *sysbase* eb-portlist) gc-scan-port)
+        (gc-scan-list-of (%+ *sysbase* eb-liblist) gc-scan-library)
+        (let ((i 0))
+          (while (%< i 8)
+            (gc-scan-list-of (int-vector i) gc-scan-int-server)
+            (set! i (%+ i 1)))))))
+
 (define (uptime) (peek (%+ *sysbase* eb-dispcount)))
 (define (switch-count) (peek (%+ *sysbase* eb-switchcount)))
 (define (task-count) (peek (%+ *sysbase* eb-taskcount)))

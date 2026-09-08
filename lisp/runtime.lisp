@@ -22,11 +22,13 @@
 
 ;; alloc-object lives in gc.lisp, next to the free lists it draws from.
 
-(define (make-closure entry nfree code)
+(define (make-closure code nfree)
+  ;; The entry address is copied out of the code object rather than passed in,
+  ;; so that a caller never has to know one. Both that word and the closure
+  ;; slot it lands in are raw addresses, not tagged values, which is why they
+  ;; go through %raw-ld and %raw-st! and not through the slot accessors.
   (let ((c (alloc-object t-closure (%+ 2 nfree))))
-    ;; Slot 0 holds a raw code address, not a tagged value, which is why it is
-    ;; written through %st32! and not %set-slot!.
-    (%st32! (%addr-of c) entry)
+    (%raw-st! (%addr-of c) (%raw-ld (%addr-of code)))
     (%set-slot! c clo-code code)
     c))
 

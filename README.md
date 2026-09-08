@@ -82,19 +82,86 @@ w & 7 == 2      immediate: characters, the unbound marker, eof.
 bump pointer and the end of its current run, so a fresh pair costs four
 instructions and one well-predicted branch.
 
-**Nothing ever moves.** Compiled code embeds the addresses of symbols and
-quoted constants directly in the instruction stream; the kernel holds raw
-pointers to tasks and messages; the display reads the framebuffer where it
-lies. A copying collector would have to cooperate with all of that. A
-non-moving one cooperates with none of it — and in exchange it can be
-conservative about stacks, which is what lets compiled code keep live values in
-registers and spill them anywhere, with no stack maps at all.
+## Finding every pointer
 
-The collector sweeps cons space into a chain of contiguous *runs* rather than a
-free list of cells, which is what keeps allocation at a bump. Its roots are the
-symbol table, a handful of globals, and one conservative scan of the Exec pool
-— which covers every task's stack, every saved register context and every Exec
-structure holding a Lisp value, in a single range.
+Compiled code contains **no heap addresses at all**. Each function reaches its
+symbols and constants through a literal vector — its own code object — held in
+`s1` and loaded once in the prologue. A constant is `lw a0, off(s1)`: one
+instruction, where materialising an address took two. `lm inspect` checks the
+invariant by decoding every `lui`/`addi` pair in code space and asserting that
+none of them names anything in the heap.
+
+That is what makes the rest possible. An object can move without a single
+instruction being patched, and there are no relocation tables to maintain.
+
+Roots are found **precisely, with no stack maps**. Every word in a Lisp frame
+between its stack pointer and its closure slot is a tagged value — locals,
+spilled temporaries, pushed arguments, the saved literal vector. Only the
+return address and the frame link are raw, and they sit at fixed offsets. And a
+callee's frame base *is* its caller's stack pointer. So the frame chain alone
+describes every frame exactly, with no per-call-site metadata:
+
+```
+scan [sp, s0-8)              locals, temporaries, closure, literal vector
+ra   = [s0-4]                raw
+sp   = s0                    the caller's stack pointer
+s0   = [s0-8]                the caller's frame
+```
+
+Allocation is the one place a live value can be in a register rather than a
+frame, so a cons site tells the truth about it: the slow path writes a
+live-register mask into `t5`, and the collector takes exactly those.
+
+Exec hands over the Lisp values in its own structures — task functions, port
+names, message bodies, library vectors — field by field, rather than having
+the pool scanned by guesswork.
+
+**One thing is still guessed at.** A task preempted mid-expression has live
+values in registers whose types nothing recorded. Making that precise would
+mean safepoint polls in every prologue and loop back-edge, at perhaps a tenth
+of the machine's speed, to remove thirty-two words of uncertainty per suspended
+task. Instead those words are scanned conservatively and whatever they reach is
+**pinned**. A pinned object does not move, and pushes the free pointer past
+itself — which is also why the free pointer is never above the object being
+considered, and why the slide can copy upwards through memory without ever
+overwriting something it has not yet moved.
+
+## The collector
+
+Mark, then compact, in four passes: plan where everything is going, rewrite
+every pointer to where its target will be, slide, and blank what is left
+behind. Forwarding is not stored per object — there is nowhere to put it
+without growing every pair by half. Instead each block of the heap records
+where the free pointer had reached when the walk arrived at it, and a lookup
+replays the few objects in between.
+
+**Pairs are compacted. Objects and code are swept in place.** Not squeamishness
+about variable sizes — it is about who is doing the collecting. This collector
+is written in the language it collects: it calls functions through symbol value
+cells and reaches its constants through the literal vector of its own code
+object, and every one of those is an object. Move them and it loses the ability
+to run, halfway through running. Pairs are safe because nothing between
+updating and sliding dereferences one, and pairs are where the space is: a few
+million of them against a few thousand objects.
+
+Code space is collected but not moved, for the same reason. Liveness needs no
+special rule: a closure holds its code object, a frame holds its closure, and a
+running function's literal vector *is* its own code object sitting in `s1`, so
+anything executing, anything on any stack and anything callable is already
+reachable. The registry of code objects lives in the pool rather than the heap,
+because a list in the heap would have to be a root, and a root would keep every
+version of every function alive forever — the opposite of the point.
+
+The effect on an image is the whole reason for the exercise:
+
+| | |
+|---|---|
+| non-moving, no blanking | 27 MB |
+| swept and blanked | 10.6 MB |
+| compacted | **1.8 MB** |
+
+That last figure is 10,340 live pairs out of the 3.4 million the compiler
+allocated to build itself.
 
 ## The bootstrap
 
@@ -128,9 +195,9 @@ Once booted, the image can save itself:
 ```
 > (define (greet who) (string-append "hello, " who))
 > (save-image)
-saved 54497 blocks
+saved 4270 blocks
 $ ./target/release/lm run snap.img
-LM resumed, 272k of code
+LM resumed, 284k of code
 > (greet "again")
 "hello, again"
 ```
@@ -216,12 +283,13 @@ encoding agreeing with itself is not.
   closures that point at it, and freeing it would mean knowing that nothing has
   baked its address into an instruction — exactly what this design gives up in
   exchange for never having to move anything.
-- The collector does not compact, so an image carries the shape of its
-  allocation history: live pairs are scattered through the range the compiler
-  touched, and a page with one live pair in it still has to be stored. The
-  build runs the collector on the machine and blanks what it reclaims, which
-  takes the kickstart from 27 MB to about 10 MB, but the rest is the price of
-  never moving anything.
+- Objects and code are collected but never moved, so object space can still
+  fragment over a long session. Its free lists are exact-fit and segregated,
+  which handles the usual case where sizes repeat.
+- Thirty-two words per suspended task are scanned conservatively, and what they
+  reach is pinned for that cycle. `(room)` reports how many.
+- A collection walks the whole used heap, so it costs proportional to the high
+  water mark rather than to the live set. Generations would fix that.
 - More than eight arguments works, but not in tail position: the caller pushes
   the overflow and a tail call's epilogue would move the stack out from under
   it, so such a call is compiled as an ordinary one followed by a return.

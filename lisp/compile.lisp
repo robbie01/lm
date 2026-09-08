@@ -15,20 +15,29 @@
 ;;;   gp       cons-space bump pointer      } dedicated for the life of the
 ;;;   tp       cons-space limit             } machine; allocation is inline
 ;;;
+;;;   s1       the running function's literal vector, that is its code object
+;;;
 ;;; Frame
 ;;;   s0 + 0        argument 8, if there is one
 ;;;   s0 - 4        saved ra
 ;;;   s0 - 8        saved s0
 ;;;   s0 - 12       the closure
-;;;   s0 - 16 - 4i  local slot i
+;;;   s0 - 16       saved s1
+;;;   s0 - 20 - 4i  local slot i
 ;;;   sp            below all of that; temporaries are pushed under it
 ;;;
 ;;; Only one instruction in the prologue depends on the frame size, so the
 ;;; frame is sized after the body is emitted and that single word is patched.
+;;;
+;;; Every word between sp and s0-12 inclusive is a tagged Lisp value: locals,
+;;; spilled temporaries, pushed arguments, the closure. Only the saved ra and
+;;; the frame link are raw, and they are at fixed offsets. That uniformity is
+;;; what lets the collector walk a stack precisely with no stack maps at all.
 
-(define frame-fixed 16)
+(define frame-fixed 20)
 (define (local-off n) (%- (%- 0 frame-fixed) (%* 4 n)))
 (define clo-slot -12)
+(define lit-slot -16)
 
 ;; ---------------------------------------------------------------- ecall codes
 (define trap-arity 1)
@@ -214,11 +223,18 @@
      ((%fixnum? v) (i-li-fixnum a reg v))
      ((%char? v) (i-li a reg (%logior (%lsh (%char->int v) 8) 2)))
      (else
-      ;; A heap object. Nothing moves, so its address goes straight into the
-      ;; instruction stream; the object is recorded as a literal so the
-      ;; collector can reach it through the code object.
-      (asm-literal a v)
-      (i-li a reg (%addr-of v))))))
+      ;; A heap object. Its address is never written into the instruction
+      ;; stream - the code loads it from the literal vector instead, so the
+      ;; collector can move the object and only has to update one word.
+      (emit-literal c v reg)))))
+
+(define (emit-literal c v reg)
+  (let* ((a (cx-asm c))
+         (off (literal-offset (asm-literal a v))))
+    (if (%>= off 2048)
+        (error "compile: too many literals in" (cx-name c))
+        nil)
+    (i-lw a reg $s1 off)))
 
 ;; ---------------------------------------------------------------- variables
 ;; A location is (local n), (boxed-local n), (free n), (boxed-free n) or
@@ -244,8 +260,7 @@
      (else
       (let ((sym (cadr loc)))
         (note-global-ref sym)
-        (asm-literal a sym)
-        (i-li a $t6 (%addr-of sym))
+        (emit-literal c sym $t6)
         (i-lw a reg $t6 (%* 4 sym-value)))))))
 
 ;; Every global the compiler emits a reference to gets recorded, so the build
@@ -296,17 +311,24 @@
       (i-sw a reg $t6 0))
      (else
       (let ((sym (cadr loc)))
-        (asm-literal a sym)
-        (i-li a $t6 (%addr-of sym))
+        (emit-literal c sym $t6)
         (i-sw a reg $t6 (%* 4 sym-value)))))))
 
 ;; ---------------------------------------------------------------- allocation
 ;; Inline cons. gp is the bump pointer and tp the limit, both held in registers
 ;; for the life of the machine, so a fresh pair costs four instructions on the
 ;; fast path plus one well-predicted branch.
-(define (emit-cons c car-reg cdr-reg dst)
-  (let ((a (cx-asm c)) (ok (asm-gensym-label "cons")))
+(define (emit-cons c car-reg cdr-reg dst . live)
+  ;; `live` is a bitmask of the argument registers holding values that must
+  ;; survive a collection. It is written into t5 on the slow path only, and
+  ;; the stub stores it where the collector can read it: that is what lets the
+  ;; stack walker take exactly the live registers and ignore the rest, rather
+  ;; than guessing at sixteen saved words.
+  (let ((a (cx-asm c))
+        (ok (asm-gensym-label "cons"))
+        (mask (if (%cons? live) (%car live) 3)))
     (i-bltu a $gp $tp ok)
+    (i-li a $t5 mask)
     (i-lw a $t6 $zero lg-gchook)
     (i-call-reg a $t6)
     (asm-label a ok)
@@ -335,9 +357,8 @@
 
 (define (emit-bool-from-flag c flag-reg dst)
   (let ((a (cx-asm c)) (tsym (intern-string "t")))
-    (asm-literal a tsym)
     (i-sub a flag-reg $zero flag-reg)   ; 0 -> 0, 1 -> all ones
-    (i-li a dst (%addr-of tsym))
+    (emit-literal c tsym dst)
     (i-and a dst dst flag-reg)))
 
 ;; ---------------------------------------------------------------- prologue
@@ -356,12 +377,18 @@
     (i-sw a $ra $t3 -4)
     (i-sw a $s0 $t3 -8)
     (i-sw a $t0 $t3 -12)
-    (i-mv a $s0 $t3)))
+    (i-sw a $s1 $t3 -16)
+    (i-mv a $s0 $t3)
+    ;; Point s1 at this function's own literal vector, which lives in the code
+    ;; object hanging off the closure. Every constant, symbol and inner code
+    ;; object the body mentions is one load from here.
+    (i-lw a $s1 $t0 (%* 4 clo-code))))
 
 (define (emit-epilogue c)
   (let ((a (cx-asm c)))
     (i-lw a $ra $s0 -4)
     (i-lw a $t3 $s0 -8)
+    (i-lw a $s1 $s0 -16)
     (i-mv a $sp $s0)
     (i-mv a $s0 $t3)))
 
@@ -858,6 +885,16 @@
         (i-sw a $tp $zero lg-cons-run-end)
         (i-mv a $a0 $zero))))
 
+  ;; Reload the cons allocator's run from memory. The compactor has to call
+  ;; this: gp and tp are live registers describing a region of the old heap,
+  ;; and after everything has slid down they describe nothing.
+  (definline '%reload-cons-run 0
+    (lambda (c)
+      (let ((a (cx-asm c)))
+        (i-lw a $gp $zero lg-cons-run)
+        (i-lw a $tp $zero lg-cons-run-end)
+        (i-mv a $a0 $zero))))
+
   ;; Raise a synchronous trap with a reason in a7. This is how a task asks to
   ;; be rescheduled: the switch has to happen inside the trap handler, where
   ;; the whole register set has already been saved.
@@ -897,6 +934,15 @@
   ;; The retired-instruction count, narrowed to thirty bits so that it is a
   ;; fixnum. Differences up to 2^30 cycles - about a second of machine time -
   ;; come out right, which is what timing anything actually needs.
+  ;; The frame pointer, so the collector can start walking the chain. Paired
+  ;; with %stack-pointer, these two are the entire root-finding interface the
+  ;; compiler has to provide.
+  (definline '%frame-pointer 0
+    (lambda (c)
+      (let ((a (cx-asm c)))
+        (i-slli a $a0 $s0 1)
+        (i-ori a $a0 $a0 1))))
+
   (definline '%cycles 0
     (lambda (c)
       (let ((a (cx-asm c)))
@@ -1211,7 +1257,7 @@
   ;; Replace the slot's value with a one-cell box holding it.
   (let ((a (cx-asm c)))
     (i-lw a $a2 $s0 (local-off slot))
-    (emit-cons c $a2 $zero $a2)
+    (emit-cons c $a2 $zero $a2 4)
     (i-sw a $a2 $s0 (local-off slot))))
 
 (define (compile-while c form tail)
@@ -1264,13 +1310,13 @@
          (code (%cdr entry-and-code))
          (nfree (length free))
          (i 0))
-    (asm-literal a code)
-    ;; make-closure is an ordinary global, so this is an ordinary call.
-    (i-li a $a0 (%logior (%lsh entry 1) 1))
+    ;; The inner function is named by its code object, which carries its own
+    ;; entry address. Nothing here mentions a code address, so the inner code
+    ;; can be moved later without patching this call site.
+    (emit-literal c code $a0)
     (i-li a $a1 (%logior (%lsh nfree 1) 1))
-    (i-li a $a2 (%addr-of code))
     (emit-load c (list 'global (intern-string "make-closure")) $t0)
-    (i-li a $t1 3)
+    (i-li a $t1 2)
     (i-lw a $t2 $t0 0)
     (i-call-reg a $t2)
     ;; a0 is the fresh closure; fill in the captured values.
@@ -1375,7 +1421,7 @@
     (i-sub a $t6 $s0 $t6)
     (i-lw a $a3 $t6 (local-off spill))
     (asm-label a got)
-    (emit-cons c $a3 $a2 $a2)
+    (emit-cons c $a3 $a2 $a2 12)
     (i-addi a $t3 $t3 -1)
     (i-j a loop)
     (asm-label a done)
@@ -1390,7 +1436,7 @@
 
 (define (add-boot-thunk form)
   (let* ((r (compile-function nil (list form) 'toplevel nil))
-         (clo (make-closure (%car r) 0 (%cdr r))))
+         (clo (make-closure (%cdr r) 0)))
     (set! *boot-thunks* (%cons clo *boot-thunks*))
     clo))
 
@@ -1403,7 +1449,7 @@
           (if (%cons? (cadr form))
               (let* ((name (caadr form))
                      (r (compile-function (cdadr form) (cddr form) name nil))
-                     (clo (make-closure (%car r) 0 (%cdr r))))
+                     (clo (make-closure (%cdr r) 0)))
                 (%set-symbol-value! name clo)
                 name)
               ;; A variable definition is given its value now, because code
@@ -1423,7 +1469,7 @@
           (register-macro form)
           (let* ((name (cadr form))
                  (r (compile-function (caddr form) (cdddr form) name nil))
-                 (clo (make-closure (%car r) 0 (%cdr r))))
+                 (clo (make-closure (%cdr r) 0)))
             (%set-symbol-function! name clo)
             (%set-symbol-flags! name (%logior (%symbol-flags name) 1))
             name))

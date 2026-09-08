@@ -272,7 +272,7 @@
 (define (eval-thunk form)
   ;; Compile one form as the body of a function of no arguments, then call it.
   (let* ((r (compile-function nil (list form) 'repl nil))
-         (clo (make-closure (%car r) 0 (%cdr r))))
+         (clo (make-closure (%cdr r) 0)))
     (%funcall clo)))
 
 ;; On the machine there is no boot list to add to: a top level form is simply
