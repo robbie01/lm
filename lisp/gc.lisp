@@ -193,8 +193,9 @@
      ((%= ty t-string) nil)
      ((%= ty t-bytes) nil)
      ((%= ty t-float) nil)
-     ;; slots 0 and 1 are the raw entry address and byte length
-     ((%= ty t-code) (gc-slots base code-lits n))
+     ;; slots 0 and 1 are the raw entry address and byte length; from the
+     ;; name on it is all tagged
+     ((%= ty t-code) (gc-slots base code-name n))
      ;; slot 0 is a raw code address; following it would be a bug
      ((%= ty t-closure) (gc-slots base 1 n))
      (else (gc-slots base 0 n)))))

@@ -102,7 +102,8 @@ pub const T_CLOSURE: u32 = 5; // word0 raw entry address, rest tagged
 pub const T_RECORD: u32 = 6; // len tagged words, word0 is a type tag
 pub const T_FLOAT: u32 = 7; // one raw word
 pub const T_PORT: u32 = 8; // len tagged words
-pub const T_CODE: u32 = 10; // word0 raw entry, word1 raw length, rest tagged
+pub const T_CODE: u32 = 10; // word0 raw entry, word1 raw length, word2 name,
+                            // then the literal vector - all tagged from 2 on
 
 pub const SYM_SLOTS: u32 = 5;
 pub const SYM_NAME: u32 = 0;
@@ -116,7 +117,8 @@ pub const SYM_FLAGS: u32 = 4;
 /// interpreter made, whose slots are (0, params, body, env, name).
 pub const CODE_ENTRY: u32 = 0;
 pub const CODE_LEN: u32 = 1;
-pub const CODE_LITS: u32 = 2;
+pub const CODE_NAME: u32 = 2;
+pub const CODE_LITS: u32 = 3;
 
 pub const CLO_ENTRY: u32 = 0;
 pub const CLO_CODE: u32 = 1;
@@ -635,11 +637,18 @@ impl<'a> Heap<'a> {
                     out.push_str(&format!("#<bytes {} @{:#x}>", self.olen(v), v));
                 }
                 T_CODE => {
+                    let nm = self.slot(v, CODE_NAME);
+                    let nm = if self.is_symbol(nm) {
+                        self.sym_name(nm)
+                    } else {
+                        "anonymous".to_string()
+                    };
                     out.push_str(&format!(
-                        "#<code {:#x} {} bytes, {} literals>",
+                        "#<code {} {:#x} {} bytes, {} literals>",
+                        nm,
                         self.slot(v, CODE_ENTRY),
                         self.slot(v, CODE_LEN),
-                        self.olen(v).saturating_sub(2)
+                        self.olen(v).saturating_sub(CODE_LITS)
                     ));
                 }
                 T_CLOSURE => {
@@ -652,7 +661,23 @@ impl<'a> Heap<'a> {
                             out.push_str("#<interpreted>");
                         }
                     } else {
-                        out.push_str(&format!("#<function {entry:#x}>"));
+                        // A compiled closure knows its own name, through the
+                        // code object it shares with every frame that runs it.
+                        let code = self.slot(v, CLO_CODE);
+                        let nm = if is_obj(code) && self.otype(code) == T_CODE {
+                            self.slot(code, CODE_NAME)
+                        } else {
+                            NIL
+                        };
+                        if self.is_symbol(nm) {
+                            out.push_str(&format!("#<function {}>", self.sym_name(nm)));
+                        } else if nm != NIL {
+                            out.push_str("#<function ");
+                            self.write_into(nm, out, quoted, depth + 1);
+                            out.push('>');
+                        } else {
+                            out.push_str(&format!("#<function {entry:#x}>"));
+                        }
                     }
                 }
                 T_FLOAT => out.push_str(&format!("{}", self.float_of(v))),

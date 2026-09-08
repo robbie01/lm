@@ -74,6 +74,7 @@ pub fn write_layout() {
     def!("t-code", T_CODE);
     def!("code-entry", CODE_ENTRY);
     def!("code-len", CODE_LEN);
+    def!("code-name", CODE_NAME);
     def!("code-lits", CODE_LITS);
     def!("sym-slots", SYM_SLOTS);
     def!("sym-name", SYM_NAME);

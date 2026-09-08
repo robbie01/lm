@@ -57,6 +57,10 @@ const LISP_SIDE: &str = r#"
 (i-csrrs a $a0 #x342 $zero)
 (i-csrrc a $zero #x304 $a1)
 (i-csrrwi a $zero #x300 8)
+(i-car a $a0 $a1)
+(i-cdr a $t0 $s1)
+(i-set-car a $a2 $a3)
+(i-set-cdr a $a2 $a3)
 (i-li a $a0 #x12345678)
 (i-li a $a0 -1)
 (i-li a $a0 #x800)
@@ -124,6 +128,10 @@ fn rust_side() -> Vec<u8> {
     w.push(csrrs(A0, 0x342, ZERO));
     w.push(csrrc(ZERO, 0x304, A1));
     w.push(csrrwi(ZERO, 0x300, 8));
+    w.push(car(A0, A1));
+    w.push(cdr(T0, S1));
+    w.push(setcar(A2, A3));
+    w.push(setcdr(A2, A3));
     li32(&mut w, A0, 0x1234_5678);
     li32(&mut w, A0, -1i32 as u32);
     li32(&mut w, A0, 0x800);

@@ -34,6 +34,8 @@
 (define trap-error 4)
 (define trap-reschedule 5)
 
+(define cause-wrong-type 24)
+
 (define (cause-name c)
   (cond ((%= c 0) "misaligned fetch")
         ((%= c 1) "instruction access fault")
@@ -44,6 +46,7 @@
         ((%= c 6) "misaligned store")
         ((%= c 7) "store access fault")
         ((%= c 11) "ecall")
+        ((%= c cause-wrong-type) "wrong type")
         (else "trap")))
 
 ;; The trap stub hands over the cause with the interrupt flag moved from bit
@@ -59,9 +62,54 @@
 (define (handle-trap cause epc tval ctx)
   (if (interrupt? cause)
       (handle-interrupt (interrupt-number cause) ctx)
-      (if (%= cause 11)
-          (handle-ecall epc ctx)
-          (fatal-trap cause epc tval ctx))))
+      (cond ((%= cause 11) (handle-ecall epc ctx))
+            ((%= cause cause-wrong-type) (wrong-type-trap epc tval ctx))
+            (else (fatal-trap cause epc tval ctx)))))
+
+;; ------------------------------------------------- the pair instructions
+;; car, cdr and their setters check the tag in hardware and trap here with
+;; the offending value in mtval. The value is the interesting part of the
+;; report, so this goes to some trouble to say what it was rather than
+;; printing a hexadecimal word and leaving the reader to decode it.
+(define (pair-op-name epc)
+  ;; funct3 of the instruction that trapped says which of the four it was.
+  (let ((f (%logand (%lsh (%ld32 epc) -12) 7)))
+    (cond ((%= f 0) "car")
+          ((%= f 1) "cdr")
+          ((%= f 2) "set-car!")
+          (else "set-cdr!"))))
+
+;; The stub narrows mtval to thirty bits so it survives as a fixnum. Every
+;; address in this machine fits, and so does any fixnum small enough to be
+;; worth printing; the rest come back as a word.
+(define (emit-value w)
+  (let ((tag (%logand w 7)))
+    (cond ((%= w 0) (emit-str "nil"))
+          ((%= (%logand w 1) 1)
+           (let ((v (%ash w -1)))
+             (emit-str (number->string (if (%>= v 268435456)
+                                           (%- v 536870912)
+                                           v)))))
+          ((%= tag 2) (write (%from-addr w)))
+          ((and (%= tag 4) (%>= w obj-base) (%< w obj-limit))
+           (write (%from-addr w)))
+          (else (emit-str (number->hex w))))))
+
+(define (wrong-type-trap epc tval ctx)
+  (emit-str "\n*** ")
+  (emit-str (pair-op-name epc))
+  ;; nil reads as a pair of nils but has no cell to write to, so the store
+  ;; side rejects it and deserves its own sentence.
+  (if (%= tval 0)
+      (emit-str ": nil has no cell to write")
+      (begin
+        (emit-str ": expected a pair, got ")
+        (emit-value tval)))
+  (emit-str ", at pc ")
+  (emit-str (number->hex epc))
+  (emit-str "\n")
+  (backtrace-from-context epc ctx)
+  (abort-to-repl ctx))
 
 ;; The compiler emits `ecall` for the handful of conditions it detects inline,
 ;; with the reason in a7. Resuming past it means stepping mepc over the
@@ -80,7 +128,15 @@
         (begin
           (cond
            ((%= code trap-arity)
-            (emit-str "\ncalled a function with the wrong number of arguments, at ")
+            ;; t0 still holds the closure that was about to be entered and t1
+            ;; the count it was handed, so the report can name both.
+            (emit-str "\ncalled ")
+            (emit-callee (%raw-ld (%+ ctx (ctx-word 5))))
+            (let ((n (%ld32 (%+ ctx (ctx-word 6)))))
+              (emit-str " with ")
+              (emit-str (number->string n))
+              (emit-str (if (%= n 1) " argument" " arguments")))
+            (emit-str ", at ")
             (emit-str (number->hex epc))
             (emit-str "\n"))
            ((%= code trap-type)
@@ -88,7 +144,58 @@
            ((%= code trap-oom)
             (emit-str "\nout of memory at ") (emit-str (number->hex epc)) (emit-str "\n"))
            (else (emit-str "\nunknown ecall\n")))
-          (abort-to-repl)))))
+          ;; The arity check is in the callee prologue, before it has loaded
+          ;; its own literal vector, so s0 and s1 still describe the caller.
+          ;; Starting the walk at the return address rather than at the ecall
+          ;; makes the first line name the call site, which is the one place
+          ;; worth looking.
+          (if (%= code trap-arity)
+              (backtrace-from-context (trap-reg ctx 1) ctx)
+              (backtrace-from-context epc ctx))
+          (abort-to-repl ctx)))))
+
+;; ---------------------------------------------------------------- backtrace
+;; The frame chain the collector walks for roots also walks for blame. Every
+;; prologue saves its caller frame base at s0-8 and its caller literal vector
+;; - which is to say its caller code object, which carries the name - at
+;; s0-16. So a backtrace needs no side table of addresses, no debug section
+;; and no unwind information: the same four words that make a frame make the
+;; trace.
+(define backtrace-limit 24)
+
+;; The closure a call was about to enter. Its code object is where the name
+;; lives, which is the same word the backtrace reads.
+(define (emit-callee f)
+  (if (%closure? f) (emit-code-label (%slot f clo-code)) (emit-str "a non-function")))
+
+(define (print-backtrace s0 code pc)
+  (emit-str "backtrace:\n")
+  (let ((f s0) (c code) (p pc) (i 0) (go t))
+    (while (if go (if (%< i backtrace-limit) (frame-ok? f) nil) nil)
+      (emit-str "  ")
+      (emit-code-label c)
+      (emit-str " at ")
+      (emit-str (number->hex p))
+      (emit-str "\n")
+      (let ((ra (%ld32 (%- f 4))))
+        ;; The allocator refill stub sits between two Lisp frames without a
+        ;; frame of its own, so the chain steps straight over it; say so
+        ;; rather than silently losing the fact that we were allocating.
+        (if (in-stub? ra) (emit-str "  (allocating)\n") nil)
+        (set! p ra))
+      (set! c (%raw-ld (%- f 16)))
+      (set! f (%ld32 (%- f 8)))
+      (set! i (%+ i 1)))
+    (if (if go (frame-ok? f) nil) (emit-str "  ...\n") nil)))
+
+;; The registers a trap saved. x8 is s0, the frame base of whatever was
+;; running; x9 is s1, its code object. (Not ctx-reg: exec.lisp has one of
+;; those and it answers the address rather than the contents.)
+(define (ctx-word n) (%* 4 n))
+(define (trap-reg ctx n) (%ld32 (%+ ctx (ctx-word n))))
+
+(define (backtrace-from-context epc ctx)
+  (print-backtrace (trap-reg ctx 8) (%raw-ld (%+ ctx (%* 4 9))) epc))
 
 (define (fatal-trap cause epc tval ctx)
   (emit-str "\n*** ")
@@ -98,16 +205,30 @@
   (emit-str ", value ")
   (emit-str (number->hex tval))
   (emit-str "\n")
-  (abort-to-repl))
+  (backtrace-from-context epc ctx)
+  (abort-to-repl ctx))
 
 ;; ---------------------------------------------------------------- restart
-;; No unwinding yet, so an error restarts the reader loop by making the trap
-;; return straight into it.
+;; An error abandons the stack it happened on. Calling the reader from inside
+;; the handler would leave it running on the trap stack, on top of the frames
+;; that faulted - which works exactly once, and makes the backtrace of the
+;; next error a walk through the wreckage of the last one.
+;;
+;; So the restart is a return, not a call: rewrite the interrupted context to
+;; look as though the reader had just been entered on a clean stack, and let
+;; the trap stub put it back. Starting a task does the same thing for the same
+;; reason.
 (define *repl-restart* nil)
 
-(define (abort-to-repl)
+(define (abort-to-repl ctx)
   (if *repl-restart*
-      (%funcall *repl-restart*)
+      (let ((f *repl-restart*))
+        (%st32! (%+ ctx (ctx-word 0)) (%ld32 (%addr-of f)))  ; pc = its entry
+        (%raw-st! (%+ ctx (ctx-word 5)) f)                   ; t0 = the closure
+        (%st32! (%+ ctx (ctx-word 6)) 0)                     ; t1 = no arguments
+        (%st32! (%+ ctx (ctx-word 2)) (%global lg-stacktop)) ; a whole stack
+        (%st32! (%+ ctx (ctx-word 1)) 0)                     ; nowhere to return
+        (%st32! (%+ ctx (ctx-word 8)) 0))                    ; and no caller
       (begin (emit-str "no repl to return to; halting\n") (%halt 1))))
 
 ;; ---------------------------------------------------------------- reader

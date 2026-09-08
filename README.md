@@ -105,6 +105,83 @@ w & 7 == 2      immediate: characters, the unbound marker, eof.
 bump pointer and the end of its current run, so a fresh pair costs four
 instructions and one well-predicted branch.
 
+### Pairs are instructions
+
+RISC-V reserves opcode space for whoever builds the machine, and this one knows
+what a pair is, so `car`, `cdr`, `set-car!` and `set-cdr!` live in custom-0
+rather than being loads and stores:
+
+```
+funct3 0   car rd, rs1        rd <- [rs1]
+funct3 1   cdr rd, rs1        rd <- [rs1 + 4]
+funct3 2   set-car! rs2, rs1  [rs1] <- rs2
+funct3 3   set-cdr! rs2, rs1  [rs1 + 4] <- rs2
+```
+
+The check is the point, and the tag scheme is what makes it free: a pair has
+its low three bits clear, so a fixnum (odd), an immediate (2 mod 8) and an
+object (4 mod 8) are all caught by a mask the processor computes alongside the
+address it was going to form anyway. Same one instruction, same 475 MIPS on a
+list-walking loop. nil passes, because it is a legal pair; writing through it
+does not, because that cell is the global vector at address 0.
+
+A wrong type traps with cause 24 — RISC-V leaves 24 through 31 to the
+implementation — and the offending value in `mtval`, which is enough for the
+handler to decode the instruction that trapped, name the operation and print
+the value itself:
+
+```
+> (car 5)
+*** car: expected a pair, got 5, at pc 1047944
+> (car "hi")
+*** car: expected a pair, got "hi", at pc 104793c
+> (set-car! nil 1)
+*** set-car!: nil has no cell to write, at pc 10478f0
+```
+
+## Calling
+
+```
+a0..a7        arguments 0..7; 8 and up are pushed, so argument 8 is at 0(s0)
+t0            the closure being entered
+t1            how many arguments, raw
+a0            the result
+s1            the running function's literal vector - its own code object
+
+s0 - 4        saved ra      raw
+s0 - 8        saved s0      raw
+s0 - 12       the closure
+s0 - 16       saved s1
+s0 - 20 - 4i  local slot i
+```
+
+Everything from `sp` up to and including the closure slot is a tagged value,
+and only the two raw words sit at fixed offsets. That is not tidiness for its
+own sake — it is the property the collector and the backtracer both live on.
+
+**A function calling itself by name does not go the long way round.** The
+general sequence loads the global's value cell, sets the argument count, loads
+the entry address out of the closure and jumps indirectly — five instructions
+and two dependent loads to reach code the compiler is *already emitting*. A
+self-call instead reuses the closure it is running, from `s0-12`, and jumps
+straight to a label just past its own arity check:
+
+```
+lw   t0, -12(s0)
+jal  ra, self                 ; and 'j self' for a tail call
+```
+
+Two instructions rather than five, plus two more saved in the prologue for the
+check it would only have been proving to itself: **six fewer instructions per
+recursive call, about 12% off `fib`**. It applies only where the compiler can
+see that it is safe — the operator is this function's own name, nothing local
+shadows it, the argument count matches exactly, and the function is not
+variadic, since the rest-list code reads that count out of `t1`.
+
+The price is the same bargain open-coding `car` makes: redefining a function
+does not reach the calls already inside it. A recursive function that redefines
+itself mid-flight will finish in the version it started in.
+
 ## Finding every pointer
 
 Compiled code contains **no heap addresses at all**. Each function reaches its
@@ -138,6 +215,43 @@ live-register mask into `t5`, and the collector takes exactly those.
 Exec hands over the Lisp values in its own structures — task functions, port
 names, message bodies, library vectors — field by field, rather than having
 the pool scanned by guesswork.
+
+### The same chain is a backtrace
+
+Nothing else was needed. A frame already holds its caller's frame base at
+`s0-8` and its caller's literal vector — that is, its caller's *code object* —
+at `s0-16`, and a code object now carries the name of the function it is. So
+the walk the collector does for roots does for blame as well, with no debug
+section, no unwind tables and no side map from address to function:
+
+```
+> (define (inner x) (+ 1 (car x)))
+> (define (middle x) (+ 1 (inner x)))
+> (define (outer) (+ 1 (middle 5)))
+> (outer)
+*** car: expected a pair, got 5, at pc 10484b8
+backtrace:
+  inner at 10484b8
+  middle at 104853c
+  outer at 10485b8
+  repl-loop at 103d34c
+  kickstart at 103d578
+```
+
+Anonymous functions are named after where they were written, so a lambda still
+says something (`lambda in map`). An arity error names the function it was
+about to enter and the count it was handed, because at that instant the callee
+is still in `t0` and the count in `t1`. A tail call leaves no frame and so
+appears in no trace — which is the honest answer, since there is no frame left
+to describe.
+
+The restart is a **return, not a call**. An error rewrites the interrupted
+context — pc, `sp`, `t0`, `s0` — to look as though the reader had just been
+entered on a clean stack, and lets the trap stub put it back. Calling the
+reader from inside the handler instead would leave it running on the trap
+stack, on top of the frames that had just faulted: that works exactly once, and
+makes the backtrace of the second error a walk through the wreckage of the
+first. Starting a task builds the same four words for the same reason.
 
 **One thing is still guessed at.** A task preempted mid-expression has live
 values in registers whose types nothing recorded. Making that precise would
@@ -280,9 +394,9 @@ to hardware from Lisp is peek and poke.
 
 ```
 lmdev all             every suite
-lmdev cpu             79 processor conformance cases
+lmdev cpu             87 processor conformance cases
 lmdev asm             the Lisp assembler against an independent Rust encoder
-lmdev compiler        118 end-to-end cases: source in, machine code out, compare
+lmdev compiler        126 end-to-end cases: source in, machine code out, compare
 lmdev bench           measure the interpreter
 lmdev inspect [IMG]   look inside an image without running it
 lmdev eval EXPR       compile and run one expression, for debugging the compiler
@@ -304,17 +418,17 @@ anything in the heap.
   the compiler does not yet do arithmetic on.
 - Compiled code open-codes `+`, `car`, `<` and friends, so redefining one does
   not affect code already compiled against it.
-- No condition system: an error prints and restarts the REPL loop rather than
-  unwinding.
-- The collector is conservative, so a stack word that happens to look like a
-  pointer keeps an object alive.
-- Code space is never collected. Compiled code is reachable only through the
-  closures that point at it, and freeing it would mean knowing that nothing has
-  baked its address into an instruction — exactly what this design gives up in
-  exchange for never having to move anything.
+- No condition system: an error prints a backtrace and restarts the reader on a
+  fresh stack. That is a reset, not an unwind — nothing gets a chance to clean
+  up on the way past, and there is no way to catch anything.
 - Objects and code are collected but never moved, so object space can still
   fragment over a long session. Its free lists are exact-fit and segregated,
   which handles the usual case where sizes repeat.
+- A fault inside a task restarts the reader in *that task's* context rather
+  than killing the task and leaving the rest of the system running.
+- `car` and `cdr` check their argument because the processor does it for free.
+  `vector-ref` and friends do not check their index, and will read whatever is
+  at the address they compute.
 - Thirty-two words per suspended task are scanned conservatively, and what they
   reach is pinned for that cycle. `(room)` reports how many.
 - A collection walks the whole used heap, so it costs proportional to the high

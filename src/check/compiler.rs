@@ -7,7 +7,7 @@
 use crate::forge::{boot_host, write_layout};
 use crate::heap::*;
 use crate::forge::hostlisp::Lisp;
-use crate::mach::{Machine, Stop};
+use crate::mach::{Machine, Stop, C_TYPE};
 use crate::map::*;
 use crate::run;
 use crate::rvenc::*;
@@ -133,6 +133,21 @@ fn cases() -> Vec<Case> {
         Case("(%cons? nil)", "nil"),
         Case("(%car nil)", "nil"),
         Case("(%cdr nil)", "nil"),
+        Case("(%set-car! (%cons 1 2) 9)", "9"),
+        Case("(let ((p (%cons 1 2))) (%set-cdr! p 9) (%cdr p))", "9"),
+        // The tag check lives in the instruction, so these fault in the
+        // processor rather than loading whatever is at address 11.
+        Case("(%car 5)", "TRAP: not a pair: 0xb"),
+        Case("(%cdr 5)", "TRAP: not a pair: 0xb"),
+        Case("(%car #\\a)", "TRAP: not a pair: 0x6102"),
+        // nil reads as a pair of nils, but writing through it would land on
+        // the globals at address zero.
+        Case("(%set-car! nil 1)", "TRAP: not a pair: 0x0"),
+        // ---- functions know their own names ----
+        // The name lives in the code object, which is also what every frame
+        // holds in s1, so this is the same word a backtrace reads.
+        Case("(begin (define (named-fn x) x) named-fn)", "#<function named-fn>"),
+        Case("(lambda (x) x)", "#<function (lambda . %ctest-entry)>"),
         // ---- quoted structure ----
         Case("'(a b c)", "(a b c)"),
         Case("'foo", "foo"),
@@ -286,6 +301,12 @@ pub fn run_one(l: &mut Lisp, src: &str) -> String {
         let epc = l.h.m.peek32(FAULT + 4);
         let tval = l.h.m.peek32(FAULT + 8);
         let a7 = l.h.m.peek32(FAULT + 12);
+        // A wrong-type trap is reported without the pc: the value is the
+        // whole diagnosis, and leaving the address out is what lets a test
+        // say exactly what it expects.
+        if cause == C_TYPE {
+            return format!("TRAP: not a pair: {tval:#x}");
+        }
         let what = match (cause, a7 >> 1) {
             (11, 1) => "arity error".to_string(),
             (11, 3) => "out of memory".to_string(),

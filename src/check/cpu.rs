@@ -448,6 +448,42 @@ fn cases() -> Vec<Case> {
         21,
     );
 
+    // ---- pairs: custom-0, with the tag check in the instruction ----
+    // A pair at 0x3000: car 111, cdr 222.
+    let pair = |mut body: Vec<u32>| -> Vec<u32> {
+        let mut v = vec![
+            addi(A1, ZERO, 0),
+            lui(A1, 3),
+            addi(A2, ZERO, 111),
+            sw(A2, A1, 0),
+            addi(A2, ZERO, 222),
+            sw(A2, A1, 4),
+        ];
+        v.append(&mut body);
+        v
+    };
+    c("car", pair(vec![car(A0, A1)]), A0, 111);
+    c("cdr", pair(vec![cdr(A0, A1)]), A0, 222);
+    c(
+        "set-car!",
+        pair(vec![addi(A3, ZERO, 99), setcar(A3, A1), lw(A0, A1, 0)]),
+        A0,
+        99,
+    );
+    c(
+        "set-cdr!",
+        pair(vec![addi(A3, ZERO, 99), setcdr(A3, A1), lw(A0, A1, 4)]),
+        A0,
+        99,
+    );
+    // nil is the word 0 and is a legal pair, so this must not trap.
+    c(
+        "car of nil",
+        vec![addi(A2, ZERO, 7), sw(A2, ZERO, 0), car(A0, ZERO)],
+        A0,
+        7,
+    );
+
     v
 }
 
@@ -489,6 +525,47 @@ pub fn run_all() -> bool {
         run::run(&mut m, 40);
         extra.push(("illegal traps to mtvec", m.x[A1 as usize] == C_ILLEGAL));
         extra.push(("mepc points at the fault", m.mepc == BASE + 8));
+    }
+
+    {
+        // A pair instruction handed something that is not a pair traps with
+        // the offending value in mtval, which is what makes the report at the
+        // other end able to say what the value was.
+        let mut m = Machine::new();
+        let mut code = vec![];
+        li32(&mut code, A0, 0x2000);
+        code.push(csrrw(ZERO, 0x305, A0));
+        code.push(addi(A0, ZERO, 11)); // the fixnum 5, tagged
+        code.push(car(A3, A0));
+        let end = emit(&mut m, BASE, &code);
+        m.poke32(end, jal(ZERO, 0));
+        let h = vec![csrrs(A1, 0x342, ZERO), csrrs(A2, 0x343, ZERO), jal(ZERO, 0)];
+        emit(&mut m, 0x2000, &h);
+        m.pc = BASE;
+        m.mtimecmp = u64::MAX;
+        m.gfx.next_vbl = u64::MAX;
+        run::run(&mut m, 40);
+        extra.push(("car of a fixnum traps", m.x[A1 as usize] == C_TYPE));
+        extra.push(("mtval names the value", m.x[A2 as usize] == 11));
+    }
+
+    {
+        // Reading nil is fine; writing through it would scribble on the
+        // globals at address 0, so the store side rejects it.
+        let mut m = Machine::new();
+        let mut code = vec![];
+        li32(&mut code, A0, 0x2000);
+        code.push(csrrw(ZERO, 0x305, A0));
+        code.push(setcar(A0, ZERO));
+        let end = emit(&mut m, BASE, &code);
+        m.poke32(end, jal(ZERO, 0));
+        let h = vec![csrrs(A1, 0x342, ZERO), jal(ZERO, 0)];
+        emit(&mut m, 0x2000, &h);
+        m.pc = BASE;
+        m.mtimecmp = u64::MAX;
+        m.gfx.next_vbl = u64::MAX;
+        run::run(&mut m, 40);
+        extra.push(("set-car! through nil traps", m.x[A1 as usize] == C_TYPE));
     }
 
     {

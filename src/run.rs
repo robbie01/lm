@@ -146,6 +146,7 @@ pub fn cause_name(c: u32) -> &'static str {
         C_SALIGN => "misaligned store",
         C_SFAULT => "store access fault",
         C_ECALL => "ecall",
+        C_TYPE => "wrong type",
         _ => "trap",
     }
 }

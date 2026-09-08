@@ -120,6 +120,20 @@ pub fn sw(rs2: u32, rs1: u32, o: i32) -> u32 {
     s_type(o, rs2, rs1, 2, 0x23)
 }
 
+// ---- custom-0: pairs, checked ----
+pub fn car(rd: u32, rs1: u32) -> u32 {
+    i_type(0, rs1, 0, rd, 0x0b)
+}
+pub fn cdr(rd: u32, rs1: u32) -> u32 {
+    i_type(0, rs1, 1, rd, 0x0b)
+}
+pub fn setcar(rs2: u32, rs1: u32) -> u32 {
+    s_type(0, rs2, rs1, 2, 0x0b)
+}
+pub fn setcdr(rs2: u32, rs1: u32) -> u32 {
+    s_type(0, rs2, rs1, 3, 0x0b)
+}
+
 pub fn addi(rd: u32, rs1: u32, i: i32) -> u32 {
     i_type(i, rs1, 0, rd, 0x13)
 }

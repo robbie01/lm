@@ -213,6 +213,9 @@
 (define op-jalr  #x67)
 (define op-jal   #x6f)
 (define op-sys   #x73)
+;; custom-0. The processor checks the tag as it forms the address, so a pair
+;; access that is handed something else traps instead of loading rubbish.
+(define op-pair  #x0b)
 
 (define (i-lui a rd imm20)   (i-u a rd imm20 op-lui))
 (define (i-auipc a rd imm20) (i-u a rd imm20 op-auipc))
@@ -257,6 +260,11 @@
 (define (i-sw a rs2 rs1 off) (i-s a rs1 rs2 off 2 op-store))
 
 (define (i-jalr a rd rs1 off) (i-i a rd rs1 off 0 op-jalr))
+
+(define (i-car a rd rs1)      (i-i a rd rs1 0 0 op-pair))
+(define (i-cdr a rd rs1)      (i-i a rd rs1 0 1 op-pair))
+(define (i-set-car a rs2 rs1) (i-s a rs1 rs2 0 2 op-pair))
+(define (i-set-cdr a rs2 rs1) (i-s a rs1 rs2 0 3 op-pair))
 (define (i-ret a) (i-jalr a $zero $ra 0))
 (define (i-jr a rs) (i-jalr a $zero rs 0))
 (define (i-call-reg a rs) (i-jalr a $ra rs 0))
@@ -441,13 +449,17 @@
 
 ;; Turn the assembler's output into a heap object, so the collector can see
 ;; both the machine code and every literal the code refers to.
-(define (asm-code-object a)
+(define (asm-code-object a name)
   ;; The literals list is in reverse, so it fills the vector from the far end.
   (let* ((n (%vector-ref a 6))
          (v (alloc-object t-code (%+ code-lits n)))
          (i (%- (%+ code-lits n) 1)))
     (%st32! (%addr-of v) (%vector-ref a 4))          ; raw entry address
     (%st32! (%+ (%addr-of v) 4) (%vector-ref a 1))   ; raw byte length
+    ;; Who this is. Every frame has its code object in s1 and saves its
+    ;; caller's, so this one word is what turns the frame chain into a
+    ;; backtrace.
+    (%set-slot! v code-name name)
     (dolist (l (%vector-ref a 5))
       (%set-slot! v i l)
       (set! i (%- i 1)))

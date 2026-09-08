@@ -465,6 +465,50 @@ fn op_bad(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     illegal(m, w, pc, fuel)
 }
 
+// ------------------------------------------------------------------- pairs
+/// The custom-0 opcode space: `car`, `cdr`, `set-car!` and `set-cdr!`, with
+/// the type check in the instruction.
+///
+/// The tag scheme was built for this. A pair is a word whose low three bits
+/// are clear, so a fixnum (odd), an immediate (2 mod 8) and an object
+/// (4 mod 8) are all rejected by a mask the processor computes alongside the
+/// address it was going to form anyway. The check is therefore free, and
+/// `(car 5)` becomes a trap that names the value instead of a load from
+/// address 5.
+///
+/// nil is the word 0, which passes: it is a legal pair whose car and cdr are
+/// both nil, and a great deal of list code leans on that. It does not pass on
+/// the store side, where writing through nil would quietly scribble on the
+/// global vector at address 0.
+///
+///     funct3 0   car rd, rs1        rd <- [rs1]
+///     funct3 1   cdr rd, rs1        rd <- [rs1 + 4]
+///     funct3 2   set-car! rs2, rs1  [rs1] <- rs2      (S-type)
+///     funct3 3   set-cdr! rs2, rs1  [rs1 + 4] <- rs2
+#[inline(never)]
+fn op_pair(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
+    let f = f3(w);
+    if f > 3 {
+        return illegal(m, w, pc, fuel);
+    }
+    let v = r(m, rs1(w));
+    let store = f & 2 != 0;
+    if v & 7 != 0 || (store && v == 0) {
+        return m.fault(C_TYPE, v, pc, fuel);
+    }
+    let a = v + ((f & 1) << 2);
+    if !m.in_ram(a, 4) {
+        return m.fault(if store { C_SFAULT } else { C_LFAULT }, a, pc, fuel);
+    }
+    if store {
+        unsafe { m.wr32(a, r(m, rs2(w))) };
+    } else {
+        let d = unsafe { m.rd32(a) };
+        w_(m, rd(w), d);
+    }
+    next!(m, pc.wrapping_add(4), fuel - 1)
+}
+
 // =========================================================== compressed, Q0
 
 #[inline(never)]
@@ -702,7 +746,7 @@ static TABLE: [Handler; 64] = [
     // ---- 32-bit, indexed by opcode[6:2] (tok 32..63) ----
     op_load,   // 00 LOAD
     op_bad,    // 01 LOAD-FP
-    op_bad,    // 02 custom-0
+    op_pair,   // 02 custom-0: car, cdr and their setters, tag-checked
     op_fence,  // 03 MISC-MEM
     op_imm,    // 04 OP-IMM
     op_auipc,  // 05 AUIPC

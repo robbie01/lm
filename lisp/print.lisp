@@ -33,6 +33,30 @@
     (list->string (reverse acc))))
 
 ;; ---------------------------------------------------------------- printing
+;; ---------------------------------------------------------------- names
+;; Every compiled function carries its name in its code object, which is what
+;; lets a printed function and a backtrace line both say who they are. These
+;; emit rather than build a string, so that reporting an error allocates
+;; nothing: a handler that conses is a handler that can fail while explaining
+;; a failure.
+(define (code-object? v)
+  (if (%object? v)
+      (if (%>= (%addr-of v) obj-base)
+          (if (%< (%addr-of v) obj-limit) (%= (%obj-type v) t-code) nil)
+          nil)
+      nil))
+
+(define (emit-name n)
+  ;; A symbol for a named function; (lambda . home) for one that never had a
+  ;; name, so that even an anonymous frame says where it came from.
+  (cond ((%null? n) (emit-str "anonymous"))
+        ((%cons? n) (emit-str "lambda in ") (emit-name (%cdr n)))
+        ((%symbol? n) (emit-str (%symbol-name n)))
+        (else (emit-str "anonymous"))))
+
+(define (emit-code-label c)
+  (if (code-object? c) (emit-name (%slot c code-name)) (emit-str "?")))
+
 (define (write-char-name c)
   (let ((n (%char->int c)))
     (emit-str "#\\")
@@ -69,7 +93,7 @@
        ((%= ty t-vector) (print-vector x quoted depth))
        ((%= ty t-closure)
         (emit-str "#<function ")
-        (emit-str (number->hex (%from-addr (%raw-ld (%addr-of x)))))
+        (emit-code-label (%slot x clo-code))
         (emit-ch 62))
        ((%= ty t-bytes)
         (emit-str "#<bytes ")

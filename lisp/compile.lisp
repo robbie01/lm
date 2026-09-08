@@ -29,10 +29,24 @@
 ;;; Only one instruction in the prologue depends on the frame size, so the
 ;;; frame is sized after the body is emitted and that single word is patched.
 ;;;
+;;; Self-calls
+;;;   A call to the name the function is being compiled under reuses the
+;;;   closure already in this frame and jumps to a label past its own arity
+;;;   check: two instructions instead of five, and no indirect jump. See
+;;;   self-call? for the conditions, and note the trade - redefining a
+;;;   function does not reach the calls already inside it.
+;;;
 ;;; Every word between sp and s0-12 inclusive is a tagged Lisp value: locals,
 ;;; spilled temporaries, pushed arguments, the closure. Only the saved ra and
 ;;; the frame link are raw, and they are at fixed offsets. That uniformity is
 ;;; what lets the collector walk a stack precisely with no stack maps at all.
+;;;
+;;; Pairs
+;;;   car, cdr, set-car! and set-cdr! are single instructions in the custom-0
+;;;   opcode space rather than loads and stores, because the processor can
+;;;   check the tag while it forms the address and so the check costs nothing.
+;;;   Anything that is not a pair traps with the offending value in mtval, and
+;;;   sys.lisp turns that into a sentence naming the value.
 
 (define frame-fixed 20)
 (define (local-off n) (%- (%- 0 frame-fixed) (%* 4 n)))
@@ -48,8 +62,9 @@
 ;; ---------------------------------------------------------------- context
 ;;  0 asm         1 env          2 nlocals    3 maxlocals   4 freevars
 ;;  5 boxed       6 name         7 frame-fix  8 outer-env   9 nparams
+;; 10 self-label  11 self-arity
 (define (cx-new asm name outer-env)
-  (let ((c (make-vector-n 10 nil)))
+  (let ((c (make-vector-n 12 nil)))
     (%vector-set! c 0 asm)
     (%vector-set! c 1 nil)
     (%vector-set! c 2 0)
@@ -60,6 +75,8 @@
     (%vector-set! c 7 0)
     (%vector-set! c 8 outer-env)
     (%vector-set! c 9 0)
+    (%vector-set! c 10 nil)
+    (%vector-set! c 11 nil)
     c))
 
 (define (cx-asm c) (%vector-ref c 0))
@@ -371,6 +388,15 @@
     (i-li a $a7 trap-arity)
     (i-ecall a)
     (asm-label a ok)
+    ;; A function calling itself by name knows the answer to every question
+    ;; the general call sequence asks: which closure (the one it is running),
+    ;; how many arguments (the right number, or this would not compile), and
+    ;; where the code is (here). So it jumps straight in, past the check it
+    ;; would only be proving to itself. Variadic functions are left alone,
+    ;; because the rest-list code downstream reads the count out of t1.
+    (if variadic
+        nil
+        (begin (%vector-set! c 10 ok) (%vector-set! c 11 nreq)))
     (i-mv a $t3 $sp)
     (%vector-set! c 7 (asm-len a))      ; the one word that knows the frame size
     (i-addi a $sp $sp 0)                ; patched by finish-frame
@@ -464,12 +490,14 @@
   (set! *intrinsics* nil)
 
   ;; ---- pairs ----
-  (definline '%car 1 (lambda (c) (i-lw (cx-asm c) $a0 $a0 0)))
-  (definline '%cdr 1 (lambda (c) (i-lw (cx-asm c) $a0 $a0 4)))
+  ;; One instruction each, and the tag is checked on the way past: these are
+  ;; the custom-0 opcodes, not plain loads and stores.
+  (definline '%car 1 (lambda (c) (i-car (cx-asm c) $a0 $a0)))
+  (definline '%cdr 1 (lambda (c) (i-cdr (cx-asm c) $a0 $a0)))
   (definline '%set-car! 2
-    (lambda (c) (i-sw (cx-asm c) $a1 $a0 0) (i-mv (cx-asm c) $a0 $a1)))
+    (lambda (c) (i-set-car (cx-asm c) $a1 $a0) (i-mv (cx-asm c) $a0 $a1)))
   (definline '%set-cdr! 2
-    (lambda (c) (i-sw (cx-asm c) $a1 $a0 4) (i-mv (cx-asm c) $a0 $a1)))
+    (lambda (c) (i-set-cdr (cx-asm c) $a1 $a0) (i-mv (cx-asm c) $a0 $a1)))
   (definline '%cons 2 (lambda (c) (emit-cons c $a0 $a1 $a0)))
 
   ;; ---- fixnum arithmetic ----
@@ -1112,6 +1140,21 @@
     (i-call-reg a $t2)
     (i-addi a $sp $sp (%* 4 n))))
 
+;; A call is a self-call when the operator is this function's own name, that
+;; name still means the global it was defined as, and the argument count is
+;; the one the prologue was built for. The price is that redefining a function
+;; does not reach the calls already inside it - the same bargain the open
+;; coded primitives make, and the same one every Lisp that compiles at all
+;; ends up making somewhere.
+(define (self-call? c op n)
+  (if (%symbol? op)
+      (if (%eq? op (cx-name c))
+          (if (%vector-ref c 10)
+              (if (cx-lookup c op) nil (%= n (%vector-ref c 11)))
+              nil)
+          nil)
+      nil))
+
 (define (compile-call-few c form tail)
   (let* ((a (cx-asm c))
          (op (%car form))
@@ -1127,18 +1170,27 @@
             (i-sw a $a0 $sp 0)
             (set! op-on-stack t)))
       (compile-args c args n)
-      (if op-on-stack
-          (begin (i-lw a $t0 $sp 0) (i-addi a $sp $sp 4))
-          (emit-load c (resolve c op) $t0))
-      (i-li a $t1 n)
-      (if tail
+      (if (self-call? c op n)
+          ;; Two instructions and a direct branch: the closure is the one in
+          ;; this frame, and the target is a label in this very buffer.
           (begin
-            (emit-epilogue c)
-            (i-lw a $t2 $t0 0)
-            (i-jr a $t2))
+            (i-lw a $t0 $s0 clo-slot)
+            (if tail
+                (begin (emit-epilogue c) (i-j a (%vector-ref c 10)))
+                (i-jal a $ra (%vector-ref c 10))))
           (begin
-            (i-lw a $t2 $t0 0)
-            (i-call-reg a $t2))))))
+            (if op-on-stack
+                (begin (i-lw a $t0 $sp 0) (i-addi a $sp $sp 4))
+                (emit-load c (resolve c op) $t0))
+            (i-li a $t1 n)
+            (if tail
+                (begin
+                  (emit-epilogue c)
+                  (i-lw a $t2 $t0 0)
+                  (i-jr a $t2))
+                (begin
+                  (i-lw a $t2 $t0 0)
+                  (i-call-reg a $t2))))))))
 
 ;; ---------------------------------------------------------------- expressions
 (define (compile-expr c form tail)
@@ -1167,7 +1219,10 @@
          ((%eq? h 'set!) (compile-set c form tail))
          ((%eq? h 'define) (compile-inner-define c form tail))
          ((%eq? h 'lambda)
-          (compile-closure c (cadr form) (cddr form) nil)
+          ;; An anonymous function still belongs somewhere, and a backtrace
+          ;; that says "lambda in fill-rect" is worth the one pair this costs.
+          (compile-closure c (cadr form) (cddr form)
+                           (%cons 'lambda (cx-name c)))
           (if tail (emit-return c) nil))
 
          ;; (%funcall f a b) is just a call whose operator happens to be an
@@ -1386,7 +1441,7 @@
     (compile-body c expanded t)
     (finish-frame c)
     (let ((entry (asm-place a)))
-      (%cons entry (asm-code-object a)))))
+      (%cons entry (asm-code-object a (cx-name c))))))
 
 ;; Collect arguments nreq.. into a list. The eight argument registers are
 ;; spilled so the loop can index them uniformly with anything on the stack.

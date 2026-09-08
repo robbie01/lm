@@ -18,6 +18,10 @@ pub const C_LFAULT: u32 = 5;
 pub const C_SALIGN: u32 = 6;
 pub const C_SFAULT: u32 = 7;
 pub const C_ECALL: u32 = 11;
+/// Wrong type handed to an instruction that checks one. RISC-V leaves causes
+/// 24 through 31 to the implementation, which is where a machine that knows
+/// what a pair is should put this. `mtval` carries the offending value.
+pub const C_TYPE: u32 = 24;
 
 pub const IRQ_SOFT: u32 = 3; // machine software interrupt
 pub const IRQ_TIMER: u32 = 7;
