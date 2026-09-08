@@ -183,6 +183,7 @@
   (emit-str "  (screen)               open the display\n")
   (emit-str "  (workbench)            windows, with a shell in each\n")
   (emit-str "  (new-shell)            another shell window\n")
+  (emit-str "  (eyes)                 xeyes; call it more than once\n")
   (emit-str "  (balls 6)              six tasks, one framebuffer\n")
   (emit-str "  (mandelbrot)           fixed point, straight to the bitmap\n")
   (emit-str "  (life 200)             life, with the blitter for the copy\n")

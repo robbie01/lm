@@ -195,6 +195,7 @@
 (define reg-sp 2)
 (define reg-t0 5)
 (define reg-t1 6)
+(define reg-s2 18)
 (define reg-a0 10)
 (define reg-a7 17)
 
@@ -440,6 +441,14 @@
     (task-ready! task)
     (poke (%+ *sysbase* eb-taskcount) (%+ (peek (%+ *sysbase* eb-taskcount)) 1))
     (enable)
+    task))
+
+;; A task that runs as an instance. Nothing else is different: s2 lives in the
+;; context block like every other register, so the scheduler was already
+;; carrying it and this costs a single word at startup.
+(define (spawn inst name pri fn . opts)
+  (let ((task (apply-list add-task (%cons name (%cons pri (%cons fn opts))))))
+    (%raw-st! (ctx-reg (peek (%+ task tc-context)) reg-s2) inst)
     task))
 
 (define (rem-task task)

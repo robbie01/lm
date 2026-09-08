@@ -60,6 +60,7 @@
 (define trap-type 2)
 (define trap-oom 3)
 (define trap-error 4)
+(define trap-instance 6)
 
 ;; ---------------------------------------------------------------- context
 ;;  0 asm         1 env          2 nlocals    3 maxlocals   4 freevars
@@ -258,9 +259,72 @@
 ;; ---------------------------------------------------------------- variables
 ;; A location is (local n), (boxed-local n), (free n), (boxed-free n) or
 ;; (global sym).
+;; ---------------------------------------------------------------- instances
+;; An instance is the state of one running application, and s2 says which one
+;; is running. A package declares at most one shape - a package is the code,
+;; an instance is its state - so a bare name inside that package can be a slot
+;; of the instance rather than a global, and costs one instruction to read
+;; where a global costs two.
+;;
+;;   slot 0   the type, so an instance can say what it is
+;;   slot 1   the layout version, so code compiled against an old shape is
+;;            caught at the boundary rather than reading the wrong field
+;;   slot 2+  the fields, in declaration order
+(define inst-tag 0)
+(define inst-version 1)
+(define inst-fields 2)
+
+(define *instance-layouts* nil)   ; (package . [type version fields])
+(define *instance-version* 0)
+
+(define (instance-layout . opt)
+  (let ((p (assq (if (%cons? opt) (%car opt) (current-package))
+                 *instance-layouts*)))
+    (if p (%cdr p) nil)))
+
+(define (layout-type l) (%vector-ref l 0))
+(define (layout-version l) (%vector-ref l 1))
+(define (layout-fields l) (%vector-ref l 2))
+
+;; A shape is needed twice, the way a macro is: by the compiler running now,
+;; and by the machine's own compiler once the image boots. So the declaration
+;; leaves a call behind in the boot list, and the machine registers it again
+;; from the same numbers.
+(define (register-instance-layout-in! pkg-name type version fields)
+  (let ((pkg (find-package pkg-name))
+        (v (make-vector-n 3 nil)))
+    (%vector-set! v 0 type)
+    (%vector-set! v 1 version)
+    (%vector-set! v 2 fields)
+    (if (%> version *instance-version*) (set! *instance-version* version) nil)
+    (set! *instance-layouts*
+          (%cons (%cons pkg v)
+                 (filter (lambda (e) (not (%eq? (%car e) pkg))) *instance-layouts*)))
+    v))
+
+(define (register-instance-layout! type fields)
+  (set! *instance-version* (%+ *instance-version* 1))
+  (register-instance-layout-in! (package-name (current-package))
+                                type *instance-version* fields))
+
+;; Which slot, if any, this name is in the instance the current package runs as.
+(define (instance-slot sym)
+  (let ((l (instance-layout)))
+    (if l
+        (let ((fs (layout-fields l)) (i inst-fields) (found nil))
+          (while (%cons? fs)
+            (if (%eq? (%car fs) sym)
+                (begin (set! found i) (set! fs nil))
+                (begin (set! i (%+ i 1)) (set! fs (%cdr fs)))))
+          found)
+        nil)))
+
 (define (resolve c sym)
   (let ((p (cx-lookup c sym)))
-    (if p (%cdr p) (list 'global sym))))
+    (if p
+        (%cdr p)
+        (let ((k (instance-slot sym)))
+          (if k (list 'instance k) (list 'global sym))))))
 
 (define (emit-load c loc reg)
   (let ((a (cx-asm c)) (kind (%car loc)))
@@ -276,6 +340,8 @@
       (i-lw a $t6 $s0 clo-slot)
       (i-lw a reg $t6 (%* 4 (%+ clo-free (cadr loc))))
       (i-lw a reg reg 0))
+     ;; One instruction, off the register that says which instance is running.
+     ((%eq? kind 'instance) (i-lw a reg $s2 (%* 4 (cadr loc))))
      (else
       (let ((sym (cadr loc)))
         (note-global-ref sym)
@@ -328,6 +394,7 @@
       (i-lw a $t6 $s0 clo-slot)
       (i-lw a $t6 $t6 (%* 4 (%+ clo-free (cadr loc))))
       (i-sw a reg $t6 0))
+     ((%eq? kind 'instance) (i-sw a reg $s2 (%* 4 (cadr loc))))
      (else
       (let ((sym (cadr loc)))
         (emit-literal c sym $t6)
@@ -907,6 +974,13 @@
   ;; ---- machine ----
   ;; The collector needs to know where the stack currently is, so it can scan
   ;; from there upwards for anything that looks like a pointer.
+  ;; Which instance is running. Dedicated for the life of the machine, like
+  ;; the cons pointers, and swapped by the context switch for nothing, because
+  ;; the trap stub was already saving all thirty two registers.
+  (definline '%instance 0 (lambda (c) (i-mv (cx-asm c) $a0 $s2)))
+  (definline '%set-instance! 1
+    (lambda (c) (i-mv (cx-asm c) $s2 $a0)))
+
   (definline '%stack-pointer 0
     (lambda (c)
       (let ((a (cx-asm c)))
@@ -1238,6 +1312,8 @@
          ((%eq? h 'while) (compile-while c form tail))
          ((%eq? h 'set!) (compile-set c form tail))
          ((%eq? h 'define) (compile-inner-define c form tail))
+         ((%eq? h 'with-instance) (compile-with-instance c form tail))
+
          ((%eq? h 'lambda)
           ;; An anonymous function still belongs somewhere, and a backtrace
           ;; that says "lambda in fill-rect" is worth the one pair this costs.
@@ -1270,6 +1346,56 @@
 (define (emit-return c)
   (emit-epilogue c)
   (i-ret (cx-asm c)))
+
+;; (with-instance expr body...) runs the body as that instance. The old one
+;; goes on the stack rather than into a register, because everything between
+;; sp and the frame link is a tagged value the collector already walks - so an
+;; instance held across a collection is held by the same machinery that holds
+;; a local.
+;;
+;; The shape is checked here rather than at every slot access: this is the
+;; boundary, and ten instructions once beats one instruction never.
+(define (compile-with-instance c form tail)
+  ;; A package with no shape of its own can still enter somebody else's -
+  ;; that is how a prompt gets inside a running application - it just has no
+  ;; bare names for the slots, because they are not its names.
+  (let ((a (cx-asm c))
+        (l (instance-layout)))
+    (compile-expr c (cadr form) nil)
+    (emit-instance-check c l)
+    (i-addi a $sp $sp -4)
+    (i-sw a $s2 $sp 0)
+    (i-mv a $s2 $a0)
+    (compile-body c (cddr form) nil)
+    (i-lw a $s2 $sp 0)
+    (i-addi a $sp $sp 4)
+    (if tail (emit-return c) nil)))
+
+;; The type and the version, both, and a trap if either is wrong. The indexed
+;; loads do the rest: they refuse anything that is not a record and anything
+;; whose index is past the end, so a nil or a fixnum never gets this far.
+(define (emit-instance-check c l)
+  (let ((a (cx-asm c)))
+    ;; The indexed load does the rest of the work: it refuses anything that is
+    ;; not a record, so nil and fixnums never reach the comparisons.
+    (i-li a $t4 (%+ (%* 2 inst-tag) 1))
+    (i-ldx a $t2 $a0 $t4 t-record)
+    (if l
+        (let ((ok (asm-gensym-label "inst"))
+              (ok2 (asm-gensym-label "instv")))
+          (emit-literal c (layout-type l) $t3)
+          (i-beq a $t2 $t3 ok)
+          (i-li a $a7 trap-instance)
+          (i-ecall a)
+          (asm-label a ok)
+          (i-li a $t4 (%+ (%* 2 inst-version) 1))
+          (i-ldx a $t2 $a0 $t4 t-record)
+          (i-li a $t3 (%+ (%* 2 (layout-version l)) 1))
+          (i-beq a $t2 $t3 ok2)
+          (i-li a $a7 trap-instance)
+          (i-ecall a)
+          (asm-label a ok2))
+        nil)))
 
 (define (compile-if c form tail)
   (let* ((a (cx-asm c))
@@ -1543,12 +1669,91 @@
             (%set-symbol-function! name clo)
             (%set-symbol-flags! name (%logior (%symbol-flags name) sym-macro))
             name))
+         ;; An instance shape has to be known to the compiler before the rest
+         ;; of the file is compiled, because it decides what a bare name means
+         ;; from here on. So it is registered now and its constructor and
+         ;; accessors are compiled as ordinary definitions.
+         ((%eq? h 'definstance) (compile-definstance form))
          ((%eq? h 'begin)
           (let ((last nil))
             (dolist (f (%cdr form)) (set! last (compile-top f)))
             last))
          (else (top-level-form form))))
       (top-level-form form)))
+
+(define (field-name spec) (if (%cons? spec) (%car spec) spec))
+(define (field-init spec) (if (%cons? spec) (cadr spec) nil))
+
+(define (derived-name base suffix)
+  (intern-in (current-package)
+             (string-append (%symbol-name base) suffix)))
+
+(define (derived-name2 prefix base suffix)
+  (intern-in (current-package)
+             (string-append prefix (string-append (%symbol-name base) suffix))))
+
+;; (definstance type (field init) field ...) declares the shape of an instance
+;; of this package's application, and gives out:
+;;
+;;   (make-<type>)          a fresh one, fields set to their initial values
+;;   (<field>-of i)         reaching in from outside, where the names are not
+;;   (set-<field>-of! i v)  slots because the code is somewhere else
+;;   (<type>? x)            is this one of ours
+;;   (instances-of '<type>) the ones that are open
+;;
+;; Inside the package the fields are simply names, which is the whole point.
+(define (compile-definstance form)
+  (let* ((type (cadr form))
+         (specs (cddr form))
+         (fields (map field-name specs))
+         (reg (derived-name2 "*" type "-instances*"))
+         (l (register-instance-layout! type fields)))
+    ;; A field may not also be a global here: after packages, a name that
+    ;; silently means two things is exactly what we stopped putting up with.
+    (dolist (f fields)
+      (if (%eq? (%symbol-value f) *unbound*)
+          nil
+          (error "definstance: this name is already a global" f)))
+    ;; The same registration, left in the boot list for the machine.
+    (top-level-form (list 'register-instance-layout-in!
+                          (package-name (current-package))
+                          (list 'quote type)
+                          (layout-version l)
+                          (list 'quote fields)))
+    (compile-top (list 'define reg nil))
+    (compile-top
+     (list 'define (list (derived-name type "?") 'x)
+           (list 'if (list '%record? 'x)
+                 (list '%eq? (list '%slot 'x inst-tag) (list 'quote type))
+                 nil)))
+    ;; The constructor fills the tag and the version first, so that the shape
+    ;; check at every with-instance has something to look at.
+    (let ((body (list (list '%set-slot! 'i inst-tag (list 'quote type))
+                      (list '%set-slot! 'i inst-version (layout-version l))))
+          (k inst-fields))
+      (dolist (spec specs)
+        (set! body (append body (list (list '%set-slot! 'i k (field-init spec)))))
+        (set! k (%+ k 1)))
+      (compile-top
+       (list 'define (list (derived-name2 "make-" type ""))
+             (append (list 'let (list (list 'i (list 'make-record
+                                                     (%+ inst-fields (length fields))
+                                                     (list 'quote type)))))
+                     (append body
+                             (list (list 'set! reg (list '%cons 'i reg)) 'i))))))
+    ;; Closing one takes it off the list, which is the only reason the list
+    ;; exists: an instance is opened and closed, the way a library is.
+    (compile-top
+     (list 'define (list (derived-name2 "close-" type "") 'i)
+           (list 'set! reg (list 'remove-eq 'i reg))))
+    (let ((k inst-fields))
+      (dolist (f fields)
+        (compile-top (list 'define (list (derived-name f "-of") 'i)
+                           (list '%slot 'i k)))
+        (compile-top (list 'define (list (derived-name2 "set-" f "-of!") 'i 'v)
+                           (list '%set-slot! 'i k 'v)))
+        (set! k (%+ k 1))))
+    type))
 
 (define (compile-file-forms forms)
   (dolist (f forms) (compile-top f))

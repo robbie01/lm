@@ -234,6 +234,47 @@
   (poke blt-val c)
   (poke blt-op op-line))
 
+;; Integer square root, by Newton. Wanted by anything that has to turn a
+;; distance into a length, which on a machine with no floats is more things
+;; than you would think.
+(define (isqrt n)
+  (if (%< n 2)
+      (if (%< n 0) 0 n)
+      (let ((x n) (y (%lsh (%+ n 1) -1)))
+        (while (%< y x)
+          (set! x y)
+          (set! y (%lsh (%+ x (%/ n x)) -1)))
+        x)))
+
+;; A filled circle, one scanline at a time. fill-rect goes through the
+;; blitter, so a circle costs two device pokes a row rather than a poke a
+;; pixel, and the clipping is the blitter's problem.
+(define (fill-circle cx cy r c)
+  (let ((dy (%- 0 r)))
+    (while (%<= dy r)
+      (let ((w (isqrt (%- (%* r r) (%* dy dy)))))
+        (fill-rect (%- cx w) (%+ cy dy) (%+ (%* 2 w) 1) 1 c))
+      (set! dy (%+ dy 1)))
+    nil))
+
+(define (draw-circle cx cy r c)
+  ;; The outline, by the same measure: the leftmost and rightmost pixel of
+  ;; each row, plus the top and bottom caps where the rows run out.
+  (let ((dy (%- 0 r)) (prev -1))
+    (while (%<= dy r)
+      (let ((w (isqrt (%- (%* r r) (%* dy dy)))))
+        (if (%< prev 0)
+            (fill-rect (%- cx w) (%+ cy dy) (%+ (%* 2 w) 1) 1 c)
+            (if (%> w prev)
+                (begin
+                  (fill-rect (%- cx w) (%+ cy dy) (%- w (%- prev 1)) 1 c)
+                  (fill-rect (%+ (%+ cx prev) 1) (%+ cy dy) (%- w prev) 1 c))
+                (begin (plot (%- cx w) (%+ cy dy) c)
+                       (plot (%+ cx w) (%+ cy dy) c))))
+        (set! prev w))
+      (set! dy (%+ dy 1)))
+    nil))
+
 (define (draw-box x y w h c)
   (draw-line x y (%+ x w) y c)
   (draw-line x (%+ y h) (%+ x w) (%+ y h) c)

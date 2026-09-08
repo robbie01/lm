@@ -25,7 +25,8 @@
 (defpackage exec use mem lm gc hw asm sys)                             ; the kernel: tasks, signals, ports, libraries
 (defpackage snap use mem lm gc hw sys exec)                            ; saving the machine
 (defpackage wb use lm hw sys exec)                                     ; the workbench: windows and shells
-(defpackage user use mem lm gc hw asm compiler sys exec snap wb)       ; where a prompt starts, and the demos
+(defpackage eyes use mem lm gc hw exec sys wb)                          ; xeyes, one instance per pair
+(defpackage user use mem lm gc hw asm compiler sys exec snap wb eyes)       ; where a prompt starts, and the demos
 (defpackage boot use mem lm gc hw asm compiler sys exec)               ; the reset and trap stubs, built by the forge
 (defpackage hostio use mem lm gc hw asm compiler sys exec snap wb user) ; the forge standing in for the machine
 
@@ -56,7 +57,7 @@
   %bytes-length %bytes-ref %bytes-set! %bytes? %car %cdr %char->int %char?
   %closure? %cons %cons? %ctest-entry %cycles %disable %display %dv %ecall
   %enable %enable-timer %eq? %error %eval %fixnum? %float? %flush
-  %frame-pointer %from-addr %funcall %gensym %global %halt %int->char
+  %frame-pointer %from-addr %funcall %gensym %global %halt %instance %set-instance! %int->char
   %intern %ld16 %ld32 %ld8 %logand %logior %lognot %logxor %lsh %macro?
   %macroexpand-1 %make-bytes %make-string %make-vector %mod %newline %null?
   %obj-len %obj-type %object? %raw-ld %raw-st! %read-file %read-from-string
@@ -75,7 +76,8 @@
   char-numeric? char-upcase char-whitespace? char<? char=? char>? char?
   code-object? comment compose cond cons console-stream constantly
   current-package current-stream cycles decf defconstant define
-  define-values defmacro defpackage defparameter defun defvar delq
+  define-values definstance defmacro defpackage defparameter defun defvar delq
+  with-instance
   digit->int display display-to-string do dolist dotimes else emit-ch
   emit-code-label emit-name emit-str eq-hash eq? equal? eqv? error even?
   every export export-symbol! expt filter find-package find-symbol-in
@@ -93,7 +95,7 @@
   package-use package? pair? pop position positive? princ print print-list
   print-obj print-record print-symbol print-vector push put qualified-hash
   quasiquote quote quotient reduce rem remainder remove-if rest revappend
-  reverse second set! set-car! set-cdr! set-current-package!
+  remove-eq reverse second set! set-car! set-cdr! set-current-package!
   set-package-use! set-symbol-function! set-symbol-value! setf sort space
   stream-get stream-put stream-wait string string->list string->number
   string->symbol string-append string-downcase string-hash string-index
@@ -126,7 +128,8 @@
 (export '(
   *screen* *screen-h* *screen-w* alloc-pool blit-rect blt-dmod blt-dst
   blt-h blt-op blt-smod blt-src blt-w clamp clear-screen disk-write
-  draw-line ev-buttondown ev-buttonup ev-keydown ev-mousemove event-ascii
+  draw-circle draw-line ev-buttondown ev-buttonup ev-keydown ev-mousemove
+  event-ascii fill-circle isqrt
   event-kind fill-rect free-pool gfx-ctrl gfx-on gfx-vbirq input-event
   input-pending int-ack int-disable int-enable int-pending int-raise millis
   mouse-x mouse-y op-copy open-screen peek peek8 plot poke poke8
@@ -137,7 +140,7 @@
 (in-package asm)
 ;; 100 public, out of 171 definitions.
 (export '(
-  $a0 $a1 $a2 $a3 $a4 $a5 $a6 $a7 $gp $ra $s0 $s1 $sp $t0 $t1 $t2 $t3 $t4
+  $a0 $a1 $a2 $a3 $a4 $a5 $a6 $a7 $gp $ra $s0 $s1 $s2 $sp $t0 $t1 $t2 $t3 $t4
   $t5 $t6 $tp $zero asm-code-object asm-gensym-label asm-label asm-len
   asm-literal asm-new asm-origin asm-place asm-place-at csr-cycle
   csr-mcause csr-mepc csr-mie csr-mscratch csr-mstatus csr-mtval csr-mtvec
@@ -153,7 +156,8 @@
 ;; 10 public, out of 79 definitions.
 (export '(
   *boot-thunks* add-boot-thunk compile-file-forms compile-function
-  compile-top setup-intrinsics trap-arity trap-error trap-oom trap-type
+  compile-top register-instance-layout-in! setup-intrinsics trap-arity
+  trap-error trap-oom trap-type
 ))
 
 (in-package sys)
@@ -170,7 +174,7 @@
 ;; 18 public, out of 179 definitions.
 (export '(
   add-task cause ctx-bytes disable enable exec-init exec-start forbid
-  handle-interrupt permit rem-task reschedule signal switch-tasks sysbase
+  handle-interrupt permit rem-task reschedule signal spawn switch-tasks sysbase
   task-count tasks wait
 ))
 
@@ -183,7 +187,10 @@
 (in-package wb)
 ;; 13 public, out of 80 definitions.
 (export '(
-  *windows* front-window new-shell wb-button-down wb-drag wb-repaint
+  *windows* front-window make-window new-shell title-height wb-back
+  wb-button-down wb-drag wb-face wb-repaint wb-shadow wb-text win-data
+  win-inner-h win-inner-w win-inner-x win-inner-y win-refresh win-set!
+  win-task window-close window-open
   win-get win-h win-w win-x win-y window-push-key workbench
 ))
 
@@ -197,6 +204,13 @@
 ;; 2 public, out of 23 definitions.
 (export '(
   *compile-trace* compile-file
+))
+
+(in-package eyes)
+;; 12 public, out of the shape and the handful of things that work it.
+(export '(
+  *eyes-instances* close-eyes eyes eyes? look-at look-x-of look-y-of
+  make-eyes rad-of set-look-x-of! set-look-y-of! set-rad-of! window-of
 ))
 
 ;; A prompt starts here.

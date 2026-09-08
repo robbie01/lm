@@ -187,6 +187,22 @@ fn cases() -> Vec<Case> {
         Case("(< (symbol-index 'car) (symbol-index 'workbench))", "t"),
         Case("(eq? (symbol-package 'car) (find-package \"lm\"))", "t"),
 
+        // ---- instances: one application, several of it ----
+        // Two instances of the same shape, with the initial values the
+        // declaration gave them, and no way for one to see the other's.
+        Case(
+            "(let ((a (eyes:make-eyes)) (b (eyes:make-eyes)))              (eyes:set-rad-of! a 5) (list (eyes:rad-of a) (eyes:rad-of b)))",
+            "(5 20)",
+        ),
+        Case("(eyes:eyes? (eyes:make-eyes))", "t"),
+        Case("(eyes:eyes? (vector 1 2))", "nil"),
+        // Entering one from a package that has no shape of its own is
+        // allowed - that is how a prompt gets inside a running application -
+        // but it still has to be an instance.
+        Case("(let ((a (eyes:make-eyes))) (with-instance a 7))", "7"),
+        Case("(with-instance 5 1)", "TRAP: wrong type: 0xb"),
+        Case("(with-instance nil 1)", "TRAP: wrong type: 0x0"),
+
         // ---- functions know their own names ----
         // The name lives in the code object, which is also what every frame
         // holds in s1, so this is the same word a backtrace reads.

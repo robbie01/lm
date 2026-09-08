@@ -55,6 +55,7 @@ tests.
 | `lisp/exec.lisp` | Amiga Exec-style kernel |
 | `lisp/packages.lisp` | every module, and the names it makes public |
 | `lisp/hw.lisp` | the custom chips |
+| `lisp/eyes.lisp` | xeyes, and the demonstration that instances work |
 | `lisp/sys.lisp` | reader, printer, REPL, trap handling |
 
 | the bench | |
@@ -242,6 +243,90 @@ encoders. It resolves the same names on both sides and compares the **address**
 of the symbol each settled on, so a hash that disagreed - which would silently
 intern a second symbol of the same name - shows up as a different number rather
 than as the same text.
+
+## Instances
+
+A package is the code; an **instance** is its state. `s2` is dedicated for the
+life of the machine to "the instance I am currently running as", and inside a
+package that has declared a shape, a bare name that matches a field is a slot
+of that instance — `lw a0, off(s2)`, **one instruction, where a global costs
+two**.
+
+```lisp
+(in-package eyes)
+
+(definstance eyes
+  (window nil) (rad 20) (pr 7)
+  (look-x -1) (look-y -1))
+
+(define (draw-eye cx cy)          ; rad is a slot, not a global
+  (fill-circle cx cy rad wb-text)
+  (draw-circle cx cy rad wb-back))
+```
+
+Nothing in `lisp/eyes.lisp` knows how many pairs of eyes there are, and nothing
+was written differently to allow more than one. `(eyes)` twice is two windows,
+two tasks, two sets of pupils, one copy of the machine code.
+
+It is nearly free here for three reasons. The **scheduler already swaps it** —
+the trap stub was saving all thirty-two registers anyway, so an instance per
+task costs nothing per switch, where the per-task streams cost a save and
+restore loop. `gp` and `tp` set the **precedent** for a dedicated register.
+And the compiler already had a resolve pass with local, free and global cases,
+so this is one more case in it.
+
+This is the Amiga's library base in `a6`, except the compiler knows about it,
+so instance variables look like globals instead of like `(app-canvas self)`.
+Traditional Lisp keeps its ergonomics, Smalltalk gets its instancing, and
+`self` never appears in a signature.
+
+`definstance` also gives out what the outside needs, because from another
+package these are not names, they are somebody else's fields:
+
+```
+(make-eyes)            a fresh one
+(eyes? x)              is this one of ours
+(rad-of i)             reaching in
+(set-rad-of! i v)
+(close-eyes i)         off the list; an instance is opened and closed
+*eyes-instances*       the ones that are open
+```
+
+`(with-instance expr body...)` runs a body as some instance — that is how a
+prompt gets inside a running application, and how a callback from somebody
+else's code gets its bearings again. The old instance goes on the **stack**,
+not into a register, because everything between `sp` and the frame link is
+already a tagged value the collector walks.
+
+The shape is checked there rather than at every access: **the boundary is the
+place, and ten instructions once beats one instruction never.** An instance
+carries its type and its layout version, so code compiled against an old shape
+is caught rather than reading the wrong field:
+
+```
+> (definstance thing (a 1) (b 2))
+> (define x (make-thing))
+> (with-instance x (list a b))
+(1 2)
+> (definstance thing (a 1) (b 2) (c 3))
+> (with-instance x (list a b))
+not an instance of the shape this code was compiled for, at 105b22c
+```
+
+A field may not also be a global in the same package — after packages, a name
+that silently means two things is not something to put up with:
+
+```
+> (definstance thing (car 0))
+error: definstance: this name is already a global car
+```
+
+The instance a task is running as is a **root**: it lives in a register, so
+there is no slot to rewrite, but it still has to be marked or the application
+would be collected out from under itself.
+
+Measured: `(fib 24)` is 5,551,834 cycles with all of this in, which is what it
+was before. It costs the running machine nothing.
 
 ## Symbols have identities
 
@@ -500,6 +585,7 @@ to hardware from Lisp is peek and poke.
 (tasks)               what every task is doing
 (workbench)           a desktop, with a shell in a window
 (new-shell)           another shell window
+(eyes)                xeyes; call it more than once
 (mandelbrot)          fixed point, straight to the bitmap
 (life 200)            Conway, with the blitter for the copy
 (balls 6)             six preemptive tasks sharing one framebuffer
@@ -512,7 +598,7 @@ to hardware from Lisp is peek and poke.
 lmdev all             every suite
 lmdev cpu             96 processor conformance cases
 lmdev asm             the Lisp assembler against an independent Rust encoder
-lmdev compiler        139 end-to-end cases: source in, machine code out, compare
+lmdev compiler        146 end-to-end cases: source in, machine code out, compare
 lmdev bench           measure the interpreter
 lmdev readers         the two readers, resolving names to the same symbol
 lmdev inspect [IMG]   look inside an image without running it

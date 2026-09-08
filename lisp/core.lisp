@@ -305,6 +305,11 @@
       (set! xs (%cdr xs)))
     (reverse acc)))
 
+(define (remove-eq x l)
+  (let ((acc nil))
+    (dolist (e l) (if (%eq? e x) nil (set! acc (%cons e acc))))
+    (reverse acc)))
+
 (define (filter pred xs)
   (let ((acc nil))
     (while (%cons? xs)

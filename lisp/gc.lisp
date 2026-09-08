@@ -329,6 +329,11 @@
   (gc-slot lg-refill)
   (gc-slot lg-startup)
   (gc-slot lg-scratch0)
+  ;; The instance this task is running as lives in a register, so there is no
+  ;; slot to rewrite - but it still has to be marked, or the application would
+  ;; be collected out from under itself. Instances are records, and records do
+  ;; not move, so marking is the whole of the job.
+  (if *gc-updating* nil (gc-push (%instance)))
   ;; This task's own stack, walked precisely from where it stands.
   (gc-scan-frames (%stack-pointer) (%frame-pointer))
   ;; Every other task, and every Exec structure holding a Lisp value.

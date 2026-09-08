@@ -89,11 +89,6 @@
 
 (define (front-window) (if (%cons? *windows*) (%car *windows*) nil))
 
-(define (remove-eq x l)
-  (let ((acc nil))
-    (dolist (e l) (if (%eq? e x) nil (set! acc (%cons e acc))))
-    (reverse acc)))
-
 (define (draw-frame x y w h)
   ;; Two lines and two colours, which is all a raised edge ever was.
   (draw-line x y (%+ x (%- w 1)) y wb-light)

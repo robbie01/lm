@@ -35,6 +35,7 @@
 (define trap-oom 3)
 (define trap-error 4)
 (define trap-reschedule 5)
+(define trap-instance 6)
 
 (define cause-wrong-type 24)
 (define cause-range 25)
@@ -203,6 +204,10 @@
             (emit-str "\n"))
            ((%= code trap-type)
             (emit-str "\ntype error at ") (emit-str (number->hex epc)) (emit-str "\n"))
+           ((%= code trap-instance)
+            (emit-str "\nnot an instance of the shape this code was compiled for, at ")
+            (emit-str (number->hex epc))
+            (emit-str "\n"))
            ((%= code trap-oom)
             (emit-str "\nout of memory at ") (emit-str (number->hex epc)) (emit-str "\n"))
            (else (emit-str "\nunknown ecall\n")))
