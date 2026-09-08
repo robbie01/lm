@@ -187,6 +187,26 @@ fn cases() -> Vec<Case> {
         Case("(< (symbol-index 'car) (symbol-index 'workbench))", "t"),
         Case("(eq? (symbol-package 'car) (find-package \"lm\"))", "t"),
 
+        // ---- regions: what a window is allowed to draw on ----
+        Case("(hw:rect-intersect (hw:rect 0 0 10 10) (hw:rect 5 5 10 10))", "(5 5 5 5)"),
+        Case("(hw:rect-intersect (hw:rect 0 0 10 10) (hw:rect 20 0 10 10))", "nil"),
+        // A hole in the middle leaves four pieces; a hole that covers leaves
+        // none; a hole that misses leaves the whole thing.
+        Case("(length (hw:rect-subtract (hw:rect 0 0 100 100) (hw:rect 40 40 20 20)))", "4"),
+        Case("(hw:rect-subtract (hw:rect 0 0 10 10) (hw:rect 0 0 10 10))", "nil"),
+        Case("(hw:rect-subtract (hw:rect 0 0 10 10) (hw:rect 50 50 1 1))", "((0 0 10 10))"),
+        // The area has to add up: subtracting a rectangle removes exactly its
+        // own area and no more, which is the property the whole thing rests on.
+        Case(
+            "(hw:region-area (hw:region-subtract (list (hw:rect 0 0 640 400))              (list (hw:rect 10 10 100 100))))",
+            "246000",
+        ),
+        Case(
+            "(hw:region-area (hw:region-subtract (list (hw:rect 0 0 640 400))              (list (hw:rect 10 10 100 100) (hw:rect 50 50 100 100))))",
+            // Two holes that overlap: 10000 + 10000 - 3600 taken out of 256000.
+            "239600",
+        ),
+
         // ---- instances: one application, several of it ----
         // Two instances of the same shape, with the initial values the
         // declaration gave them, and no way for one to see the other's.

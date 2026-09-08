@@ -247,13 +247,14 @@
 ;; the scheduler, saving them into the task leaving the processor and loading
 ;; the arriving one's. That is what a context switch is for, and it is why two
 ;; REPLs can read from two different windows without either knowing.
-(define env-slots 6)
+(define env-slots 7)
 (define env-out 0)
 (define env-in 1)
 (define env-wait 2)
 (define env-peeked 3)
 (define env-restart 4)
 (define env-package 5)
+(define env-rp 6)
 
 (define (task-env task) (%raw-ld (%+ task tc-userdata)))
 (define (set-task-env! task e) (%raw-st! (%+ task tc-userdata) e))
@@ -265,6 +266,7 @@
     (%vector-set! e env-in *in*)
     (%vector-set! e env-wait *wait*)
     (%vector-set! e env-package (current-package))
+    (%vector-set! e env-rp *rp*)
     e))
 
 (define (save-task-env task)
@@ -276,7 +278,8 @@
           (%vector-set! e env-wait *wait*)
           (%vector-set! e env-peeked *peeked*)
           (%vector-set! e env-restart *repl-restart*)
-          (%vector-set! e env-package (current-package)))
+          (%vector-set! e env-package (current-package))
+          (%vector-set! e env-rp *rp*))
         nil)))
 
 (define (load-task-env task)
@@ -288,7 +291,8 @@
           (set! *wait* (%vector-ref e env-wait))
           (set! *peeked* (%vector-ref e env-peeked))
           (set! *repl-restart* (%vector-ref e env-restart))
-          (set-current-package! (%vector-ref e env-package)))
+          (set-current-package! (%vector-ref e env-package))
+          (set! *rp* (%vector-ref e env-rp)))
         nil)))
 
 ;; Dead tasks waiting to be reclaimed. A task cannot free the stack it is
@@ -302,9 +306,9 @@
     (set! *reaped* nil)
     (while (%cons? p)
       (let ((task (%car p)))
-        (free-pool (peek (%+ task tc-splower)))
-        (free-pool (peek (%+ task tc-context)))
-        (free-pool task))
+        (free-if-ours (peek (%+ task tc-splower)))
+        (free-if-ours (peek (%+ task tc-context)))
+        (free-if-ours task))
       (set! p (%cdr p)))))
 
 (define (task-ready! task)
@@ -446,6 +450,14 @@
 ;; A task that runs as an instance. Nothing else is different: s2 lives in the
 ;; context block like every other register, so the scheduler was already
 ;; carrying it and this costs a single word at startup.
+;; What the forge handed out before the machine ran - the boot task's stack,
+;; its context - has no header and was never meant to come back. Ending the
+;; first task should not try to give it away.
+(define (free-if-ours p)
+  (if (%> p 0)
+      (if (%= (%ld32 (%+ p -4)) pool-tag) (free-pool p) nil)
+      nil))
+
 (define (spawn inst name pri fn . opts)
   (let ((task (apply-list add-task (%cons name (%cons pri (%cons fn opts))))))
     (%raw-st! (ctx-reg (peek (%+ task tc-context)) reg-s2) inst)
@@ -466,9 +478,9 @@
         nil)
       (begin
         (remove-node task)
-        (free-pool (peek (%+ task tc-splower)))
-        (free-pool (peek (%+ task tc-context)))
-        (free-pool task)
+        (free-if-ours (peek (%+ task tc-splower)))
+        (free-if-ours (peek (%+ task tc-context)))
+        (free-if-ours task)
         nil)))
 
 (define (find-task name)

@@ -63,7 +63,7 @@
 (define win-keys 6)       ; characters waiting, oldest first
 (define win-task 7)
 (define win-data 8)       ; whatever the window is for
-(define win-spare 9)
+(define win-rp 9)        ; where this window is allowed to draw
 
 (define *windows* nil)    ; front to back
 (define *wb-running* nil)
@@ -80,7 +80,32 @@
     (win-set! v win-w w)
     (win-set! v win-h h)
     (win-set! v win-title title)
+    ;; Empty until the layout is worked out; a window that has not been
+    ;; placed yet owns nothing and may draw nowhere.
+    (win-set! v win-rp (make-rastport 0 0 nil))
     v))
+
+(define (window-rastport w) (win-get w win-rp))
+
+;; The desktop is the bottom layer, and gets whatever no window is standing on.
+(define *desktop-rp* nil)
+
+;; Front to back: each window may draw on its own rectangle, less every
+;; rectangle in front of it. That is the whole of the occlusion model, and it
+;; is what stops a task at the back painting over a window at the front
+;; between one repaint and the next.
+(define (compute-regions)
+  (let ((claimed nil))
+    (dolist (w *windows*)
+      (let ((r (rect (win-get w win-x) (win-get w win-y)
+                     (win-get w win-w) (win-get w win-h))))
+        (set-rp-region! (win-get w win-rp) (region-subtract (list r) claimed))
+        (set! claimed (%cons r claimed))))
+    (if (%null? *desktop-rp*) (set! *desktop-rp* (make-rastport 0 0 nil)) nil)
+    (set-rp-region! *desktop-rp*
+                    (region-subtract (list (rect 0 0 *screen-w* *screen-h*))
+                                     claimed))
+    nil))
 
 (define (win-inner-x w) (%+ (win-get w win-x) 2))
 (define (win-inner-y w) (%+ (win-get w win-y) (%+ title-height 1)))
@@ -95,6 +120,16 @@
   (draw-line x y x (%+ y (%- h 1)) wb-light)
   (draw-line (%+ x (%- w 1)) y (%+ x (%- w 1)) (%+ y (%- h 1)) wb-shadow)
   (draw-line x (%+ y (%- h 1)) (%+ x (%- w 1)) (%+ y (%- h 1)) wb-shadow))
+
+;; Draw something through a region of its own, without disturbing the rastport
+;; the window's own task is using: a repaint borrows the pixels, it does not
+;; take the window over.
+(define (draw-through rgn thunk)
+  (let ((saved *rp*))
+    (use-rastport (make-rastport 0 0 rgn))
+    (%funcall thunk)
+    (use-rastport saved)
+    nil))
 
 (define (window-draw win)
   (let* ((x (win-get win win-x))
@@ -118,26 +153,81 @@
         nil)
     nil))
 
-(define (wb-repaint)
+(define (draw-desktop)
   (fill-rect 0 0 *screen-w* *screen-h* wb-desktop)
   ;; A menu bar with nothing in the menus yet, which is honest enough.
   (fill-rect 0 0 *screen-w* 13 wb-face)
   (draw-text 4 3 "Workbench" wb-back -1)
   (draw-line 0 12 (%- *screen-w* 1) 12 wb-shadow)
-  ;; Back to front, so the front window is drawn last and wins.
-  (dolist (w (reverse *windows*)) (window-draw w))
   nil)
+
+;; Everything, from scratch. Order no longer matters: the regions do not
+;; overlap, so nobody can paint over anybody.
+(define (wb-repaint)
+  (compute-regions)
+  (draw-through (rp-region *desktop-rp*) (lambda () (draw-desktop)))
+  (dolist (w *windows*)
+    (draw-through (rp-region (win-get w win-rp)) (lambda () (window-draw w))))
+  nil)
+
+;; What actually happens when a window opens, closes, moves or comes forward:
+;; work out the new layout, and repaint only what was uncovered by it.
+;; Which window was in front last time the layout was worked out. A window
+;; that loses the front does not get uncovered by anything, so nothing would
+;; repaint it - and its title bar would go on claiming to be active.
+(define *front-was* nil)
+
+(define (title-rect win)
+  (rect (win-get win win-x) (win-get win win-y)
+        (win-get win win-w) (%+ title-height 2)))
+
+(define (repaint-title win)
+  ;; A window that has just been closed is not in the list any more and has no
+  ;; region worth speaking of; drawing its title bar again would put it back
+  ;; on the screen after the desktop had painted over it.
+  (if (if (%null? win) t (%null? (memq win *windows*)))
+      nil
+      (let ((rgn (region-intersect-rect (rp-region (win-get win win-rp))
+                                        (title-rect win))))
+        (if (%cons? rgn)
+            (draw-through rgn (lambda () (window-draw win)))
+            nil))))
+
+(define (wb-update)
+  (let ((olds nil) (old-desk (if *desktop-rp* (rp-region *desktop-rp*) nil)))
+    (dolist (w *windows*)
+      (set! olds (%cons (%cons w (rp-region (win-get w win-rp))) olds)))
+    (compute-regions)
+    (let ((exposed (region-subtract (rp-region *desktop-rp*) old-desk)))
+      (if (%cons? exposed)
+          (draw-through exposed (lambda () (draw-desktop)))
+          nil))
+    (dolist (w *windows*)
+      (let* ((p (assq w olds))
+             (was (if p (%cdr p) nil))
+             (new (region-subtract (rp-region (win-get w win-rp)) was)))
+        (if (%cons? new)
+            (draw-through new (lambda () (window-draw w)))
+            nil)))
+    ;; And whoever changed places at the front.
+    (if (%eq? *front-was* (front-window))
+        nil
+        (begin
+          (repaint-title *front-was*)
+          (repaint-title (front-window))
+          (set! *front-was* (front-window))))
+    nil))
 
 (define (window-open win)
   (set! *windows* (%cons win *windows*))
-  (wb-repaint)
+  (wb-update)
   win)
 
 (define (window-close win)
   (set! *windows* (remove-eq win *windows*))
   (let ((task (win-get win win-task)))
     (if task (rem-task task) nil))
-  (wb-repaint)
+  (wb-update)
   nil)
 
 (define (window-to-front win)
@@ -145,7 +235,7 @@
       nil
       (begin
         (set! *windows* (%cons win (remove-eq win *windows*)))
-        (wb-repaint))))
+        (wb-update))))
 
 (define (window-at x y)
   (let ((found nil))
@@ -364,7 +454,10 @@
             (begin
               (win-set! *drag-win* win-x nx)
               (win-set! *drag-win* win-y ny)
-              (wb-repaint))))
+              ;; A moved window repaints itself and uncovers whatever it left.
+              (wb-update)
+              (draw-through (rp-region (win-get *drag-win* win-rp))
+                            (lambda () (window-draw *drag-win*))))))
       nil))
 
 (define (wb-event e)

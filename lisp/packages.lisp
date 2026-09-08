@@ -129,11 +129,17 @@
   *screen* *screen-h* *screen-w* alloc-pool blit-rect blt-dmod blt-dst
   blt-h blt-op blt-smod blt-src blt-w clamp clear-screen disk-write
   draw-circle draw-line ev-buttondown ev-buttonup ev-keydown ev-mousemove
+  *rp* make-rastport rastport? rp-origin-x rp-origin-y rp-region
+  set-rp-origin! set-rp-region! use-rastport screen-fill-rect screen-plot
+  screen-blit-rect rect rect-x rect-y rect-w rect-h rect-x2 rect-y2 rect-ok?
+  rect-intersect rect-contains? rect-subtract region-subtract-rect region-area
+  region-intersect-rect region-subtract region-area
   event-ascii fill-circle isqrt
   event-kind fill-rect free-pool gfx-ctrl gfx-on gfx-vbirq input-event
   input-pending int-ack int-disable int-enable int-pending int-raise millis
   mouse-x mouse-y op-copy open-screen peek peek8 plot poke poke8
-  pool-free-bytes pool-used random screen-height screen-sync screen-width
+  pool-free-bytes pool-tag pool-used random screen-height screen-sync
+  screen-width
   timer-set-in vblank-count
 ))
 
@@ -188,6 +194,7 @@
 ;; 13 public, out of 80 definitions.
 (export '(
   *windows* front-window make-window new-shell title-height wb-back
+  window-rastport wb-update compute-regions draw-through
   wb-button-down wb-drag wb-face wb-repaint wb-shadow wb-text win-data
   win-inner-h win-inner-w win-inner-x win-inner-y win-refresh win-set!
   win-task window-close window-open

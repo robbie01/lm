@@ -137,7 +137,7 @@
 (define (vblank-count) (peek gfx-vcount))
 (define (screen-sync) (poke gfx-sync 1))
 
-(define (plot x y c)
+(define (screen-plot x y c)
   (if (if (%>= x 0) (if (%< x *screen-w*) (if (%>= y 0) (%< y *screen-h*) nil) nil) nil)
       (poke8 (%+ *screen* (%+ (%* y *screen-w*) x)) c)
       nil))
@@ -185,7 +185,7 @@
         (list x0 y0 (%- x1 x0) (%- y1 y0))
         nil)))
 
-(define (fill-rect x y w h c)
+(define (screen-fill-rect x y w h c)
   (let ((r (clip-rect x y w h)))
     (if r
         (begin
@@ -199,7 +199,7 @@
 
 (define (clear-screen c) (fill-rect 0 0 *screen-w* *screen-h* c))
 
-(define (blit-rect sx sy dx dy w h)
+(define (screen-blit-rect sx sy dx dy w h)
   ;; Clipped against both ends: the source rectangle and the destination have
   ;; to fit, and the smaller of the two wins.
   (let* ((sr (clip-rect sx sy w h))
@@ -215,7 +215,169 @@
           (poke blt-op op-copy))
         nil)))
 
+;; ---------------------------------------------------------------- regions
+;; A region is a list of rectangles that do not overlap. Rectangles are lists
+;; of four numbers, because a region rarely has more than three of them and
+;; the whole of the arithmetic below is one screenful.
+;;
+;; This is what a window system is made of. A window may draw into the part of
+;; the bitmap it actually owns - its rectangle, less the rectangles of every
+;; window in front of it - and subtracting one rectangle from another is the
+;; only operation needed to work that out.
+(define (rect x y w h) (list x y w h))
+(define (rect-x r) (%car r))
+(define (rect-y r) (cadr r))
+(define (rect-w r) (caddr r))
+(define (rect-h r) (cadddr r))
+(define (rect-x2 r) (%+ (rect-x r) (rect-w r)))
+(define (rect-y2 r) (%+ (rect-y r) (rect-h r)))
+(define (rect-ok? r) (if (%> (rect-w r) 0) (%> (rect-h r) 0) nil))
+
+(define (rect-intersect a b)
+  (let ((x (if (%> (rect-x a) (rect-x b)) (rect-x a) (rect-x b)))
+        (y (if (%> (rect-y a) (rect-y b)) (rect-y a) (rect-y b)))
+        (x2 (if (%< (rect-x2 a) (rect-x2 b)) (rect-x2 a) (rect-x2 b)))
+        (y2 (if (%< (rect-y2 a) (rect-y2 b)) (rect-y2 a) (rect-y2 b))))
+    (if (if (%< x x2) (%< y y2) nil) (rect x y (%- x2 x) (%- y2 y)) nil)))
+
+(define (rect-contains? r x y)
+  (if (%>= x (rect-x r))
+      (if (%< x (rect-x2 r))
+          (if (%>= y (rect-y r)) (%< y (rect-y2 r)) nil)
+          nil)
+      nil))
+
+;; a minus b, as up to four rectangles: the strip above, the strip below, and
+;; what is left to the left and to the right of the hole in between.
+(define (rect-subtract a b)
+  (let ((i (rect-intersect a b)))
+    (if (%null? i)
+        (list a)
+        (let ((out nil))
+          (if (%> (rect-y i) (rect-y a))
+              (set! out (%cons (rect (rect-x a) (rect-y a)
+                                     (rect-w a) (%- (rect-y i) (rect-y a)))
+                               out))
+              nil)
+          (if (%< (rect-y2 i) (rect-y2 a))
+              (set! out (%cons (rect (rect-x a) (rect-y2 i)
+                                     (rect-w a) (%- (rect-y2 a) (rect-y2 i)))
+                               out))
+              nil)
+          (if (%> (rect-x i) (rect-x a))
+              (set! out (%cons (rect (rect-x a) (rect-y i)
+                                     (%- (rect-x i) (rect-x a)) (rect-h i))
+                               out))
+              nil)
+          (if (%< (rect-x2 i) (rect-x2 a))
+              (set! out (%cons (rect (rect-x2 i) (rect-y i)
+                                     (%- (rect-x2 a) (rect-x2 i)) (rect-h i))
+                               out))
+              nil)
+          out))))
+
+(define (region-subtract-rect rgn b)
+  (let ((out nil))
+    (dolist (r rgn) (dolist (piece (rect-subtract r b)) (set! out (%cons piece out))))
+    out))
+
+(define (region-intersect-rect rgn b)
+  (let ((out nil))
+    (dolist (r rgn)
+      (let ((i (rect-intersect r b)))
+        (if i (set! out (%cons i out)) nil)))
+    out))
+
+(define (region-subtract rgn holes)
+  (let ((out rgn))
+    (dolist (h holes) (set! out (region-subtract-rect out h)))
+    out))
+
+(define (region-area rgn)
+  (let ((n 0))
+    (dolist (r rgn) (set! n (%+ n (%* (rect-w r) (rect-h r)))))
+    n))
+
+;; ---------------------------------------------------------------- rastports
+;; Where drawing goes: an origin to shift by, and the region it is allowed to
+;; touch. Everything below draws through the current one, and the current one
+;; travels with the task the way its streams do - so a task that draws is
+;; clipped to its own window without being told.
+;;
+;; Nothing set means the bare screen, which is what the demos and the boot
+;; messages want and what the machine did before any of this existed.
+(define rp-slots 4)
+(define rp-org-x 1)
+(define rp-org-y 2)
+(define rp-clip 3)
+
+(define *rp* nil)
+
+(define (make-rastport ox oy clip)
+  (let ((r (make-record rp-slots 'rastport)))
+    (%set-slot! r rp-org-x ox)
+    (%set-slot! r rp-org-y oy)
+    (%set-slot! r rp-clip clip)
+    r))
+
+(define (rastport? x)
+  (if (%record? x) (%eq? (%slot x 0) 'rastport) nil))
+
+(define (rp-origin-x r) (%slot r rp-org-x))
+(define (rp-origin-y r) (%slot r rp-org-y))
+(define (rp-region r) (%slot r rp-clip))
+(define (set-rp-origin! r x y) (%set-slot! r rp-org-x x) (%set-slot! r rp-org-y y))
+(define (set-rp-region! r rgn) (%set-slot! r rp-clip rgn))
+
+(define (use-rastport rp) (set! *rp* rp) rp)
+
 (define (clamp v lo hi) (if (%< v lo) lo (if (%> v hi) hi v)))
+
+;; ---------------------------------------------- drawing, through a rastport
+;; The three primitives everything else is built out of. With no rastport they
+;; are what they always were; with one they shift by its origin and are cut to
+;; its region, and every circle, glyph and line above them inherits that for
+;; nothing.
+(define (fill-rect x y w h c)
+  (if *rp*
+      (let ((r (rect (%+ x (rp-origin-x *rp*)) (%+ y (rp-origin-y *rp*)) w h)))
+        (dolist (cr (rp-region *rp*))
+          (let ((i (rect-intersect r cr)))
+            (if i (screen-fill-rect (rect-x i) (rect-y i) (rect-w i) (rect-h i) c)
+                nil))))
+      (screen-fill-rect x y w h c))
+  nil)
+
+(define (plot x y c)
+  (if *rp*
+      (let ((px (%+ x (rp-origin-x *rp*)))
+            (py (%+ y (rp-origin-y *rp*)))
+            (go t))
+        (dolist (cr (rp-region *rp*))
+          (if (if go (rect-contains? cr px py) nil)
+              (begin (screen-plot px py c) (set! go nil))
+              nil)))
+      (screen-plot x y c))
+  nil)
+
+;; A copy inside one window: both ends shift, and the destination is cut to
+;; the region. The source is not - it is the same bitmap, and whatever is on
+;; top of it there is what a scroll should carry along.
+(define (blit-rect sx sy dx dy w h)
+  (if *rp*
+      (let* ((ox (rp-origin-x *rp*))
+             (oy (rp-origin-y *rp*))
+             (d (rect (%+ dx ox) (%+ dy oy) w h)))
+        (dolist (cr (rp-region *rp*))
+          (let ((i (rect-intersect d cr)))
+            (if i
+                (screen-blit-rect (%+ (%+ sx ox) (%- (rect-x i) (rect-x d)))
+                                  (%+ (%+ sy oy) (%- (rect-y i) (rect-y d)))
+                                  (rect-x i) (rect-y i)
+                                  (rect-w i) (rect-h i))
+                nil))))
+      (screen-blit-rect sx sy dx dy w h))
+  nil)
 
 (define (draw-line x0 y0 x1 y1 c)
   ;; Endpoints are clamped rather than properly clipped, so a line that leaves

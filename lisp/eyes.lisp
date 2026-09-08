@@ -60,7 +60,21 @@
 
 (define (draw-pupil x y) (fill-circle x y pr wb-back))
 
-(define (draw-all)
+;; Drawing establishes its own rastport rather than trusting the one the task
+;; happens to be carrying: `(with-instance w (look-at ...))` from a prompt is
+;; a perfectly reasonable thing to do, and it must not paint over the window
+;; in front just because the prompt's task was not clipped to anything.
+(define (drawing thunk)
+  (let ((saved *rp*))
+    (use-rastport (window-rastport window))
+    (%funcall thunk)
+    (use-rastport saved)
+    nil))
+
+(define (draw-all) (drawing (lambda () (draw-all-1))))
+(define (track) (drawing (lambda () (track-1))))
+
+(define (draw-all-1)
   (place-eyes)
   (fill-rect (win-inner-x window) (win-inner-y window)
              (win-inner-w window) (win-inner-h window) wb-face)
@@ -72,7 +86,7 @@
 
 ;; Only the eye that changed is redrawn, and only when it changed: at sixty
 ;; frames a second with nothing moving, this does nothing at all.
-(define (track)
+(define (track-1)
   (let* ((tx (target-x))
          (ty (target-y))
          (p1 (pupil-at lx ly tx ty))

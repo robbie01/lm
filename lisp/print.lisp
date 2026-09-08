@@ -152,9 +152,20 @@
         (emit-str (number->string (%obj-len x)))
         (emit-ch 62))
        ((%= ty t-record)
-        (if (package? x)
-            (begin (emit-str "#<package ") (emit-str (package-name x)) (emit-ch 62))
-            (print-record x quoted depth)))
+        (cond
+         ((package? x)
+          (emit-str "#<package ") (emit-str (package-name x)) (emit-ch 62))
+         ;; An instance is a tag and a version followed by whatever it holds,
+         ;; and what it holds is frequently the window it is drawn in, which
+         ;; holds the instance back. Printing the name is the useful half and
+         ;; the half that terminates.
+         ((if (%>= (%obj-len x) 2)
+              (if (%symbol? (%slot x 0)) (%fixnum? (%slot x 1)) nil)
+              nil)
+          (emit-ch 35) (emit-ch 60)
+          (emit-str (%symbol-name (%slot x 0)))
+          (emit-ch 62))
+         (else (print-record x quoted depth))))
        (else (emit-str "#<object>")))))
    (else (emit-str "#<immediate>"))))
 
