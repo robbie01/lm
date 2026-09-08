@@ -1,15 +1,28 @@
 ;;; gc.lisp - the collector.
 ;;;
-;;; Mark and sweep, conservative over stacks, and nothing ever moves.
+;;; Mark, then compact the pairs. Roots are found precisely.
 ;;;
-;;; Not moving is the whole design. Compiled code embeds the addresses of
-;;; symbols and quoted constants directly in the instruction stream; the Exec
-;;; kernel holds raw pointers to tasks and messages in a shared address space;
-;;; the framebuffer is a raw pointer the display hardware reads. A copying
-;;; collector would have to cooperate with every one of those. A non-moving one
-;;; has to cooperate with none of them, and in exchange it can be conservative
-;;; about stacks - which is what lets compiled code keep live values in
-;;; registers and spill them anywhere it likes, with no stack maps at all.
+;;; Pairs move and objects do not, and the division is about who is doing the
+;;; collecting rather than about how hard either would be. This collector is
+;;; written in the language it collects: it reaches its functions through
+;;; symbol value cells and its constants through the literal vector of its own
+;;; code object, and every one of those is an object. Moving them would be
+;;; sawing off the branch it is sitting on. Pairs are safe because nothing
+;;; between updating and sliding ever dereferences one - and pairs are where
+;;; the space is, a few million against a few thousand objects.
+;;;
+;;; Moving anything at all is only possible because compiled code contains no
+;;; heap addresses: a function reaches its symbols and constants through the
+;;; literal vector in s1, so an object can move without an instruction being
+;;; patched. Roots come from the frame chain rather than from stack maps,
+;;; because a Lisp frame is uniformly typed. What is left conservative is the
+;;; register set of a task suspended mid-expression, and whatever those thirty
+;;; two words reach is pinned for the cycle.
+;;;
+;;; The Exec pool is a different heap entirely - raw, unmoving, never scanned -
+;;; and that is where stacks, task structures and bitmaps live, which is what
+;;; lets the display hardware read a bitmap and the kernel pass pointers around
+;;; without the collector needing to know.
 ;;;
 ;;; Cons space is swept into a chain of contiguous RUNS rather than a list of
 ;;; individual cells, which is what keeps allocation at four instructions and a
@@ -936,6 +949,16 @@
   (uart-num (%- (%- (%global lg-code-ptr) code-base) (%global lg-code-free-n)))
   (uart-string ", collections ")
   (uart-num *gc-count*)
+  (uart-nl)
+  ;; The pool is the other heap: raw, unmoving, and nothing to do with the
+  ;; collector, but it is where stacks and bitmaps come from and it is the one
+  ;; that runs out quietly.
+  (uart-string "pool bytes claimed ")
+  (uart-num (pool-used))
+  (uart-string ", free ")
+  (uart-num (pool-free-bytes))
+  (uart-string " of ")
+  (uart-num (%- pool-limit pool-base))
   (uart-nl)
   nil)
 

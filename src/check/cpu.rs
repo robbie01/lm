@@ -43,6 +43,14 @@ fn go(code: &[u32]) -> Box<Machine> {
     li32(&mut tail, T0, MMIO_BASE);
     tail.push(sw(ZERO, T0, 0));
     emit(&mut m, end, &tail);
+    // Somewhere for an unexpected trap to go. A case that faults should fail
+    // its assertion, not vanish into a handler that is not there.
+    let mut stub = vec![];
+    li32(&mut stub, T0, MMIO_BASE);
+    stub.push(addi(T1, ZERO, 1));
+    stub.push(sw(T1, T0, 0));
+    emit(&mut m, 0x2000, &stub);
+    m.mtvec = 0x2000;
     m.pc = BASE;
     m.mtimecmp = u64::MAX;
     m.gfx.next_vbl = u64::MAX;
@@ -448,6 +456,44 @@ fn cases() -> Vec<Case> {
         21,
     );
 
+    // ---- indexed access: custom-1, bounds and type checked ----
+    // A three-element vector at 0x3004, header 0x3000: (3 << 8) | T_VECTOR.
+    let vec = |mut body: Vec<u32>| -> Vec<u32> {
+        let mut v = vec![
+            addi(A1, ZERO, 0),
+            lui(A1, 3),
+            addi(A1, A1, 4),          // the object pointer, tag 4
+            addi(A2, ZERO, (3 << 8) | 3),
+            sw(A2, A1, -4),           // header: three slots, type vector
+            addi(A2, ZERO, 111),
+            sw(A2, A1, 0),
+            addi(A2, ZERO, 222),
+            sw(A2, A1, 4),
+            addi(A2, ZERO, 333),
+            sw(A2, A1, 8),
+        ];
+        v.append(&mut body);
+        v
+    };
+    // Indices arrive tagged: 2n+1.
+    c("ldx", vec(vec![addi(A3, ZERO, 3), ldx(A0, A1, A3, 3)]), A0, 222);
+    c("ldx slot 0", vec(vec![addi(A3, ZERO, 1), ldx(A0, A1, A3, 3)]), A0, 111);
+    c("ldx any type", vec(vec![addi(A3, ZERO, 5), ldx(A0, A1, A3, 0)]), A0, 333);
+    c(
+        "stx",
+        vec(vec![
+            addi(A3, ZERO, 3),
+            addi(A0, ZERO, 99),
+            stx(A0, A1, A3, 3),
+            lw(A0, A1, 4),
+        ]),
+        A0,
+        99,
+    );
+    // A byte index is checked against the same length, which counts elements:
+    // three slots means three, whatever size the access is.
+    c("ldxb", vec(vec![addi(A3, ZERO, 1), ldxb(A0, A1, A3, 3)]), A0, 111);
+
     // ---- pairs: custom-0, with the tag check in the instruction ----
     // A pair at 0x3000: car 111, cdr 222.
     let pair = |mut body: Vec<u32>| -> Vec<u32> {
@@ -525,6 +571,76 @@ pub fn run_all() -> bool {
         run::run(&mut m, 40);
         extra.push(("illegal traps to mtvec", m.x[A1 as usize] == C_ILLEGAL));
         extra.push(("mepc points at the fault", m.mepc == BASE + 8));
+    }
+
+    {
+        // The bound is checked against the length in the header, so an index
+        // past the end is a trap naming the index rather than a load from
+        // somewhere just after the object.
+        let mut m = Machine::new();
+        let mut code = vec![];
+        li32(&mut code, A0, 0x2000);
+        code.push(csrrw(ZERO, 0x305, A0));
+        li32(&mut code, A1, 0x3004);
+        code.push(addi(A2, ZERO, (3 << 8) | 3));
+        code.push(sw(A2, A1, -4));
+        code.push(addi(A3, ZERO, 7)); // the fixnum 3, one past the end
+        code.push(ldx(A0, A1, A3, 3));
+        let end = emit(&mut m, BASE, &code);
+        m.poke32(end, jal(ZERO, 0));
+        let h = vec![csrrs(A1, 0x342, ZERO), csrrs(A2, 0x343, ZERO), jal(ZERO, 0)];
+        emit(&mut m, 0x2000, &h);
+        m.pc = BASE;
+        m.mtimecmp = u64::MAX;
+        m.gfx.next_vbl = u64::MAX;
+        run::run(&mut m, 60);
+        extra.push(("index past the end traps", m.x[A1 as usize] == C_RANGE));
+        extra.push(("mtval names the index", m.x[A2 as usize] == 7));
+    }
+
+    {
+        // funct7 names the type the access requires, so reading a string as a
+        // vector is caught rather than reinterpreted.
+        let mut m = Machine::new();
+        let mut code = vec![];
+        li32(&mut code, A0, 0x2000);
+        code.push(csrrw(ZERO, 0x305, A0));
+        li32(&mut code, A1, 0x3004);
+        code.push(addi(A2, ZERO, (3 << 8) | 2)); // a string, not a vector
+        code.push(sw(A2, A1, -4));
+        code.push(addi(A3, ZERO, 1));
+        code.push(ldx(A0, A1, A3, 3));
+        let end = emit(&mut m, BASE, &code);
+        m.poke32(end, jal(ZERO, 0));
+        let h = vec![csrrs(A1, 0x342, ZERO), jal(ZERO, 0)];
+        emit(&mut m, 0x2000, &h);
+        m.pc = BASE;
+        m.mtimecmp = u64::MAX;
+        m.gfx.next_vbl = u64::MAX;
+        run::run(&mut m, 60);
+        extra.push(("wrong object type traps", m.x[A1 as usize] == C_TYPE));
+    }
+
+    {
+        // An index that is not a fixnum is a type error, not a wild address.
+        let mut m = Machine::new();
+        let mut code = vec![];
+        li32(&mut code, A0, 0x2000);
+        code.push(csrrw(ZERO, 0x305, A0));
+        li32(&mut code, A1, 0x3004);
+        code.push(addi(A2, ZERO, (3 << 8) | 3));
+        code.push(sw(A2, A1, -4));
+        code.push(addi(A3, ZERO, 4)); // even: not a fixnum
+        code.push(ldx(A0, A1, A3, 3));
+        let end = emit(&mut m, BASE, &code);
+        m.poke32(end, jal(ZERO, 0));
+        let h = vec![csrrs(A1, 0x342, ZERO), jal(ZERO, 0)];
+        emit(&mut m, 0x2000, &h);
+        m.pc = BASE;
+        m.mtimecmp = u64::MAX;
+        m.gfx.next_vbl = u64::MAX;
+        run::run(&mut m, 60);
+        extra.push(("index that is not a number traps", m.x[A1 as usize] == C_TYPE));
     }
 
     {

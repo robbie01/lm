@@ -35,6 +35,7 @@
 (define trap-reschedule 5)
 
 (define cause-wrong-type 24)
+(define cause-range 25)
 
 (define (cause-name c)
   (cond ((%= c 0) "misaligned fetch")
@@ -47,6 +48,7 @@
         ((%= c 7) "store access fault")
         ((%= c 11) "ecall")
         ((%= c cause-wrong-type) "wrong type")
+        ((%= c cause-range) "index out of range")
         (else "trap")))
 
 ;; The trap stub hands over the cause with the interrupt flag moved from bit
@@ -63,21 +65,21 @@
   (if (interrupt? cause)
       (handle-interrupt (interrupt-number cause) ctx)
       (cond ((%= cause 11) (handle-ecall epc ctx))
-            ((%= cause cause-wrong-type) (wrong-type-trap epc tval ctx))
+            ((%= cause cause-wrong-type) (check-trap epc tval ctx))
+            ((%= cause cause-range) (check-trap epc tval ctx))
             (else (fatal-trap cause epc tval ctx)))))
 
-;; ------------------------------------------------- the pair instructions
-;; car, cdr and their setters check the tag in hardware and trap here with
-;; the offending value in mtval. The value is the interesting part of the
-;; report, so this goes to some trouble to say what it was rather than
-;; printing a hexadecimal word and leaving the reader to decode it.
-(define (pair-op-name epc)
-  ;; funct3 of the instruction that trapped says which of the four it was.
-  (let ((f (%logand (%lsh (%ld32 epc) -12) 7)))
-    (cond ((%= f 0) "car")
-          ((%= f 1) "cdr")
-          ((%= f 2) "set-car!")
-          (else "set-cdr!"))))
+;; ------------------------- the instructions that check their operands
+;; car, cdr and their setters check a tag; the indexed accesses check a tag, a
+;; type, and a bound. Both trap here, and the interesting part of the report is
+;; not the address but which operation it was and what it was handed - all of
+;; which can be read back out: the instruction is at the saved pc, and every
+;; register it named is in the saved context.
+(define (insn-f3 w)  (%logand (%lsh w -12) 7))
+(define (insn-f7 w)  (%logand (%lsh w -25) 127))
+(define (insn-rs1 w) (%logand (%lsh w -15) 31))
+(define (insn-rs2 w) (%logand (%lsh w -20) 31))
+(define (insn-op w)  (%logand w 127))
 
 ;; The stub narrows mtval to thirty bits so it survives as a fixnum. Every
 ;; address in this machine fits, and so does any fixnum small enough to be
@@ -95,21 +97,79 @@
            (write (%from-addr w)))
           (else (emit-str (number->hex w))))))
 
-(define (wrong-type-trap epc tval ctx)
-  (emit-str "\n*** ")
-  (emit-str (pair-op-name epc))
+;; A value the handler is about to print may be anything at all, including a
+;; word that only looks like a pointer, so it is checked before the printer
+;; is allowed near it.
+(define (safe-object? v)
+  (if (%object? v)
+      (if (%>= (%addr-of v) obj-base) (%< (%addr-of v) obj-limit) nil)
+      nil))
+
+(define (emit-object v)
+  (if (safe-object? v) (write v) (emit-value (%addr-of v))))
+
+(define (emit-type-name ty)
+  (cond ((%= ty t-vector) (emit-str "a vector"))
+        ((%= ty t-string) (emit-str "a string"))
+        ((%= ty t-bytes) (emit-str "a byte vector"))
+        ((%= ty t-symbol) (emit-str "a symbol"))
+        ((%= ty t-closure) (emit-str "a function"))
+        ((%= ty t-record) (emit-str "a record"))
+        ((%= ty t-code) (emit-str "a code object"))
+        (else (emit-str "an object"))))
+
+(define (emit-pair-op f)
+  (cond ((%= f 0) (emit-str "car"))
+        ((%= f 1) (emit-str "cdr"))
+        ((%= f 2) (emit-str "set-car!"))
+        (else (emit-str "set-cdr!"))))
+
+(define (emit-index-op ty f)
+  (cond ((%= ty t-vector) (emit-str (if (%= f 0) "vector-ref" "vector-set!")))
+        ((%= ty t-string) (emit-str (if (%= f 2) "string-ref" "string-set!")))
+        ((%= ty t-bytes)  (emit-str (if (%= f 2) "bytes-ref" "bytes-set!")))
+        (else (emit-str (if (%= (%logand f 1) 1) "set-slot!" "slot")))))
+
+(define (emit-pair-fault w tval)
+  (emit-pair-op (insn-f3 w))
   ;; nil reads as a pair of nils but has no cell to write to, so the store
   ;; side rejects it and deserves its own sentence.
   (if (%= tval 0)
       (emit-str ": nil has no cell to write")
-      (begin
-        (emit-str ": expected a pair, got ")
-        (emit-value tval)))
-  (emit-str ", at pc ")
-  (emit-str (number->hex epc))
-  (emit-str "\n")
-  (backtrace-from-context epc ctx)
-  (abort-to-repl ctx))
+      (begin (emit-str ": expected a pair, got ") (emit-value tval))))
+
+(define (emit-index-fault w ctx)
+  ;; Both operands are still in the registers the instruction named, so the
+  ;; report can say what was indexed as well as what with.
+  (let* ((ty (insn-f7 w))
+         (obj (%raw-ld (%+ ctx (ctx-word (insn-rs1 w)))))
+         (idx (%raw-ld (%+ ctx (ctx-word (insn-rs2 w))))))
+    (emit-index-op ty (insn-f3 w))
+    (cond
+     ((not (safe-object? obj))
+      (emit-str ": expected ") (emit-type-name ty)
+      (emit-str ", got ") (emit-value (%addr-of obj)))
+     ((if (%> ty 0) (not (%= (%obj-type obj) ty)) nil)
+      (emit-str ": expected ") (emit-type-name ty)
+      (emit-str ", got ") (emit-object obj))
+     ((not (%fixnum? idx))
+      (emit-str ": index is not a number, it is ") (emit-value (%addr-of idx)))
+     (else
+      (emit-str ": index ") (emit-str (number->string idx))
+      (emit-str " is outside ") (emit-type-name ty)
+      (emit-str " of ") (emit-str (number->string (%obj-len obj)))))))
+
+(define (check-trap epc tval ctx)
+  (let ((w (%ld32 epc)))
+    (emit-str "\n*** ")
+    (if (%= (insn-op w) op-index)
+        (emit-index-fault w ctx)
+        (emit-pair-fault w tval))
+    (emit-str ", at pc ")
+    (emit-str (number->hex epc))
+    (emit-str "\n")
+    (backtrace-from-context epc ctx)
+    (abort-to-repl ctx)))
 
 ;; The compiler emits `ecall` for the handful of conditions it detects inline,
 ;; with the reason in a7. Resuming past it means stepping mepc over the

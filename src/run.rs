@@ -113,6 +113,12 @@ pub fn run(m: &mut Machine, budget: u64) -> Stop {
             Stop::Trap => {
                 let (c, t, e) = m.trap;
                 m.enter_trap(c, t, e);
+                // Taking a trap costs a cycle. The faulting instruction
+                // retired nothing, so without this a handler that faults on
+                // its own first instruction makes no progress at all and the
+                // outer loop spins on a budget that never goes down.
+                m.cycles = m.cycles.wrapping_add(1);
+                left = left.saturating_sub(1);
             }
             Stop::Wfi => idle(m),
             Stop::Halt => {

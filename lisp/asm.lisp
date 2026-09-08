@@ -216,6 +216,9 @@
 ;; custom-0. The processor checks the tag as it forms the address, so a pair
 ;; access that is handed something else traps instead of loading rubbish.
 (define op-pair  #x0b)
+;; custom-1: indexed access. funct7 carries the type the object has to be, so
+;; one instruction checks the tag, the type, the index and the bound.
+(define op-index #x2b)
 
 (define (i-lui a rd imm20)   (i-u a rd imm20 op-lui))
 (define (i-auipc a rd imm20) (i-u a rd imm20 op-auipc))
@@ -265,6 +268,12 @@
 (define (i-cdr a rd rs1)      (i-i a rd rs1 0 1 op-pair))
 (define (i-set-car a rs2 rs1) (i-s a rs1 rs2 0 2 op-pair))
 (define (i-set-cdr a rs2 rs1) (i-s a rs1 rs2 0 3 op-pair))
+
+;; rd, object, index - and for the stores rd is the value being written.
+(define (i-ldx a rd obj idx ty)  (i-r a ty rd obj idx 0 op-index))
+(define (i-stx a val obj idx ty) (i-r a ty val obj idx 1 op-index))
+(define (i-ldxb a rd obj idx ty)  (i-r a ty rd obj idx 2 op-index))
+(define (i-stxb a val obj idx ty) (i-r a ty val obj idx 3 op-index))
 (define (i-ret a) (i-jalr a $zero $ra 0))
 (define (i-jr a rs) (i-jalr a $zero rs 0))
 (define (i-call-reg a rs) (i-jalr a $ra rs 0))

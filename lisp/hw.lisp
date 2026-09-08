@@ -287,15 +287,103 @@
 ;; ---------------------------------------------------------------- pool
 ;; Raw memory that the collector never touches and nothing ever moves: task
 ;; structures, message ports, stacks and bitmaps all live here.
-(define (alloc-pool nbytes)
-  (let ((p (%global lg-poolptr))
-        (size (%logand (%+ nbytes 7) -8)))
-    (if (%> (%+ p size) (%global lg-poolend))
+;;
+;; Every block carries an eight byte header - its total size, then a tag - and
+;; the free blocks are threaded onto one list kept in address order, which is
+;; what makes coalescing a comparison against the neighbour rather than a
+;; search. First fit, split when the remainder is worth having.
+;;
+;; What the forge handed out before the machine ever ran - the trap save area,
+;; the trap stack, the boot stack - has no header and is never freed. It sits
+;; below the bump pointer this allocator starts carving from, so the two never
+;; meet, and the tag is what tells anyone who tries to free one that they have
+;; made a mistake.
+(define pool-tag #x1feeded)     ; not a pool address, so it cannot be a link
+(define pool-min 24)            ; a free block must hold its size and its link
+
+(define (pool-size b) (%ld32 b))
+(define (pool-next b) (%ld32 (%+ b 4)))
+(define (pool-set-size! b n) (%st32! b n))
+(define (pool-set-next! b n) (%st32! (%+ b 4) n))
+
+(define (pool-zero p n)
+  (let ((i 0))
+    (while (%< i n)
+      (%st32! (%+ p i) 0)
+      (set! i (%+ i 4)))))
+
+;; Carve a fresh block off the top, for when nothing on the free list fits.
+(define (pool-extend need)
+  (let ((p (%global lg-poolptr)))
+    (if (%> (%+ p need) (%global lg-poolend))
         (out-of-memory "exec pool")
         nil)
-    (%set-global! lg-poolptr (%+ p size))
-    (let ((i 0))
-      (while (%< i size)
-        (%st32! (%+ p i) 0)
-        (set! i (%+ i 4))))
+    (%set-global! lg-poolptr (%+ p need))
     p))
+
+(define (pool-take b prev need)
+  ;; Hand out the front of a free block, and put any worthwhile remainder
+  ;; back in its place on the list.
+  (let ((size (pool-size b))
+        (next (pool-next b)))
+    (if (%>= (%- size need) pool-min)
+        (let ((rest (%+ b need)))
+          (pool-set-size! rest (%- size need))
+          (pool-set-next! rest next)
+          (pool-set-size! b need)
+          (if prev (pool-set-next! prev rest) (%set-global! lg-pool-free rest)))
+        (if prev (pool-set-next! prev next) (%set-global! lg-pool-free next)))
+    b))
+
+(define (alloc-pool nbytes)
+  (let* ((need (let ((n (%logand (%+ (%+ nbytes 8) 7) -8)))
+                 (if (%< n pool-min) pool-min n)))
+         (b (let ((p (%global lg-pool-free)) (prev nil) (found nil))
+              (while (if found nil (%> p 0))
+                (if (%>= (pool-size p) need)
+                    (set! found (pool-take p prev need))
+                    (begin (set! prev p) (set! p (pool-next p)))))
+              (if found found (let ((n (pool-extend need)))
+                                (pool-set-size! n need)
+                                n)))))
+    (%st32! (%+ b 4) pool-tag)
+    (pool-zero (%+ b 8) (%- (pool-size b) 8))
+    (%+ b 8)))
+
+(define (free-pool p)
+  ;; Insert in address order, joining up with either neighbour that touches.
+  (let ((b (%- p 8)))
+    (if (%= (%ld32 (%+ b 4)) pool-tag)
+        nil
+        (error "free-pool: not an allocated block" p))
+    (let ((size (pool-size b))
+          (prev nil)
+          (q (%global lg-pool-free)))
+      (while (if (%> q 0) (%< q b) nil)
+        (set! prev q)
+        (set! q (pool-next q)))
+      ;; Forward: absorb the next block if it starts where this one ends.
+      (if (if (%> q 0) (%= (%+ b size) q) nil)
+          (begin (set! size (%+ size (pool-size q))) (set! q (pool-next q)))
+          nil)
+      (pool-set-size! b size)
+      (pool-set-next! b q)
+      ;; Backward: if the previous block runs right up to this one, the two
+      ;; become one and this header disappears.
+      (if (if prev (%= (%+ prev (pool-size prev)) b) nil)
+          (begin
+            (pool-set-size! prev (%+ (pool-size prev) size))
+            (pool-set-next! prev q))
+          (if prev
+              (pool-set-next! prev b)
+              (%set-global! lg-pool-free b)))
+      nil)))
+
+(define (pool-used) (%- (%global lg-poolptr) pool-base))
+
+(define (pool-free-bytes)
+  (let ((p (%global lg-pool-free)) (n 0))
+    (while (%> p 0)
+      (set! n (%+ n (pool-size p)))
+      (set! p (pool-next p)))
+    n))

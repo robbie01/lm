@@ -451,7 +451,13 @@ impl<'a> Heap<'a> {
         self.set_slot(s, SYM_VALUE, UNBOUND);
         self.set_slot(s, SYM_FUNCTION, NIL);
         self.set_slot(s, SYM_PLIST, NIL);
-        self.set_slot(s, SYM_FLAGS, fix(0));
+        // Flags in the low eight bits, the symbol's identity above them.
+        // Interning is the only place a symbol is made, on either side of the
+        // bootstrap, so the counter in low memory is what keeps the two from
+        // ever handing out the same number.
+        let idx = self.g(LG_SYMCOUNT);
+        self.set_g(LG_SYMCOUNT, idx + 1);
+        self.set_slot(s, SYM_FLAGS, fix((idx << 8) as i32));
         let head = self.slot(ob, b);
         let cell = self.cons(s, head);
         self.set_slot(ob, b, cell);

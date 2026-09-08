@@ -236,6 +236,22 @@
 
 (define (reschedule) (%ecall trap-reschedule))
 
+;; Dead tasks waiting to be reclaimed. A task cannot free the stack it is
+;; standing on, so it goes on this list instead and the next context switch
+;; does the work - that runs on the trap stack, with the corpse saved and
+;; never to be resumed, which is the first moment its stack is genuinely idle.
+(define *reaped* nil)
+
+(define (reap-tasks)
+  (let ((p *reaped*))
+    (set! *reaped* nil)
+    (while (%cons? p)
+      (let ((task (%car p)))
+        (free-pool (peek (%+ task tc-splower)))
+        (free-pool (peek (%+ task tc-context)))
+        (free-pool task))
+      (set! p (%cdr p)))))
+
 (define (task-ready! task)
   (poke (%+ task tc-state) ts-ready)
   (enqueue (ready-list) task))
@@ -260,7 +276,10 @@
                 (poke (%+ *sysbase* eb-thistask) next)
                 (poke (%+ *sysbase* eb-switchcount)
                       (%+ (peek (%+ *sysbase* eb-switchcount)) 1))
-                (%set-context (peek (%+ next tc-context)))))))
+                (%set-context (peek (%+ next tc-context)))
+                ;; Only now, with the context switched away from whatever was
+                ;; running, is it safe to hand a dead task's stack back.
+                (if *reaped* (reap-tasks) nil)))))
     nil))
 
 ;; ---------------------------------------------------------------- signals
@@ -374,10 +393,17 @@
   (if (%= task (this-task))
       (begin
         ;; The current task cannot free its own stack while standing on it, so
-        ;; it just stops being runnable and never comes back.
+        ;; it puts itself on the reaper list and stops being runnable. The
+        ;; switch that takes it off the processor is what frees it.
+        (set! *reaped* (%cons task *reaped*))
         (reschedule)
         nil)
-      (begin (remove-node task) nil)))
+      (begin
+        (remove-node task)
+        (free-pool (peek (%+ task tc-splower)))
+        (free-pool (peek (%+ task tc-context)))
+        (free-pool task)
+        nil)))
 
 (define (find-task name)
   (if (%null? name)
@@ -465,6 +491,7 @@
 (define (delete-port p)
   (if (%null? (%raw-ld (%+ p ln-name))) nil (begin (disable) (remove-node p) (enable)))
   (free-signal (peek (%+ p mp-sigtask)) (peek (%+ p mp-sigbit)))
+  (free-pool p)
   nil)
 
 (define (find-port name) (find-name (%+ *sysbase* eb-portlist) name))
@@ -504,6 +531,8 @@
     (add-head (%+ port mp-msglist) m)
     (enable)
     m))
+
+(define (delete-message m) (free-pool m))
 
 (define (reply-msg msg)
   (let ((r (peek (%+ msg mn-replyport))))

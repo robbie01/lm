@@ -434,9 +434,43 @@
     frame))
 
 ;; ---------------------------------------------------------------- intrinsics
-;; Each entry is (name arity . emitter). The emitter is handed the context
-;; with the arguments already in a0, a1, ... and leaves the result in a0.
-(define (intrinsic-entry name) (assq name *intrinsics*))
+;; Everything the compiler knows about a name lives on the symbol, in the
+;; function slot, as (intrinsic . aliases):
+;;
+;;   intrinsic   (arity . emitter), or nil
+;;   aliases     ((nargs . target-symbol) ...)
+;;
+;; The emitter is handed the context with the arguments already in a0, a1,
+;; and leaves the result in a0.
+;;
+;; This used to be two lists, ninety entries between them, walked at every
+;; call site the compiler looked at. A symbol is a unique object with four
+;; slots and two of them spare, so the answer was already one load away.
+(define (compile-info sym) (%symbol-function sym))
+
+(define *inline-syms* nil)   ; every symbol carrying one, so setup can reset
+
+(define (compile-info! sym)
+  (let ((ci (compile-info sym)))
+    (if (%cons? ci)
+        ci
+        (let ((new (%cons nil nil)))
+          (%set-symbol-function! sym new)
+          (set! *inline-syms* (%cons sym *inline-syms*))
+          new))))
+
+(define (inline-entry sym nargs)
+  ;; The (arity . emitter) to open-code this call with, or nil. A symbol that
+  ;; is itself an intrinsic wins outright, and an arity mismatch there is an
+  ;; error rather than a silent call; an ordinary name only open-codes at the
+  ;; argument count its alias was declared for.
+  (let ((ci (compile-info sym)))
+    (if (%cons? ci)
+        (if (%car ci)
+            (%car ci)
+            (let ((p (assq nargs (%cdr ci))))
+              (if p (%car (compile-info (%cdr p))) nil)))
+        nil)))
 
 ;; Ordinary names that mean an intrinsic when called with the right number of
 ;; arguments. Without this, (< i n) in a loop calls the variadic `<`, which
@@ -468,26 +502,24 @@
     (lognot 1 %lognot) (ash 2 %ash) (lsh 2 %lsh)
     (peek 1 %ld32) (poke 2 %st32!) (peek8 1 %ld8) (poke8 2 %st8!)))
 
-(define (inline-alias name nargs)
-  (let ((p *inline-aliases*) (r nil))
-    (while (%cons? p)
-      (let ((e (%car p)))
-        (if (if (%eq? (%car e) name) (%= (cadr e) nargs) nil)
-            (begin (set! r (caddr e)) (set! p nil))
-            (set! p (%cdr p)))))
-    r))
 
 (define (emit-load-addr c reg)
   ;; a0 holds a tagged fixnum address; leave the raw address in reg.
   (i-srai (cx-asm c) reg $a0 1))
 
-(define *intrinsics* nil)
-
 (define (definline name arity fn)
-  (set! *intrinsics* (%cons (%cons name (%cons arity fn)) *intrinsics*)))
+  (%set-car! (compile-info! name) (%cons arity fn)))
+
+(define (defalias name nargs target)
+  (let ((ci (compile-info! name)))
+    (%set-cdr! ci (%cons (%cons nargs target) (%cdr ci)))))
 
 (define (setup-intrinsics)
-  (set! *intrinsics* nil)
+  ;; Start from clean: this runs once in the forge and again on the machine,
+  ;; and a stale emitter left on a symbol would be a compiler that quietly
+  ;; disagrees with itself.
+  (dolist (s *inline-syms*) (%set-symbol-function! s nil))
+  (set! *inline-syms* nil)
 
   ;; ---- pairs ----
   ;; One instruction each, and the tag is checked on the way past: these are
@@ -685,36 +717,22 @@
         (i-srli a $t2 $t2 8)
         (i-slli a $a0 $t2 1)
         (i-ori a $a0 $a0 1))))
+  ;; One instruction, and it checks the tag, the index and the bound. Type 0
+  ;; means any object at all: a slot is a slot, whatever is holding it.
   (definline '%slot 2
-    (lambda (c)
-      (let ((a (cx-asm c)))
-        (i-srai a $t2 $a1 1)
-        (i-slli a $t2 $t2 2)
-        (i-add a $t2 $t2 $a0)
-        (i-lw a $a0 $t2 0))))
+    (lambda (c) (i-ldx (cx-asm c) $a0 $a0 $a1 0)))
   (definline '%set-slot! 3
     (lambda (c)
-      (let ((a (cx-asm c)))
-        (i-srai a $t2 $a1 1)
-        (i-slli a $t2 $t2 2)
-        (i-add a $t2 $t2 $a0)
-        (i-sw a $a2 $t2 0)
-        (i-mv a $a0 $a2))))
+      (i-stx (cx-asm c) $a2 $a0 $a1 0)
+      (i-mv (cx-asm c) $a0 $a2)))
+  ;; These name the type they require, so (vector-ref "abc" 0) is a trap and
+  ;; not a plausible-looking word out of the middle of a string.
   (definline '%vector-ref 2
-    (lambda (c)
-      (let ((a (cx-asm c)))
-        (i-srai a $t2 $a1 1)
-        (i-slli a $t2 $t2 2)
-        (i-add a $t2 $t2 $a0)
-        (i-lw a $a0 $t2 0))))
+    (lambda (c) (i-ldx (cx-asm c) $a0 $a0 $a1 t-vector)))
   (definline '%vector-set! 3
     (lambda (c)
-      (let ((a (cx-asm c)))
-        (i-srai a $t2 $a1 1)
-        (i-slli a $t2 $t2 2)
-        (i-add a $t2 $t2 $a0)
-        (i-sw a $a2 $t2 0)
-        (i-mv a $a0 $a2))))
+      (i-stx (cx-asm c) $a2 $a0 $a1 t-vector)
+      (i-mv (cx-asm c) $a0 $a2)))
   (definline '%vector-length 1
     (lambda (c)
       (let ((a (cx-asm c)))
@@ -739,34 +757,26 @@
   (definline '%string-ref 2
     (lambda (c)
       (let ((a (cx-asm c)))
-        (i-srai a $t2 $a1 1)
-        (i-add a $t2 $t2 $a0)
-        (i-lbu a $t2 $t2 0)
+        (i-ldxb a $t2 $a0 $a1 t-string)
         (i-slli a $a0 $t2 8)
         (i-ori a $a0 $a0 2))))          ; a character immediate
   (definline '%string-set! 3
     (lambda (c)
       (let ((a (cx-asm c)))
-        (i-srai a $t2 $a1 1)
-        (i-add a $t2 $t2 $a0)
         (i-srli a $t3 $a2 8)
-        (i-sb a $t3 $t2 0)
+        (i-stxb a $t3 $a0 $a1 t-string)
         (i-mv a $a0 $a2))))
   (definline '%bytes-ref 2
     (lambda (c)
       (let ((a (cx-asm c)))
-        (i-srai a $t2 $a1 1)
-        (i-add a $t2 $t2 $a0)
-        (i-lbu a $t2 $t2 0)
+        (i-ldxb a $t2 $a0 $a1 t-bytes)
         (i-slli a $a0 $t2 1)
         (i-ori a $a0 $a0 1))))
   (definline '%bytes-set! 3
     (lambda (c)
       (let ((a (cx-asm c)))
-        (i-srai a $t2 $a1 1)
-        (i-add a $t2 $t2 $a0)
         (i-srai a $t3 $a2 1)
-        (i-sb a $t3 $t2 0)
+        (i-stxb a $t3 $a0 $a1 t-bytes)
         (i-mv a $a0 $a2))))
 
   ;; ---- characters ----
@@ -995,6 +1005,11 @@
       (let ((a (cx-asm c)))
         (i-csrrsi a $zero csr-mstatus 8)
         (i-mv a $a0 $zero))))
+
+  ;; And the ordinary names that mean one of the above at the right argument
+  ;; count. These hang off the same slot, so a call site asks one question.
+  (dolist (e *inline-aliases*)
+    (defalias (%car e) (cadr e) (caddr e)))
   nil)
 
 ;; `blt reg, zero` is spelled out because there is no bltz pseudo-op above.
@@ -1232,16 +1247,11 @@
 
          ;; ---- open-coded operations ----
          ((if (%symbol? h)
-              (if (cx-lookup c h)
-                  nil
-                  (if (intrinsic-entry h) t (inline-alias h (length (%cdr form)))))
+              (if (cx-lookup c h) nil (inline-entry h (length (%cdr form))))
               nil)
-          (let* ((e (let ((direct (intrinsic-entry h)))
-                      (if direct
-                          direct
-                          (intrinsic-entry (inline-alias h (length (%cdr form)))))))
-                 (arity (cadr e))
-                 (fn (cddr e))
+          (let* ((e (inline-entry h (length (%cdr form))))
+                 (arity (%car e))
+                 (fn (%cdr e))
                  (args (%cdr form)))
             (if (%= (length args) arity)
                 nil

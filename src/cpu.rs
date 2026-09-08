@@ -509,6 +509,72 @@ fn op_pair(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     next!(m, pc.wrapping_add(4), fuel - 1)
 }
 
+/// The custom-1 opcode space: indexed access to an object, checked.
+///
+/// One instruction does what four did - untag the index, scale it, add it to
+/// the base, load - and on the way it establishes everything that was being
+/// taken on trust. The address arithmetic needs the header word anyway to be
+/// worth anything, and the header is where the length is, so the bounds check
+/// costs a comparison the processor can do in parallel with the address.
+///
+///     funct7   the type the object must be, or 0 for any object at all
+///     funct3   0 load word, 1 store word, 2 load byte, 3 store byte
+///     rs1      the object, tagged
+///     rs2      the index, a tagged fixnum
+///     rd       where the result goes, or - for a store - the value to write
+///
+/// Byte forms leave a raw byte in `rd` and take a raw byte from it, so the
+/// tagging a character or a fixnum needs stays where it belongs, in the
+/// compiler. Traps carry the offending value in `mtval`, and the handler
+/// decodes the instruction to say which operand it was.
+#[inline(never)]
+fn op_index(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
+    let obj = r(m, rs1(w));
+    let idx = r(m, rs2(w));
+    if obj & 7 != 4 {
+        return m.fault(C_TYPE, obj, pc, fuel);
+    }
+    let hdr_at = obj.wrapping_sub(4);
+    if !m.in_ram(hdr_at, 4) {
+        return m.fault(C_LFAULT, hdr_at, pc, fuel);
+    }
+    let hdr = unsafe { m.rd32(hdr_at) };
+    let want = w >> 25;
+    if want != 0 && hdr & 255 != want {
+        return m.fault(C_TYPE, obj, pc, fuel);
+    }
+    if idx & 1 != 1 {
+        return m.fault(C_TYPE, idx, pc, fuel);
+    }
+    let i = (idx as i32) >> 1;
+    if i < 0 || (i as u32) >= hdr >> 8 {
+        return m.fault(C_RANGE, idx, pc, fuel);
+    }
+    let f = f3(w);
+    let a = if f & 2 == 0 {
+        obj.wrapping_add((i as u32) << 2)
+    } else {
+        obj.wrapping_add(i as u32)
+    };
+    let sz = if f & 2 == 0 { 4 } else { 1 };
+    if !m.in_ram(a, sz) {
+        return m.fault(if f & 1 == 0 { C_LFAULT } else { C_SFAULT }, a, pc, fuel);
+    }
+    match f {
+        0 => {
+            let v = unsafe { m.rd32(a) };
+            w_(m, rd(w), v);
+        }
+        1 => unsafe { m.wr32(a, r(m, rd(w))) },
+        2 => {
+            let v = unsafe { m.rd8(a) } as u32;
+            w_(m, rd(w), v);
+        }
+        _ => unsafe { m.wr8(a, r(m, rd(w)) as u8) },
+    }
+    next!(m, pc.wrapping_add(4), fuel - 1)
+}
+
 // =========================================================== compressed, Q0
 
 #[inline(never)]
@@ -754,7 +820,7 @@ static TABLE: [Handler; 64] = [
     op_bad,    // 07 (48-bit)
     op_store,  // 08 STORE
     op_bad,    // 09 STORE-FP
-    op_bad,    // 0a custom-1
+    op_index,  // 0a custom-1: indexed access, bounds and type checked
     op_bad,    // 0b AMO
     op_reg,    // 0c OP
     op_lui,    // 0d LUI

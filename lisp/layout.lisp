@@ -70,6 +70,8 @@
 (define lg-scratch1 #x1a0)
 (define lg-scratch2 #x1a4)
 (define lg-scratch3 #x1a8)
+(define lg-symcount #x1c4)
+(define lg-pool-free #x1c8)
 
 ;; ---- object representation ----
 (define t-symbol #x1)

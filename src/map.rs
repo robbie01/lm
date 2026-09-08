@@ -136,4 +136,7 @@ globals! {
     LG_SCRATCH1   = 0xa0, "scratch1";
     LG_SCRATCH2   = 0xa4, "scratch2";
     LG_SCRATCH3   = 0xa8, "scratch3";
+    LG_SYMCOUNT   = 0xc4, "symcount";    // symbols interned so far: the next
+                                         // symbol's identity, and its hash
+    LG_POOLFREE   = 0xc8, "pool-free";   // free list head, exec pool
 }

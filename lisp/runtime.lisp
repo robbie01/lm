@@ -80,10 +80,24 @@
           (%set-slot! sym sym-value *unbound*)
           (%set-slot! sym sym-function nil)
           (%set-slot! sym sym-plist nil)
-          (%set-slot! sym sym-flags 0)
+          ;; Flags in the low eight bits, the symbol's identity above them.
+          ;; Interning is the only place a symbol comes from, here or in the
+          ;; forge, so one counter in low memory is what stops the two sides
+          ;; from ever handing out the same number.
+          (%set-slot! sym sym-flags (%lsh (%global lg-symcount) 8))
+          (%set-global! lg-symcount (%+ (%global lg-symcount) 1))
           (%vector-set! ob b (%cons sym (%vector-ref ob b)))
           (%raw-st! lg-symlist (%cons sym (%raw-ld lg-symlist)))
           sym))))
+
+;; A symbol's identity is a small dense integer, which makes it the hash: no
+;; collisions at all, nothing to recompute, and nothing that a collector could
+;; invalidate by moving something. It also orders symbols, which is enough to
+;; iterate a table deterministically.
+(define (symbol-index s) (%lsh (%slot s sym-flags) -8))
+(define (symbol-flags s) (%logand (%slot s sym-flags) 255))
+(define (symbol-hash s) (symbol-index s))
+(define (symbol-count) (%global lg-symcount))
 
 ;; ---------------------------------------------------------------- diagnostics
 (define (out-of-memory what)

@@ -7,7 +7,7 @@
 use crate::forge::{boot_host, write_layout};
 use crate::heap::*;
 use crate::forge::hostlisp::Lisp;
-use crate::mach::{Machine, Stop, C_TYPE};
+use crate::mach::{Machine, Stop, C_RANGE, C_TYPE};
 use crate::map::*;
 use crate::run;
 use crate::rvenc::*;
@@ -137,12 +137,24 @@ fn cases() -> Vec<Case> {
         Case("(let ((p (%cons 1 2))) (%set-cdr! p 9) (%cdr p))", "9"),
         // The tag check lives in the instruction, so these fault in the
         // processor rather than loading whatever is at address 11.
-        Case("(%car 5)", "TRAP: not a pair: 0xb"),
-        Case("(%cdr 5)", "TRAP: not a pair: 0xb"),
-        Case("(%car #\\a)", "TRAP: not a pair: 0x6102"),
+        Case("(%car 5)", "TRAP: wrong type: 0xb"),
+        Case("(%cdr 5)", "TRAP: wrong type: 0xb"),
+        Case("(%car #\\a)", "TRAP: wrong type: 0x6102"),
         // nil reads as a pair of nils, but writing through it would land on
         // the globals at address zero.
-        Case("(%set-car! nil 1)", "TRAP: not a pair: 0x0"),
+        Case("(%set-car! nil 1)", "TRAP: wrong type: 0x0"),
+        // ---- indexed access, checked in the instruction ----
+        Case("(%vector-ref (vector 5 6 7) 2)", "7"),
+        Case("(%vector-length (vector 5 6 7))", "3"),
+        // The index is what makes these worth asserting: it comes back in
+        // mtval exactly as the instruction saw it, tag and all.
+        Case("(%vector-ref (vector 5 6 7) 3)", "TRAP: out of range: 0x7"),
+        Case("(%vector-ref (vector 5 6 7) -1)", "TRAP: out of range: 0xffffffff"),
+        Case("(%string-ref \"abc\" 3)", "TRAP: out of range: 0x7"),
+        Case("(%bytes-ref (make-bytes 2) 2)", "TRAP: out of range: 0x5"),
+        // A string is an object, so this is the type check rather than the
+        // tag check doing the work.
+        Case("(%vector-ref \"abc\" 0)", "TRAP: wrong type"),
         // ---- functions know their own names ----
         // The name lives in the code object, which is also what every frame
         // holds in s1, so this is the same word a backtrace reads.
@@ -305,7 +317,10 @@ pub fn run_one(l: &mut Lisp, src: &str) -> String {
         // whole diagnosis, and leaving the address out is what lets a test
         // say exactly what it expects.
         if cause == C_TYPE {
-            return format!("TRAP: not a pair: {tval:#x}");
+            return format!("TRAP: wrong type: {tval:#x}");
+        }
+        if cause == C_RANGE {
+            return format!("TRAP: out of range: {tval:#x}");
         }
         let what = match (cause, a7 >> 1) {
             (11, 1) => "arity error".to_string(),
@@ -390,7 +405,10 @@ pub fn run_all(verbose: bool) -> bool {
             eprintln!("[{cons} conses, {obj} obj bytes, {code} code bytes] {src}");
         }
         let got = run_one(&mut l, src);
-        if got == want {
+        // A trap whose value is a heap address cannot be spelled out, since
+        // the address depends on everything compiled before it; asserting the
+        // prefix says which check fired, which is the part under test.
+        if got == want || (want.starts_with("TRAP:") && got.starts_with(want)) {
             pass += 1;
         } else {
             fail += 1;

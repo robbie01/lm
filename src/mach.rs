@@ -22,6 +22,8 @@ pub const C_ECALL: u32 = 11;
 /// 24 through 31 to the implementation, which is where a machine that knows
 /// what a pair is should put this. `mtval` carries the offending value.
 pub const C_TYPE: u32 = 24;
+/// An index outside the object it was applied to. `mtval` carries the index.
+pub const C_RANGE: u32 = 25;
 
 pub const IRQ_SOFT: u32 = 3; // machine software interrupt
 pub const IRQ_TIMER: u32 = 7;

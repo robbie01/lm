@@ -120,6 +120,21 @@ pub fn sw(rs2: u32, rs1: u32, o: i32) -> u32 {
     s_type(o, rs2, rs1, 2, 0x23)
 }
 
+// ---- custom-1: indexed access, checked ----
+/// `ty` is the object type the access requires, or 0 for any object.
+pub fn ldx(rd: u32, rs1: u32, rs2: u32, ty: u32) -> u32 {
+    r_type(ty, rs2, rs1, 0, rd, 0x2b)
+}
+pub fn stx(rs3: u32, rs1: u32, rs2: u32, ty: u32) -> u32 {
+    r_type(ty, rs2, rs1, 1, rs3, 0x2b)
+}
+pub fn ldxb(rd: u32, rs1: u32, rs2: u32, ty: u32) -> u32 {
+    r_type(ty, rs2, rs1, 2, rd, 0x2b)
+}
+pub fn stxb(rs3: u32, rs1: u32, rs2: u32, ty: u32) -> u32 {
+    r_type(ty, rs2, rs1, 3, rs3, 0x2b)
+}
+
 // ---- custom-0: pairs, checked ----
 pub fn car(rd: u32, rs1: u32) -> u32 {
     i_type(0, rs1, 0, rd, 0x0b)
