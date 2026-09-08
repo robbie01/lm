@@ -59,7 +59,10 @@ pub fn rebuild(from: &str, out: &str, verbose: bool, check: bool) -> i32 {
     }
     // The new image is written to the disk the machine is given, so the disk
     // is the output file.
-    let _ = std::fs::remove_file(out);
+    // --check writes nothing, so it must not clear away what is there.
+    if !check {
+        let _ = std::fs::remove_file(out);
+    }
     let o = crate::boot::Options {
         image: from.to_string(),
         window: false,
@@ -67,7 +70,7 @@ pub fn rebuild(from: &str, out: &str, verbose: bool, check: bool) -> i32 {
         script: Some(script),
         interactive: false,
         budget: u64::MAX,
-        disk: Some(out.to_string()),
+        disk: if check { None } else { Some(out.to_string()) },
         trace_exit: verbose,
         screenshot: None,
         trace_traps: false,
