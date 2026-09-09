@@ -911,6 +911,11 @@ fn op_fixnum(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     }
     let f = f3(w);
     let f7 = w >> 25;
+    #[cfg(feature = "isaprof")]
+    unsafe {
+        let base = if f7 == 1 { crate::prof::FIX1 } else { crate::prof::FIX0 };
+        *m.prof.get_unchecked_mut(base + f as usize) += 1;
+    }
     let x = (a as i32) >> 1;
     let y = (b as i32) >> 1;
     let v = match f7 {
@@ -978,6 +983,10 @@ fn op_fixnum(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 #[inline(never)]
 fn op_tagged(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let f = f3(w);
+    #[cfg(feature = "isaprof")]
+    unsafe {
+        *m.prof.get_unchecked_mut(crate::prof::TAGD + f as usize) += 1;
+    }
     let a = r(m, rs1(w));
     if a & 1 == 0 {
         return m.fault(C_TYPE, a, pc, fuel);

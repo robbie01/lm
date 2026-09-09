@@ -20,7 +20,7 @@
 //! forward to the next interrupt without executing anything. This counts
 //! instructions; that counts time.
 
-pub const SLOTS: usize = 128;
+pub const SLOTS: usize = 152;
 
 // Slots past the 64 dispatch tokens.
 pub const PAIR0: usize = 64; // + funct3: car, cdr, set-car!, set-cdr!
@@ -64,6 +64,10 @@ pub const TAG_UNTAG: usize = 99;
 pub const TAG_RETAG: usize = 100;
 /// Register-register arithmetic, for scale.
 pub const ARITH: usize = 101;
+/// custom-2 and custom-3 broken down the way custom-0 and custom-1 are.
+pub const FIX0: usize = 104;   // + funct3, funct7 0x00
+pub const FIX1: usize = 112;   // + funct3, funct7 0x01
+pub const TAGD: usize = 120;   // + funct3
 
 /// The bookkeeping those four need. Not counters: the state a basic block and
 /// a call stack are tracked with.
@@ -177,6 +181,9 @@ pub const NAMES: [&str; SLOTS] = [
     "li then branch", "li total",
     "tag fixup", "untag", "retag", "arithmetic",
     "-", "-",
+    "  fadd", "  fsub", "  fmul", "  fdiv", "  frem", "  fand", "  for", "  fxor",
+    "  fsll", "  fsrl", "  fsra", "  flt", "  fltu", "  feq", "  ?6", "  ?7",
+    "  faddi", "  fandi", "  fori", "  fshi", "  tlw", "  tlb", "  tsw", "  tsb",
     "-", "-", "-", "-", "-", "-", "-", "-",
     "-", "-", "-", "-", "-", "-", "-", "-",
     "-", "-", "-", "-", "-", "-", "-", "-",
@@ -253,8 +260,23 @@ pub fn report(prof: &[u64; SLOTS]) -> String {
         let sub = match i {
             34 => Some(PAIR0),
             42 => Some(INDEX0),
+            54 => Some(FIX0),
+            62 => Some(TAGD),
             _ => None,
         };
+        if i == 54 {
+            for k in 0..8 {
+                if prof[FIX1 + k] > 0 {
+                    out.push_str(&format!(
+                        "  {:<16} {:>12}  {:>5.1}%
+",
+                        NAMES[FIX1 + k],
+                        prof[FIX1 + k],
+                        100.0 * prof[FIX1 + k] as f64 / total as f64
+                    ));
+                }
+            }
+        }
         if let Some(b) = sub {
             for k in 0..8 {
                 if prof[b + k] > 0 {
