@@ -100,6 +100,7 @@
   (%raw-st! lg-traphook (%symbol-value 'handle-trap))
   (exec-init)
   (exec-start)
+  (if *resume-fn* (%funcall *resume-fn*) nil)
   (set-current-package! (make-package "user"))
   (emit-str "\n")
   (emit-str system-name)

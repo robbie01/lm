@@ -673,12 +673,26 @@
   nil)
 
 ;; ---------------------------------------------------------------- startup
+;; A resumed image has the windows and none of the tasks that were running
+;; them: Exec is rebuilt from nothing, so the compositor, the input task and
+;; every shell's prompt are gone. The pixels are still there and mean nothing.
+;;
+;; So the workbench restarts rather than pretends. What it keeps is the screen
+;; it already has.
+(define (wb-resume)
+  (if *wb-running*
+      (begin
+        (attach-screen)
+        (workbench))
+      nil))
+
 (define (workbench)
   (if (%null? *screen*) (open-screen screen-width screen-height) nil)
   (if (%null? *font*) (begin (font-init) (mono-init)) nil)
   (platinum-palette)
   (set! *windows* nil)
   (set! *wb-running* t)
+  (set! *resume-fn* (lambda () (wb-resume)))
   (wb-repaint)
   (add-task "composite" 2 (lambda () (wb-compositor-task)))
   (add-task "input" 1 (lambda () (wb-input-task)))

@@ -135,7 +135,8 @@
   rect-intersect rect-contains? rect-subtract region-subtract-rect region-area
   region-intersect-rect region-subtract
   event-ascii fill-circle isqrt
-  event-kind fill-rect free-pool gfx-ctrl gfx-on gfx-vbirq inp-ctrl
+  attach-screen event-kind fill-rect free-pool gfx-ctrl gfx-on gfx-vbirq
+  inp-ctrl
   set-colour rgb
   input-event
   input-pending int-ack int-disable int-enable int-pending int-raise millis
@@ -171,7 +172,7 @@
 (in-package sys)
 ;; 26 public, out of 69 definitions.
 (export '(
-  *abort-cleanup-fn* *repl-restart* *return-addr-fn* *stack-top-fn*
+  *abort-cleanup-fn* *repl-restart* *resume-fn* *return-addr-fn* *stack-top-fn*
   *task-abort-fn*
   bye compile-time-eval eval eval-form expand-macro handle-trap
   int-external int-software int-timer kickstart macro-form? print-backtrace
@@ -185,6 +186,7 @@
 (export '(
   add-task cause ctx-bytes disable enable exec-init exec-start forbid
   handle-interrupt idle? idle-start input-listen permit preemption-off
+  task-snapshot
   this-task
   rem-task reschedule sigb-input sigb-vblank sigf-input sigf-vblank signal
   spawn switch-tasks sysbase *vblank-count* vblank-start wait-input
@@ -207,7 +209,7 @@
   wb-button-down wb-drag wb-face wb-repaint wb-shadow wb-text win-data
   win-inner-h win-inner-w win-inner-x win-inner-y win-refresh win-set!
   win-task window-close window-open
-  win-get win-h win-w win-x win-y window-push-key workbench win-bm
+  win-get win-h win-w win-x win-y window-push-key workbench win-bm wb-resume
   pt-black pt-white pt-g1 pt-g2 pt-g3 pt-g6 pt-g7 pt-g8 pt-g10 pt-g13
   pt-lav pt-lav-dark pt-lav-light pt-desktop pt-grey pt-band pt-title-h
   pt-hline pt-vline pt-frame pt-raised pt-sunken pt-title-box pt-grow-box

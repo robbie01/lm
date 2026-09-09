@@ -97,17 +97,30 @@
     (set! *screen* bm)
     (set! *screen-w* w)
     (set! *screen-h* h)
-    (poke gfx-base bm)
-    (poke gfx-width w)
-    (poke gfx-height h)
-    (poke gfx-pitch w)
-    (poke gfx-mode 8)
-    ;; The vblank interrupt goes on with the display. Exec has a server on it
-    ;; before this runs, and writing the control register without the bit
-    ;; would quietly turn the frame clock off again.
-    (poke gfx-ctrl (%logior gfx-on gfx-vbirq))
-    (default-palette)
-    bm))
+    (attach-screen)))
+
+;; Point the display at the bitmap we already have.
+;;
+;; A resumed image still has the bitmap - it is pool memory, and the pool is
+;; saved - and it still has the three globals that say where and how big. What
+;; it does not have is a display: devices are hardware, hardware comes back
+;; reset, and a machine drawing carefully into memory nothing is scanning out
+;; looks exactly like a machine that has crashed.
+(define (attach-screen)
+  (if (%null? *screen*)
+      nil
+      (begin
+        (poke gfx-base *screen*)
+        (poke gfx-width *screen-w*)
+        (poke gfx-height *screen-h*)
+        (poke gfx-pitch *screen-w*)
+        (poke gfx-mode 8)
+        ;; The vblank interrupt goes on with the display. Exec has a server on
+        ;; it before this runs, and writing the control register without the
+        ;; bit would quietly turn the frame clock off again.
+        (poke gfx-ctrl (%logior gfx-on gfx-vbirq))
+        (default-palette)
+        *screen*)))
 
 (define (set-colour i rgb)
   ;; An index register and a data register: two writes that mean one thing.

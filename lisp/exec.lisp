@@ -510,6 +510,17 @@
         ((%= s ts-removed) "removed")
         (else "?")))
 
+(define (task-snapshot)
+  ;; The lists are walked with interrupts off and printed with them on: an
+  ;; interrupt that signals a task moves it from one list to the other, and a
+  ;; walk that was halfway along the first one then follows a node that is now
+  ;; in the second.
+  (without-interrupts
+    (let ((acc nil))
+      (dolist (p (list-nodes (wait-list))) (set! acc (%cons p acc)))
+      (dolist (p (list-nodes (ready-list))) (set! acc (%cons p acc)))
+      (%cons (this-task) (reverse acc)))))
+
 (define (tasks)
   ;; What the whole system is doing, for the repl.
   (emit-str "  pri  state    switches  name\n")
@@ -523,9 +534,7 @@
                 (emit-str "  ")
                 (emit-str (task-name p))
                 (emit-str "\n"))))
-    (%funcall show (this-task))
-    (dolist (p (list-nodes (ready-list))) (%funcall show p))
-    (dolist (p (list-nodes (wait-list))) (%funcall show p)))
+    (dolist (p (task-snapshot)) (%funcall show p)))
   nil)
 
 ;; The stub a task returns to when its function finishes. It cannot be a Lisp
@@ -856,6 +865,13 @@
 
 ;; ---------------------------------------------------------------- startup
 (define (exec-init)
+  ;; A resumed image arrives with these still set, naming interrupt structures
+  ;; that belonged to the ExecBase this is about to replace. Believing them
+  ;; means never installing the servers into the new one, and a machine with
+  ;; no vblank and no keyboard.
+  (set! *vblank-int* 0)
+  (set! *input-int* 0)
+  (set! *input-task* 0)
   (let ((sb (alloc-pool execbase-size)))
     (set! *sysbase* sb)
     (%raw-st! (%+ sb ln-name) "exec")

@@ -297,6 +297,9 @@
 ;; however many of those the faulting code was holding, so they have to be put
 ;; back to nothing - and only Exec knows where they live.
 (define *abort-cleanup-fn* nil)
+;; What a resumed image has to put back that is not memory: devices, and
+;; whatever was running them. The workbench fills this in.
+(define *resume-fn* nil)
 
 (define (restart-stack)
   ;; A task must restart on its own stack. Putting it back on the boot task's
