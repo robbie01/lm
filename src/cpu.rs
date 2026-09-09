@@ -296,7 +296,14 @@ fn op_jalr(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 #[inline(never)]
 fn op_branch(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     #[cfg(feature = "isaprof")]
-    m.watch.new_block();
+    {
+        if m.watch.li_pc.wrapping_add(4) == pc
+            && (m.watch.li_rd == rs1(w) || m.watch.li_rd == rs2(w))
+        {
+            m.prof[crate::prof::LI_BRANCH] += 1;
+        }
+        m.watch.new_block();
+    }
     let a = r(m, rs1(w));
     let b = r(m, rs2(w));
     let taken = match f3(w) {
@@ -467,7 +474,14 @@ fn op_imm(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let i = imm_i(w);
     let sh = (w >> 20) & 31;
     #[cfg(feature = "isaprof")]
-    prof_ext(m, w >> 25, f3(w));
+    {
+        prof_ext(m, w >> 25, f3(w));
+        if f3(w) == 0 && rs1(w) == 0 {
+            m.prof[crate::prof::LI_TOTAL] += 1;
+            m.watch.li_pc = pc;
+            m.watch.li_rd = rd(w);
+        }
+    }
     let v = match f3(w) {
         0 => a.wrapping_add(i),
         2 => ((a as i32) < (i as i32)) as u32,

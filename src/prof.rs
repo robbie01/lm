@@ -51,6 +51,11 @@ pub const LD_REDUNDANT_ADJ: usize = 92;
 pub const CALLS: usize = 93;
 pub const LEAF_CALLS: usize = 94;
 pub const LEAF_INS: usize = 95;
+/// A branch whose operand was put in a register by the instruction just
+/// before it - which is what comparing against a written-down constant looks
+/// like, since RISC-V has no compare-immediate-and-branch.
+pub const LI_BRANCH: usize = 96;
+pub const LI_TOTAL: usize = 97;
 
 /// The bookkeeping those four need. Not counters: the state a basic block and
 /// a call stack are tracked with.
@@ -65,6 +70,9 @@ pub struct Watch {
     /// store-then-reload case a peephole would catch with no analysis at all.
     pub st_pc: u32,
     pub st_addr: u32,
+    /// The last `li`, for the compare-against-a-constant question.
+    pub li_pc: u32,
+    pub li_rd: u32,
     /// A shadow call stack: what was entered at this depth, and did that
     /// activation call anything?
     pub depth: usize,
@@ -90,6 +98,8 @@ impl Default for Watch {
             block: 1,
             st_pc: u32::MAX,
             st_addr: 0,
+            li_pc: u32::MAX,
+            li_rd: 32,
             depth: 0,
             called: [false; 512],
             entry_ins: [0; 512],
@@ -151,7 +161,8 @@ pub const NAMES: [&str; SLOTS] = [
     "  ld frame (s0)", "  ld spill (sp)", "  ld literal (s1)", "  ld other",
     "  st frame (s0)", "  st spill (sp)", "  st other",
     "redundant load", "  adjacent", "calls", "leaf calls", "leaf instructions",
-    "-", "-", "-", "-", "-", "-", "-", "-",
+    "li then branch", "li total",
+    "-", "-", "-", "-", "-", "-",
     "-", "-", "-", "-", "-", "-", "-", "-",
     "-", "-", "-", "-", "-", "-", "-", "-",
     "-", "-", "-", "-", "-", "-", "-", "-",
@@ -273,6 +284,15 @@ memory traffic: {} ({:.1}%)
             100.0 * home as f64 / total as f64
         ));
     }
+
+    out.push_str(&format!(
+        "
+branches on a constant put in a register the instruction before: {} ({:.1}% of all instructions; {} li in total)
+",
+        prof[LI_BRANCH],
+        100.0 * prof[LI_BRANCH] as f64 / total.max(1) as f64,
+        prof[LI_TOTAL]
+    ));
 
     // What a basic-block peephole and a leaf-frame rule are each worth.
     out.push_str(&format!(

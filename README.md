@@ -262,6 +262,43 @@ The price is the same bargain open-coding `car` makes: redefining a function
 does not reach the calls already inside it. A recursive function that redefines
 itself mid-flight will finish in the version it started in.
 
+### A function that calls nothing builds nothing
+
+About seven functions in ten call nothing at all — accessors, predicates,
+arithmetic — and they take a bit over half of every call the machine makes.
+None of them needs the frame above. `ra` survives, because nothing will
+overwrite it. No collection can start, because allocating is a call. And their
+locals cannot be clobbered by a callee, because there is no callee.
+
+So a leaf keeps its locals in `s3`–`s10` and its caller's literal vector in
+`s11`, and its whole prologue is two instructions:
+
+```
+mv   s11, s1                  ; the caller's literals
+lw   s1,  4(t0)               ; ours
+                              ; ...and parameters stay in a0.. , moved to s3..
+```
+
+against ten for a frame — and its epilogue is `mv s1, s11; ret` against six.
+Nothing else in the machine touches those nine registers, so there is nothing
+to save and nothing to restore. Locals stop being memory entirely: no store on
+entry, no reload at each mention.
+
+The collector needs no telling. It scans from the innermost stack pointer up to
+the frame it can see, and a leaf simply has no frame in between; a leaf that
+pushes an argument pushes a tagged value below that pointer, which is inside
+the range already. Backtraces are unaffected too, because the trap handler is
+handed the saved `s1` separately from the frame chain, so the innermost
+function names itself.
+
+The catch is that leaf-ness is decided from the source, before a word is
+emitted, and a source pre-pass can be wrong. So it is checked against the
+result: `check-leaf` walks the bytes the function actually produced, and any
+instruction that writes `ra` in something compiled as a leaf is a build
+failure. On a collection-heavy workload the change is **11% fewer instructions**
+and it takes frame and spill traffic from a quarter of everything the machine
+runs to a sixth.
+
 ## Packages
 
 Every name used to land in one global namespace, and the code leaned on
@@ -668,8 +705,22 @@ protection. Doubly linked lists with a virtual head and tail node so removal
 needs no special cases; tasks with 32 signal bits and `Wait`/`Signal`; message
 ports on top of signals; `Forbid`/`Permit` for cooperative critical sections and
 `Disable`/`Enable` for real ones; libraries reached through a jump table below
-their base pointer. `AbsSysBase` is at address 8 rather than 4, because address
-4 is nil's cdr.
+their base pointer.
+
+What Exec does *not* have here is an ExecBase. A real one exists so that any
+program, in any language, compiled separately, can find the kernel with
+`move.l 4.w,a6` and no linker; none of that applies to one image in one address
+space where every function can name a symbol. So the current task, the two
+nesting counts, the saved interrupt state and the counters are ordinary
+variables — two instructions to read instead of four, inspectable by name
+rather than by offset, and no longer able to be written through a null base
+pointer during the allocation that creates the base pointer, which is what
+`Disable` was quietly doing at every boot.
+
+The list headers stay in memory, because they are memory: a header overlaps two
+imaginary nodes, and nodes point back into it, which is exactly what makes
+insert and remove need no test for the ends of a list. That block is 192 bytes,
+and address 8 still says where it is.
 
 `PutMsg` costs a pointer on a list. Nothing is copied, because there is nothing
 to copy it between — which is the whole reason to have a shared address space.
