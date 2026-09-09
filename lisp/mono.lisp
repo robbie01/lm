@@ -148,23 +148,37 @@
             (let ((k (%+ (%* i mono-cell) row)))
               (if (%< k (bytes-length *mono*)) (bytes-ref *mono* k) 0))))))
 
-;; Straight into the bitmap. A glyph is five by seven and going through the
-;; blitter for each run would cost more in setup than the pixels are worth.
+;; Straight into the bitmap, and clipped to the rastport's region as well as
+;; to the bitmap, for the same reason `draw-char` is.
 (define (draw-mono-char x y ch fg bg)
   (let ((bm (if *rp* (rp-bitmap *rp*) *screen*))
         (bw (if *rp* (rp-bitmap-w *rp*) *screen-w*))
         (bh (if *rp* (rp-bitmap-h *rp*) *screen-h*))
         (px (%+ x (if *rp* (rp-origin-x *rp*) 0)))
-        (py (%+ y (if *rp* (rp-origin-y *rp*) 0)))
-        (row 0))
-    (if (%>= bg 0) (bm-fill-rect bm bw bh px py mono-advance mono-height bg) nil)
+        (py (%+ y (if *rp* (rp-origin-y *rp*) 0))))
+    (if (%>= bg 0) (fill-rect x y mono-advance mono-height bg) nil)
+    (if *rp*
+        (dolist (cr (rp-region *rp*))
+          (mono-rows ch px py fg bm bw bh
+                     (rect-x cr) (rect-y cr) (rect-x2 cr) (rect-y2 cr)))
+        (mono-rows ch px py fg bm bw bh 0 0 bw bh))
+    nil))
+
+(define (mono-rows ch px py fg bm bw bh x0 y0 x1 y1)
+  (let ((row 0))
     (while (%< row mono-cell)
-      (let ((bits (mono-row ch row)) (col 0))
-        (while (%< col 5)
-          (if (%= 1 (%logand (%lsh bits (%- col 4)) 1))
-              (bm-plot bm bw bh (%+ px col) (%+ py row) fg)
-              nil)
-          (set! col (%+ col 1))))
+      (let ((gy (%+ py row)))
+        (if (if (%>= gy y0) (%< gy y1) nil)
+            (let ((bits (mono-row ch row)) (col 0))
+              (while (%< col 5)
+                (let ((gx (%+ px col)))
+                  (if (if (%>= gx x0) (%< gx x1) nil)
+                      (if (%= 1 (%logand (%lsh bits (%- col 4)) 1))
+                          (bm-plot bm bw bh gx gy fg)
+                          nil)
+                      nil))
+                (set! col (%+ col 1))))
+            nil))
       (set! row (%+ row 1)))
     nil))
 

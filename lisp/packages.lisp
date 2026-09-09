@@ -212,7 +212,7 @@
   pt-lav pt-lav-dark pt-lav-light pt-desktop pt-grey pt-band pt-title-h
   pt-hline pt-vline pt-frame pt-raised pt-sunken pt-title-box pt-grow-box
   platinum-palette text-width text-truncate draw-text draw-char
-  make-demo-window win-plot win-point win-fill win-row
+  make-demo-window win-plot win-point win-fill win-row window-footprint
   draw-mono draw-mono-char mono-width mono-advance mono-height
 ))
 

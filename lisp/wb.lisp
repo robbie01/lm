@@ -72,6 +72,21 @@
 (define (window-rect w)
   (rect (win-get w win-x) (win-get w win-y) (win-get w win-w) (win-get w win-h)))
 
+;; What the window costs the screen, which is one pixel more than the window:
+;; Platinum draws a hard black shadow down the right edge and along the
+;; bottom. It is not part of the window - it falls on whatever is behind -
+;; so the compositor draws it rather than the window, and damage has to
+;; cover it or a moved window leaves its shadow behind.
+(define (window-footprint w)
+  (rect (win-get w win-x) (win-get w win-y)
+        (%+ (win-get w win-w) 1) (%+ (win-get w win-h) 1)))
+
+(define (shadow-rects w)
+  (let ((x (win-get w win-x)) (y (win-get w win-y))
+        (ww (win-get w win-w)) (wh (win-get w win-h)))
+    (list (rect (%+ x ww) (%+ y 2) 1 (%- wh 1))
+          (rect (%+ x 2) (%+ y wh) (%- ww 1) 1))))
+
 ;; Coordinates inside a window are the window's own: nothing here knows or
 ;; cares where on the screen it ends up.
 (define (win-inner-x w) pt-band)
@@ -140,7 +155,7 @@
                 nil)))))
   nil)
 
-(define (window-damage w) (damage (window-rect w)))
+(define (window-damage w) (damage (window-footprint w)))
 
 (define (draw-frame x y w h)
   ;; Two lines and two colours, which is all a raised edge ever was.
@@ -271,7 +286,15 @@
                 (ch (rect-h i)))
             (bm-blit-rect bm bw bh *screen* *screen-w* *screen-h*
                           sx sy dx dy cw ch))
-          nil)))
+          nil)
+      ;; And its shadow, clipped to the damage like everything else.
+      (dolist (sr (shadow-rects w))
+        (let ((si (rect-intersect sr r)))
+          (if si
+              (bm-fill-rect *screen* *screen-w* *screen-h*
+                            (rect-x si) (rect-y si) (rect-w si) (rect-h si)
+                            pt-black)
+              nil)))))
   nil)
 
 ;; One pass of the compositor: take whatever damage has accumulated and pay it.

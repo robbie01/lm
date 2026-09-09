@@ -184,8 +184,34 @@
       (set! i (%+ i 1)))
     w))
 
-;; A glyph, straight into the bitmap. `bg` below zero leaves what is there,
-;; which is what drawing over pinstripes needs.
+;; A glyph, straight into the bitmap: going through the blitter for each run
+;; costs more in setup than the pixels are worth. `bg` below zero leaves what
+;; is there, which is what drawing over pinstripes needs.
+;;
+;; It clips to the rastport's region as well as to the bitmap. That used to be
+;; only the bitmap, which was harmless as long as every caller happened to be
+;; drawing inside its own window - and stopped being harmless the moment the
+;; compositor started drawing the desktop through a rastport clipped to the
+;; damage, where the menu bar's text was written whether or not the damage
+;; reached it.
+(define (glyph-rows i ox py ink fg bm bw bh x0 y0 x1 y1)
+  (let ((row 0))
+    (while (%< row font-height)
+      (let ((gy (%+ py row)))
+        (if (if (%>= gy y0) (%< gy y1) nil)
+            (let ((bits (font-bits i row)) (col 0))
+              (while (%< col ink)
+                (let ((gx (%+ ox col)))
+                  (if (if (%>= gx x0) (%< gx x1) nil)
+                      (if (%= 1 (%logand (%lsh bits (%- col 15)) 1))
+                          (bm-plot bm bw bh gx gy fg)
+                          nil)
+                      nil))
+                (set! col (%+ col 1))))
+            nil))
+      (set! row (%+ row 1)))
+    nil))
+
 (define (draw-char x y ch fg bg)
   (let ((i (font-index ch)))
     (if (%< i 0)
@@ -194,21 +220,17 @@
               (bw (if *rp* (rp-bitmap-w *rp*) *screen-w*))
               (bh (if *rp* (rp-bitmap-h *rp*) *screen-h*))
               (px (%+ x (if *rp* (rp-origin-x *rp*) 0)))
-              (py (%+ y (if *rp* (rp-origin-y *rp*) 0)))
-              (row 0))
+              (py (%+ y (if *rp* (rp-origin-y *rp*) 0))))
           (if (%>= bg 0)
-              (bm-fill-rect bm bw bh px py (font-adv-of i) font-height bg)
+              (fill-rect x y (font-adv-of i) font-height bg)
               nil)
           (let ((ink (font-ink-of i))
                 (ox (%+ px (font-left-of i))))
-            (while (%< row font-height)
-              (let ((bits (font-bits i row)) (col 0))
-                (while (%< col ink)
-                  (if (%= 1 (%logand (%lsh bits (%- col 15)) 1))
-                      (bm-plot bm bw bh (%+ ox col) (%+ py row) fg)
-                      nil)
-                  (set! col (%+ col 1))))
-              (set! row (%+ row 1))))
+            (if *rp*
+                (dolist (cr (rp-region *rp*))
+                  (glyph-rows i ox py ink fg bm bw bh
+                              (rect-x cr) (rect-y cr) (rect-x2 cr) (rect-y2 cr)))
+                (glyph-rows i ox py ink fg bm bw bh 0 0 bw bh)))
           (font-adv-of i)))))
 
 (define (draw-text x y s fg bg)
