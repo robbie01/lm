@@ -96,6 +96,21 @@ offsets from `s0` and the compressed forms only encode unsigned ones. Laying
 the frame out upward would make roughly 30% more of the image compressible —
 or the register allocator would remove those loads instead.
 
+## Images the machine writes itself
+
+**Code space is never compacted, and that is most of why a rebuilt image is
+larger than a forge-built one.** `next.img` carries 636 KiB of code region
+holding 288 KiB of live code; `kick.img` carries 316 KiB holding 315 KiB.
+Sweeping frees the old code but the free blocks interleave with the new, so
+blanking them (which `gc-for-image` now does) frees almost no whole pages —
+it saved 8 KiB. The real fix is compacting code space, which means relocating
+every `clo-entry` and `code-entry`; intra-function jumps are pc-relative and
+would survive the move, and calls already go through the closure's entry word.
+
+The rest of the difference is that a rebuilt image is a *running system's*
+heap - an Exec with tasks, a REPL, every symbol interned twice - where a
+forge-built one is a freshly constructed one.
+
 ## Loose ends
 
 **`sysbase-ptr` (address 8) and `lg-sysbase` are dead.** Nothing writes them

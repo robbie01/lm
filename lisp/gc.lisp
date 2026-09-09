@@ -1041,9 +1041,24 @@
         (set! p (%+ p size))))
     zeroed))
 
+;; Blank the code that sweeping freed, as well. It matters most for an image
+;; the machine wrote itself: a rebuild allocates all of its new code above the
+;; old, sweeping hands the old back to the free list, and nothing zeroes it -
+;; so every dead byte goes into the file. The image writer skips pages that
+;; are entirely zero, which is what makes this worth doing.
+(define (gc-blank-free-code)
+  (let ((p (%global lg-code-free)))
+    (while (%> p 0)
+      (let ((size (%ld32 p)) (next (%ld32 (%+ p 4))))
+        ;; The first two words are the size and the next pointer, and the free
+        ;; list is still threaded through them.
+        (if (%> size 8) (gc-blank (%+ p 8) (%+ p size)) nil)
+        (set! p next)))))
+
 (define (gc-for-image)
   (gc-collect)
-  (gc-blank-free-objects))
+  (gc-blank-free-objects)
+  (gc-blank-free-code))
 
 ;; ---------------------------------------------------------------- reporting
 (define (room)
