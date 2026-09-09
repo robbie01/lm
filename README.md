@@ -583,6 +583,10 @@ kick.img         3403 KiB -> 949 KiB
 are holding objects — so it compacts less well: 2570 KiB of object space with
 592 KiB live in it, which still takes the file from 4138 KiB to 1697 KiB.
 
+The machine still cannot do this to itself. What it would take is written down
+in [docs/moving-objects.md](docs/moving-objects.md), along with why it has not
+mattered yet.
+
 ## Exec
 
 An Amiga Exec, in Lisp, in one shared address space with no MMU and no
