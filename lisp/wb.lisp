@@ -29,24 +29,26 @@
 (define wb-title-text-off pt-g7)
 
 ;; ---------------------------------------------------------------- windows
-(define win-slots 11)
-(define win-x 0)
-(define win-y 1)
-(define win-w 2)
-(define win-h 3)
-(define win-title 4)
-(define win-refresh 5)    ; (lambda (w)) draws the interior
-(define win-keys 6)       ; characters waiting, oldest first
-(define win-task 7)
-(define win-data 8)       ; whatever the window is for
-(define win-rp 9)        ; where this window draws: its own bitmap
-(define win-bm 10)       ; and the pool memory that bitmap lives in
+;; Slot 0 is the record's tag, so a window says what it is and asking a
+;; number for its title is a trap rather than a wrong answer.
+(define win-slots 12)
+(define win-x 1)
+(define win-y 2)
+(define win-w 3)
+(define win-h 4)
+(define win-title 5)
+(define win-refresh 6)    ; (lambda (w)) draws the interior
+(define win-keys 7)       ; characters waiting, oldest first
+(define win-task 8)
+(define win-data 9)       ; whatever the window is for
+(define win-rp 10)        ; where this window draws: its own bitmap
+(define win-bm 11)        ; and the pool memory that bitmap lives in
 
 (define *windows* nil)    ; front to back
 (define *wb-running* nil)
 
-(define (win-get w i) (%vector-ref w i))
-(define (win-set! w i v) (%vector-set! w i v))
+(define (win-get w i) (%record-ref w i))
+(define (win-set! w i v) (%record-set! w i v))
 
 (define title-height pt-title-h)
 
@@ -56,7 +58,7 @@
   ;; wrong their arithmetic is, drawing does not have to be clipped to a
   ;; region that somebody has to keep correct, and the order things appear in
   ;; is decided once, by the compositor, instead of every time anybody paints.
-  (let ((v (make-vector-n win-slots nil)))
+  (let ((v (make-record win-slots 'window)))
     (win-set! v win-x x)
     (win-set! v win-y y)
     (win-set! v win-w w)
@@ -447,27 +449,27 @@
 ;; ---------------------------------------------------------------- shells
 ;; A shell keeps characters, not pixels: a grid it can redraw from, which is
 ;; what lets it live on the shared bitmap with no backing store of its own.
-(define shell-slots 5)
-(define sh-cols 0)
-(define sh-rows 1)
-(define sh-grid 2)
-(define sh-col 3)
-(define sh-row 4)
+(define shell-slots 6)
+(define sh-cols 1)
+(define sh-rows 2)
+(define sh-grid 3)
+(define sh-col 4)
+(define sh-row 5)
 
 (define (shell-clear sh)
-  (let ((g (%vector-ref sh sh-grid)) (i 0))
+  (let ((g (%record-ref sh sh-grid)) (i 0))
     (while (%< i (bytes-length g))
       (bytes-set! g i 32)
       (set! i (%+ i 1)))
-    (%vector-set! sh sh-col 0)
-    (%vector-set! sh sh-row 0)
+    (%record-set! sh sh-col 0)
+    (%record-set! sh sh-row 0)
     nil))
 
 (define (make-shell cols rows)
-  (let ((v (make-vector-n shell-slots nil)))
-    (%vector-set! v sh-cols cols)
-    (%vector-set! v sh-rows rows)
-    (%vector-set! v sh-grid (make-bytes (%* cols rows)))
+  (let ((v (make-record shell-slots 'shell)))
+    (%record-set! v sh-cols cols)
+    (%record-set! v sh-rows rows)
+    (%record-set! v sh-grid (make-bytes (%* cols rows)))
     (shell-clear v)
     v))
 
@@ -478,9 +480,9 @@
   ;; The grid moves up a line and so does the picture: the blitter copies the
   ;; interior over itself, which it is allowed to do because it knows which
   ;; way to walk when source and destination overlap.
-  (let* ((g (%vector-ref sh sh-grid))
-         (cols (%vector-ref sh sh-cols))
-         (rows (%vector-ref sh sh-rows))
+  (let* ((g (%record-ref sh sh-grid))
+         (cols (%record-ref sh sh-cols))
+         (rows (%record-ref sh sh-rows))
          (n (%* cols (%- rows 1)))
          (i 0))
     (while (%< i n)
@@ -495,20 +497,20 @@
     (fill-rect (win-inner-x win)
                (%+ (win-inner-y win) (%* (%- rows 1) mono-height))
                (win-inner-w win) mono-height wb-back)
-    (%vector-set! sh sh-row (%- rows 1))
+    (%record-set! sh sh-row (%- rows 1))
     nil))
 
 (define (shell-newline win sh)
-  (%vector-set! sh sh-col 0)
-  (%vector-set! sh sh-row (%+ (%vector-ref sh sh-row) 1))
-  (if (%>= (%vector-ref sh sh-row) (%vector-ref sh sh-rows))
+  (%record-set! sh sh-col 0)
+  (%record-set! sh sh-row (%+ (%record-ref sh sh-row) 1))
+  (if (%>= (%record-ref sh sh-row) (%record-ref sh sh-rows))
       (shell-scroll win sh)
       nil))
 
 (define (shell-poke sh c)
-  (bytes-set! (%vector-ref sh sh-grid)
-              (%+ (%* (%vector-ref sh sh-row) (%vector-ref sh sh-cols))
-                  (%vector-ref sh sh-col))
+  (bytes-set! (%record-ref sh sh-grid)
+              (%+ (%* (%record-ref sh sh-row) (%record-ref sh sh-cols))
+                  (%record-ref sh sh-col))
               c))
 
 (define (shell-putc win sh c)
@@ -527,32 +529,32 @@
    ((%= c 13) nil)
    ((%= c 8)
     ;; Backspace erases, because a prompt you cannot correct is a toy.
-    (if (%> (%vector-ref sh sh-col) 0)
+    (if (%> (%record-ref sh sh-col) 0)
         (begin
-          (%vector-set! sh sh-col (%- (%vector-ref sh sh-col) 1))
+          (%record-set! sh sh-col (%- (%record-ref sh sh-col) 1))
           (shell-poke sh 32)
-          (fill-rect (shell-cell-x win (%vector-ref sh sh-col))
-                     (shell-cell-y win (%vector-ref sh sh-row))
+          (fill-rect (shell-cell-x win (%record-ref sh sh-col))
+                     (shell-cell-y win (%record-ref sh sh-row))
                      mono-advance mono-height wb-back))
         nil))
    (else
-    (if (%>= (%vector-ref sh sh-col) (%vector-ref sh sh-cols))
+    (if (%>= (%record-ref sh sh-col) (%record-ref sh sh-cols))
         (shell-newline win sh)
         nil)
     (shell-poke sh c)
-    (draw-mono-char (shell-cell-x win (%vector-ref sh sh-col))
-               (shell-cell-y win (%vector-ref sh sh-row))
+    (draw-mono-char (shell-cell-x win (%record-ref sh sh-col))
+               (shell-cell-y win (%record-ref sh sh-row))
                (%int->char c) wb-text wb-back)
-    (%vector-set! sh sh-col (%+ (%vector-ref sh sh-col) 1))))
+    (%record-set! sh sh-col (%+ (%record-ref sh sh-col) 1))))
   nil)
 
 (define (shell-refresh win)
   ;; Everything the window knows, drawn again. This is what buys the absence
   ;; of a backing store.
   (let* ((sh (win-get win win-data))
-         (g (%vector-ref sh sh-grid))
-         (cols (%vector-ref sh sh-cols))
-         (rows (%vector-ref sh sh-rows))
+         (g (%record-ref sh sh-grid))
+         (cols (%record-ref sh sh-cols))
+         (rows (%record-ref sh sh-rows))
          (r 0))
     (while (%< r rows)
       (let ((c 0))

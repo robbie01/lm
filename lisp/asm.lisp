@@ -48,20 +48,39 @@
 ;;   4 origin   address the code will live at, once known
 ;;   5 literals objects the code refers to, kept alive by the code object
 
+;; The assembler's own state. Seven numbered slots and no names is exactly the
+;; sort of thing that is fine until the day you add an eighth.
+(define asi-buf 1)
+(define asi-len 2)
+(define asi-labels 3)
+(define asi-fixups 4)
+(define asi-origin 5)
+(define asi-literals 6)
+(define asi-nlits 7)
+(define asm-slots 8)
+
 (define (asm-new)
-  (let ((a (make-vector-n 7 nil)))
-    (%vector-set! a 0 (make-bytes-n 512))
-    (%vector-set! a 1 0)
-    (%vector-set! a 2 nil)
-    (%vector-set! a 3 nil)
-    (%vector-set! a 4 0)
-    (%vector-set! a 5 nil)
-    (%vector-set! a 6 0)
+  (let ((a (make-record asm-slots 'assembler)))
+    (%record-set! a asi-buf (make-bytes-n 512))
+    (%record-set! a asi-len 0)
+    (%record-set! a asi-origin 0)
+    (%record-set! a asi-nlits 0)
     a))
 
-(define (asm-len a) (%vector-ref a 1))
-(define (asm-origin a) (%vector-ref a 4))
-(define (asm-literals a) (%vector-ref a 5))
+(define (asm-buf a) (%record-ref a asi-buf))
+(define (asm-set-buf! a v) (%record-set! a asi-buf v))
+(define (asm-len a) (%record-ref a asi-len))
+(define (asm-set-len! a v) (%record-set! a asi-len v))
+(define (asm-labels a) (%record-ref a asi-labels))
+(define (asm-set-labels! a v) (%record-set! a asi-labels v))
+(define (asm-fixups a) (%record-ref a asi-fixups))
+(define (asm-set-fixups! a v) (%record-set! a asi-fixups v))
+(define (asm-origin a) (%record-ref a asi-origin))
+(define (asm-set-origin! a v) (%record-set! a asi-origin v))
+(define (asm-literals a) (%record-ref a asi-literals))
+(define (asm-set-literals! a v) (%record-set! a asi-literals v))
+(define (asm-nlits a) (%record-ref a asi-nlits))
+(define (asm-set-nlits! a v) (%record-set! a asi-nlits v))
 
 (define (asm-literal a obj)
   ;; Record a heap object the code refers to, and answer the slot it will
@@ -71,8 +90,8 @@
   ;;
   ;; Repeats share a slot. A function that mentions the same symbol ten times
   ;; gets one word and one load offset, not ten.
-  (let ((lits (%vector-ref a 5))
-        (n (%vector-ref a 6))
+  (let ((lits (asm-literals a))
+        (n (asm-nlits a))
         (found nil)
         (k 0)
         (p nil))
@@ -84,33 +103,33 @@
     (if found
         found
         (begin
-          (%vector-set! a 5 (%cons obj lits))
-          (%vector-set! a 6 (%+ n 1))
+          (asm-set-literals! a (%cons obj lits))
+          (asm-set-nlits! a (%+ n 1))
           n))))
 
 ;; Byte offset of literal `i` from the code object pointer, which is what the
 ;; s1 register holds while a compiled function is running.
 (define (literal-offset i) (%* 4 (%+ code-lits i)))
 
-(define (literal-count a) (%vector-ref a 6))
+(define (literal-count a) (asm-nlits a))
 
 (define (asm-grow a need)
-  (let ((buf (%vector-ref a 0)))
+  (let ((buf (asm-buf a)))
     (if (%> need (%bytes-length buf))
         (let ((n (%bytes-length buf)))
           (while (%< n need) (set! n (%* n 2)))
-          (let ((nb (make-bytes-n n)) (i 0) (len (%vector-ref a 1)))
+          (let ((nb (make-bytes-n n)) (i 0) (len (asm-len a)))
             (while (%< i len)
               (%bytes-set! nb i (%bytes-ref buf i))
               (set! i (%+ i 1)))
-            (%vector-set! a 0 nb)))
+            (asm-set-buf! a nb)))
         nil)))
 
 (define (asm-byte a b)
-  (let ((len (%vector-ref a 1)))
+  (let ((len (asm-len a)))
     (asm-grow a (%+ len 1))
-    (%bytes-set! (%vector-ref a 0) len (%logand b 255))
-    (%vector-set! a 1 (%+ len 1))))
+    (%bytes-set! (asm-buf a) len (%logand b 255))
+    (asm-set-len! a (%+ len 1))))
 
 (define (asm-half a h)
   (asm-byte a (%logand h 255))
@@ -123,7 +142,7 @@
 
 ;; Overwrite an already-emitted instruction, for fixups.
 (define (asm-patch a off lo hi)
-  (let ((buf (%vector-ref a 0)))
+  (let ((buf (asm-buf a)))
     (%bytes-set! buf off (%logand lo 255))
     (%bytes-set! buf (%+ off 1) (%logand (%lsh lo -8) 255))
     (%bytes-set! buf (%+ off 2) (%logand hi 255))
@@ -131,16 +150,16 @@
 
 ;; ---------------------------------------------------------------- labels
 (define (asm-label a name)
-  (%vector-set! a 2 (%cons (%cons name (%vector-ref a 1)) (%vector-ref a 2)))
+  (asm-set-labels! a (%cons (%cons name (asm-len a)) (asm-labels a)))
   name)
 
 (define (asm-label-offset a name)
-  (let ((p (assq name (%vector-ref a 2))))
+  (let ((p (assq name (asm-labels a))))
     (if p (%cdr p) (error "assembler: undefined label" name))))
 
 (define (asm-fixup a kind . rest)
-  (%vector-set! a 3 (%cons (%cons kind (%cons (%vector-ref a 1) rest))
-                           (%vector-ref a 3))))
+  (asm-set-fixups! a (%cons (%cons kind (%cons (asm-len a) rest))
+                           (asm-fixups a))))
 
 (define gensym-counter 0)
 (define (asm-gensym-label prefix)
@@ -466,7 +485,7 @@
 
 ;; ---------------------------------------------------------------- resolution
 (define (asm-resolve a)
-  (let ((fixups (reverse (%vector-ref a 3))))
+  (let ((fixups (reverse (asm-fixups a))))
     (dolist (f fixups)
       (let* ((kind (%car f))
              (off (cadr f))
@@ -476,37 +495,37 @@
           (let* ((f3 (%car rest)) (rs1 (cadr rest)) (rs2 (caddr rest))
                  (label (cadddr rest))
                  (delta (%- (asm-label-offset a label) off))
-                 (save (%vector-ref a 1)))
+                 (save (asm-len a)))
             (if (if (%>= delta -4096) (%< delta 4096) nil)
                 nil
                 (error "assembler: branch out of range" label delta))
             ;; Re-encode in place by pointing the emitter at the patch site.
-            (%vector-set! a 1 off)
+            (asm-set-len! a off)
             (i-b a rs1 rs2 delta f3 op-br)
-            (%vector-set! a 1 save)))
+            (asm-set-len! a save)))
          ((%eq? kind 'jal)
           (let* ((rd (%car rest)) (label (cadr rest))
                  (delta (%- (asm-label-offset a label) off))
-                 (save (%vector-ref a 1)))
+                 (save (asm-len a)))
             (if (if (%>= delta -1048576) (%< delta 1048576) nil)
                 nil
                 (error "assembler: jump out of range" label delta))
-            (%vector-set! a 1 off)
+            (asm-set-len! a off)
             (enc-j a rd delta op-jal)
-            (%vector-set! a 1 save)))
+            (asm-set-len! a save)))
          ((%eq? kind 'la)
           (let* ((rd (%car rest)) (label (cadr rest))
                  (delta (%- (asm-label-offset a label) off))
                  (lo (%logand delta #xfff))
                  (lo-signed (if (%>= lo 2048) (%- lo 4096) lo))
                  (hi (%logand (%lsh (%- delta lo-signed) -12) #xfffff))
-                 (save (%vector-ref a 1)))
-            (%vector-set! a 1 off)
+                 (save (asm-len a)))
+            (asm-set-len! a off)
             (i-auipc a rd hi)
             (i-addi a rd rd lo-signed)
-            (%vector-set! a 1 save)))
+            (asm-set-len! a save)))
          (else (error "assembler: unknown fixup" kind)))))
-    (%vector-set! a 3 nil)
+    (asm-set-fixups! a nil)
     a))
 
 ;; ---------------------------------------------------------------- placement
@@ -518,10 +537,10 @@
   ;; reset stub needs this: it has to sit at the base of code space, because
   ;; that is where the processor starts, but it cannot be assembled until the
   ;; things it refers to have addresses.
-  (%vector-set! a 4 addr)
+  (asm-set-origin! a addr)
   (asm-resolve a)
-  (let ((len (%vector-ref a 1))
-        (buf (%vector-ref a 0))
+  (let ((len (asm-len a))
+        (buf (asm-buf a))
         (i 0))
     (while (%< i len)
       (%st8! (%+ addr i) (%bytes-ref buf i))
@@ -530,30 +549,30 @@
 
 (define (asm-place a)
   (asm-resolve a)
-  (let* ((len (%vector-ref a 1))
+  (let* ((len (asm-len a))
          (addr (alloc-code len))
-         (buf (%vector-ref a 0))
+         (buf (asm-buf a))
          (i 0))
     (while (%< i len)
       (%st8! (%+ addr i) (%bytes-ref buf i))
       (set! i (%+ i 1)))
-    (%vector-set! a 4 addr)
+    (asm-set-origin! a addr)
     addr))
 
 ;; Turn the assembler's output into a heap object, so the collector can see
 ;; both the machine code and every literal the code refers to.
 (define (asm-code-object a name)
   ;; The literals list is in reverse, so it fills the vector from the far end.
-  (let* ((n (%vector-ref a 6))
+  (let* ((n (asm-nlits a))
          (v (alloc-object t-code (%+ code-lits n)))
          (i (%- (%+ code-lits n) 1)))
-    (%st32! (%addr-of v) (%vector-ref a 4))          ; raw entry address
-    (%st32! (%+ (%addr-of v) 4) (%vector-ref a 1))   ; raw byte length
+    (%st32! (%addr-of v) (asm-origin a))          ; raw entry address
+    (%st32! (%+ (%addr-of v) 4) (asm-len a))   ; raw byte length
     ;; Who this is. Every frame has its code object in s1 and saves its
     ;; caller's, so this one word is what turns the frame chain into a
     ;; backtrace.
     (%set-slot! v code-name name)
-    (dolist (l (%vector-ref a 5))
+    (dolist (l (asm-literals a))
       (%set-slot! v i l)
       (set! i (%- i 1)))
     ;; The collector finds code through this, not by scanning code space,

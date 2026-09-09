@@ -39,17 +39,17 @@
 (define (make-table . opts)
   (let* ((cap (if (%cons? opts) (%car opts) 8))
          (r (make-record tbl-slots 'table)))
-    (%set-slot! r tbl-keys (make-vector-n cap *table-empty*))
-    (%set-slot! r tbl-vals (make-vector-n cap nil))
-    (%set-slot! r tbl-count 0)
-    (%set-slot! r tbl-dead 0)
+    (%record-set! r tbl-keys (make-vector-n cap *table-empty*))
+    (%record-set! r tbl-vals (make-vector-n cap nil))
+    (%record-set! r tbl-count 0)
+    (%record-set! r tbl-dead 0)
     r))
 
 (define (table? x)
-  (if (%record? x) (%eq? (%slot x 0) 'table) nil))
+  (if (%record? x) (%eq? (%record-ref x 0) 'table) nil))
 
-(define (table-count tbl) (%slot tbl tbl-count))
-(define (table-capacity tbl) (%vector-length (%slot tbl tbl-keys)))
+(define (table-count tbl) (%record-ref tbl tbl-count))
+(define (table-capacity tbl) (%vector-length (%record-ref tbl tbl-keys)))
 
 ;; ---------------------------------------------------------------- probing
 ;; Where a key lives, or -1. Stops at an empty slot and steps over the ones
@@ -91,18 +91,18 @@
 
 ;; ---------------------------------------------------------------- access
 (define (table-ref tbl key . opts)
-  (let ((i (table-find-slot (%slot tbl tbl-keys) key)))
+  (let ((i (table-find-slot (%record-ref tbl tbl-keys) key)))
     (if (%>= i 0)
-        (%vector-ref (%slot tbl tbl-vals) i)
+        (%vector-ref (%record-ref tbl tbl-vals) i)
         (if (%cons? opts) (%car opts) nil))))
 
 (define (table-has? tbl key)
-  (%>= (table-find-slot (%slot tbl tbl-keys) key) 0))
+  (%>= (table-find-slot (%record-ref tbl tbl-keys) key) 0))
 
 (define (table-grow! tbl)
   ;; Twice the size, and the deleted slots do not come with it.
-  (let* ((old-keys (%slot tbl tbl-keys))
-         (old-vals (%slot tbl tbl-vals))
+  (let* ((old-keys (%record-ref tbl tbl-keys))
+         (old-vals (%record-ref tbl tbl-vals))
          (n (%vector-length old-keys))
          (cap (%* n 2))
          (keys (make-vector-n cap *table-empty*))
@@ -116,50 +116,50 @@
               (%vector-set! vals j (%vector-ref old-vals i)))
             nil))
       (set! i (%+ i 1)))
-    (%set-slot! tbl tbl-keys keys)
-    (%set-slot! tbl tbl-vals vals)
-    (%set-slot! tbl tbl-dead 0)
+    (%record-set! tbl tbl-keys keys)
+    (%record-set! tbl tbl-vals vals)
+    (%record-set! tbl tbl-dead 0)
     tbl))
 
 (define (table-set! tbl key val)
   ;; Grown at three quarters full, counting the deleted slots: they cost a
   ;; probe step each, so a table full of holes is as slow as a table full of
   ;; keys and has to be rebuilt just the same.
-  (let ((used (%+ (%slot tbl tbl-count) (%slot tbl tbl-dead))))
+  (let ((used (%+ (%record-ref tbl tbl-count) (%record-ref tbl tbl-dead))))
     (if (%>= (%* (%+ used 1) 4) (%* (table-capacity tbl) 3))
         (table-grow! tbl)
         nil))
-  (let* ((keys (%slot tbl tbl-keys))
+  (let* ((keys (%record-ref tbl tbl-keys))
          (i (table-insert-slot keys key))
          (k (%vector-ref keys i)))
     (if (%eq? k key)
         nil
         (begin
           (if (%eq? k *table-gone*)
-              (%set-slot! tbl tbl-dead (%- (%slot tbl tbl-dead) 1))
+              (%record-set! tbl tbl-dead (%- (%record-ref tbl tbl-dead) 1))
               nil)
           (%vector-set! keys i key)
-          (%set-slot! tbl tbl-count (%+ (%slot tbl tbl-count) 1))))
-    (%vector-set! (%slot tbl tbl-vals) i val)
+          (%record-set! tbl tbl-count (%+ (%record-ref tbl tbl-count) 1))))
+    (%vector-set! (%record-ref tbl tbl-vals) i val)
     val))
 
 (define (table-del! tbl key)
   ;; A hole rather than an empty slot: something further along the probe may
   ;; have walked past here to get where it is.
-  (let ((i (table-find-slot (%slot tbl tbl-keys) key)))
+  (let ((i (table-find-slot (%record-ref tbl tbl-keys) key)))
     (if (%< i 0)
         nil
         (begin
-          (%vector-set! (%slot tbl tbl-keys) i *table-gone*)
-          (%vector-set! (%slot tbl tbl-vals) i nil)
-          (%set-slot! tbl tbl-count (%- (%slot tbl tbl-count) 1))
-          (%set-slot! tbl tbl-dead (%+ (%slot tbl tbl-dead) 1))
+          (%vector-set! (%record-ref tbl tbl-keys) i *table-gone*)
+          (%vector-set! (%record-ref tbl tbl-vals) i nil)
+          (%record-set! tbl tbl-count (%- (%record-ref tbl tbl-count) 1))
+          (%record-set! tbl tbl-dead (%+ (%record-ref tbl tbl-dead) 1))
           t))))
 
 ;; ---------------------------------------------------------------- walking
 (define (table-for-each tbl f)
-  (let* ((keys (%slot tbl tbl-keys))
-         (vals (%slot tbl tbl-vals))
+  (let* ((keys (%record-ref tbl tbl-keys))
+         (vals (%record-ref tbl tbl-vals))
          (n (%vector-length keys))
          (i 0))
     (while (%< i n)

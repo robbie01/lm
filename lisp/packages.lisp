@@ -50,7 +50,8 @@
   %intern %ld16 %ld32 %ld8 %logand %logior %lognot %logxor %lsh %macro?
   %macroexpand-1 %make-bytes %make-string %make-vector %mod %newline %null?
   %obj-len %obj-type %object? %raw-ld %raw-st! %read-file
-  %enable-after-trap %record? %reload-cons-run %rem %restore-interrupts %set-car! %set-cdr!
+  %enable-after-trap %record? %record-ref %record-set!
+  %reload-cons-run %rem %restore-interrupts %set-car! %set-cdr!
   %set-context
   %set-global! %set-slot! %set-symbol-flags! %set-symbol-function!
   %set-symbol-plist! %set-symbol-value! %slot %st16! %st32! %st8!
@@ -155,7 +156,8 @@
   ;; s3..s11 are where a leaf function keeps its locals, and nothing else in
   ;; the machine touches them.
   $s3 $s4 $s5 $s6 $s7 $s8 $s9 $s10 $s11 asm-code-object asm-gensym-label asm-label asm-len
-  asm-literal asm-new asm-origin asm-place asm-place-at csr-cycle
+  asm-literal asm-new asm-origin asm-place asm-place-at asm-buf asm-fixups
+  asm-labels asm-nlits asm-set-len! asm-set-origin! csr-cycle
   csr-mcause csr-mepc csr-mie csr-mscratch csr-mstatus csr-mtval csr-mtvec
   i-add i-addi i-and i-andi i-beq i-beqz i-bge i-blt i-bltu i-bne i-bnez
   i-call-reg i-car i-cdr i-csrrci i-csrrs i-csrrsi i-csrrw i-div i-ecall

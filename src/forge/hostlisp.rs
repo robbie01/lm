@@ -943,11 +943,14 @@ impl<'a> Lisp<'a> {
                 need!(1);
                 fix(self.h.olen(a[0]) as i32)
             }
-            "%slot" => {
+            // The bootstrap interpreter does not check the type the way the
+            // machine's instruction does; it is here so that the same source
+            // reads on both sides of the bootstrap.
+            "%slot" | "%record-ref" => {
                 need!(2);
                 self.h.slot(a[0], n!(1) as u32)
             }
-            "%set-slot!" => {
+            "%set-slot!" | "%record-set!" => {
                 need!(3);
                 let i = n!(1) as u32;
                 self.h.set_slot(a[0], i, a[2]);
@@ -1343,6 +1346,8 @@ pub static PRIMS: &[(&str, u32)] = &[
     ("%obj-len", 1),
     ("%slot", 2),
     ("%set-slot!", 3),
+    ("%record-ref", 2),
+    ("%record-set!", 3),
     ("%ld8", 1),
     ("%ld16", 1),
     ("%ld32", 1),

@@ -78,48 +78,79 @@
 (define trap-instance 6)
 
 ;; ---------------------------------------------------------------- context
-;;  0 asm         1 env          2 nlocals    3 maxlocals   4 freevars
-;;  5 boxed       6 name         7 frame-fix  8 outer-env   9 nparams
-;; 10 self-label  11 self-arity  12 leaf?
+;; What the compiler knows while it is compiling one function. This was a
+;; vector of thirteen numbered slots and a comment block to say which was
+;; which, which is fine until you add a fourteenth and have to count.
+(define cxi-tag 0)
+(define cxi-asm 1)
+(define cxi-env 2)
+(define cxi-nlocals 3)
+(define cxi-maxlocals 4)
+(define cxi-free 5)
+(define cxi-boxed 6)
+(define cxi-name 7)
+(define cxi-framefix 8)
+(define cxi-outer 9)
+(define cxi-nparams 10)
+(define cxi-selflabel 11)
+(define cxi-selfarity 12)
+(define cxi-leaf 13)
+(define cx-slots 14)
+
 (define (cx-new asm name outer-env)
-  (let ((c (make-vector-n 13 nil)))
-    (%vector-set! c 0 asm)
-    (%vector-set! c 1 nil)
-    (%vector-set! c 2 0)
-    (%vector-set! c 3 0)
-    (%vector-set! c 4 nil)
-    (%vector-set! c 5 nil)
-    (%vector-set! c 6 name)
-    (%vector-set! c 7 0)
-    (%vector-set! c 8 outer-env)
-    (%vector-set! c 9 0)
-    (%vector-set! c 10 nil)
-    (%vector-set! c 11 nil)
-    (%vector-set! c 12 nil)
+  (let ((c (make-record cx-slots 'context)))
+    (%record-set! c cxi-asm asm)
+    (%record-set! c cxi-nlocals 0)
+    (%record-set! c cxi-maxlocals 0)
+    (%record-set! c cxi-name name)
+    (%record-set! c cxi-framefix 0)
+    (%record-set! c cxi-outer outer-env)
+    (%record-set! c cxi-nparams 0)
     c))
 
-(define (cx-asm c) (%vector-ref c 0))
-(define (cx-env c) (%vector-ref c 1))
-(define (cx-set-env! c e) (%vector-set! c 1 e))
-(define (cx-name c) (%vector-ref c 6))
-(define (cx-leaf? c) (%vector-ref c 12))
+(define (cx-asm c) (%record-ref c cxi-asm))
+(define (cx-set-asm! c v) (%record-set! c cxi-asm v))
+(define (cx-env c) (%record-ref c cxi-env))
+(define (cx-set-env! c v) (%record-set! c cxi-env v))
+(define (cx-nlocals c) (%record-ref c cxi-nlocals))
+(define (cx-set-nlocals! c v) (%record-set! c cxi-nlocals v))
+(define (cx-maxlocals c) (%record-ref c cxi-maxlocals))
+(define (cx-set-maxlocals! c v) (%record-set! c cxi-maxlocals v))
+(define (cx-free c) (%record-ref c cxi-free))
+(define (cx-set-free! c v) (%record-set! c cxi-free v))
+(define (cx-boxed c) (%record-ref c cxi-boxed))
+(define (cx-set-boxed! c v) (%record-set! c cxi-boxed v))
+(define (cx-name c) (%record-ref c cxi-name))
+(define (cx-set-name! c v) (%record-set! c cxi-name v))
+(define (cx-framefix c) (%record-ref c cxi-framefix))
+(define (cx-set-framefix! c v) (%record-set! c cxi-framefix v))
+(define (cx-outer c) (%record-ref c cxi-outer))
+(define (cx-set-outer! c v) (%record-set! c cxi-outer v))
+(define (cx-nparams c) (%record-ref c cxi-nparams))
+(define (cx-set-nparams! c v) (%record-set! c cxi-nparams v))
+(define (cx-self-label c) (%record-ref c cxi-selflabel))
+(define (cx-set-self-label! c v) (%record-set! c cxi-selflabel v))
+(define (cx-self-arity c) (%record-ref c cxi-selfarity))
+(define (cx-set-self-arity! c v) (%record-set! c cxi-selfarity v))
+(define (cx-leaf? c) (%record-ref c cxi-leaf))
+(define (cx-set-leaf! c v) (%record-set! c cxi-leaf v))
 
 (define (cx-alloc-local c)
-  (let ((n (%vector-ref c 2)))
+  (let ((n (cx-nlocals c)))
     ;; The pre-pass bounds this before deciding a function is a leaf, so
     ;; reaching here means the bound was wrong rather than that the function
     ;; is unusual.
     (if (cx-leaf? c)
         (if (%>= n leaf-locals) (error "compile: leaf out of registers" (cx-name c)) nil)
         nil)
-    (%vector-set! c 2 (%+ n 1))
-    (if (%> (%+ n 1) (%vector-ref c 3)) (%vector-set! c 3 (%+ n 1)) nil)
+    (cx-set-nlocals! c (%+ n 1))
+    (if (%> (%+ n 1) (cx-maxlocals c)) (cx-set-maxlocals! c (%+ n 1)) nil)
     n))
 
 (define (cx-bind c sym loc)
-  (%vector-set! c 1 (%cons (%cons sym loc) (%vector-ref c 1))))
+  (cx-set-env! c (%cons (%cons sym loc) (cx-env c))))
 
-(define (cx-lookup c sym) (assq sym (%vector-ref c 1)))
+(define (cx-lookup c sym) (assq sym (cx-env c)))
 
 ;; ---------------------------------------------------------------- expansion
 ;; Macros are gone before anything looks at the tree, so the analysis passes
@@ -515,9 +546,9 @@
           ;; downstream reads the count out of t1.
           (if variadic
               nil
-              (begin (%vector-set! c 10 ok) (%vector-set! c 11 nreq)))
+              (begin (cx-set-self-label! c ok) (cx-set-self-arity! c nreq)))
           (i-mv a $t3 $sp)
-          (%vector-set! c 7 (asm-len a))  ; the one word that knows the frame size
+          (cx-set-framefix! c (asm-len a))  ; the one word that knows the frame size
           (i-addi a $sp $sp 0)            ; patched by finish-frame
           (i-sw a $ra $t3 -4)
           (i-sw a $s0 $t3 -8)
@@ -553,8 +584,8 @@
 ;; miscompile of the return address is the worst one in the machine.
 (define (check-leaf c)
   (let* ((a (cx-asm c))
-         (buf (%vector-ref a 0))
-         (len (%vector-ref a 1))
+         (buf (asm-buf a))
+         (len (asm-len a))
          (i 0))
     (while (%< i len)
       (let ((w (%logior (%logior (%bytes-ref buf i)
@@ -574,13 +605,13 @@
   (let* ((a (cx-asm c))
          ;; +15 rather than +7: round up to eight and leave one spare word
          ;; below the last local, so a stray store cannot reach the caller.
-         (frame (%logand (%+ (%+ frame-fixed (%* 4 (%vector-ref c 3))) 15) -8))
-         (off (%vector-ref c 7))
-         (save (%vector-ref a 1)))
+         (frame (%logand (%+ (%+ frame-fixed (%* 4 (cx-maxlocals c))) 15) -8))
+         (off (cx-framefix c))
+         (save (asm-len a)))
     (if (%> frame 2000) (error "compile: frame too large in" (cx-name c)) nil)
-    (%vector-set! a 1 off)
+    (asm-set-len! a off)
     (i-addi a $sp $sp (%- 0 frame))
-    (%vector-set! a 1 save)
+    (asm-set-len! a save)
     frame))
 
 ;; ---------------------------------------------------------------- intrinsics
@@ -780,6 +811,7 @@
   (set! *inline-syms* nil)
   (set! *indexed-imm*
         (list (list '%slot 0 nil) (list '%set-slot! 0 t)
+              (list '%record-ref t-record nil) (list '%record-set! t-record t)
               (list '%vector-ref t-vector nil) (list '%vector-set! t-vector t)))
   (setup-const-arg)
 
@@ -966,6 +998,18 @@
     (lambda (c)
       (i-stx (cx-asm c) $a2 $a0 $a1 0)
       (i-mv (cx-asm c) $a0 $a2)))
+  ;; A record, and only a record. `%slot` above will take any object at all,
+  ;; which is right for the handful of places that reach into a symbol, a
+  ;; closure or a code object by index - and wrong everywhere else, because it
+  ;; means `(win-get "abc" 1)` reads a string's bytes back as a window's y
+  ;; coordinate. Anything that knows it is holding a record says so.
+  (definline '%record-ref 2
+    (lambda (c) (i-ldx (cx-asm c) $a0 $a0 $a1 t-record)))
+  (definline '%record-set! 3
+    (lambda (c)
+      (i-stx (cx-asm c) $a2 $a0 $a1 t-record)
+      (i-mv (cx-asm c) $a0 $a2)))
+
   ;; These name the type they require, so (vector-ref "abc" 0) is a trap and
   ;; not a plausible-looking word out of the middle of a string.
   (definline '%vector-ref 2
@@ -1476,8 +1520,8 @@
 (define (self-call? c op n)
   (if (%symbol? op)
       (if (%eq? op (cx-name c))
-          (if (%vector-ref c 10)
-              (if (cx-lookup c op) nil (%= n (%vector-ref c 11)))
+          (if (cx-self-label c)
+              (if (cx-lookup c op) nil (%= n (cx-self-arity c)))
               nil)
           nil)
       nil))
@@ -1503,8 +1547,8 @@
           (begin
             (i-lw a $t0 $s0 clo-slot)
             (if tail
-                (begin (emit-epilogue c) (i-j a (%vector-ref c 10)))
-                (i-jal a $ra (%vector-ref c 10))))
+                (begin (emit-epilogue c) (i-j a (cx-self-label c)))
+                (i-jal a $ra (cx-self-label c))))
           (begin
             (if op-on-stack
                 (begin (i-lw a $t0 $sp 0) (i-addi a $sp $sp 4))
@@ -1674,7 +1718,7 @@
   (let* ((binds (cadr form))
          (body (cddr form))
          (saved-env (cx-env c))
-         (saved-n (%vector-ref c 2))
+         (saved-n (cx-nlocals c))
          (slots nil))
     ;; Initialisers all see the outer scope, so `let` binds in parallel.
     (dolist (b binds)
@@ -1686,12 +1730,12 @@
       (cx-bind c (%car s) (box-or-plain c (%car s) (%cdr s))))
     (compile-body c body tail)
     (cx-set-env! c saved-env)
-    (%vector-set! c 2 saved-n)))
+    (cx-set-nlocals! c saved-n)))
 
 (define (box-or-plain c sym slot)
   ;; A variable that an inner lambda captures and that something assigns has
   ;; to live in a box, or the closure and the frame would see different values.
-  (if (memq sym (%vector-ref c 5))
+  (if (memq sym (cx-boxed c))
       (begin
         (emit-make-box c slot)
         (list 'boxed-local slot))
@@ -1853,7 +1897,7 @@
       nil
       (if (%cons? free)
           nil
-          (if (%cons? (%vector-ref c 5))
+          (if (%cons? (cx-boxed c))
               nil
               (let ((bound (bound-names (%cons 'begin forms) names)))
                 (if (%> (length bound) leaf-locals)
@@ -1872,11 +1916,11 @@
          (captured (captured-vars (%cons 'begin expanded) nil))
          (i 0))
     ;; Decide up front which variables need boxes.
-    (%vector-set! c 5 (filter (lambda (s) (memq s captured)) (dedup assigned)))
+    (cx-set-boxed! c (filter (lambda (s) (memq s captured)) (dedup assigned)))
     ;; And whether this is a leaf, which decides the whole shape of the frame
     ;; and where its locals live, so it has to be known before a word is
     ;; emitted.
-    (%vector-set! c 12 (leaf-function? c expanded names rest free))
+    (cx-set-leaf! c (leaf-function? c expanded names rest free))
     (emit-prologue c nreq (if rest t nil))
     ;; Parameters land in the first local slots.
     (set! i 0)
@@ -1903,7 +1947,7 @@
         nil)
     ;; Box the parameters that need it, now that they are in slots.
     (dolist (p names)
-      (if (memq p (%vector-ref c 5))
+      (if (memq p (cx-boxed c))
           (let ((loc (%cdr (cx-lookup c p))))
             (emit-make-box c (cadr loc))
             (cx-set-env! c (%cons (%cons p (list 'boxed-local (cadr loc)))
@@ -1928,7 +1972,7 @@
 ;; spilled so the loop can index them uniformly with anything on the stack.
 (define (emit-rest-list c nreq slot)
   (let* ((a (cx-asm c))
-         (spill (%vector-ref c 2))
+         (spill (cx-nlocals c))
          (loop (asm-gensym-label "rest"))
          (done (asm-gensym-label "rdone"))
          (from-reg (asm-gensym-label "rreg"))

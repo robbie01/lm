@@ -264,6 +264,32 @@ instruction count in the hottest position in the machine, and its failure mode
 is a branch going the wrong way rather than a forged pointer. In practice its
 operands nearly always come from an operation that already checked them.
 
+### And the things that were vectors with numbers in them
+
+A window was eleven numbered slots, the compiler's context was thirteen with a
+comment block to say which was which, the assembler was seven, and a stream was
+three. They are records now, with named accessors and a tag that says what they
+are — so `(win-get "abc" 1)` stops reading a string's bytes back as a window's
+y coordinate:
+
+```
+> (win-get "abc" 1)
+*** slot: expected a record, got "abc"
+> (win-get 5 1)
+*** slot: expected a record, got 5
+```
+
+That needed a second indexed instruction. `%slot` takes any object, which is
+right for the handful of places that reach into a symbol, a closure or a code
+object by index and wrong everywhere else; `%record-ref` requires a record, and
+everything that knows it is holding one says so. Both are the same single
+`ldx` — the type it demands is a field in the instruction.
+
+What stays raw is what has to be: the 32-word register context the trap stub
+writes, the pool free list, the mark and pin bitmaps, the code area, device
+registers, and object headers. Those are addresses, and pretending otherwise
+would cost more than it bought.
+
 ### And a good deal of it was already standard
 
 Before inventing an instruction it is worth checking whether the committee got

@@ -148,7 +148,7 @@ const LISP_SIDE: &str = r#"
 (i-ret a)
 (asm-resolve a)
 (define *asm-len* (asm-len a))
-(define *asm-buf* (%vector-ref a 0))
+(define *asm-buf* (asm-buf a))
 "#;
 
 fn rust_side() -> Vec<u8> {

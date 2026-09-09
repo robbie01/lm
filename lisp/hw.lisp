@@ -370,12 +370,12 @@
 
 (define (make-rastport-on bm bw bh ox oy clip)
   (let ((r (make-record rp-slots 'rastport)))
-    (%set-slot! r rp-bm bm)
-    (%set-slot! r rp-bw bw)
-    (%set-slot! r rp-bh bh)
-    (%set-slot! r rp-org-x ox)
-    (%set-slot! r rp-org-y oy)
-    (%set-slot! r rp-clip clip)
+    (%record-set! r rp-bm bm)
+    (%record-set! r rp-bw bw)
+    (%record-set! r rp-bh bh)
+    (%record-set! r rp-org-x ox)
+    (%record-set! r rp-org-y oy)
+    (%record-set! r rp-clip clip)
     r))
 
 ;; The screen is the default target, so the old three-argument form still
@@ -389,18 +389,18 @@
   (make-rastport-on bm w h 0 0 (list (rect 0 0 w h))))
 
 (define (rastport? x)
-  (if (%record? x) (%eq? (%slot x 0) 'rastport) nil))
+  (if (%record? x) (%eq? (%record-ref x 0) 'rastport) nil))
 
-(define (rp-bitmap r) (%slot r rp-bm))
-(define (rp-bitmap-w r) (%slot r rp-bw))
-(define (rp-bitmap-h r) (%slot r rp-bh))
+(define (rp-bitmap r) (%record-ref r rp-bm))
+(define (rp-bitmap-w r) (%record-ref r rp-bw))
+(define (rp-bitmap-h r) (%record-ref r rp-bh))
 (define (set-rp-bitmap! r bm w h)
-  (%set-slot! r rp-bm bm) (%set-slot! r rp-bw w) (%set-slot! r rp-bh h))
-(define (rp-origin-x r) (%slot r rp-org-x))
-(define (rp-origin-y r) (%slot r rp-org-y))
-(define (rp-region r) (%slot r rp-clip))
-(define (set-rp-origin! r x y) (%set-slot! r rp-org-x x) (%set-slot! r rp-org-y y))
-(define (set-rp-region! r rgn) (%set-slot! r rp-clip rgn))
+  (%record-set! r rp-bm bm) (%record-set! r rp-bw w) (%record-set! r rp-bh h))
+(define (rp-origin-x r) (%record-ref r rp-org-x))
+(define (rp-origin-y r) (%record-ref r rp-org-y))
+(define (rp-region r) (%record-ref r rp-clip))
+(define (set-rp-origin! r x y) (%record-set! r rp-org-x x) (%record-set! r rp-org-y y))
+(define (set-rp-region! r rgn) (%record-set! r rp-clip rgn))
 
 (define (use-rastport rp) (set! *rp* rp) rp)
 

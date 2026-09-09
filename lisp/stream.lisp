@@ -40,17 +40,28 @@
 (define (await-char)
   (if *wait* (%funcall *wait*) (%wait-for-input)))
 
-(define (make-stream put get wait) (vector put get wait))
-(define (stream-put s) (%vector-ref s 0))
-(define (stream-get s) (%vector-ref s 1))
-(define (stream-wait s) (%vector-ref s 2))
+;; Slot 0 is the tag, so a stream says what it is.
+(define stream-slots 4)
+(define st-put 1)
+(define st-get 2)
+(define st-wait 3)
+
+(define (make-stream put get wait)
+  (let ((s (make-record stream-slots 'stream)))
+    (%record-set! s st-put put)
+    (%record-set! s st-get get)
+    (%record-set! s st-wait wait)
+    s))
+(define (stream-put s) (%record-ref s st-put))
+(define (stream-get s) (%record-ref s st-get))
+(define (stream-wait s) (%record-ref s st-wait))
 
 (define (current-stream) (make-stream *out* *in* *wait*))
 
 (define (use-stream! s)
-  (set! *out* (%vector-ref s 0))
-  (set! *in* (%vector-ref s 1))
-  (set! *wait* (%vector-ref s 2))
+  (set! *out* (stream-put s))
+  (set! *in* (stream-get s))
+  (set! *wait* (stream-wait s))
   s)
 
 ;; The serial line, named so it can be switched back to.
