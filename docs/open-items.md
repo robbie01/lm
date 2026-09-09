@@ -4,17 +4,31 @@ Things deliberately left undone, with enough detail to pick them up cold.
 
 ## Safety
 
-**Overflow trapping is built but not switched on.**
-`faddo`, `fsubo` and `fmulo` trap when a result will not fit in 31 bits. They
-are tested and nothing emits them. Two things block turning them on:
+**Overflow should make a bignum. Decided, not built.**
+`faddo`, `fsubo` and `fmulo` trap when a result will not fit in 31 bits; they
+are tested and nothing emits them yet. The plan:
 
-- `hash-string-into` computes `(%* h 33)` where `h` is 30 bits. That overflows
-  on purpose and masks afterwards.
-- The fixed-point Mandelbrot in `demo.lisp` relies on multiplies wrapping.
+- `+`, `-`, `*` and friends emit the trapping form and the handler promotes.
+  `C_OVER` carries the wrapped result in `mtval`, which is not enough to
+  reconstruct the true value for a multiply, so the handler decodes the
+  instruction, reads the two operands out of the saved context, redoes the
+  arithmetic in wider form and writes a bignum into `rd`. Then it steps `mepc`
+  past the instruction and returns, exactly as `handle-ecall` already does.
+- A bignum is an object: `t-bignum`, sign plus a vector of 30-bit limbs, with
+  the invariant that anything that fits a fixnum *is* a fixnum, so `eq?` on
+  small numbers keeps working and every existing type test stays right.
+- The arithmetic instructions stay fixnum-only. A bignum operand is a `C_TYPE`
+  trap, and the same handler catches it and dispatches to the Lisp routines.
+  So one trap handler covers both promotion and mixed-mode arithmetic, and the
+  fast path is untouched.
+- Two explicit forms for the places that want the old behaviour. `wrap+`,
+  `wrap*` and so on emit the wrapping instructions - `hash-string-into` needs
+  `(wrap* h 33)`, and the fixed-point Mandelbrot needs wrapping multiplies.
+  And a strict family that traps rather than promoting, for code that means
+  to stay in fixnums and wants to hear about it.
 
-Turning it on means deciding what a number that does not fit should become —
-which is a decision about bignums, not about encoding. Until then, arithmetic
-is type-checked and wraps.
+The ordering matters: the wrapping forms have to exist and those two callers
+have to move to them *before* the default changes, or interning breaks.
 
 **The fused comparison is not checked.**
 `(< i n)` as the test of an `if` compiles to a bare `blt`. Making it checked
@@ -61,12 +75,27 @@ measured demand.
 **`%lognot` is two instructions** — `li -1` then `fxor`. An immediate xor would
 make it one, but there is no funct3 left in custom-3 for it.
 
-## Instructions with no users
+## Instructions with no users, and what they are for
 
-Emitted zero times in the image: `fltu`, `faddo`, `fsubo`, `fmulo`, `ldxbi`,
-`stxbi`, and `fori` (four sites, two executions). The overflow three are
-deliberate — see above. The rest exist because the encoding is orthogonal.
-Decide whether orthogonality is worth the decode arms, or drop them.
+The three overflow forms are spoken for: they are what bignums will be built
+on. The others:
+
+**`fltu` — unsigned compare.** The customer is address arithmetic. Every
+`(%< p limit)` in the collector and the allocators compares two addresses held
+as fixnums, and a fixnum is 31 bits, so an address above 2^30 would compare as
+negative. Nothing in a 256 MiB machine reaches that today, which is why nobody
+has noticed; `fltu` is what makes it not matter. It is also the right primitive
+for a `bytes<?` or an unsigned `min`/`max` on raw data.
+
+**`ldxbi` / `stxbi` — a byte at a constant index.** No customer today because
+string and byte access is nearly always a computed index. The two that are not
+are a string's first character - `(string-ref s 0)`, which the reader does on
+every token - and fixed-layout byte records, which is what a disk block header
+or a font glyph would be if either were a `t-bytes` object rather than raw
+pool memory. Worth keeping until the font atlas or the file system arrives.
+
+**`fori`** has four sites and two executions, and is simply rare rather than
+useless: `(%logior x k)` with a constant is uncommon in this code.
 
 ## Held ISA ideas
 
@@ -143,6 +172,51 @@ would survive the move, and calls already go through the closure's entry word.
 The rest of the difference is that a rebuilt image is a *running system's*
 heap - an Exec with tasks, a REPL, every symbol interned twice - where a
 forge-built one is a freshly constructed one.
+
+## Locking
+
+Three mechanisms, and the rule for choosing between them:
+
+- **`without-interrupts`** — for anything an interrupt server touches. It saves
+  and restores the hardware state, works before Exec exists, and stops the
+  clock, the keyboard and the frame for its duration. The scheduler's lists,
+  the signal bits and the pool free list need this.
+- **`without-tasks`** (Forbid) — for anything only tasks touch. Interrupts keep
+  running; only the scheduler is held off. Costs one increment, needs nothing
+  declared, and cannot deadlock. `*windows*` and `*damage*` in the workbench
+  are the obvious customers and still use `without-interrupts` today.
+- **A semaphore** — not built. For sections that are long, or that block, or
+  that only a few tasks contend for. Forbid stops *every* task in the system,
+  which is fine for a few instructions and wrong for anything that waits.
+
+`disable`/`enable` and `forbid`/`permit` stay as raw pairs, for the sections
+that are not lexical. `wait` is the one that cannot be a macro: it releases
+around a `reschedule` inside a loop and takes the section again on the way
+back, which no lexical form expresses.
+
+**Semaphores are the missing piece.** An Exec semaphore is a node with a
+nesting count, an owner, and a queue of waiters, with Obtain/Release/Attempt
+built on Wait and Signal. Perhaps sixty lines. Nothing needs one yet because
+nothing holds a lock across a block; the first customer will be a file system
+or a disk queue.
+
+## A clean self-hosted rebuild
+
+Today a rebuilt image is a running system's heap. Two things stand between
+that and a clean one, and both are listed above:
+
+1. **Compacting code space**, so the dead code a rebuild leaves behind is not
+   in the file.
+2. **A purify step before saving.** Exec is rebuilt from nothing on resume, so
+   at save time the old ExecBase lists, the task records, the reaper list and
+   the compiler's caches are all garbage that is still rooted. Setting those
+   globals to nil before the final collection, and freeing the pool blocks the
+   old stacks occupy, would let the collector take them. This is the old Lisp
+   machine trick and it is what `save-image` should do.
+
+With both, `lmforge rebuild` would produce an image the size of what the new
+system actually is, and the machine would be able to build a clean successor
+without the forge in the loop at all.
 
 ## Loose ends
 
