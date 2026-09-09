@@ -276,6 +276,50 @@
 (define (i-stx a val obj idx ty) (i-r a ty val obj idx 1 op-index))
 (define (i-ldxb a rd obj idx ty)  (i-r a ty rd obj idx 2 op-index))
 (define (i-stxb a val obj idx ty) (i-r a ty val obj idx 3 op-index))
+;; The same four with a constant index, which is what a record field, a
+;; closure slot and an instance tag always are. The index goes in the rs2
+;; field, as an untagged 0..31, the way slli has always kept its shift there.
+(define (i-ldxi a rd obj i ty)  (i-r a ty rd obj i 4 op-index))
+(define (i-stxi a val obj i ty) (i-r a ty val obj i 5 op-index))
+(define (i-ldxbi a rd obj i ty)  (i-r a ty rd obj i 6 op-index))
+(define (i-stxbi a val obj i ty) (i-r a ty val obj i 7 op-index))
+
+;; ---- B extension: Zba, Zbb, Zbs; and Zicond ----
+;; Ratified RISC-V rather than ours. Taking these first is what stops the
+;; custom opcodes growing to cover ground the committee already covered.
+(define (i-sh1add a rd rs1 rs2) (i-r a #x10 rd rs1 rs2 2 op-reg))
+(define (i-sh2add a rd rs1 rs2) (i-r a #x10 rd rs1 rs2 4 op-reg))
+(define (i-sh3add a rd rs1 rs2) (i-r a #x10 rd rs1 rs2 6 op-reg))
+(define (i-andn a rd rs1 rs2)   (i-r a #x20 rd rs1 rs2 7 op-reg))
+(define (i-orn a rd rs1 rs2)    (i-r a #x20 rd rs1 rs2 6 op-reg))
+(define (i-xnor a rd rs1 rs2)   (i-r a #x20 rd rs1 rs2 4 op-reg))
+(define (i-min a rd rs1 rs2)    (i-r a #x05 rd rs1 rs2 4 op-reg))
+(define (i-minu a rd rs1 rs2)   (i-r a #x05 rd rs1 rs2 5 op-reg))
+(define (i-max a rd rs1 rs2)    (i-r a #x05 rd rs1 rs2 6 op-reg))
+(define (i-maxu a rd rs1 rs2)   (i-r a #x05 rd rs1 rs2 7 op-reg))
+(define (i-rol a rd rs1 rs2)    (i-r a #x30 rd rs1 rs2 1 op-reg))
+(define (i-ror a rd rs1 rs2)    (i-r a #x30 rd rs1 rs2 5 op-reg))
+(define (i-rori a rd rs1 sh)    (i-r a #x30 rd rs1 sh 5 op-imm))
+(define (i-bset a rd rs1 rs2)   (i-r a #x14 rd rs1 rs2 1 op-reg))
+(define (i-bclr a rd rs1 rs2)   (i-r a #x24 rd rs1 rs2 1 op-reg))
+(define (i-binv a rd rs1 rs2)   (i-r a #x34 rd rs1 rs2 1 op-reg))
+(define (i-bext a rd rs1 rs2)   (i-r a #x24 rd rs1 rs2 5 op-reg))
+(define (i-bseti a rd rs1 sh)   (i-r a #x14 rd rs1 sh 1 op-imm))
+(define (i-bclri a rd rs1 sh)   (i-r a #x24 rd rs1 sh 1 op-imm))
+(define (i-binvi a rd rs1 sh)   (i-r a #x34 rd rs1 sh 1 op-imm))
+(define (i-bexti a rd rs1 sh)   (i-r a #x24 rd rs1 sh 5 op-imm))
+(define (i-clz a rd rs1)        (i-r a #x30 rd rs1 0 1 op-imm))
+(define (i-ctz a rd rs1)        (i-r a #x30 rd rs1 1 1 op-imm))
+(define (i-cpop a rd rs1)       (i-r a #x30 rd rs1 2 1 op-imm))
+(define (i-sextb a rd rs1)      (i-r a #x30 rd rs1 4 1 op-imm))
+(define (i-sexth a rd rs1)      (i-r a #x30 rd rs1 5 1 op-imm))
+(define (i-zexth a rd rs1)      (i-r a #x04 rd rs1 0 4 op-reg))
+(define (i-rev8 a rd rs1)       (i-r a #x34 rd rs1 #x18 5 op-imm))
+(define (i-orcb a rd rs1)       (i-r a #x14 rd rs1 7 5 op-imm))
+;; rd <- (rs2 = 0) ? 0 : rs1, and its opposite. A branchless select on a
+;; machine with no flags register.
+(define (i-czero-eqz a rd rs1 rs2) (i-r a #x07 rd rs1 rs2 5 op-reg))
+(define (i-czero-nez a rd rs1 rs2) (i-r a #x07 rd rs1 rs2 7 op-reg))
 (define (i-ret a) (i-jalr a $zero $ra 0))
 (define (i-jr a rs) (i-jalr a $zero rs 0))
 (define (i-call-reg a rs) (i-jalr a $ra rs 0))

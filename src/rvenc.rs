@@ -120,6 +120,105 @@ pub fn sw(rs2: u32, rs1: u32, o: i32) -> u32 {
     s_type(o, rs2, rs1, 2, 0x23)
 }
 
+// ---- B extension: Zba, Zbb, Zbs; and Zicond ----
+// Ratified RISC-V, not our own. They are here because the collector's bit
+// maps, the boolean materialisation and the compositor's clipping all want
+// them, and because reaching for a standard extension is what keeps the
+// custom opcodes small.
+pub fn sh1add(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    r_type(0x10, rs2, rs1, 2, rd, 0x33)
+}
+pub fn sh2add(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    r_type(0x10, rs2, rs1, 4, rd, 0x33)
+}
+pub fn sh3add(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    r_type(0x10, rs2, rs1, 6, rd, 0x33)
+}
+pub fn andn(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    r_type(0x20, rs2, rs1, 7, rd, 0x33)
+}
+pub fn orn(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    r_type(0x20, rs2, rs1, 6, rd, 0x33)
+}
+pub fn xnor(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    r_type(0x20, rs2, rs1, 4, rd, 0x33)
+}
+pub fn min(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    r_type(0x05, rs2, rs1, 4, rd, 0x33)
+}
+pub fn minu(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    r_type(0x05, rs2, rs1, 5, rd, 0x33)
+}
+pub fn max(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    r_type(0x05, rs2, rs1, 6, rd, 0x33)
+}
+pub fn maxu(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    r_type(0x05, rs2, rs1, 7, rd, 0x33)
+}
+pub fn rol(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    r_type(0x30, rs2, rs1, 1, rd, 0x33)
+}
+pub fn ror(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    r_type(0x30, rs2, rs1, 5, rd, 0x33)
+}
+pub fn rori(rd: u32, rs1: u32, sh: u32) -> u32 {
+    r_type(0x30, sh, rs1, 5, rd, 0x13)
+}
+pub fn bset(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    r_type(0x14, rs2, rs1, 1, rd, 0x33)
+}
+pub fn bclr(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    r_type(0x24, rs2, rs1, 1, rd, 0x33)
+}
+pub fn binv(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    r_type(0x34, rs2, rs1, 1, rd, 0x33)
+}
+pub fn bext(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    r_type(0x24, rs2, rs1, 5, rd, 0x33)
+}
+pub fn bseti(rd: u32, rs1: u32, sh: u32) -> u32 {
+    r_type(0x14, sh, rs1, 1, rd, 0x13)
+}
+pub fn bclri(rd: u32, rs1: u32, sh: u32) -> u32 {
+    r_type(0x24, sh, rs1, 1, rd, 0x13)
+}
+pub fn binvi(rd: u32, rs1: u32, sh: u32) -> u32 {
+    r_type(0x34, sh, rs1, 1, rd, 0x13)
+}
+pub fn bexti(rd: u32, rs1: u32, sh: u32) -> u32 {
+    r_type(0x24, sh, rs1, 5, rd, 0x13)
+}
+pub fn clz(rd: u32, rs1: u32) -> u32 {
+    r_type(0x30, 0, rs1, 1, rd, 0x13)
+}
+pub fn ctz(rd: u32, rs1: u32) -> u32 {
+    r_type(0x30, 1, rs1, 1, rd, 0x13)
+}
+pub fn cpop(rd: u32, rs1: u32) -> u32 {
+    r_type(0x30, 2, rs1, 1, rd, 0x13)
+}
+pub fn sextb(rd: u32, rs1: u32) -> u32 {
+    r_type(0x30, 4, rs1, 1, rd, 0x13)
+}
+pub fn sexth(rd: u32, rs1: u32) -> u32 {
+    r_type(0x30, 5, rs1, 1, rd, 0x13)
+}
+pub fn zexth(rd: u32, rs1: u32) -> u32 {
+    r_type(0x04, 0, rs1, 4, rd, 0x33)
+}
+pub fn rev8(rd: u32, rs1: u32) -> u32 {
+    r_type(0x34, 0x18, rs1, 5, rd, 0x13)
+}
+pub fn orcb(rd: u32, rs1: u32) -> u32 {
+    r_type(0x14, 7, rs1, 5, rd, 0x13)
+}
+pub fn czeroeqz(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    r_type(0x07, rs2, rs1, 5, rd, 0x33)
+}
+pub fn czeronez(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    r_type(0x07, rs2, rs1, 7, rd, 0x33)
+}
+
 // ---- custom-1: indexed access, checked ----
 /// `ty` is the object type the access requires, or 0 for any object.
 pub fn ldx(rd: u32, rs1: u32, rs2: u32, ty: u32) -> u32 {
@@ -133,6 +232,19 @@ pub fn ldxb(rd: u32, rs1: u32, rs2: u32, ty: u32) -> u32 {
 }
 pub fn stxb(rs3: u32, rs1: u32, rs2: u32, ty: u32) -> u32 {
     r_type(ty, rs2, rs1, 3, rs3, 0x2b)
+}
+/// The same four, with the index as a five-bit immediate in the rs2 field.
+pub fn ldxi(rd: u32, rs1: u32, i: u32, ty: u32) -> u32 {
+    r_type(ty, i, rs1, 4, rd, 0x2b)
+}
+pub fn stxi(rs3: u32, rs1: u32, i: u32, ty: u32) -> u32 {
+    r_type(ty, i, rs1, 5, rs3, 0x2b)
+}
+pub fn ldxbi(rd: u32, rs1: u32, i: u32, ty: u32) -> u32 {
+    r_type(ty, i, rs1, 6, rd, 0x2b)
+}
+pub fn stxbi(rs3: u32, rs1: u32, i: u32, ty: u32) -> u32 {
+    r_type(ty, i, rs1, 7, rs3, 0x2b)
 }
 
 // ---- custom-0: pairs, checked ----

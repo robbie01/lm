@@ -54,14 +54,13 @@
 ;; lookup replays the few objects between that boundary and the one asked
 ;; about. Blocks are small enough that the replay is short and numerous enough
 ;; that the tables stay well under a megabyte.
-(define gc-popcount-table gc-stack-end)
 (define cons-block-bytes 64)                 ; 8 pairs
 ;; Eight rather than the sixty-four this started with. Every pointer the
 ;; update pass rewrites costs one replay of its block's mark bits, and a
 ;; sixty-four pair block is eight bytes of popcount a lookup; eight pairs is
 ;; one. The table is eight times larger and lives in scratch, which is not
 ;; saved and has a hundred and twenty-eight megabytes to spend.
-(define gc-cons-prefix (%+ gc-popcount-table 256))
+(define gc-cons-prefix gc-stack-end)
 (define gc-cons-blocks (%lsh (%- cons-limit cons-base) -6))
 (define obj-block-bytes 1024)
 (define gc-obj-prefix (%+ gc-cons-prefix (%lsh gc-cons-blocks 2)))
@@ -108,25 +107,14 @@
 ;; ---------------------------------------------------------------- mark bits
 (define (gc-bit-index p) (%lsh (%- p gc-heap-lo) -3))
 
-(define (gc-marked? p)
-  (let ((i (gc-bit-index p)))
-    (%= 1 (%logand 1 (%lsh (%ld8 (%+ gc-bitmap (%lsh i -3)))
-                           (%- 0 (%logand i 7)))))))
-
-(define (gc-mark! p)
-  (let* ((i (gc-bit-index p))
-         (a (%+ gc-bitmap (%lsh i -3))))
-    (%st8! a (%logior (%ld8 a) (%lsh 1 (%logand i 7))))))
-
-(define (gc-pinned? p)
-  (let ((i (gc-bit-index p)))
-    (%= 1 (%logand 1 (%lsh (%ld8 (%+ gc-pinmap (%lsh i -3)))
-                           (%- 0 (%logand i 7)))))))
-
-(define (gc-pin! p)
-  (let* ((i (gc-bit-index p))
-         (a (%+ gc-pinmap (%lsh i -3))))
-    (%st8! a (%logior (%ld8 a) (%lsh 1 (%logand i 7))))))
+;; These were four shifts, a mask and a byte load apiece, and every one of the
+;; shifts was the general run-time kind that branches on the sign of its
+;; count. `bext` and `bset` do the bit in one instruction, and the compiler
+;; now folds a constant shift, so what is left is the address arithmetic.
+(define (gc-marked? p) (%bit-ref gc-bitmap (gc-bit-index p)))
+(define (gc-mark! p) (%bit-set! gc-bitmap (gc-bit-index p)))
+(define (gc-pinned? p) (%bit-ref gc-pinmap (gc-bit-index p)))
+(define (gc-pin! p) (%bit-set! gc-pinmap (gc-bit-index p)))
 
 ;; Six megabytes of mark bits, cleared twice a collection. A Lisp loop stores
 ;; one word per thirty cycles and takes forty-seven million of them to do it;
@@ -173,21 +161,10 @@
 
 ;; A byte-at-a-time population count. There is no such instruction in the
 ;; base integer set, and the usual bit-twiddling constants do not fit in a
-;; thirty-bit fixnum, so a small table is both simpler and faster.
-(define (gc-build-popcount)
-  (let ((i 0))
-    (while (%< i 256)
-      (let ((n 0) (b i))
-        (while (%> b 0)
-          (set! n (%+ n (%logand b 1)))
-          (set! b (%lsh b -1)))
-        (%st8! (%+ gc-popcount-table i) n))
-      (set! i (%+ i 1)))))
+;; thirty-bit fixnum. That used to argue for a 256-byte lookup table built at
+;; the first collection; `cpop` is one instruction and settles it.
 
-(define (popcount-byte b) (%ld8 (%+ gc-popcount-table b)))
-
-(define (gc-bit? map i)
-  (%= 1 (%logand 1 (%lsh (%ld8 (%+ map (%lsh i -3))) (%- 0 (%logand i 7))))))
+(define (gc-bit? map i) (%bit-ref map i))
 
 (define (gc-clear-bitmap)
   (gc-clear-map gc-bitmap)
@@ -588,7 +565,7 @@
         (e (%lsh (%- to gc-heap-lo) -3))
         (n 0))
     (while (%<= (%+ i 8) e)
-      (set! n (%+ n (popcount-byte (%ld8 (%+ gc-bitmap (%lsh i -3))))))
+      (set! n (%+ n (%popcount (%ld8 (%+ gc-bitmap (%lsh i -3))))))
       (set! i (%+ i 8)))
     (while (%< i e)
       (if (gc-bit? gc-bitmap i) (set! n (%+ n 1)) nil)
@@ -786,16 +763,14 @@
     (%lsh (%- cons-limit cons-top) -3)))
 
 ;; ---------------------------------------------------------------- collect
-(define *gc-ready* nil)
-
-;; The popcount table, the mark bitmap and the mark stack all live above
-;; fast-base, which no image saves - they are scratch, rebuilt on demand. The
-;; flag saying the table has been built is an ordinary Lisp global, and that
-;; one does get saved. An image written without this call comes back claiming
-;; a table it does not have, and the collector then computes forwarding
-;; addresses out of a page of zeroes: everything still looks like a pointer,
-;; and nothing points where it used to.
-(define (gc-forget-scratch) (set! *gc-ready* nil))
+;; Everything above fast-base - the mark bitmap, the pin map, the mark stack,
+;; the forwarding tables - is scratch that no image saves, and every part of
+;; it is rebuilt from nothing at the start of a collection. That was not
+;; always true: a popcount table was built once and remembered in an ordinary
+;; Lisp global, which *was* saved, so an image could come back believing in a
+;; table that was a page of zeroes and compute forwarding addresses out of it.
+;; `cpop` retired the table and the flag with it, and there is now nothing
+;; about the collector for a save to get wrong.
 
 (define (gc-collect)
   ;; Interrupts are off for the whole of this and back on afterwards only if
@@ -804,7 +779,6 @@
   ;; who was holding Disable and happened to allocate.
   (let ((t0 (%cycles)))
     (without-interrupts
-      (if *gc-ready* nil (begin (gc-build-popcount) (set! *gc-ready* t)))
       ;; No need to ask any task how far it has got: runs are carved out of
       ;; lg-cons-ptr, so that is already above every pair anyone has been
       ;; handed. What is left unused inside a task's run is simply unmarked,

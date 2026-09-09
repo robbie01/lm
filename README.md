@@ -73,7 +73,11 @@ tests.
 
 ## The processor
 
-RV32IMC, machine mode, with the CSRs a kernel needs. Dispatch is token
+`rv32imc_zba_zbb_zbs_zicond_xlm`, machine mode, with the CSRs a kernel needs.
+The standard part is ordinary RISC-V; `Xlm` is the two custom opcodes below.
+(`L` would have been the obvious letter and is not available: the spec reserves
+it for decimal floating point, and a non-standard extension is spelled with an
+`X` anyway.) Dispatch is token
 threaded on the opcode itself — no predecode, no translation cache, nothing to
 invalidate when the compiler writes fresh code into the heap and jumps to it:
 
@@ -146,6 +150,74 @@ the value itself:
 > (set-car! nil 1)
 *** set-car!: nil has no cell to write, at pc 10478f0
 ```
+
+### Indexed access is one instruction
+
+custom-1 does for objects what custom-0 does for pairs, and rather more, since
+an indexed access has four things to establish rather than one. `funct7`
+carries the type the object has to be - 0 for any object at all - and one
+instruction checks the tag, checks the header, checks that the index is a
+fixnum, checks it against the length in the header, then untags it, scales it
+and forms the address:
+
+```
+funct3 bit 0   store rather than load
+funct3 bit 1   byte rather than word
+funct3 bit 2   the index is a five-bit immediate in the rs2 field
+```
+
+The address arithmetic needs the header word anyway, and the length is in the
+header, so the bound costs a comparison the processor makes in parallel with
+the address. Out of range traps with cause 25 and the index in `mtval`.
+
+The immediate form is there because most indices are written down rather than
+computed: every record field, every closure slot, the instance tag and version.
+Putting the index in the `rs2` field follows `slli`, which has always kept its
+shift amount there, so the encoding stays R-type and nothing that walks
+instructions needs a new case.
+
+**It is also what makes a checked call free.** A closure's entry point is slot
+0 of a `t-closure`, and the call sequence used to load it with a bare `lw` that
+proved nothing:
+
+```
+> (let ((f 5)) (f 1))       ; before
+*** illegal instruction at pc 0, value 0
+> (nosuchfunction 1)
+*** illegal instruction at pc 8, value 92090
+```
+
+Calling a number jumped to whatever was in the nil cell; calling an undefined
+name jumped to the sysbase pointer and executed it. `ldxi t2, t0, 0, t-closure`
+is the same one instruction and says what it means:
+
+```
+> (let ((f 5)) (f 1))       ; after
+*** call: expected a function, got 5, at pc 105e7d8
+backtrace:
+  repl-loop at 105e7d8
+> (nosuchfunction 1)
+*** call: undefined function, at pc 105ce44
+```
+
+### And a good deal of it was already standard
+
+Before inventing an instruction it is worth checking whether the committee got
+there first, and for a Lisp it repeatedly has. The core implements Zba, Zbb,
+Zbs and Zicond, and the compiler emits them:
+
+| | what wanted it |
+|---|---|
+| `bext`, `bset` | the collector's mark and pin maps: a bit test was a call, four run-time shifts and a mask |
+| `cpop` | counting marks, which needed a 256-byte lookup table built at the first collection - and a saved-image bug of its own, since the flag saying the table existed *was* saved and the table was not |
+| `czero.eqz` | turning a comparison into `t` or `nil`, at 530 sites |
+| `min`, `max` | a fixnum is 2n+1, which preserves signed order, so these are right on tagged values with no untagging at all |
+| `sh2add` | addressing the bit maps by word, which is what puts the bit index in the five bits `bext` looks at |
+
+None of it is ours, and that is the point: the two custom opcodes stay small
+because the standard ones did the rest. On a collection-heavy workload the lot
+together is **34% fewer instructions**, and a collection itself 39% faster -
+update 158M cycles to 97M, move 121M to 68M, marking 33M to 25M.
 
 ## Calling
 
@@ -793,6 +865,23 @@ encoding agreeing with itself is not.
 `lmdev inspect` checks the invariant the collector depends on, by decoding
 every `lui`/`addi` pair in code space and asserting that none of them names
 anything in the heap.
+
+A static count of an image says what the compiler *emitted*; it says nothing
+about what runs, and the two distributions are not the same - a prologue is
+emitted once per function and executed once per call. For the other half:
+
+```
+cargo build --release --features isaprof
+lm kick.img --stats --script '...'
+```
+
+which adds one counter per dispatch slot, in the threaded core's `next!`, and
+prints a sorted histogram on exit with the custom opcodes broken down by form.
+A feature rather than a flag because that increment is in the path every single
+instruction takes: off, it is not there at all. The total it prints is smaller
+than the instruction count beside it, and the difference is real - `cycles` is
+the machine's timebase, and a machine parked on `wfi` has its clock moved
+forward to the next interrupt without executing anything.
 
 `lmdev reach` walks the heap once per package, from that package's own symbols,
 and records for every cell the set of packages that can get to it. It answers

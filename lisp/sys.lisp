@@ -128,7 +128,8 @@
         (else (emit-str "set-cdr!"))))
 
 (define (emit-index-op ty f)
-  (cond ((%= ty t-vector) (emit-str (if (%= f 0) "vector-ref" "vector-set!")))
+  (cond ((%= ty t-closure) (emit-str "call"))
+        ((%= ty t-vector) (emit-str (if (%= f 0) "vector-ref" "vector-set!")))
         ((%= ty t-string) (emit-str (if (%= f 2) "string-ref" "string-set!")))
         ((%= ty t-bytes)  (emit-str (if (%= f 2) "bytes-ref" "bytes-set!")))
         (else (emit-str (if (%= (%logand f 1) 1) "set-slot!" "slot")))))
@@ -143,15 +144,30 @@
 
 (define (emit-index-fault w ctx)
   ;; Both operands are still in the registers the instruction named, so the
-  ;; report can say what was indexed as well as what with.
+  ;; report can say what was indexed as well as what with - except that the
+  ;; immediate form keeps the index in the instruction, where the rs2 field
+  ;; is the index itself rather than the number of a register holding it.
   (let* ((ty (insn-f7 w))
+         (f (insn-f3 w))
          (obj (%raw-ld (%+ ctx (ctx-word (insn-rs1 w)))))
-         (idx (%raw-ld (%+ ctx (ctx-word (insn-rs2 w))))))
-    (emit-index-op ty (insn-f3 w))
+         (idx (if (%= 4 (%logand f 4))
+                  (insn-rs2 w)
+                  (%raw-ld (%+ ctx (ctx-word (insn-rs2 w)))))))
+    (emit-index-op ty (%logand f 3))
     (cond
+     ;; Calling a name nothing was ever stored in. The value is the unbound
+     ;; marker, which is an immediate and would otherwise be reported by the
+     ;; branch below as the meaningless `#<immediate>`.
+     ((if (%= ty t-closure) (%eq? obj *unbound*) nil)
+      (emit-str ": undefined function"))
      ((not (safe-object? obj))
       (emit-str ": expected ") (emit-type-name ty)
       (emit-str ", got ") (emit-value (%addr-of obj)))
+     ;; `call` is the one of these the programmer did not write: it is the
+     ;; entry-point load the call sequence does, and reaching here means the
+     ;; thing being called was an object of the wrong sort.
+     ((%= ty t-closure)
+      (emit-str ": expected a function, got ") (emit-object obj))
      ((if (%> ty 0) (not (%= (%obj-type obj) ty)) nil)
       (emit-str ": expected ") (emit-type-name ty)
       (emit-str ", got ") (emit-object obj))

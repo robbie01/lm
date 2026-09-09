@@ -445,10 +445,11 @@
   ;; 't rather than (intern-string "t"): the symbol has to be the one this
   ;; source means, resolved once when this file was read, not whichever one
   ;; the package that happens to be current would give us at compile time.
+  ;; czero.eqz is a select with no branch and no flags register: t stays t
+  ;; when the flag is set, and becomes zero - which is nil - when it is not.
   (let ((a (cx-asm c)) (tsym 't))
-    (i-sub a flag-reg $zero flag-reg)   ; 0 -> 0, 1 -> all ones
     (emit-literal c tsym dst)
-    (i-and a dst dst flag-reg)))
+    (i-czero-eqz a dst dst flag-reg)))
 
 ;; ---------------------------------------------------------------- prologue
 (define (emit-prologue c nreq variadic)
@@ -572,7 +573,8 @@
     (char->integer 1 %char->int) (integer->char 1 %int->char)
     (logand 2 %logand) (logior 2 %logior) (logxor 2 %logxor)
     (lognot 1 %lognot) (ash 2 %ash) (lsh 2 %lsh)
-    (peek 1 %ld32) (poke 2 %st32!) (peek8 1 %ld8) (poke8 2 %st8!)))
+    (peek 1 %ld32) (poke 2 %st32!) (peek8 1 %ld8) (poke8 2 %st8!)
+    (min 2 %min) (max 2 %max) (min2 2 %min) (max2 2 %max)))
 
 
 (define (emit-load-addr c reg)
@@ -586,12 +588,130 @@
   (let ((ci (compile-info! name)))
     (%set-cdr! ci (%cons (%cons nargs target) (%cdr ci)))))
 
+;; ---------------------------------------------------------------- constant argument
+;; A second operand that is written down rather than computed needs no
+;; register to hold it and no instruction to put it there - and for the
+;; shifts it needs no run-time decision about which way to go, which is what
+;; the general form spends most of its ten instructions and two branches on.
+;;
+;; This matters most in the collector, where a bitmap index is
+;; `(%lsh (%- p gc-heap-lo) -3)`: three operators, every one of them with a
+;; constant, and every one of them paying for a register it did not need.
+;;
+;; Entries are (name fits? emitter); the emitter is handed the compiler and
+;; the untagged constant, with the first argument already in a0.
+(define *const-arg* nil)
+
+;; The bound is on the constant, not on the doubled constant: a fixnum is
+;; thirty-one bits, so testing 2k for range would itself overflow and wrap a
+;; large constant round into a small one. 2k and 2k+1 both fit a twelve-bit
+;; signed immediate exactly when k is in [-1024, 1023].
+(define (fits-tagged-imm? k) (if (%>= k -1024) (%< k 1024) nil))
+(define (shift-amount? k) (if (%> k -32) (%< k 32) nil))
+
+(define (const-arg-entry h args)
+  (let ((e (assq h *const-arg*)))
+    (if e
+        (if (%= (length args) 2)
+            (let ((k (cadr args)))
+              (if (%fixnum? k) (if (%funcall (cadr e) k) e nil) nil))
+            nil)
+        nil)))
+
+(define (emit-const-arg c e args tail)
+  (compile-expr c (%car args) nil)
+  (%funcall (caddr e) c (cadr args))
+  (if tail (emit-return c) nil))
+
+;; A tagged fixnum is 2n+1, so adding the constant k means adding 2k: the two
+;; tag bits cancel and the correcting `addi` the general form needs disappears
+;; along with the `li`.
+(define (emit-add-const c k)
+  (i-addi (cx-asm c) $a0 $a0 (%* 2 k)))
+(define (emit-sub-const c k)
+  (i-addi (cx-asm c) $a0 $a0 (%- 0 (%* 2 k))))
+;; and / or keep the low bit set when both sides have it, so the constant
+;; goes in tagged and the answer comes out tagged. (xor does not, which is
+;; why it is not here: it would need the correcting `ori` back again.)
+(define (emit-and-const c k)
+  (i-andi (cx-asm c) $a0 $a0 (%+ (%* 2 k) 1)))
+(define (emit-or-const c k)
+  (i-ori (cx-asm c) $a0 $a0 (%+ (%* 2 k) 1)))
+
+(define (emit-shift-const c k arith)
+  ;; Untag, shift by a constant in one instruction, retag. The general form
+  ;; branches on the sign of the shift at run time; here the sign is known.
+  (let ((a (cx-asm c)))
+    (if (%= k 0)
+        nil
+        (begin
+          (i-srai a $t2 $a0 1)
+          (if (%> k 0)
+              (i-slli a $t2 $t2 k)
+              (if arith
+                  (i-srai a $t2 $t2 (%- 0 k))
+                  (i-srli a $t2 $t2 (%- 0 k))))
+          (i-slli a $a0 $t2 1)
+          (i-ori a $a0 $a0 1)))))
+
+(define (emit-lsh-const c k) (emit-shift-const c k nil))
+(define (emit-ash-const c k) (emit-shift-const c k t))
+
+(define (setup-const-arg)
+  (set! *const-arg*
+        (list (list '%+ fits-tagged-imm? emit-add-const)
+              (list '%- fits-tagged-imm? emit-sub-const)
+              (list '%logand fits-tagged-imm? emit-and-const)
+              (list '%logior fits-tagged-imm? emit-or-const)
+              (list '%lsh shift-amount? emit-lsh-const)
+              (list '%ash shift-amount? emit-ash-const))))
+
+;; ---------------------------------------------------------------- constant index
+;; An index that is written down rather than computed - which is every record
+;; field, every closure slot, the instance tag and version - does not need a
+;; register to hold it or an instruction to put it there. The immediate form
+;; of the custom-1 opcode carries indices 0 to 31 in the instruction itself.
+;;
+;; Entries are (name type store?), and the index is always the second
+;; argument, for the load and the store both.
+(define *indexed-imm* nil)
+
+(define (indexed-imm-entry h args)
+  (let ((e (assq h *indexed-imm*)))
+    (if e
+        (let* ((store (caddr e))
+               (want (if store 3 2))
+               (idx (if (%= (length args) want) (cadr args) nil)))
+          (if (%fixnum? idx)
+              (if (%>= idx 0) (if (%< idx 32) e nil) nil)
+              nil))
+        nil)))
+
+(define (emit-indexed-imm c e args tail)
+  (let ((a (cx-asm c))
+        (ty (cadr e))
+        (i (cadr args)))
+    (if (caddr e)
+        (begin
+          ;; The object and the value; the index is in the instruction.
+          (compile-args c (list (%car args) (caddr args)) 2)
+          (i-stxi a $a1 $a0 i ty)
+          (i-mv a $a0 $a1))
+        (begin
+          (compile-expr c (%car args) nil)
+          (i-ldxi a $a0 $a0 i ty)))
+    (if tail (emit-return c) nil)))
+
 (define (setup-intrinsics)
   ;; Start from clean: this runs once in the forge and again on the machine,
   ;; and a stale emitter left on a symbol would be a compiler that quietly
   ;; disagrees with itself.
   (dolist (s *inline-syms*) (%set-symbol-function! s nil))
   (set! *inline-syms* nil)
+  (set! *indexed-imm*
+        (list (list '%slot 0 nil) (list '%set-slot! 0 t)
+              (list '%vector-ref t-vector nil) (list '%vector-set! t-vector t)))
+  (setup-const-arg)
 
   ;; ---- pairs ----
   ;; One instruction each, and the tag is checked on the way past: these are
@@ -943,6 +1063,52 @@
         (i-sw a $t3 $t2 0)
         (i-mv a $a0 $a1))))
 
+  ;; ---- min and max ----
+  ;; A fixnum is 2n+1, which preserves signed order, so these are right on
+  ;; tagged values without untagging either side and retagging the answer.
+  (definline '%min 2 (lambda (c) (i-min (cx-asm c) $a0 $a0 $a1)))
+  (definline '%max 2 (lambda (c) (i-max (cx-asm c) $a0 $a0 $a1)))
+
+  ;; ---- bits ----
+  (definline '%popcount 1
+    (lambda (c)
+      (let ((a (cx-asm c)))
+        (i-srai a $t2 $a0 1)
+        (i-cpop a $t2 $t2)
+        (i-slli a $a0 $t2 1)
+        (i-ori a $a0 $a0 1))))
+
+  ;; A bit array at a raw address, indexed by bit number. The collector's mark
+  ;; and pin maps are the customers, and between them they are the busiest
+  ;; code in the system - a mark test was a call, four shifts and a mask.
+  ;;
+  ;; The map is addressed a word at a time rather than a byte at a time, which
+  ;; is what makes the low five bits of the index land exactly where `bext`
+  ;; and `bset` look for them. Same bits either way on a little-endian
+  ;; machine: bit i of the word at (i >> 5) is bit i & 7 of the byte at
+  ;; (i >> 3), so the blitter can still clear a map by the byte.
+  (definline '%bit-ref 2
+    (lambda (c)
+      (let ((a (cx-asm c)))
+        (i-srai a $t2 $a0 1)          ; base address
+        (i-srai a $t3 $a1 1)          ; bit index
+        (i-srli a $t4 $t3 5)
+        (i-sh2add a $t4 $t4 $t2)
+        (i-lw a $t4 $t4 0)
+        (i-bext a $t2 $t4 $t3)
+        (emit-bool-from-flag c $t2 $a0))))
+  (definline '%bit-set! 2
+    (lambda (c)
+      (let ((a (cx-asm c)))
+        (i-srai a $t2 $a0 1)
+        (i-srai a $t3 $a1 1)
+        (i-srli a $t4 $t3 5)
+        (i-sh2add a $t4 $t4 $t2)
+        (i-lw a $t5 $t4 0)
+        (i-bset a $t5 $t5 $t3)
+        (i-sw a $t5 $t4 0)
+        (i-mv a $a0 $zero))))
+
   ;; ---- symbols ----
   (definline '%symbol-name 1
     (lambda (c) (i-lw (cx-asm c) $a0 $a0 (%* 4 sym-name))))
@@ -1263,7 +1429,7 @@
       (set! i (%+ i 1)))
     (emit-load c (resolve c op) $t0)
     (i-li a $t1 n)
-    (i-lw a $t2 $t0 0)
+    (i-ldxi a $t2 $t0 clo-entry t-closure)
     (i-call-reg a $t2)
     (i-addi a $sp $sp (%* 4 n))))
 
@@ -1310,13 +1476,18 @@
                 (begin (i-lw a $t0 $sp 0) (i-addi a $sp $sp 4))
                 (emit-load c (resolve c op) $t0))
             (i-li a $t1 n)
+            ;; The entry point is slot 0 of a closure, and loading it with the
+            ;; immediate-index opcode says so: same instruction as the plain
+            ;; `lw` it replaces, except that calling a number, a string or nil
+            ;; now faults with a diagnostic instead of jumping to whatever the
+            ;; first word of the thing happened to be.
             (if tail
                 (begin
                   (emit-epilogue c)
-                  (i-lw a $t2 $t0 0)
+                  (i-ldxi a $t2 $t0 clo-entry t-closure)
                   (i-jr a $t2))
                 (begin
-                  (i-lw a $t2 $t0 0)
+                  (i-ldxi a $t2 $t0 clo-entry t-closure)
                   (i-call-reg a $t2))))))))
 
 ;; ---------------------------------------------------------------- expressions
@@ -1358,6 +1529,18 @@
          ;; expression, so it compiles to the ordinary call sequence rather
          ;; than to a call to something named %funcall.
          ((%eq? h '%funcall) (compile-call c (%cdr form) tail))
+
+         ;; ---- an operator whose second argument is written down ----
+         ((if (%symbol? h)
+              (if (cx-lookup c h) nil (const-arg-entry h (%cdr form)))
+              nil)
+          (emit-const-arg c (const-arg-entry h (%cdr form)) (%cdr form) tail))
+
+         ;; ---- indexed access with the index written down ----
+         ((if (%symbol? h)
+              (if (cx-lookup c h) nil (indexed-imm-entry h (%cdr form)))
+              nil)
+          (emit-indexed-imm c (indexed-imm-entry h (%cdr form)) (%cdr form) tail))
 
          ;; ---- open-coded operations ----
          ((if (%symbol? h)
@@ -1411,8 +1594,7 @@
   (let ((a (cx-asm c)))
     ;; The indexed load does the rest of the work: it refuses anything that is
     ;; not a record, so nil and fixnums never reach the comparisons.
-    (i-li a $t4 (%+ (%* 2 inst-tag) 1))
-    (i-ldx a $t2 $a0 $t4 t-record)
+    (i-ldxi a $t2 $a0 inst-tag t-record)
     (if l
         (let ((ok (asm-gensym-label "inst"))
               (ok2 (asm-gensym-label "instv")))
@@ -1421,8 +1603,7 @@
           (i-li a $a7 trap-instance)
           (i-ecall a)
           (asm-label a ok)
-          (i-li a $t4 (%+ (%* 2 inst-version) 1))
-          (i-ldx a $t2 $a0 $t4 t-record)
+          (i-ldxi a $t2 $a0 inst-version t-record)
           (i-li a $t3 (%+ (%* 2 (layout-version l)) 1))
           (i-beq a $t2 $t3 ok2)
           (i-li a $a7 trap-instance)
@@ -1546,7 +1727,7 @@
     (i-li a $a1 (%logior (%lsh nfree 1) 1))
     (emit-load c (list 'global 'make-closure) $t0)
     (i-li a $t1 2)
-    (i-lw a $t2 $t0 0)
+    (i-ldxi a $t2 $t0 clo-entry t-closure)
     (i-call-reg a $t2)
     ;; a0 is the fresh closure; fill in the captured values.
     (dolist (s free)

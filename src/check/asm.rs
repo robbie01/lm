@@ -67,6 +67,41 @@ const LISP_SIDE: &str = r#"
 (i-ldxb a $t0 $s1 $a2 2)
 (i-stxb a $t0 $s1 $a2 4)
 (i-ldx a $a0 $a1 $a2 0)
+(i-ldxi a $a0 $a1 0 5)
+(i-stxi a $a3 $a1 31 3)
+(i-ldxbi a $t0 $s1 7 2)
+(i-stxbi a $t0 $s1 12 4)
+(i-sh1add a $a0 $a1 $a2)
+(i-sh2add a $a0 $a1 $a2)
+(i-sh3add a $a0 $a1 $a2)
+(i-andn a $t0 $t1 $t2)
+(i-orn a $t0 $t1 $t2)
+(i-xnor a $t0 $t1 $t2)
+(i-min a $s0 $s1 $a0)
+(i-minu a $s0 $s1 $a0)
+(i-max a $s0 $s1 $a0)
+(i-maxu a $s0 $s1 $a0)
+(i-rol a $a1 $a2 $a3)
+(i-ror a $a1 $a2 $a3)
+(i-rori a $a1 $a2 13)
+(i-bset a $a0 $a1 $a2)
+(i-bclr a $a0 $a1 $a2)
+(i-binv a $a0 $a1 $a2)
+(i-bext a $a0 $a1 $a2)
+(i-bseti a $a0 $a1 31)
+(i-bclri a $a0 $a1 0)
+(i-binvi a $a0 $a1 17)
+(i-bexti a $a0 $a1 5)
+(i-clz a $t3 $t4)
+(i-ctz a $t3 $t4)
+(i-cpop a $t3 $t4)
+(i-sextb a $t3 $t4)
+(i-sexth a $t3 $t4)
+(i-zexth a $t3 $t4)
+(i-rev8 a $t3 $t4)
+(i-orcb a $t3 $t4)
+(i-czero-eqz a $a0 $a1 $a2)
+(i-czero-nez a $a0 $a1 $a2)
 (i-li a $a0 #x12345678)
 (i-li a $a0 -1)
 (i-li a $a0 #x800)
@@ -143,6 +178,41 @@ fn rust_side() -> Vec<u8> {
     w.push(ldxb(T0, S1, A2, 2));
     w.push(stxb(T0, S1, A2, 4));
     w.push(ldx(A0, A1, A2, 0));
+    w.push(ldxi(A0, A1, 0, 5));
+    w.push(stxi(A3, A1, 31, 3));
+    w.push(ldxbi(T0, S1, 7, 2));
+    w.push(stxbi(T0, S1, 12, 4));
+    w.push(sh1add(A0, A1, A2));
+    w.push(sh2add(A0, A1, A2));
+    w.push(sh3add(A0, A1, A2));
+    w.push(andn(T0, T1, T2));
+    w.push(orn(T0, T1, T2));
+    w.push(xnor(T0, T1, T2));
+    w.push(min(S0, S1, A0));
+    w.push(minu(S0, S1, A0));
+    w.push(max(S0, S1, A0));
+    w.push(maxu(S0, S1, A0));
+    w.push(rol(A1, A2, A3));
+    w.push(ror(A1, A2, A3));
+    w.push(rori(A1, A2, 13));
+    w.push(bset(A0, A1, A2));
+    w.push(bclr(A0, A1, A2));
+    w.push(binv(A0, A1, A2));
+    w.push(bext(A0, A1, A2));
+    w.push(bseti(A0, A1, 31));
+    w.push(bclri(A0, A1, 0));
+    w.push(binvi(A0, A1, 17));
+    w.push(bexti(A0, A1, 5));
+    w.push(clz(T3, T4));
+    w.push(ctz(T3, T4));
+    w.push(cpop(T3, T4));
+    w.push(sextb(T3, T4));
+    w.push(sexth(T3, T4));
+    w.push(zexth(T3, T4));
+    w.push(rev8(T3, T4));
+    w.push(orcb(T3, T4));
+    w.push(czeroeqz(A0, A1, A2));
+    w.push(czeronez(A0, A1, A2));
     li32(&mut w, A0, 0x1234_5678);
     li32(&mut w, A0, -1i32 as u32);
     li32(&mut w, A0, 0x800);

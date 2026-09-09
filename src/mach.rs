@@ -73,6 +73,11 @@ pub struct Machine {
     pub cycles: u64,
     pub trap: (u32, u32, u32), // cause, tval, epc
 
+    /// Dynamic instruction histogram. Slots 0..63 are dispatch tokens; the
+    /// rest break down what a token alone cannot say. See `prof::NAMES`.
+    #[cfg(feature = "isaprof")]
+    pub prof: Box<[u64; crate::prof::SLOTS]>,
+
     // --- custom chips ---
     pub intreq: u32,
     pub intena: u32,
@@ -117,6 +122,8 @@ impl Machine {
             mtval: 0,
             cycles: 0,
             trap: (0, 0, 0),
+            #[cfg(feature = "isaprof")]
+            prof: Box::new([0; crate::prof::SLOTS]),
             intreq: 0,
             intena: 0,
             uart: Uart::new(),

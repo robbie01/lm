@@ -40,8 +40,9 @@
 (export '(
   alloc-object *object-allocator* *collector*
   ;; the memory map and object layout, generated from the Rust side
-  clo-code clo-free code-base code-lits code-name cons-base cons-limit dev-blit dev-disk dev-gfx dev-input dev-sys dev-timer dev-uart fast-base imm-unbound int-input int-soft int-vblank lg-bootlist lg-code-end lg-code-free lg-code-free-n lg-code-ptr lg-code-reg lg-code-reg-n lg-cons-free lg-cons-free-n lg-cons-ptr lg-cons-run lg-cons-run-end lg-errhandler lg-gccount lg-gchook lg-imgentry lg-obarray lg-obj-end lg-obj-free-n lg-obj-ptr lg-package lg-packages lg-pool-free lg-poolend lg-poolptr lg-refill lg-roots lg-scratch0 lg-scratch1 lg-stackbot lg-stacktop lg-startup lg-stub-hi lg-stub-lo lg-symcount lg-symlist lg-sysbase lg-toplevel lg-traphook lg-trapsave mmio-base obj-base obj-bins obj-bin-count obj-limit pkg-name pkg-slots pkg-tag pkg-use pool-base pool-limit sym-exported sym-flags sym-function sym-macro sym-name sym-package sym-plist sym-slots sym-value sysbase-ptr t-bytes t-closure t-code t-float t-free t-record t-string t-symbol t-vector
+  clo-code clo-entry clo-free code-base code-lits code-name cons-base cons-limit dev-blit dev-disk dev-gfx dev-input dev-sys dev-timer dev-uart fast-base imm-unbound int-input int-soft int-vblank lg-bootlist lg-code-end lg-code-free lg-code-free-n lg-code-ptr lg-code-reg lg-code-reg-n lg-cons-free lg-cons-free-n lg-cons-ptr lg-cons-run lg-cons-run-end lg-errhandler lg-gccount lg-gchook lg-imgentry lg-obarray lg-obj-end lg-obj-free-n lg-obj-ptr lg-package lg-packages lg-pool-free lg-poolend lg-poolptr lg-refill lg-roots lg-scratch0 lg-scratch1 lg-stackbot lg-stacktop lg-startup lg-stub-hi lg-stub-lo lg-symcount lg-symlist lg-sysbase lg-toplevel lg-traphook lg-trapsave mmio-base obj-base obj-bins obj-bin-count obj-limit pkg-name pkg-slots pkg-tag pkg-use pool-base pool-limit sym-exported sym-flags sym-function sym-macro sym-name sym-package sym-plist sym-slots sym-value sysbase-ptr t-bytes t-closure t-code t-float t-free t-record t-string t-symbol t-vector
   %* %+ %- %/ %< %<= %= %> %>= %addr-of %alloc-code %alloc-pool %apply %ash
+  %bit-ref %bit-set! %min %max %popcount
   %bytes-length %bytes-ref %bytes-set! %bytes? %car %cdr %char->int %char?
   %closure? %cons %cons? %ctest-entry %cycles %disable %display %dv %ecall
   %enable %enable-timer %eq? %error %eval %fixnum? %float? %flush
@@ -115,7 +116,7 @@
   alloc-code alloc-object forget-package forget-unused-packages frame-ok?
   cons-chunk gc gc-blank-free-objects gc-collect gc-extra-roots gc-for-image
   gc-invalidate-runs
-  gc-forget-scratch gc-slot
+  gc-slot
   gc-scan-conservative gc-scan-frames in-stub? install-allocator obj-take
   refill-cons register-code room stub-args-off stub-frame-size
   stub-mask-off stub-raw-off
@@ -155,10 +156,17 @@
   csr-mcause csr-mepc csr-mie csr-mscratch csr-mstatus csr-mtval csr-mtvec
   i-add i-addi i-and i-andi i-beq i-beqz i-bge i-blt i-bltu i-bne i-bnez
   i-call-reg i-car i-cdr i-csrrci i-csrrs i-csrrsi i-csrrw i-div i-ecall
-  i-j i-jal i-jr i-lbu i-ldx i-ldxb i-lhu i-li i-li-fixnum i-lw i-mret
+  i-j i-jal i-jr i-lbu i-ldx i-ldxb i-ldxbi i-ldxi i-lhu i-li i-li-fixnum
+  i-lw i-mret
   i-mul i-mv i-not i-or i-ori i-rem i-ret i-sb i-seqz i-set-car i-set-cdr
   i-sh i-sll i-slli i-slt i-snez i-sra i-srai i-srl i-srli i-stx i-stxb
+  i-stxbi i-stxi
   i-sub i-sw i-sw-abs i-wfi i-xor i-xori literal-offset op-index
+  ;; The B extension: ratified RISC-V, taken rather than invented.
+  i-andn i-bclr i-bclri i-bext i-bexti i-binv i-binvi i-bset i-bseti
+  i-clz i-cpop i-ctz i-czero-eqz i-czero-nez i-max i-maxu i-min i-minu
+  i-orcb i-orn i-rev8 i-rol i-ror i-rori i-sextb i-sexth i-sh1add i-sh2add
+  i-sh3add i-xnor i-zexth
 ))
 
 (in-package compiler)

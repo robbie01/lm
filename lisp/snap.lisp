@@ -36,8 +36,8 @@
   ;;
   ;; Both halves of that matter. Outside a critical section, another task can
   ;; allocate an object out of a free block this is in the middle of blanking,
-  ;; or collect and undo `gc-forget-scratch`, or mutate saved data to point at
-  ;; a pair above the top being written. And allocating *inside* one is the
+  ;; or mutate saved data to point at a pair above the top being written.
+  ;; And allocating *inside* one is the
   ;; same problem by another door: a cons that happens to exhaust the current
   ;; run calls the collector, from within the stretch that was supposed to be
   ;; indivisible. So the header block is claimed first and the five regions are
@@ -52,9 +52,6 @@
       ;; an image small: afterwards the live pairs are one contiguous block at
       ;; the bottom of cons space, and everything above it has been blanked.
       (gc-for-image)
-      ;; What is about to be written does not include the collector's scratch
-      ;; memory, so the image must not come back believing it is set up.
-      (gc-forget-scratch)
       ;; A resumed image re-enters through here rather than through the boot
       ;; list: every global it would have set is already set.
       (%raw-st! lg-toplevel top)

@@ -54,6 +54,19 @@ fn w_(m: &mut Machine, i: u32, v: u32) {
     }
 }
 
+/// orc.b: every byte that has any bit set becomes 0xff. The only Zbb
+/// operation with no one-liner in Rust.
+#[inline(always)]
+fn orc_b(a: u32) -> u32 {
+    let mut v = 0u32;
+    for k in 0..4 {
+        if (a >> (k * 8)) & 0xff != 0 {
+            v |= 0xff << (k * 8);
+        }
+    }
+    v
+}
+
 // ------------------------------------------------------------- 32-bit immediates
 #[inline(always)]
 fn imm_i(w: u32) -> u32 {
@@ -146,6 +159,10 @@ macro_rules! next {
         } else {
             ((w & 3) << 3) | ((w >> 13) & 7)
         };
+        #[cfg(feature = "isaprof")]
+        unsafe {
+            *m.prof.get_unchecked_mut(tok as usize) += 1;
+        }
         become (unsafe { *TABLE.get_unchecked(tok as usize) })(m, w, pc, fuel)
     }};
 }
@@ -305,11 +322,33 @@ fn op_store(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 }
 
 // ---- integer ALU ----------------------------------------------------------
+/// Which ratified extension an OP or OP-IMM encoding belongs to, for the
+/// histogram. The base ISA's own funct7 values (0x00 for the arithmetic and
+/// logical forms, 0x20 for sub and the arithmetic shifts, 0x01 for M) are not
+/// counted; everything else here was added by Zba, Zbb, Zbs or Zicond.
+#[cfg(feature = "isaprof")]
+fn prof_ext(m: &mut Machine, f7: u32, f3: u32) {
+    let slot = match f7 {
+        0x10 => crate::prof::ZBA,
+        0x05 | 0x30 | 0x04 => crate::prof::ZBB,
+        0x14 | 0x24 | 0x34 => crate::prof::ZBS,
+        0x07 => crate::prof::ZICOND,
+        // sub and sra share funct7 0x20 with andn, orn and xnor.
+        0x20 if f3 == 4 || f3 == 6 || f3 == 7 => crate::prof::ZBB,
+        _ => return,
+    };
+    unsafe {
+        *m.prof.get_unchecked_mut(slot) += 1;
+    }
+}
+
 #[inline(never)]
 fn op_imm(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let a = r(m, rs1(w));
     let i = imm_i(w);
     let sh = (w >> 20) & 31;
+    #[cfg(feature = "isaprof")]
+    prof_ext(m, w >> 25, f3(w));
     let v = match f3(w) {
         0 => a.wrapping_add(i),
         2 => ((a as i32) < (i as i32)) as u32,
@@ -317,15 +356,31 @@ fn op_imm(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         4 => a ^ i,
         6 => a | i,
         7 => a & i,
-        1 => {
-            if w >> 25 != 0 {
-                return illegal(m, w, pc, fuel);
-            }
-            a << sh
-        }
+        // The shift-immediate slot is where the B extension hides its
+        // single-source operations: funct7 tells them apart, and for the
+        // Zbb unary forms the shift amount is a further selector.
+        1 => match w >> 25 {
+            0x00 => a << sh,
+            0x14 => a | (1 << sh),  // bseti
+            0x24 => a & !(1 << sh), // bclri
+            0x34 => a ^ (1 << sh),  // binvi
+            0x30 => match sh {
+                0 => a.leading_zeros(),
+                1 => a.trailing_zeros(),
+                2 => a.count_ones(),
+                4 => a as i8 as i32 as u32,
+                5 => a as i16 as i32 as u32,
+                _ => return illegal(m, w, pc, fuel),
+            },
+            _ => return illegal(m, w, pc, fuel),
+        },
         _ => match w >> 25 {
-            0 => a >> sh,
+            0x00 => a >> sh,
             0x20 => ((a as i32) >> sh) as u32,
+            0x24 => (a >> sh) & 1,      // bexti
+            0x30 => a.rotate_right(sh), // rori
+            0x34 if sh == 0x18 => a.swap_bytes(),
+            0x14 if sh == 0x07 => orc_b(a),
             _ => return illegal(m, w, pc, fuel),
         },
     };
@@ -338,6 +393,8 @@ fn op_reg(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let a = r(m, rs1(w));
     let b = r(m, rs2(w));
     let f = f3(w);
+    #[cfg(feature = "isaprof")]
+    prof_ext(m, w >> 25, f);
     let v = match w >> 25 {
         0 => match f {
             0 => a.wrapping_add(b),
@@ -351,7 +408,70 @@ fn op_reg(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         },
         0x20 => match f {
             0 => a.wrapping_sub(b),
+            4 => !(a ^ b), // xnor
             5 => ((a as i32) >> (b & 31)) as u32,
+            6 => a | !b, // orn
+            7 => a & !b, // andn
+            _ => return illegal(m, w, pc, fuel),
+        },
+        // ---- Zba: shift-and-add, one instruction for base + index * n ----
+        0x10 => match f {
+            2 => (a << 1).wrapping_add(b),
+            4 => (a << 2).wrapping_add(b),
+            6 => (a << 3).wrapping_add(b),
+            _ => return illegal(m, w, pc, fuel),
+        },
+        // ---- Zbb: min and max. Tagged fixnums are 2n+1, which preserves
+        // signed order, so these are correct on tagged values as they stand.
+        0x05 => match f {
+            4 => (a as i32).min(b as i32) as u32,
+            5 => a.min(b),
+            6 => (a as i32).max(b as i32) as u32,
+            7 => a.max(b),
+            _ => return illegal(m, w, pc, fuel),
+        },
+        // ---- Zicond: conditional zero, which is how a branchless select is
+        // built without a flags register.
+        0x07 => match f {
+            5 => {
+                if b == 0 {
+                    0
+                } else {
+                    a
+                }
+            } // czero.eqz
+            7 => {
+                if b != 0 {
+                    0
+                } else {
+                    a
+                }
+            } // czero.nez
+            _ => return illegal(m, w, pc, fuel),
+        },
+        // ---- Zbb: rotate ----
+        0x30 => match f {
+            1 => a.rotate_left(b & 31),
+            5 => a.rotate_right(b & 31),
+            _ => return illegal(m, w, pc, fuel),
+        },
+        // ---- Zbs: single-bit operations ----
+        0x14 => match f {
+            1 => a | (1 << (b & 31)), // bset
+            _ => return illegal(m, w, pc, fuel),
+        },
+        0x24 => match f {
+            1 => a & !(1 << (b & 31)), // bclr
+            5 => (a >> (b & 31)) & 1,  // bext
+            _ => return illegal(m, w, pc, fuel),
+        },
+        0x34 => match f {
+            1 => a ^ (1 << (b & 31)), // binv
+            _ => return illegal(m, w, pc, fuel),
+        },
+        // ---- Zbb: zext.h, which on RV32 lives here rather than in OP-IMM ----
+        0x04 => match f {
+            4 if rs2(w) == 0 => a & 0xffff,
             _ => return illegal(m, w, pc, fuel),
         },
         // ---- M extension ----
@@ -488,6 +608,10 @@ fn op_bad(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 #[inline(never)]
 fn op_pair(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let f = f3(w);
+    #[cfg(feature = "isaprof")]
+    unsafe {
+        *m.prof.get_unchecked_mut(crate::prof::PAIR0 + f as usize) += 1;
+    }
     if f > 3 {
         return illegal(m, w, pc, fuel);
     }
@@ -518,10 +642,19 @@ fn op_pair(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 /// costs a comparison the processor can do in parallel with the address.
 ///
 ///     funct7   the type the object must be, or 0 for any object at all
-///     funct3   0 load word, 1 store word, 2 load byte, 3 store byte
+///     funct3   bit 0 store, bit 1 byte, bit 2 the index is an immediate
 ///     rs1      the object, tagged
-///     rs2      the index, a tagged fixnum
+///     rs2      the index: a register holding a tagged fixnum, or - when
+///              funct3 bit 2 is set - a raw five-bit index, 0 to 31
 ///     rd       where the result goes, or - for a store - the value to write
+///
+/// The immediate form exists because most indices are constants: every record
+/// field, every closure slot, the instance tag and version. Putting the index
+/// in the rs2 field follows `slli`, which has always kept its shift amount
+/// there, so the encoding stays R-type and nothing that walks instructions
+/// needs a new case. The immediate form is also what makes a checked call
+/// free: loading a closure's entry point is slot 0 of a t-closure, which used
+/// to be a bare `lw` that proved nothing.
 ///
 /// Byte forms leave a raw byte in `rd` and take a raw byte from it, so the
 /// tagging a character or a fixnum needs stays where it belongs, in the
@@ -530,7 +663,6 @@ fn op_pair(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 #[inline(never)]
 fn op_index(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let obj = r(m, rs1(w));
-    let idx = r(m, rs2(w));
     if obj & 7 != 4 {
         return m.fault(C_TYPE, obj, pc, fuel);
     }
@@ -543,14 +675,25 @@ fn op_index(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     if want != 0 && hdr & 255 != want {
         return m.fault(C_TYPE, obj, pc, fuel);
     }
-    if idx & 1 != 1 {
-        return m.fault(C_TYPE, idx, pc, fuel);
-    }
-    let i = (idx as i32) >> 1;
-    if i < 0 || (i as u32) >= hdr >> 8 {
-        return m.fault(C_RANGE, idx, pc, fuel);
-    }
     let f = f3(w);
+    #[cfg(feature = "isaprof")]
+    unsafe {
+        *m.prof.get_unchecked_mut(crate::prof::INDEX0 + f as usize) += 1;
+    }
+    // An immediate index is trusted to be a small non-negative number, because
+    // the compiler put it there. A register index is a Lisp value and is not.
+    let i = if f & 4 != 0 {
+        rs2(w) as i32
+    } else {
+        let idx = r(m, rs2(w));
+        if idx & 1 != 1 {
+            return m.fault(C_TYPE, idx, pc, fuel);
+        }
+        (idx as i32) >> 1
+    };
+    if i < 0 || (i as u32) >= hdr >> 8 {
+        return m.fault(C_RANGE, ((i as u32) << 1) | 1, pc, fuel);
+    }
     let a = if f & 2 == 0 {
         obj.wrapping_add((i as u32) << 2)
     } else {
@@ -560,7 +703,7 @@ fn op_index(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     if !m.in_ram(a, sz) {
         return m.fault(if f & 1 == 0 { C_LFAULT } else { C_SFAULT }, a, pc, fuel);
     }
-    match f {
+    match f & 3 {
         0 => {
             let v = unsafe { m.rd32(a) };
             w_(m, rd(w), v);

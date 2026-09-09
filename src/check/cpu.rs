@@ -85,6 +85,165 @@ fn cases() -> Vec<Case> {
         0xffff_ffff,
     );
     c("lui", vec![lui(A0, 0xabcde)], A0, 0xabcd_e000);
+
+    // ---- B extension: Zba, Zbb, Zbs, and Zicond ----
+    c(
+        "sh2add",
+        vec![addi(A1, ZERO, 3), addi(A2, ZERO, 100), sh2add(A0, A1, A2)],
+        A0,
+        112,
+    );
+    c(
+        "sh3add",
+        vec![addi(A1, ZERO, 3), addi(A2, ZERO, 100), sh3add(A0, A1, A2)],
+        A0,
+        124,
+    );
+    c(
+        "sh1add",
+        vec![addi(A1, ZERO, 3), addi(A2, ZERO, 100), sh1add(A0, A1, A2)],
+        A0,
+        106,
+    );
+    c(
+        "andn",
+        vec![addi(A1, ZERO, 0xff), addi(A2, ZERO, 0x0f), andn(A0, A1, A2)],
+        A0,
+        0xf0,
+    );
+    c(
+        "orn",
+        vec![addi(A1, ZERO, 1), addi(A2, ZERO, 2), orn(A0, A1, A2)],
+        A0,
+        0xffff_fffd,
+    );
+    c(
+        "xnor",
+        vec![addi(A1, ZERO, 5), addi(A2, ZERO, 3), xnor(A0, A1, A2)],
+        A0,
+        0xffff_fff9,
+    );
+    c(
+        "min signed",
+        vec![addi(A1, ZERO, -5), addi(A2, ZERO, 3), min(A0, A1, A2)],
+        A0,
+        0xffff_fffb,
+    );
+    c(
+        "minu unsigned",
+        vec![addi(A1, ZERO, -5), addi(A2, ZERO, 3), minu(A0, A1, A2)],
+        A0,
+        3,
+    );
+    c(
+        "max signed",
+        vec![addi(A1, ZERO, -5), addi(A2, ZERO, 3), max(A0, A1, A2)],
+        A0,
+        3,
+    );
+    c(
+        "maxu unsigned",
+        vec![addi(A1, ZERO, -5), addi(A2, ZERO, 3), maxu(A0, A1, A2)],
+        A0,
+        0xffff_fffb,
+    );
+    // Tagged fixnums are 2n+1, so signed order survives tagging and max works
+    // on tagged values as they stand: max(2*-5+1, 2*3+1) = 7 = the tag of 3.
+    c(
+        "max on tagged fixnums",
+        vec![addi(A1, ZERO, -9), addi(A2, ZERO, 7), max(A0, A1, A2)],
+        A0,
+        7,
+    );
+    c("cpop", vec![addi(A1, ZERO, -1), cpop(A0, A1)], A0, 32);
+    c("cpop of 0", vec![cpop(A0, ZERO)], A0, 0);
+    c("clz", vec![addi(A1, ZERO, 1), clz(A0, A1)], A0, 31);
+    c("ctz", vec![addi(A1, ZERO, 8), ctz(A0, A1)], A0, 3);
+    c("sext.b", vec![addi(A1, ZERO, 0xff), sextb(A0, A1)], A0, 0xffff_ffff);
+    c("sext.h", vec![lui(A1, 8), sexth(A0, A1)], A0, 0xffff_8000);
+    c("zext.h", vec![addi(A1, ZERO, -1), zexth(A0, A1)], A0, 0xffff);
+    c("rev8", vec![addi(A1, ZERO, 0x123), rev8(A0, A1)], A0, 0x2301_0000);
+    c("orc.b", vec![addi(A1, ZERO, 0x100), orcb(A0, A1)], A0, 0xff00);
+    c(
+        "rol",
+        vec![lui(A1, 0x80000), addi(A2, ZERO, 1), rol(A0, A1, A2)],
+        A0,
+        1,
+    );
+    c(
+        "ror",
+        vec![addi(A1, ZERO, 1), addi(A2, ZERO, 1), ror(A0, A1, A2)],
+        A0,
+        0x8000_0000,
+    );
+    c("rori", vec![addi(A1, ZERO, 1), rori(A0, A1, 4)], A0, 0x1000_0000);
+    c(
+        "bset",
+        vec![addi(A2, ZERO, 31), bset(A0, ZERO, A2)],
+        A0,
+        0x8000_0000,
+    );
+    c(
+        "bclr",
+        vec![addi(A1, ZERO, -1), addi(A2, ZERO, 0), bclr(A0, A1, A2)],
+        A0,
+        0xffff_fffe,
+    );
+    c(
+        "binv",
+        vec![addi(A1, ZERO, 1), addi(A2, ZERO, 0), binv(A0, A1, A2)],
+        A0,
+        0,
+    );
+    c(
+        "bext",
+        vec![addi(A1, ZERO, 8), addi(A2, ZERO, 3), bext(A0, A1, A2)],
+        A0,
+        1,
+    );
+    c(
+        "bext off",
+        vec![addi(A1, ZERO, 8), addi(A2, ZERO, 2), bext(A0, A1, A2)],
+        A0,
+        0,
+    );
+    // The shift amount is taken modulo 32, so a bit index past the word wraps
+    // rather than reading nothing.
+    c(
+        "bext wraps at 32",
+        vec![addi(A1, ZERO, 8), addi(A2, ZERO, 35), bext(A0, A1, A2)],
+        A0,
+        1,
+    );
+    c("bseti", vec![bseti(A0, ZERO, 31)], A0, 0x8000_0000);
+    c("bclri", vec![addi(A1, ZERO, -1), bclri(A0, A1, 0)], A0, 0xffff_fffe);
+    c("binvi", vec![addi(A1, ZERO, 1), binvi(A0, A1, 0)], A0, 0);
+    c("bexti", vec![addi(A1, ZERO, 8), bexti(A0, A1, 3)], A0, 1);
+    // czero.eqz: rd is zero when rs2 is zero, otherwise rs1.
+    c(
+        "czero.eqz taken",
+        vec![addi(A1, ZERO, 42), czeroeqz(A0, A1, ZERO)],
+        A0,
+        0,
+    );
+    c(
+        "czero.eqz not taken",
+        vec![addi(A1, ZERO, 42), addi(A2, ZERO, 1), czeroeqz(A0, A1, A2)],
+        A0,
+        42,
+    );
+    c(
+        "czero.nez taken",
+        vec![addi(A1, ZERO, 42), addi(A2, ZERO, 1), czeronez(A0, A1, A2)],
+        A0,
+        0,
+    );
+    c(
+        "czero.nez not taken",
+        vec![addi(A1, ZERO, 42), czeronez(A0, A1, ZERO)],
+        A0,
+        42,
+    );
     c("auipc", vec![auipc(A0, 1)], A0, BASE + 0x1000);
     c("x0 stays zero", vec![addi(ZERO, ZERO, 99), add(A0, ZERO, ZERO)], A0, 0);
     c(
@@ -493,6 +652,18 @@ fn cases() -> Vec<Case> {
     // A byte index is checked against the same length, which counts elements:
     // three slots means three, whatever size the access is.
     c("ldxb", vec(vec![addi(A3, ZERO, 1), ldxb(A0, A1, A3, 3)]), A0, 111);
+    // The immediate form takes a raw index, not a tagged one, and needs no
+    // register to hold it.
+    c("ldxi", vec(vec![ldxi(A0, A1, 1, 3)]), A0, 222);
+    c("ldxi slot 0", vec(vec![ldxi(A0, A1, 0, 3)]), A0, 111);
+    c("ldxi any type", vec(vec![ldxi(A0, A1, 2, 0)]), A0, 333);
+    c(
+        "stxi",
+        vec(vec![addi(A0, ZERO, 99), stxi(A0, A1, 1, 3), lw(A0, A1, 4)]),
+        A0,
+        99,
+    );
+    c("ldxbi", vec(vec![ldxbi(A0, A1, 0, 3)]), A0, 111);
 
     // ---- pairs: custom-0, with the tag check in the instruction ----
     // A pair at 0x3000: car 111, cdr 222.

@@ -24,6 +24,12 @@ path = "src/bin/lmforge.rs"
 name = "lmdev"
 path = "src/bin/lmdev.rs"
 
+# Count what the machine actually executes, one counter per dispatch slot.
+# A feature rather than a flag because the counter sits in the dispatch macro,
+# which every instruction expands: off, it is not there at all.
+[features]
+isaprof = []
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 minifb = { version = "0.27", default-features = false, features = ["x11"] }
