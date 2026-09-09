@@ -845,7 +845,7 @@ to hardware from Lisp is peek and poke.
 
 ```
 lmdev all             every suite
-lmdev cpu             96 processor conformance cases
+lmdev cpu             138 processor conformance cases
 lmdev asm             the Lisp assembler against an independent Rust encoder
 lmdev compiler        153 end-to-end cases: source in, machine code out, compare
 lmdev bench           measure the interpreter

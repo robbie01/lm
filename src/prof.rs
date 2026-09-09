@@ -29,6 +29,32 @@ pub const ZBA: usize = 80;
 pub const ZBB: usize = 81;
 pub const ZBS: usize = 82;
 pub const ZICOND: usize = 83;
+/// Where a load or a store went. The whole register-allocator question is
+/// how big these are: a frame slot and a spill are a value the machine had
+/// in a register and put in memory because the collector has to be able to
+/// find it.
+pub const LD_FRAME: usize = 84;
+pub const LD_SPILL: usize = 85;
+pub const LD_LIT: usize = 86;
+pub const LD_OTHER: usize = 87;
+pub const ST_FRAME: usize = 88;
+pub const ST_SPILL: usize = 89;
+pub const ST_OTHER: usize = 90;
+
+/// The base register a load or a store used, as a slot. s0 is the frame
+/// pointer, sp the spill area, s1 the running function's literal vector.
+#[inline(always)]
+pub fn mem_slot(rs1: u32, store: bool) -> usize {
+    match (rs1, store) {
+        (8, false) => LD_FRAME,
+        (2, false) => LD_SPILL,
+        (9, false) => LD_LIT,
+        (_, false) => LD_OTHER,
+        (8, true) => ST_FRAME,
+        (2, true) => ST_SPILL,
+        (_, true) => ST_OTHER,
+    }
+}
 
 /// Names for every slot, in slot order. The first 32 are the compressed
 /// quadrants, which this compiler does not emit but an image may still carry.
@@ -52,8 +78,9 @@ pub const NAMES: [&str; SLOTS] = [
     "  ldx", "  stx", "  ldxb", "  stxb", "  ldxi", "  stxi", "  ldxbi", "  stxbi",
     // ---- the standard extensions, counted inside op-reg and op-imm ----
     "  Zba (sh*add)", "  Zbb", "  Zbs (b*)", "  Zicond (czero)",
-    "-", "-", "-", "-", "-", "-", "-", "-",
-    "-", "-", "-", "-",
+    "  ld frame (s0)", "  ld spill (sp)", "  ld literal (s1)", "  ld other",
+    "  st frame (s0)", "  st spill (sp)", "  st other",
+    "-", "-", "-", "-", "-",
 ];
 
 /// A sorted table, and the share of the whole each line is.
@@ -94,6 +121,37 @@ pub fn report(prof: &[u64; SLOTS]) -> String {
             }
         }
     }
+    // Where the memory traffic went. Frame slots and spills together are the
+    // measure of what a register allocator would be worth - they are values
+    // the compiler had in a register and wrote to memory anyway.
+    let mem: u64 = prof[LD_FRAME..=ST_OTHER].iter().sum();
+    if mem > 0 {
+        out.push_str(&format!(
+            "
+memory traffic: {} ({:.1}%)
+",
+            mem,
+            100.0 * mem as f64 / total as f64
+        ));
+        for k in LD_FRAME..=ST_OTHER {
+            out.push_str(&format!(
+                "  {:<16} {:>12}  {:>5.1}%
+",
+                NAMES[k],
+                prof[k],
+                100.0 * prof[k] as f64 / total as f64
+            ));
+        }
+        let home = prof[LD_FRAME] + prof[LD_SPILL] + prof[ST_FRAME] + prof[ST_SPILL];
+        out.push_str(&format!(
+            "  {:<16} {:>12}  {:>5.1}%   <- what a register allocator is aimed at
+",
+            "frame + spill",
+            home,
+            100.0 * home as f64 / total as f64
+        ));
+    }
+
     let ext: u64 = prof[ZBA..=ZICOND].iter().sum();
     if ext > 0 {
         out.push_str(&format!(

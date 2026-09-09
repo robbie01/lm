@@ -279,6 +279,10 @@ fn do_load(m: &mut Machine, a: u32, f: u32, fuel: u32) -> Option<u32> {
 
 #[inline(never)]
 fn op_load(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
+    #[cfg(feature = "isaprof")]
+    unsafe {
+        *m.prof.get_unchecked_mut(crate::prof::mem_slot(rs1(w), false)) += 1;
+    }
     let a = r(m, rs1(w)).wrapping_add(imm_i(w));
     match do_load(m, a, f3(w), fuel) {
         Some(v) => w_(m, rd(w), v),
@@ -314,6 +318,10 @@ fn do_store(m: &mut Machine, a: u32, f: u32, v: u32, fuel: u32) -> bool {
 #[inline(never)]
 fn op_store(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let a = r(m, rs1(w)).wrapping_add(imm_s(w));
+    #[cfg(feature = "isaprof")]
+    unsafe {
+        *m.prof.get_unchecked_mut(crate::prof::mem_slot(rs1(w), true)) += 1;
+    }
     let v = r(m, rs2(w));
     if !do_store(m, a, f3(w), v, fuel) {
         return m.fault(C_SFAULT, a, pc, fuel);
