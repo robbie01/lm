@@ -25,33 +25,6 @@
 (define wb-title-text-on 1)
 (define wb-title-text-off 0)
 
-;; ---------------------------------------------------------------- text
-;; A glyph is written a pixel at a time. Sixty four stores a character sounds
-;; extravagant until you count them: a whole screen of text is about a
-;; millisecond, and nothing else has to exist for it to work.
-(define (draw-char x y ch fg bg)
-  (let ((row 0))
-    (while (%< row font-cell)
-      (let ((bits (font-row ch row))
-            (col 0))
-        (while (%< col 5)
-          (if (%= 1 (%logand (%lsh bits (%- col 4)) 1))
-              (plot (%+ x col) (%+ y row) fg)
-              (if (%>= bg 0) (plot (%+ x col) (%+ y row) bg) nil))
-          (set! col (%+ col 1)))
-        (if (%>= bg 0) (plot (%+ x 5) (%+ y row) bg) nil))
-      (set! row (%+ row 1)))
-    nil))
-
-(define (draw-text x y s fg bg)
-  (let ((i 0) (n (string-length s)))
-    (while (%< i n)
-      (draw-char (%+ x (%* i font-advance)) y (string-ref s i) fg bg)
-      (set! i (%+ i 1)))
-    nil))
-
-(define (text-width s) (%* (string-length s) font-advance))
-
 ;; ---------------------------------------------------------------- windows
 (define win-slots 10)
 (define win-x 0)
@@ -71,7 +44,7 @@
 (define (win-get w i) (%vector-ref w i))
 (define (win-set! w i v) (%vector-set! w i v))
 
-(define title-height 10)
+(define title-height 22)
 
 (define (make-window x y w h title)
   (let ((v (make-vector-n win-slots nil)))
@@ -140,11 +113,11 @@
     (fill-rect x y w h wb-face)
     (fill-rect (%+ x 1) (%+ y 1) (%- w 2) title-height
                (if front wb-title-on wb-title-off))
-    (draw-text (%+ x 3) (%+ y 2) (win-get win win-title)
+    (draw-text (%+ x 6) (%+ y 4) (win-get win win-title)
                (if front wb-title-text-on wb-title-text-off) -1)
     ;; The close box, top right.
-    (fill-rect (%+ x (%- w 10)) (%+ y 2) 7 7 wb-face)
-    (draw-frame (%+ x (%- w 10)) (%+ y 2) 7 7)
+    (fill-rect (%+ x (%- w 17)) (%+ y 5) 12 12 wb-face)
+    (draw-frame (%+ x (%- w 17)) (%+ y 5) 12 12)
     (fill-rect (win-inner-x win) (win-inner-y win)
                (win-inner-w win) (win-inner-h win) wb-back)
     (draw-frame x y w h)
@@ -156,9 +129,9 @@
 (define (draw-desktop)
   (fill-rect 0 0 *screen-w* *screen-h* wb-desktop)
   ;; A menu bar with nothing in the menus yet, which is honest enough.
-  (fill-rect 0 0 *screen-w* 13 wb-face)
-  (draw-text 4 3 "Workbench" wb-back -1)
-  (draw-line 0 12 (%- *screen-w* 1) 12 wb-shadow)
+  (fill-rect 0 0 *screen-w* 20 wb-face)
+  (draw-text 9 2 "Workbench" wb-back -1)
+  (draw-line 0 19 (%- *screen-w* 1) 19 wb-shadow)
   nil)
 
 ;; Everything, from scratch. Order no longer matters: the regions do not
@@ -308,8 +281,8 @@
     (shell-clear v)
     v))
 
-(define (shell-cell-x win col) (%+ (win-inner-x win) (%* col font-advance)))
-(define (shell-cell-y win row) (%+ (win-inner-y win) (%* row font-height)))
+(define (shell-cell-x win col) (%+ (win-inner-x win) (%* col mono-advance)))
+(define (shell-cell-y win row) (%+ (win-inner-y win) (%* row mono-height)))
 
 (define (shell-scroll win sh)
   ;; The grid moves up a line and so does the picture: the blitter copies the
@@ -326,12 +299,12 @@
     (while (%< i (%* cols rows))
       (bytes-set! g i 32)
       (set! i (%+ i 1)))
-    (blit-rect (win-inner-x win) (%+ (win-inner-y win) font-height)
+    (blit-rect (win-inner-x win) (%+ (win-inner-y win) mono-height)
                (win-inner-x win) (win-inner-y win)
-               (win-inner-w win) (%- (win-inner-h win) font-height))
+               (win-inner-w win) (%- (win-inner-h win) mono-height))
     (fill-rect (win-inner-x win)
-               (%+ (win-inner-y win) (%* (%- rows 1) font-height))
-               (win-inner-w win) font-height wb-back)
+               (%+ (win-inner-y win) (%* (%- rows 1) mono-height))
+               (win-inner-w win) mono-height wb-back)
     (%vector-set! sh sh-row (%- rows 1))
     nil))
 
@@ -360,14 +333,14 @@
           (shell-poke sh 32)
           (fill-rect (shell-cell-x win (%vector-ref sh sh-col))
                      (shell-cell-y win (%vector-ref sh sh-row))
-                     font-advance font-height wb-back))
+                     mono-advance mono-height wb-back))
         nil))
    (else
     (if (%>= (%vector-ref sh sh-col) (%vector-ref sh sh-cols))
         (shell-newline win sh)
         nil)
     (shell-poke sh c)
-    (draw-char (shell-cell-x win (%vector-ref sh sh-col))
+    (draw-mono-char (shell-cell-x win (%vector-ref sh sh-col))
                (shell-cell-y win (%vector-ref sh sh-row))
                (%int->char c) wb-text wb-back)
     (%vector-set! sh sh-col (%+ (%vector-ref sh sh-col) 1))))
@@ -387,7 +360,7 @@
           (let ((ch (bytes-ref g (%+ (%* r cols) c))))
             (if (%= ch 32)
                 nil
-                (draw-char (shell-cell-x win c) (shell-cell-y win r)
+                (draw-mono-char (shell-cell-x win c) (shell-cell-y win r)
                            (%int->char ch) wb-text -1)))
           (set! c (%+ c 1))))
       (set! r (%+ r 1)))
@@ -415,8 +388,8 @@
          (w (if (%cons? opts) (%car opts) 380))
          (h (if (if (%cons? opts) (%cons? (%cdr opts)) nil) (cadr opts) 200))
          (win (make-window x y w h "Shell"))
-         (cols (%/ (%- w 4) font-advance))
-         (rows (%/ (%- h (%+ title-height 3)) font-height))
+         (cols (%/ (%- w 4) mono-advance))
+         (rows (%/ (%- h (%+ title-height 3)) mono-height))
          (sh (make-shell cols rows)))
     (win-set! win win-data sh)
     (win-set! win win-refresh (lambda (v) (shell-refresh v)))
@@ -495,7 +468,7 @@
 ;; ---------------------------------------------------------------- startup
 (define (workbench)
   (if (%null? *screen*) (open-screen screen-width screen-height) nil)
-  (if (%null? *font*) (font-init) nil)
+  (if (%null? *font*) (begin (font-init) (mono-init)) nil)
   (set! *windows* nil)
   (set! *wb-running* t)
   (wb-repaint)
