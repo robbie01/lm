@@ -120,9 +120,12 @@
 
 ;; ---------------------------------------------------------------- the app
 (define (eyes-task)
+  ;; Once a frame, not as often as the scheduler will allow. The pupils cannot
+  ;; move more often than the screen is shown, so anything faster is work
+  ;; nobody sees - and under preemption it is work taken from somebody else.
   (while t
     (track)
-    (reschedule)))
+    (wait-vblank)))
 
 (define *eyes-count* 0)
 

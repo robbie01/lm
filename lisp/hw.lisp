@@ -102,7 +102,10 @@
     (poke gfx-height h)
     (poke gfx-pitch w)
     (poke gfx-mode 8)
-    (poke gfx-ctrl gfx-on)
+    ;; The vblank interrupt goes on with the display. Exec has a server on it
+    ;; before this runs, and writing the control register without the bit
+    ;; would quietly turn the frame clock off again.
+    (poke gfx-ctrl (%logior gfx-on gfx-vbirq))
     (default-palette)
     bm))
 

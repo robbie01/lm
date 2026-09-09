@@ -472,6 +472,10 @@
      (else nil))))
 
 (define (wb-input-task)
+  ;; Drain whatever has arrived, then sleep until the next frame. A mouse
+  ;; sampled sixty times a second is a mouse that feels immediate, and the
+  ;; alternative - asking again as fast as the processor can be handed back -
+  ;; was most of what this machine did while it looked idle.
   (while *wb-running*
     (let ((n (input-pending)))
       (if (%> n 0)
@@ -479,7 +483,7 @@
             (while (%< i n)
               (wb-event (input-event))
               (set! i (%+ i 1))))
-          (reschedule))))
+          (wait-vblank))))
   nil)
 
 ;; ---------------------------------------------------------------- startup

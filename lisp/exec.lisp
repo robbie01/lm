@@ -174,6 +174,7 @@
 (define eb-idlecount 240)
 (define eb-taskcount 244)
 (define eb-idletask 248)
+(define eb-idsaved 252)       ; interrupt state the outermost Disable found
 (define execbase-size 256)
 
 (define *sysbase* 0)
@@ -205,16 +206,24 @@
 ;; Disable turns interrupts off at the processor. Forbid leaves them on but
 ;; tells the scheduler not to switch: an interrupt still runs, it just cannot
 ;; take the processor away.
+;; The count is what a debugger reads; what makes the pair correct is the
+;; state the outermost Disable found. Enable used to turn interrupts on when
+;; the count reached zero, which is wrong wherever the count did not start at
+;; zero-with-interrupts-on - and an interrupt handler is exactly that place.
+;; A server that called Signal, whose Enable balanced, re-enabled interrupts
+;; in the middle of the handler.
 (define (disable)
-  (%disable)
-  (poke (%+ *sysbase* eb-idnest) (%+ (peek (%+ *sysbase* eb-idnest)) 1))
+  (let ((was (%disable))
+        (n (peek (%+ *sysbase* eb-idnest))))
+    (if (%= n 0) (poke (%+ *sysbase* eb-idsaved) was) nil)
+    (poke (%+ *sysbase* eb-idnest) (%+ n 1)))
   nil)
 
 (define (enable)
   (let ((n (%- (peek (%+ *sysbase* eb-idnest)) 1)))
-    (poke (%+ *sysbase* eb-idnest) n)
+    (poke (%+ *sysbase* eb-idnest) (if (%< n 0) 0 n))
     (if (%<= n 0)
-        (begin (poke (%+ *sysbase* eb-idnest) 0) (%enable))
+        (%restore-interrupts (peek (%+ *sysbase* eb-idsaved)))
         nil))
   nil)
 
@@ -690,6 +699,49 @@
     (%raw-st! (%+ i is-data) data)
     i))
 
+;; ---------------------------------------------------------------- vblank
+;; One signal bit, the same in every task, so that waking every waiter is a
+;; walk of the wait list rather than a registry somebody has to maintain.
+;; `alloc-signal` hands out bits from 16 up, which leaves the low half for
+;; things like this.
+(define sigb-vblank 5)
+(define sigf-vblank 32)
+(define *vblank-int* 0)
+(define *vblank-count* 0)
+
+(define (vblank-server data)
+  ;; Runs inside the interrupt handler, so it allocates nothing and takes the
+  ;; successor before Signal moves the task off the list it is standing on.
+  (set! *vblank-count* (%+ *vblank-count* 1))
+  (let ((p (list-first (wait-list))))
+    (while p
+      (let ((next (node-next p)))
+        (if (%> (%logand (peek (%+ p tc-sigwait)) sigf-vblank) 0)
+            (signal p sigf-vblank)
+            nil)
+        (set! p next))))
+  nil)
+
+;; Sleep until the display has finished a frame.
+;;
+;; This is what a drawing task should do instead of rescheduling: a redraw
+;; that runs more often than the screen is shown is work nobody sees, and on a
+;; preemptive machine it is work taken from somebody who needed it. A task
+;; waiting here is off the ready list entirely, so it costs nothing until the
+;; frame arrives.
+(define (wait-vblank) (wait sigf-vblank))
+
+(define (vblank-start)
+  (if (%> *vblank-int* 0)
+      nil
+      (begin
+        (set! *vblank-int*
+              (make-interrupt "vblank" 0 (lambda (d) (vblank-server d)) 0))
+        (add-int-server int-vblank *vblank-int*)
+        ;; And tell the display to raise it.
+        (poke gfx-ctrl (%logior (peek gfx-ctrl) gfx-vbirq))))
+  *vblank-int*)
+
 (define (add-int-server line int)
   (disable)
   (enqueue (int-vector line) int)
@@ -779,6 +831,7 @@
     ;; than halting the machine.
     (set! *stack-top-fn* (lambda () (peek (%+ (this-task) tc-spupper))))
     (set! *return-addr-fn* (lambda () *task-exit-stub*))
+    (vblank-start)
     (set! *abort-cleanup-fn*
           (lambda ()
             (poke (%+ sb eb-idnest) 0)
