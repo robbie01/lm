@@ -654,6 +654,24 @@ register writes and then the one that starts it; two tasks interleaved there
 start each other's work. That one is visible — it draws a line across the
 screen from a rectangle that was supposed to be clipped to a window.
 
+### Waiting for a frame
+
+Preemption also made it obvious that nothing was ever *waiting*. A drawing task
+looped on `reschedule`, which under a cooperative scheduler was polite and
+under a preemptive one is a task asking for the processor back thousands of
+times a second to redraw a picture the display shows sixty times.
+
+So the display gets an interrupt server. Exec reserves one signal bit —
+`sigf-vblank`, the same bit in every task, which is what makes waking every
+waiter a walk of the wait list rather than a registry somebody has to keep —
+and `(wait-vblank)` blocks until the display has finished a frame. The eyes
+and the workbench's input task use it, and a task blocked there is off the
+ready list entirely.
+
+Four pairs of eyes open and nothing happening: three seconds of machine time
+now costs three seconds of wall clock, with the emulator idling through it.
+Spinning, the same three seconds had not arrived after 174.
+
 ## The Workbench
 
 A window owns the part of the bitmap it may draw on, and nothing else. Its
