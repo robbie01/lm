@@ -20,36 +20,43 @@
     n))
 
 ;; ---------------------------------------------------------------- balls
-;; One task per ball. They share the framebuffer with no coordination at all,
-;; which is exactly the Amiga bargain: a single address space, nothing in the
-;; way, and it is on you not to draw over each other.
-(define (ball-task colour seed)
-  (lambda ()
-    (let ((x (%+ 40 (%mod seed 500)))
-          (y (%+ 40 (%mod (%* seed 7) 300)))
-          (dx (if (%= 0 (%mod seed 2)) 3 -2))
-          (dy (if (%= 0 (%mod seed 3)) 2 -3))
-          (r 8))
-      (while t
-        (fill-rect x y r r 0)
-        (set! x (%+ x dx))
-        (set! y (%+ y dy))
-        (if (if (%< x 2) t (%> x (%- screen-width (%+ r 2)))) (set! dx (%- 0 dx)) nil)
-        (if (if (%< y 2) t (%> y (%- screen-height (%+ r 2)))) (set! dy (%- 0 dy)) nil)
-        (fill-rect x y r r colour)
-        (wait-vblank)))))
+;; One task per ball, all of them drawing into one window. They coordinate
+;; about nothing, which is exactly the Amiga bargain - a single address space,
+;; nothing in the way, and it is on you not to draw over each other - except
+;; that now the worst they can do is spoil their own window.
+(define (ball-task win colour seed)
+  (let ((bw (win-inner-w win)) (bh (win-inner-h win)))
+    (lambda ()
+      (let ((x (%mod seed (%- bw 20)))
+            (y (%mod (%* seed 7) (%- bh 20)))
+            (dx (if (%= 0 (%mod seed 2)) 3 -2))
+            (dy (if (%= 0 (%mod seed 3)) 2 -3))
+            (r 8))
+        (while t
+          (win-fill win x y r r pt-white)
+          (set! x (%+ x dx))
+          (set! y (%+ y dy))
+          ;; Turn round *and* step back inside. Flipping the direction without
+          ;; correcting the position leaves the ball one column out, and one
+          ;; column out is inside the window frame, which it then paints over.
+          (if (%< x 0) (begin (set! x 0) (set! dx (%- 0 dx))) nil)
+          (if (%> x (%- bw r)) (begin (set! x (%- bw r)) (set! dx (%- 0 dx))) nil)
+          (if (%< y 0) (begin (set! y 0) (set! dy (%- 0 dy))) nil)
+          (if (%> y (%- bh r)) (begin (set! y (%- bh r)) (set! dy (%- 0 dy))) nil)
+          (win-fill win x y r r colour)
+          (present win))))))
 
-(define (balls n)
-  (screen)
-  (clear-screen 15)
-  (poke gfx-ctrl (%logior gfx-on gfx-vbirq))
-  (let ((i 0))
+(define (balls . opts)
+  (let* ((n (if (%cons? opts) (%car opts) 8))
+         (win (make-demo-window "Balls" 420 300))
+         (i 0))
+    (win-fill win 0 0 (win-inner-w win) (win-inner-h win) pt-white)
     (while (%< i n)
       (add-task (string-append "ball" (number->string i))
                 0
-                (ball-task (%+ 1 (%mod i 11)) (%+ 3 (%* i 37))))
-      (set! i (%+ i 1))))
-  n)
+                (ball-task win (%+ 1 (%mod i 11)) (%+ 3 (%* i 37))))
+      (set! i (%+ i 1)))
+    win))
 
 ;; ---------------------------------------------------------------- mandelbrot
 ;; Fixed point with twelve fractional bits. A fixnum holds thirty bits, and
@@ -73,79 +80,104 @@
     i))
 
 (define (mandelbrot . opts)
-  (let ((limit (if (%cons? opts) (%car opts) 40)))
-    (screen)
-    (let ((y 0))
-      (while (%< y screen-height)
-        (let ((x 0)
-              ;; -1.2 .. 1.2 over the height
-              (ci (%- (%/ (%* y (%* 24 fp-one)) (%* 10 screen-height))
-                      (%/ (%* 12 fp-one) 10))))
-          (while (%< x screen-width)
-            (let* ((cr (%- (%/ (%* x (%* 3 fp-one)) screen-width) (%* 2 fp-one)))
-                   (n (mandel-point cr ci limit)))
-              (plot x y (if (%>= n limit) 0 (%+ 16 (%mod (%* n 7) 240)))))
-            (set! x (%+ x 1))))
-        (set! y (%+ y 1))
-        (if (%= 0 (%mod y 16)) (screen-sync) nil)))
-    (screen-sync)
-    'done))
+  ;; A window of its own, and a row of it handed over every sixteen: the
+  ;; picture appears in bands rather than after a long silence.
+  (let* ((limit (if (%cons? opts) (%car opts) 40))
+         (win (make-demo-window "Mandelbrot" 420 320))
+         (bw (win-inner-w win))
+         (bh (win-inner-h win))
+         (y 0))
+    (while (%< y bh)
+      (let ((x 0)
+            ;; -1.2 .. 1.2 over the height
+            (ci (%- (%/ (%* y (%* 24 fp-one)) (%* 10 bh))
+                    (%/ (%* 12 fp-one) 10))))
+        (while (%< x bw)
+          (let* ((cr (%- (%/ (%* x (%* 3 fp-one)) bw) (%* 2 fp-one)))
+                 (n (mandel-point cr ci limit)))
+            (win-plot win x y (if (%>= n limit) pt-black (%+ 16 (%mod (%* n 7) 200)))))
+          (set! x (%+ x 1))))
+      (set! y (%+ y 1))
+      (if (%= 0 (%mod y 16)) (present win) nil))
+    (window-damage win)
+    win))
 
 ;; ---------------------------------------------------------------- life
 ;; Conway's life, straight on the framebuffer: the screen is the board, which
 ;; is only reasonable because reading a pixel back is a load like any other.
 (define *life-back* nil)
 
+(define *life-win* nil)
+(define *life-w* 0)
+(define *life-h* 0)
+
 (define (life-seed density)
-  (screen)
-  (if *life-back* nil (set! *life-back* (alloc-pool (%* screen-width screen-height))))
-  (clear-screen 0)
-  (let ((y 1))
-    (while (%< y (%- screen-height 1))
-      (let ((x 1))
-        (while (%< x (%- screen-width 1))
-          (if (%< (%mod (random) 100) density) (plot x y 1) nil)
-          (set! x (%+ x 1))))
-      (set! y (%+ y 1))))
+  (let ((w (win-inner-w *life-win*)) (h (win-inner-h *life-win*)))
+    (set! *life-w* w)
+    (set! *life-h* h)
+    (if *life-back* nil (set! *life-back* (alloc-pool (%* w h))))
+    (win-fill *life-win* 0 0 w h pt-white)
+    (let ((y 1))
+      (while (%< y (%- h 1))
+        (let ((x 1))
+          (while (%< x (%- w 1))
+            (if (%< (%mod (random) 100) density)
+                (win-plot *life-win* x y pt-black)
+                nil)
+            (set! x (%+ x 1))))
+        (set! y (%+ y 1)))))
   'seeded)
 
 (define (life-step)
-  (let ((y 1) (w screen-width))
-    ;; Count into the back buffer first, so every cell sees the same
-    ;; generation.
-    (while (%< y (%- screen-height 1))
-      (let ((x 1) (row (%* y w)))
+  ;; The window's own bitmap is the board, which is only reasonable because
+  ;; reading a pixel back is a load like any other. A cell is alive if it is
+  ;; black; the counting is done against the back buffer so that every cell
+  ;; sees the same generation.
+  (let ((y 1)
+        (w *life-w*)
+        (h *life-h*)
+        (stride (win-get *life-win* win-w)))
+    (while (%< y (%- h 1))
+      (let ((x 1) (row (win-row *life-win* y)))
         (while (%< x (%- w 1))
-          (let* ((p (%+ *screen* (%+ row x)))
-                 (n (%+ (%+ (%+ (peek8 (%- p (%+ w 1))) (peek8 (%- p w)))
-                            (%+ (peek8 (%- p (%- w 1))) (peek8 (%- p 1))))
-                        (%+ (%+ (peek8 (%+ p 1)) (peek8 (%+ p (%- w 1))))
-                            (%+ (peek8 (%+ p w)) (peek8 (%+ p (%+ w 1)))))))
-                 (alive (peek8 p)))
-            (poke8 (%+ *life-back* (%+ row x))
+          (let* ((p (%+ row x))
+                 (up (%- p stride))
+                 (dn (%+ p stride))
+                 (n (%+ (%+ (%+ (live? (%- up 1)) (live? up))
+                            (%+ (live? (%+ up 1)) (live? (%- p 1))))
+                        (%+ (%+ (live? (%+ p 1)) (live? (%- dn 1)))
+                            (%+ (live? dn) (live? (%+ dn 1))))))
+                 (alive (live? p)))
+            (poke8 (%+ *life-back* (%+ (%* y w) x))
                    (if (%= alive 1)
                        (if (if (%= n 2) t (%= n 3)) 1 0)
                        (if (%= n 3) 1 0))))
           (set! x (%+ x 1))))
+      (set! y (%+ y 1)))
+    ;; And back, a row at a time: the board is w wide and the bitmap is not.
+    (set! y 1)
+    (while (%< y (%- h 1))
+      (let ((x 1) (row (win-row *life-win* y)))
+        (while (%< x (%- w 1))
+          (poke8 (%+ row x)
+                 (if (%= 1 (peek8 (%+ *life-back* (%+ (%* y w) x))))
+                     pt-black pt-white))
+          (set! x (%+ x 1))))
       (set! y (%+ y 1))))
-  ;; Copy back with the blitter rather than a loop; this is what it is for.
-  (poke blt-src *life-back*)
-  (poke blt-dst *screen*)
-  (poke blt-w screen-width)
-  (poke blt-h screen-height)
-  (poke blt-smod screen-width)
-  (poke blt-dmod screen-width)
-  (poke blt-op op-copy)
-  (screen-sync)
+  (present *life-win*)
   nil)
 
-(define (life n)
-  (life-seed 28)
-  (let ((i 0))
-    (while (%< i n)
-      (life-step)
-      (set! i (%+ i 1))))
-  'done)
+(define (live? p) (if (%= (peek8 p) pt-black) 1 0))
+
+(define (life . opts)
+  (let ((n (if (%cons? opts) (%car opts) 60)))
+    (set! *life-win* (make-demo-window "Life" 260 200))
+    (life-seed 28)
+    (let ((i 0))
+      (while (%< i n)
+        (life-step)
+        (set! i (%+ i 1))))
+    *life-win*))
 
 ;; ---------------------------------------------------------------- self-test
 ;; The most convincing thing the machine can do is compile something while you

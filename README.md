@@ -57,6 +57,8 @@ tests.
 | `lisp/exec.lisp` | Amiga Exec-style kernel |
 | `lisp/packages.lisp` | every module, and the names it makes public |
 | `lisp/hw.lisp` | the custom chips |
+| `lisp/platinum.lisp` | the Mac OS 8/9 appearance, ported from ~/platinum |
+| `lisp/font.lisp` `lisp/mono.lisp` | Charcoal for the interface, a 5x7 face for shells |
 | `lisp/eyes.lisp` | xeyes, and the demonstration that instances work |
 | `lisp/read.lisp` | the reader, and the only one |
 | `lisp/sys.lisp` | the kickstart: traps, REPL, rebuild |

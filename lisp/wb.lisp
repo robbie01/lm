@@ -87,7 +87,8 @@
 ;; pixels and the blitter is charged one cycle each, which is more than two
 ;; frames at sixty hertz - so compositing everything every time is not a thing
 ;; this machine can afford, and the union of what actually moved is.
-(define *damage* nil)
+(define *damage* nil)      ; a list of rectangles, newest first
+(define damage-max 16)      ; beyond which they are all merged into one
 
 (define (rect-union a b)
   (if (%null? a)
@@ -100,8 +101,43 @@
                 (y2 (if (%> (rect-y2 a) (rect-y2 b)) (rect-y2 a) (rect-y2 b))))
             (rect x y (%- x2 x) (%- y2 y))))))
 
+(define (rect-covers? a b)
+  ;; Is b entirely inside a?
+  (if (%<= (rect-x a) (rect-x b))
+      (if (%<= (rect-y a) (rect-y b))
+          (if (%>= (rect-x2 a) (rect-x2 b)) (%>= (rect-y2 a) (rect-y2 b)) nil)
+          nil)
+      nil))
+
+(define (covered? r)
+  ;; Is the damage entirely behind one window? Then the desktop under it does
+  ;; not need painting, and the common case - a task damaging its own window -
+  ;; costs one blit instead of a screenful of fill.
+  (let ((yes nil))
+    (dolist (w *windows*)
+      (if (if yes nil (rect-covers? (window-rect w) r)) (set! yes t) nil))
+    yes))
+
 (define (damage r)
-  (without-interrupts (set! *damage* (rect-union *damage* r)))
+  ;; A list rather than one growing rectangle. Two windows at opposite corners
+  ;; have a union that is nearly the whole screen, and a compositor asked to
+  ;; repaint the whole screen sixty times a second is a compositor that never
+  ;; finishes one - which looks exactly like a window that will not appear.
+  (without-interrupts
+    ;; Six tasks drawing into one window ask for the same rectangle six times.
+    ;; Dropping what is already covered is what keeps the list short enough
+    ;; that it never has to be merged into one screen-sized regret.
+    (let ((have nil))
+      (dolist (d *damage*) (if (rect-covers? d r) (set! have t) nil))
+      (if have
+          nil
+          (begin
+            (set! *damage* (%cons r *damage*))
+            (if (%> (length *damage*) damage-max)
+                (let ((u nil))
+                  (dolist (d *damage*) (set! u (rect-union u d)))
+                  (set! *damage* (list u)))
+                nil)))))
   nil)
 
 (define (window-damage w) (damage (window-rect w)))
@@ -139,6 +175,19 @@
     (window-damage win)
     nil))
 
+;; The chrome and nothing else. Coming forward or losing the front changes the
+;; frame and not one pixel of what the window is showing - and a window whose
+;; contents took a minute to compute would rather not be asked for them again
+;; because somebody clicked on something else.
+(define (window-draw-frame win)
+  (let ((saved *rp*))
+    (use-rastport (window-rastport win))
+    (window-frame win (win-get win win-w) (win-get win win-h)
+                  (%eq? win (front-window)))
+    (use-rastport saved))
+  (window-damage win)
+  nil)
+
 ;; The Platinum frame: a #CC face inside a black outline, raised six-pixel
 ;; bands down the sides and along the bottom, a striped title bar with a box
 ;; at each end, and a black border round the content.
@@ -155,7 +204,12 @@
          (tw (text-width title))
          (tx (let ((c (%/ (%- w tw) 2)))
                (if (%< c (%+ close-x 20)) (%+ close-x 20) c))))
-    (fill-rect 0 0 w h pt-g3)
+    ;; The bands, not the whole rectangle: the interior belongs to whoever
+    ;; owns the window, and coming forward must not cost them their picture.
+    (fill-rect 0 0 w pt-title-h pt-g3)
+    (fill-rect 0 pt-title-h pt-band (%- h pt-title-h) pt-g3)
+    (fill-rect (%- w pt-band) pt-title-h pt-band (%- h pt-title-h) pt-g3)
+    (fill-rect 0 (%- h pt-band) w pt-band pt-g3)
     (pt-frame 0 0 w h outline)
     (if front
         (begin
@@ -190,29 +244,44 @@
 ;; Back to front, into the screen, over whatever was damaged. Overlap needs no
 ;; arithmetic: a window in front is blitted after the one behind it and simply
 ;; wins.
+
+
 (define (composite r)
-  (let ((saved *rp*))
-    (use-rastport (make-rastport-on *screen* *screen-w* *screen-h*
-                                    0 0 (list r)))
-    (draw-desktop)
-    (use-rastport saved))
+  ;; Filling 1024 by 768 costs 786,432 cycles and a frame is 333,333, so the
+  ;; desktop is painted only where it will actually show.
+  (if (covered? r)
+      nil
+      (let ((saved *rp*))
+        (use-rastport (make-rastport-on *screen* *screen-w* *screen-h*
+                                        0 0 (list r)))
+        (draw-desktop)
+        (use-rastport saved)))
   (dolist (w (reverse *windows*))
     (let* ((wr (window-rect w))
            (i (rect-intersect wr r)))
       (if i
-          (bm-blit-rect (window-bitmap w) (win-get w win-w) (win-get w win-h)
-                        *screen* *screen-w* *screen-h*
-                        (%- (rect-x i) (rect-x wr)) (%- (rect-y i) (rect-y wr))
-                        (rect-x i) (rect-y i) (rect-w i) (rect-h i))
+          (let ((bm (window-bitmap w))
+                (bw (win-get w win-w))
+                (bh (win-get w win-h))
+                (sx (%- (rect-x i) (rect-x wr)))
+                (sy (%- (rect-y i) (rect-y wr)))
+                (dx (rect-x i))
+                (dy (rect-y i))
+                (cw (rect-w i))
+                (ch (rect-h i)))
+            (bm-blit-rect bm bw bh *screen* *screen-w* *screen-h*
+                          sx sy dx dy cw ch))
           nil)))
   nil)
 
 ;; One pass of the compositor: take whatever damage has accumulated and pay it.
 (define (wb-composite)
-  (let ((r (without-interrupts (let ((d *damage*)) (set! *damage* nil) d))))
-    (if (%null? r)
-        nil
-        (composite (rect-intersect r (rect 0 0 *screen-w* *screen-h*))))))
+  (let ((ds (without-interrupts (let ((d *damage*)) (set! *damage* nil) d)))
+        (screen (rect 0 0 *screen-w* *screen-h*)))
+    (dolist (d ds)
+      (let ((i (rect-intersect d screen)))
+        (if i (composite i) nil)))
+    nil))
 
 ;; Finished drawing: hand the frame over and wait until it has been shown.
 ;; This is what a drawing task should call instead of a bare wait - the
@@ -242,15 +311,47 @@
       nil
       (begin
         (if (if *front-was* (memq *front-was* *windows*) nil)
-            (window-draw *front-was*)
+            (window-draw-frame *front-was*)
             nil)
-        (if (front-window) (window-draw (front-window)) nil)
+        (if (front-window) (window-draw-frame (front-window)) nil)
         (set! *front-was* (front-window))))
   (dolist (w *windows*) (window-damage w))
   nil)
 
+;; ---------------------------------------------------------------- surfaces
+;; A window whose interior is exactly w by h, staggered like a shell, plus the
+;; two calls something drawing pixel by pixel wants: straight at the bitmap,
+;; because a plot that walks a clipping region is a plot that costs more in
+;; bookkeeping than in pixels.
+(define (make-demo-window title w h)
+  (let* ((n (length *windows*))
+         (win (make-window (%+ 40 (%* n 24)) (%+ 40 (%* n 20))
+                           (%+ w (%* 2 pt-band))
+                           (%+ h (%+ pt-title-h pt-band))
+                           title)))
+    (window-open win)
+    win))
+
+(define (win-plot win x y c)
+  (bm-plot (window-bitmap win) (win-get win win-w) (win-get win win-h)
+           (%+ x (win-inner-x win)) (%+ y (win-inner-y win)) c))
+
+(define (win-point win x y)
+  (bm-point (window-bitmap win) (win-get win win-w) (win-get win win-h)
+            (%+ x (win-inner-x win)) (%+ y (win-inner-y win))))
+
+(define (win-fill win x y w h c)
+  (bm-fill-rect (window-bitmap win) (win-get win win-w) (win-get win win-h)
+                (%+ x (win-inner-x win)) (%+ y (win-inner-y win)) w h c))
+
+;; Where a row of the interior starts, for the things that walk memory.
+(define (win-row win y)
+  (%+ (window-bitmap win)
+      (%+ (%* (%+ y (win-inner-y win)) (win-get win win-w)) (win-inner-x win))))
+
 (define (window-open win)
   (set! *windows* (%cons win *windows*))
+  (window-draw win)
   (wb-update)
   win)
 

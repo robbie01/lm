@@ -49,7 +49,7 @@ const CASES: &[(&str, &str, &str)] = &[
 /// Text that must be refused rather than quietly interned.
 const ERRORS: &[(&str, &str)] = &[
     // Private, so one colon is not enough.
-    ("user", "wb:draw-char"),
+    ("user", "wb:shell-putc"),
     // No such package at all.
     ("user", "nosuchpackage:thing"),
 ];
