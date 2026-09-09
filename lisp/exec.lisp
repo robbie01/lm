@@ -255,15 +255,39 @@
   (set! *tdnest* (%+ *tdnest* 1))
   nil)
 
+;; Leaving Forbid means paying whatever the scheduler wanted to do while it was
+;; held off. Split out because the macro below wants it too.
+(define (permit-deferred)
+  (if (%> *attn-resched* 0)
+      (begin (set! *attn-resched* 0) (reschedule))
+      nil))
+
 (define (permit)
   (let ((n (%- *tdnest* 1)))
     (set! *tdnest* (if (%< n 0) 0 n))
-    (if (%<= n 0)
-        (if (%> *attn-resched* 0)
-            (begin (set! *attn-resched* 0) (reschedule))
-            nil)
-        nil))
+    (if (%<= n 0) (permit-deferred) nil))
   nil)
+
+;; Forbid, lexically, and the one to reach for by default.
+;;
+;; The body runs with the scheduler held off: no other task can take the
+;; processor. Interrupts stay on, which is the whole difference from
+;; `without-interrupts` - the clock keeps counting, the keyboard keeps
+;; arriving, the display keeps its frame - and only tasks are excluded. So it
+;; is the right lock for anything shared between tasks that no interrupt
+;; server touches, and it is the wrong one for anything a server does touch.
+;;
+;; It restores the nesting depth it found rather than decrementing, so an
+;; unbalanced Forbid somewhere inside the body cannot leave the scheduler
+;; switched off for good.
+(defmacro without-tasks body
+  (let ((saved (gensym)) (result (gensym)))
+    `(let ((,saved *tdnest*))
+       (set! *tdnest* (%+ ,saved 1))
+       (let ((,result (begin ,@body)))
+         (set! *tdnest* ,saved)
+         (if (%= ,saved 0) (permit-deferred) nil)
+         ,result))))
 
 (define (forbidden?) (%> *tdnest* 0))
 

@@ -207,7 +207,8 @@
   ;; handle-interrupt and switch-tasks are the trap handler's, and the trap
   ;; handler is in sys: exported to one caller, not to applications.
   handle-interrupt switch-tasks
-  idle? idle-start input-listen permit preemption-off preemption-on
+  idle? idle-start input-listen permit permit-deferred without-tasks
+  preemption-off preemption-on
   task-snapshot task?
   this-task
   rem-task reschedule sigb-input sigb-vblank sigf-input sigf-vblank signal
