@@ -66,6 +66,7 @@ tests.
 | `src/check/asm.rs` | the Lisp assembler against an independent Rust encoder |
 | `src/check/compiler.rs` | source in, machine code out, run, compare |
 | `src/check/inspect.rs` | what is actually in an image |
+| `src/check/reach.rs` | what each package's symbols can reach |
 
 ## The processor
 
@@ -649,6 +650,7 @@ lmdev bench           measure the interpreter
 lmdev readers         name resolution: use lists, pkg:name, pkg::name
 lmforge rebuild --check   compile every source on the machine, then collect
 lmdev inspect [IMG]   look inside an image without running it
+lmdev reach [IMG]     what each package's symbols can reach, and what only they can
 lmdev eval EXPR       compile and run one expression, for debugging the compiler
 lmdev repl            a prompt on the bootstrap interpreter
 ```
@@ -661,6 +663,12 @@ encoding agreeing with itself is not.
 `lmdev inspect` checks the invariant the collector depends on, by decoding
 every `lui`/`addi` pair in code space and asserting that none of them names
 anything in the heap.
+
+`lmdev reach` walks the heap once per package, from that package's own symbols,
+and records for every cell the set of packages that can get to it. It answers
+what a namespace actually weighs - and it is how the 2.5 MB of dead object
+space in a fresh image was found, which is real: pairs are compacted and 100%
+of them are live, code is 99% live, and objects are 14%.
 
 ## Known limits
 

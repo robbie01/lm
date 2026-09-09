@@ -13,4 +13,5 @@ pub mod asm;
 pub mod compiler;
 pub mod cpu;
 pub mod inspect;
+pub mod reach;
 pub mod readers;

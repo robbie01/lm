@@ -71,6 +71,17 @@ enum Cmd {
         names: Vec<String>,
     },
 
+    /// What each package's symbols can reach, and what only they can reach
+    Reach {
+        /// Image to examine
+        #[arg(default_value = "kick.img")]
+        image: String,
+
+        /// Print the regions as JSON rather than a table
+        #[arg(long)]
+        json: bool,
+    },
+
     /// A prompt on the bootstrap interpreter, for poking at the compiler
     ///
     /// This is the build-time Lisp, not the machine's own: it runs on the host
@@ -101,6 +112,7 @@ fn main() -> std::process::ExitCode {
         }
         Cmd::Eval { exprs } => lm::check::compiler::eval_one(&exprs) == 0,
         Cmd::Inspect { image, names } => lm::check::inspect::run(&image, &names) == 0,
+        Cmd::Reach { image, json } => lm::check::reach::run(&image, json) == 0,
         Cmd::Repl { files } => lm::forge::host_repl(&files) == 0,
     };
     if ok {
