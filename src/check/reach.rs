@@ -189,6 +189,49 @@ pub fn run(path: &str, json: bool) -> i32 {
         }
     }
     let empty_pages = page_used.iter().filter(|u| !**u).count();
+
+    // What compacting would cost and what it would buy: how much live data
+    // sits on each page, and how much of it would have to be copied to close
+    // the gaps. A page that is nearly full is not worth evacuating; the
+    // histogram says how many are.
+    let mut page_live = vec![0u64; obj_pages.max(1)];
+    for v in reach(&h, &roots) {
+        if is_cons(v) {
+            continue;
+        }
+        let start = v - 4;
+        let end = start + obj_size(h.hdr(v));
+        let mut a = start;
+        while a < end {
+            let page = (a - OBJ_BASE) / 4096;
+            let upto = ((a / 4096) + 1) * 4096;
+            let stop = end.min(upto);
+            if (page as usize) < page_live.len() {
+                page_live[page as usize] += (stop - a) as u64;
+            }
+            a = stop;
+        }
+    }
+    let mut bands = [0usize; 5]; // 0, <25%, <50%, <75%, >=75%
+    let mut sparse_bytes = 0u64;
+    for l in &page_live {
+        let f = *l as f64 / 4096.0;
+        let b = if *l == 0 {
+            0
+        } else if f < 0.25 {
+            1
+        } else if f < 0.5 {
+            2
+        } else if f < 0.75 {
+            3
+        } else {
+            4
+        };
+        bands[b] += 1;
+        if f < 0.5 {
+            sparse_bytes += *l;
+        }
+    }
     // The regions of the diagram: bytes that exactly this set of packages can
     // reach, and nobody else.
     let mut region: HashMap<u32, u64> = HashMap::new();
@@ -250,6 +293,15 @@ pub fn run(path: &str, json: bool) -> i32 {
         "      {} KiB stranded on {} pages that still hold something live",
         dead.saturating_sub(blanked) / 1024,
         obj_pages - empty_pages
+    );
+    println!(
+        "    object pages by how full they are: {} empty, {} under a quarter, {} under half, {} under three quarters, {} fuller",
+        bands[0], bands[1], bands[2], bands[3], bands[4]
+    );
+    println!(
+        "    evacuating every page under half full would copy {} KiB and free {} pages",
+        sparse_bytes / 1024,
+        bands[1] + bands[2]
     );
     if homeless > 0 {
         println!("  ({homeless} symbols belong to no package)");
