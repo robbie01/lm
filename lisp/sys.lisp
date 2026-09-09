@@ -22,8 +22,8 @@
   nil)
 
 (define (banner-exec)
-  (emit-str "exec at ")
-  (emit-str (number->hex (sysbase)))
+  (emit-str "exec lists at ")
+  (emit-str (number->hex (exec-lists)))
   (emit-str ", ")
   (emit-str (number->string (task-count)))
   (emit-str " task\n"))

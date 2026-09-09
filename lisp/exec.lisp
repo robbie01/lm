@@ -158,32 +158,47 @@
 (define ts-except 5)
 (define ts-removed 6)
 
-;; ---------------------------------------------------------------- ExecBase
-(define eb-thistask 20)
-(define eb-taskready 24)      ; List
-(define eb-taskwait 40)       ; List
-(define eb-idnest 56)
-(define eb-tdnest 60)
-(define eb-quantum 64)
-(define eb-attnresched 68)
-(define eb-liblist 72)        ; List
-(define eb-portlist 88)       ; List
-(define eb-intvects 104)      ; 8 lists of 16 bytes
-(define eb-dispcount 232)
-(define eb-switchcount 236)
-(define eb-idlecount 240)
-(define eb-taskcount 244)
-(define eb-idletask 248)
-(define eb-idsaved 252)       ; interrupt state the outermost Disable found
-(define execbase-size 256)
+;; ---------------------------------------------------------------- the kernel
+;; Exec keeps its own state in an ExecBase structure at a known address, so
+;; that any program, in any language, compiled separately, can find the kernel
+;; with `move.l 4.w,a6` and no linker. None of that applies here: one address
+;; space, one image, and every function can name a symbol directly. So the
+;; scalars are variables. They are two instructions to read instead of four,
+;; a debugger reads them by name rather than by offset, and `disable` no
+;; longer writes through a null base pointer during the allocation that
+;; creates the base pointer.
+;;
+;; What is left is memory rather than values, and has to be. A list header
+;; overlaps two imaginary nodes - the head's successor field and the tail's
+;; predecessor field - which is what lets insert and remove work with no test
+;; for the ends of the list. Nodes therefore point back into the header, and
+;; a header has to be somewhere addressable.
+(define el-taskready 0)       ; List
+(define el-taskwait 16)       ; List
+(define el-liblist 32)        ; List
+(define el-portlist 48)       ; List
+(define el-intvects 64)       ; 8 lists of 16 bytes
+(define exec-lists-size 192)
 
-(define *sysbase* 0)
+(define *exec-lists* 0)
 
-(define (sysbase) *sysbase*)
-(define (this-task) (peek (%+ *sysbase* eb-thistask)))
-(define (ready-list) (%+ *sysbase* eb-taskready))
-(define (wait-list) (%+ *sysbase* eb-taskwait))
-(define (int-vector n) (%+ *sysbase* (%+ eb-intvects (%* n list-size))))
+(define *this-task* 0)
+(define *idle-task* 0)
+(define *idnest* 0)           ; Disable nesting
+(define *tdnest* 0)           ; Forbid nesting
+(define *int-state-saved* 0)  ; the interrupt state the outermost Disable found
+(define *attn-resched* 0)     ; a switch a Forbid deferred
+(define *quantum* 0)
+(define *disp-count* 0)
+(define *switch-count* 0)
+(define *idle-count* 0)
+(define *task-count* 0)
+
+(define (exec-lists) *exec-lists*)
+(define (this-task) *this-task*)
+(define (ready-list) (%+ *exec-lists* el-taskready))
+(define (wait-list) (%+ *exec-lists* el-taskwait))
+(define (int-vector n) (%+ *exec-lists* (%+ el-intvects (%* n list-size))))
 
 ;; ---------------------------------------------------------------- context
 ;; Word 0 is the pc, words 1..31 are x1..x31. This is the block the trap stub
@@ -214,34 +229,34 @@
 ;; in the middle of the handler.
 (define (disable)
   (let ((was (%disable))
-        (n (peek (%+ *sysbase* eb-idnest))))
-    (if (%= n 0) (poke (%+ *sysbase* eb-idsaved) was) nil)
-    (poke (%+ *sysbase* eb-idnest) (%+ n 1)))
+        (n *idnest*))
+    (if (%= n 0) (set! *int-state-saved* was) nil)
+    (set! *idnest* (%+ n 1)))
   nil)
 
 (define (enable)
-  (let ((n (%- (peek (%+ *sysbase* eb-idnest)) 1)))
-    (poke (%+ *sysbase* eb-idnest) (if (%< n 0) 0 n))
+  (let ((n (%- *idnest* 1)))
+    (set! *idnest* (if (%< n 0) 0 n))
     (if (%<= n 0)
-        (%restore-interrupts (peek (%+ *sysbase* eb-idsaved)))
+        (%restore-interrupts *int-state-saved*)
         nil))
   nil)
 
 (define (forbid)
-  (poke (%+ *sysbase* eb-tdnest) (%+ (peek (%+ *sysbase* eb-tdnest)) 1))
+  (set! *tdnest* (%+ *tdnest* 1))
   nil)
 
 (define (permit)
-  (let ((n (%- (peek (%+ *sysbase* eb-tdnest)) 1)))
-    (poke (%+ *sysbase* eb-tdnest) (if (%< n 0) 0 n))
+  (let ((n (%- *tdnest* 1)))
+    (set! *tdnest* (if (%< n 0) 0 n))
     (if (%<= n 0)
-        (if (%> (peek (%+ *sysbase* eb-attnresched)) 0)
-            (begin (poke (%+ *sysbase* eb-attnresched) 0) (reschedule))
+        (if (%> *attn-resched* 0)
+            (begin (set! *attn-resched* 0) (reschedule))
             nil)
         nil))
   nil)
 
-(define (forbidden?) (%> (peek (%+ *sysbase* eb-tdnest)) 0))
+(define (forbidden?) (%> *tdnest* 0))
 
 ;; ---------------------------------------------------------------- scheduler
 ;; A reschedule is asked for with an ecall, so that the switch happens inside
@@ -332,7 +347,7 @@
   (let ((cur (this-task)))
     (if (forbidden?)
         ;; A forbidden task keeps the processor; remember that it owes us one.
-        (poke (%+ *sysbase* eb-attnresched) 1)
+        (set! *attn-resched* 1)
         (let ((next (rem-head (ready-list))))
           (if (%null? next)
               nil
@@ -344,10 +359,9 @@
                 (poke (%+ cur tc-elapsed) (%+ (peek (%+ cur tc-elapsed)) 1))
                 (poke (%+ next tc-state) ts-run)
                 (poke (%+ next tc-switches) (%+ (peek (%+ next tc-switches)) 1))
-                (poke (%+ *sysbase* eb-thistask) next)
+                (set! *this-task* next)
                 (load-task-env next)
-                (poke (%+ *sysbase* eb-switchcount)
-                      (%+ (peek (%+ *sysbase* eb-switchcount)) 1))
+                (set! *switch-count* (%+ *switch-count* 1))
                 (%set-context (peek (%+ next tc-context)))
                 ;; Only now, with the context switched away from whatever was
                 ;; running, is it safe to hand a dead task's stack back.
@@ -401,7 +415,7 @@
             (task-ready! task)
             ;; A woken task of higher priority should get the processor now.
             (if (%> (peek (%+ task ln-pri)) (peek (%+ (this-task) ln-pri)))
-                (poke (%+ *sysbase* eb-attnresched) 1)
+                (set! *attn-resched* 1)
                 nil))
           nil)
       nil)
@@ -483,7 +497,7 @@
     (poke (ctx-reg ctx reg-t1) 0)
     (disable)
     (task-ready! task)
-    (poke (%+ *sysbase* eb-taskcount) (%+ (peek (%+ *sysbase* eb-taskcount)) 1))
+    (set! *task-count* (%+ *task-count* 1))
     (enable)
     task))
 
@@ -509,7 +523,7 @@
   ;; arriving from another task finds out rather than guesses.
   (poke (%+ task ln-type) 0)
   (poke (%+ task tc-state) ts-removed)
-  (poke (%+ *sysbase* eb-taskcount) (%- (peek (%+ *sysbase* eb-taskcount)) 1))
+  (set! *task-count* (%- *task-count* 1))
   (enable)
   (if (%= task (this-task))
       (begin
@@ -580,7 +594,7 @@
     ;; The last task to finish takes the machine with it: there is nothing
     ;; left to schedule, and pretending otherwise is a hang. The idle task does
     ;; not count - it is always there and it never does anything.
-    (if (%<= (task-count) (if (%> (peek (%+ *sysbase* eb-idletask)) 0) 2 1))
+    (if (%<= (task-count) (if (%> *idle-task* 0) 2 1))
         (begin (emit-str "\n") (%halt 0))
         nil)
     (rem-task task)
@@ -621,7 +635,7 @@
     (new-list (%+ p mp-msglist))
     (if (%null? name)
         nil
-        (begin (disable) (enqueue (%+ *sysbase* eb-portlist) p) (enable)))
+        (begin (disable) (enqueue (%+ *exec-lists* el-portlist) p) (enable)))
     p))
 
 (define (delete-port p)
@@ -630,7 +644,7 @@
   (free-pool p)
   nil)
 
-(define (find-port name) (find-name (%+ *sysbase* eb-portlist) name))
+(define (find-port name) (find-name (%+ *exec-lists* el-portlist) name))
 
 (define (create-message body reply)
   (let ((m (alloc-pool message-size)))
@@ -707,14 +721,14 @@
       (poke (%+ (%- base (%* 8 i)) 4) (closure-entry fn))
       (set! i (%+ i 1)))
     (disable)
-    (enqueue (%+ *sysbase* eb-liblist) base)
+    (enqueue (%+ *exec-lists* el-liblist) base)
     (enable)
     base))
 
 (define (lvo base n) (%raw-ld (%- base (%* 8 n))))
 
 (define (open-library name version)
-  (let ((lib (find-name (%+ *sysbase* eb-liblist) name)))
+  (let ((lib (find-name (%+ *exec-lists* el-liblist) name)))
     (if (%null? lib)
         nil
         (if (%< (peek (%+ lib lib-version)) version)
@@ -792,17 +806,16 @@
 ;; one task's worth of spinning.
 (define (idle-task)
   (while t
-    (poke (%+ *sysbase* eb-idlecount) (%+ (peek (%+ *sysbase* eb-idlecount)) 1))
+    (set! *idle-count* (%+ *idle-count* 1))
     (%wait-for-input)))
 
 (define (idle-start)
-  (if (%> (peek (%+ *sysbase* eb-idletask)) 0)
+  (if (%> *idle-task* 0)
       nil
-      (poke (%+ *sysbase* eb-idletask)
-            (add-task "idle" -128 (lambda () (idle-task)) 4096)))
-  (peek (%+ *sysbase* eb-idletask)))
+      (set! *idle-task* (add-task "idle" -128 (lambda () (idle-task)) 4096)))
+  *idle-task*)
 
-(define (idle? task) (%= task (peek (%+ *sysbase* eb-idletask))))
+(define (idle? task) (%= task *idle-task*))
 
 ;; ---------------------------------------------------------------- input
 ;; The input device raises its line for as long as it has events, so a handler
@@ -888,8 +901,8 @@
 (define (handle-interrupt-1 n ctx)
   (cond
    ((%= n int-timer)
-    (poke (%+ *sysbase* eb-dispcount) (%+ (peek (%+ *sysbase* eb-dispcount)) 1))
-    (timer-set-in (peek (%+ *sysbase* eb-quantum)))
+    (set! *disp-count* (%+ *disp-count* 1))
+    (timer-set-in *quantum*)
     (switch-tasks))
    ((%= n int-external)
     ;; Ask the chips which line it was, service every server on it, then
@@ -912,20 +925,35 @@
   (set! *vblank-int* 0)
   (set! *input-int* 0)
   (set! *input-task* 0)
-  (let ((sb (alloc-pool execbase-size)))
-    (set! *sysbase* sb)
-    (%raw-st! (%+ sb ln-name) "exec")
-    (poke (%+ sb ln-type) nt-library)
+  ;; And these, which a resumed image also arrives with: counts and flags that
+  ;; described an Exec that no longer exists. When they lived in a structure,
+  ;; allocating a fresh one zeroed them all at once; now that they are
+  ;; variables, saying so is the price of not having a base pointer.
+  (set! *this-task* 0)
+  (set! *idle-task* 0)
+  (set! *idnest* 0)
+  (set! *tdnest* 0)
+  (set! *int-state-saved* 0)
+  (set! *attn-resched* 0)
+  (set! *disp-count* 0)
+  (set! *switch-count* 0)
+  (set! *idle-count* 0)
+  (set! *task-count* 0)
+  (let ((sb (alloc-pool exec-lists-size)))
+    (set! *exec-lists* sb)
     (new-list (ready-list))
     (new-list (wait-list))
-    (new-list (%+ sb eb-liblist))
-    (new-list (%+ sb eb-portlist))
+    (new-list (%+ sb el-liblist))
+    (new-list (%+ sb el-portlist))
     (let ((i 0))
       (while (%< i 8)
         (new-list (int-vector i))
         (set! i (%+ i 1))))
-    (poke (%+ sb eb-quantum) default-quantum)
-    ;; AbsSysBase, where every Amiga program has always looked for it.
+    (set! *quantum* default-quantum)
+    ;; Where the kernel's lists are, in the two places the memory map has
+    ;; always named. Nothing outside this file reads either, and the emulator
+    ;; never has; they are here so that a machine stopped mid-flight can be
+    ;; told where to start looking.
     (%st32! sysbase-ptr sb)
     (%set-global! lg-sysbase sb)
 
@@ -941,8 +969,8 @@
       (poke (%+ boot tc-spupper) (%global lg-stacktop))
       (poke (%+ boot tc-sigalloc) 65535)
       (set-task-env! boot (new-task-env))
-      (poke (%+ sb eb-thistask) boot)
-      (poke (%+ sb eb-taskcount) 1))
+      (set! *this-task* boot)
+      (set! *task-count* 1))
 
     (build-task-exit-stub)
     ;; Now the two things sys.lisp had to leave blank: a task restarts on its
@@ -954,9 +982,9 @@
     (idle-start)
     (set! *abort-cleanup-fn*
           (lambda ()
-            (poke (%+ sb eb-idnest) 0)
-            (poke (%+ sb eb-tdnest) 0)
-            (poke (%+ sb eb-attnresched) 0)
+            (set! *idnest* 0)
+            (set! *tdnest* 0)
+            (set! *attn-resched* 0)
             ;; A fault inside an interrupt server never reaches the line that
             ;; clears this, and a machine that believes it is permanently
             ;; inside a handler refuses every Wait after.
@@ -972,15 +1000,16 @@
 ;; stops is being taken off the processor against your will.
 ;;
 ;; There is one caller and it is the one that needs it. A rebuild recompiles
-;; exec.lisp into the machine it is running on, and `(define *sysbase* nil)`
-;; is a top level form like any other: for the rest of that rebuild the kernel
-;; has no ExecBase. Nothing notices as long as nothing calls into the kernel -
-;; and a timer interrupt is exactly that call, arriving unasked.
+;; exec.lisp into the machine it is running on, and every `(define *idnest* 0)`
+;; in it is a top level form like any other: for the rest of that rebuild the
+;; kernel's state resets under it, one variable at a time. Nothing notices as
+;; long as nothing calls into the kernel - and a timer interrupt is exactly
+;; that call, arriving unasked.
 (define (preemption-off) (timer-never) nil)
 
 (define (exec-start)
   ;; Turn on preemption. From here the timer interrupt drives the scheduler.
-  (timer-set-in (peek (%+ *sysbase* eb-quantum)))
+  (timer-set-in *quantum*)
   (%enable-timer)
   (%enable)
   nil)
@@ -1005,7 +1034,7 @@
         nil)))
 
 (define (gc-invalidate-runs)
-  (if (%= *sysbase* 0)
+  (if (%= *exec-lists* 0)
       nil
       (begin
         (gc-scan-list-of (ready-list) drop-task-run)
@@ -1056,7 +1085,7 @@
       (set! p (node-next p)))))
 
 (define (gc-extra-roots)
-  (if (%= *sysbase* 0)
+  (if (%= *exec-lists* 0)
       nil
       (begin
         ;; The running task, whose stack gc-roots already walked.
@@ -1065,13 +1094,13 @@
         (gc-slot (%+ (this-task) tc-userdata))
         (gc-scan-list-of (ready-list) gc-scan-task)
         (gc-scan-list-of (wait-list) gc-scan-task)
-        (gc-scan-list-of (%+ *sysbase* eb-portlist) gc-scan-port)
-        (gc-scan-list-of (%+ *sysbase* eb-liblist) gc-scan-library)
+        (gc-scan-list-of (%+ *exec-lists* el-portlist) gc-scan-port)
+        (gc-scan-list-of (%+ *exec-lists* el-liblist) gc-scan-library)
         (let ((i 0))
           (while (%< i 8)
             (gc-scan-list-of (int-vector i) gc-scan-int-server)
             (set! i (%+ i 1)))))))
 
-(define (uptime) (peek (%+ *sysbase* eb-dispcount)))
-(define (switch-count) (peek (%+ *sysbase* eb-switchcount)))
-(define (task-count) (peek (%+ *sysbase* eb-taskcount)))
+(define (uptime) *disp-count*)
+(define (switch-count) *switch-count*)
+(define (task-count) *task-count*)
