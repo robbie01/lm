@@ -1,47 +1,57 @@
-//! Differential test for the two readers.
+//! Conformance tests for the reader.
 //!
-//! There are two implementations of what a name means: the forge's, in Rust,
-//! and the machine's, in Lisp. They have to agree exactly, because a symbol
-//! read at build time and one read by the running machine are the same symbol
-//! or they are not, and nothing in between is survivable. This is the same
-//! discipline `asm` applies to the two instruction encoders, for the same
-//! reason: one implementation agreeing with itself is not evidence.
+//! There used to be two readers - one in Rust for the bootstrap, one in Lisp
+//! for the machine - and this file compared them, because two implementations
+//! of what a name means had to agree exactly or a symbol read at build time
+//! would not be the symbol read at run time.
 //!
-//! The comparison is on identity, not on spelling. Each side resolves a name
-//! in a package and answers the address of the symbol it got, so a hash that
-//! disagreed - which would quietly intern a second symbol of the same name -
-//! shows up as a different number rather than as the same text.
+//! There is one now. `lisp/read.lisp` reads everything, including itself, and
+//! the bootstrap reader in Rust knows only how to make a list. So what is left
+//! to check is not agreement but behaviour: that a bare name finds what its
+//! package can see, that `pkg:name` reaches an export and `pkg::name` reaches
+//! past the interface, and that asking for something a package does not export
+//! is an error rather than a fresh symbol.
 
-use crate::check::compiler::run_one;
 use crate::forge::hostlisp::Lisp;
 use crate::forge::{boot_host, write_layout};
-use crate::heap::NIL;
 use crate::mach::Machine;
 
-/// Names worth asking about: ones a package holds itself, ones it only sees
-/// because something it uses exported them, ones two packages both have, and
-/// ones nobody has anywhere.
-const CASES: &[(&str, &str)] = &[
-    ("lm", "car"),
-    ("lm", "define"),
-    ("lm", "%car"),
-    ("lm", "t"),
-    ("user", "car"),        // inherited from the prelude
-    ("user", "workbench"),  // inherited from wb
-    ("user", "gc"),
-    ("wb", "draw-char"),    // wb's own, and private
-    ("wb", "title-height"),
-    ("wb", "car"),          // inherited
-    ("compiler", "compile-top"),
-    ("compiler", "trap-arity"),
-    ("sys", "trap-arity"),  // the same name, a different package
-    ("gc", "gc-extra-roots"),
-    ("exec", "gc-extra-roots"), // gc's symbol, overridden by exec
-    ("asm", "i-lw"),
-    ("mem", "t-vector"),
-    ("hw", "plot"),
-    ("snap", "save-image"),
-    ("lm", "no-such-name-anywhere"),
+/// Read `text` while standing in `pkg`, and report where the symbol ended up.
+const PROBE: &str = r#"
+(define (probe-read pkg text)
+  (let ((old (current-package)) (r nil))
+    (set-current-package! (find-package pkg))
+    (set! r (read-from-string text))
+    (set-current-package! old)
+    (list (package-name (symbol-package r)) (%symbol-name r))))
+"#;
+
+/// (package to read in, the text, where the symbol should end up)
+const CASES: &[(&str, &str, &str)] = &[
+    // The package's own names.
+    ("lm", "car", "(\"lm\" \"car\")"),
+    ("wb", "draw-char", "(\"wb\" \"draw-char\")"),
+    // Inherited through the use list: wb has no `car`, the prelude does.
+    ("wb", "car", "(\"lm\" \"car\")"),
+    ("user", "workbench", "(\"wb\" \"workbench\")"),
+    ("compiler", "define", "(\"lm\" \"define\")"),
+    // Reaching in from outside, by the two spellings.
+    ("user", "lm:car", "(\"lm\" \"car\")"),
+    ("user", "wb::draw-char", "(\"wb\" \"draw-char\")"),
+    ("gc", "wb::title-height", "(\"wb\" \"title-height\")"),
+    // A name nobody has becomes one of the reader's own package's - and the
+    // same name read in two packages is two symbols, which is the whole point
+    // of having packages at all.
+    ("user", "a-name-of-its-own", "(\"user\" \"a-name-of-its-own\")"),
+    ("wb", "a-name-of-its-own", "(\"wb\" \"a-name-of-its-own\")"),
+];
+
+/// Text that must be refused rather than quietly interned.
+const ERRORS: &[(&str, &str)] = &[
+    // Private, so one colon is not enough.
+    ("user", "wb:draw-char"),
+    // No such package at all.
+    ("user", "nosuchpackage:thing"),
 ];
 
 pub fn run() -> bool {
@@ -54,67 +64,53 @@ pub fn run() -> bool {
     }
     let script: String = crate::forge::SYSTEM
         .iter()
-        .map(|f| format!("(hostio:compile-file {f:?})\n"))
+        .map(|f| format!("(compile-file {f:?})\n"))
         .collect();
     if let Err(e) = l.eval_string(&script, "<readers>") {
         eprint!("compiling the library: {e}");
         return false;
     }
+    if let Err(e) = l.eval_lisp(PROBE) {
+        eprint!("defining the probe: {e}");
+        return false;
+    }
 
     let mut pass = 0;
     let mut fail = 0;
-    for (pkg, name) in CASES {
-        // The machine's answer, from its own reader's resolution, as the
-        // address of whatever symbol it settled on.
-        let src = format!(
-            "(%addr-of (intern-visible (find-package {pkg:?}) {name:?}))"
-        );
-        let got = run_one(&mut l, &src);
-        // The forge's answer, from the same three rules in Rust.
-        let p = match l.h.find_package(pkg) {
-            Some(p) => p,
-            None => {
-                println!("FAIL {pkg}:{name} - the forge has no such package");
+    for (pkg, text, want) in CASES {
+        let src = format!("(probe-read {pkg:?} {text:?})");
+        match l.eval_lisp(&src) {
+            Ok(v) => {
+                let got = l.h.write(v);
+                if got == *want {
+                    pass += 1;
+                } else {
+                    fail += 1;
+                    println!("FAIL reading {text} in {pkg}");
+                    println!("     want {want}");
+                    println!("     got  {got}");
+                }
+            }
+            Err(e) => {
                 fail += 1;
-                continue;
+                println!("FAIL reading {text} in {pkg}: {}", e.msg);
             }
-        };
-        let sym = l.h.intern_visible(p, name);
-        let want = sym.to_string();
-        if got == want {
-            pass += 1;
-        } else {
-            fail += 1;
-            println!("FAIL {pkg}:{name}");
-            println!("     forge   {want}");
-            println!("     machine {got}");
+        }
+    }
+    for (pkg, text) in ERRORS {
+        let src = format!("(probe-read {pkg:?} {text:?})");
+        match l.eval_lisp(&src) {
+            Err(_) => pass += 1,
+            Ok(v) => {
+                fail += 1;
+                println!(
+                    "FAIL reading {text} in {pkg} should have been refused, gave {}",
+                    l.h.write(v)
+                );
+            }
         }
     }
 
-    // And that every symbol in the image knows which package it belongs to:
-    // one without a home would print unqualified from anywhere and could not
-    // be found again by name.
-    let mut homeless = 0;
-    let mut all = l.h.g(crate::map::LG_SYMLIST);
-    let mut n = 0;
-    while all != NIL {
-        let s = l.h.car(all);
-        if l.h.slot(s, crate::heap::SYM_PACKAGE) == NIL {
-            if homeless < 5 {
-                println!("FAIL homeless symbol {}", l.h.sym_name(s));
-            }
-            homeless += 1;
-        }
-        n += 1;
-        all = l.h.cdr(all);
-    }
-    if homeless > 0 {
-        println!("     {homeless} symbols of {n} have no package");
-        fail += 1;
-    } else {
-        pass += 1;
-    }
-
-    println!("readers: {pass} passed, {fail} failed, {n} symbols checked");
+    println!("readers: {pass} passed, {fail} failed");
     fail == 0
 }

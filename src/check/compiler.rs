@@ -340,18 +340,18 @@ pub fn run_one(l: &mut Lisp, src: &str) -> String {
     // Read the source, compile every form but the last as a definition, and
     // wrap the last one in a thunk we can call.
     let script = format!(
-        r#"(let* ((forms (lm:%read-from-string {src:?}))
+        r#"(let* ((forms (read-forms-from-string {src:?}))
                   (n (length forms))
                   (defs (if (%> n 1) (reverse (%cdr (reverse forms))) nil))
                   (final (last forms)))
-             (dolist (d defs) (compiler:compile-top d))
-             (compiler:compile-top (list 'define (list 'lm:%ctest-entry) final))
+             (dolist (d defs) (compile-top d))
+             (compile-top (list 'define (list '%ctest-entry) final))
              nil)"#
     );
     if let Err(e) = l.eval_string(&script, "<ctest>") {
         return format!("COMPILE ERROR: {}", e.msg);
     }
-    let entry_sym = l.h.intern_path("lm:%ctest-entry");
+    let entry_sym = l.h.intern("%ctest-entry");
     let closure = l.h.sym_value(entry_sym);
     if closure == UNBOUND || closure == NIL {
         return "COMPILE ERROR: no entry".into();
@@ -417,13 +417,14 @@ pub fn eval_one(exprs: &[String]) -> i32 {
     }
     let script: String = crate::forge::SYSTEM
         .iter()
-        .map(|f| format!("(hostio:compile-file {f:?})
+        .map(|f| format!("(compile-file {f:?})
 "))
         .collect();
     if let Err(e) = l.eval_string(&script, "<eval>") {
         eprint!("{e}");
         return 1;
     }
+    run_one(&mut l, "(gc:install-allocator)");
     for e in exprs {
         println!("{}", run_one(&mut l, e));
     }
@@ -444,7 +445,7 @@ pub fn run_all(verbose: bool) -> bool {
     let t = std::time::Instant::now();
     let script: String = crate::forge::SYSTEM
         .iter()
-        .map(|f| format!("(hostio:compile-file {f:?})
+        .map(|f| format!("(compile-file {f:?})
 "))
         .collect();
     if let Err(e) = l.eval_string(&script, "<ctest-library>") {
@@ -456,9 +457,17 @@ pub fn run_all(verbose: bool) -> bool {
         t.elapsed().as_secs_f64(),
         l.h.g(LG_CODE_PTR) - CODE_BASE
     );
+    // The image installs the allocator from `kickstart`, and nothing here
+    // runs kickstart; without this the first test to make a vector would call
+    // through an empty hook.
+    let r = run_one(&mut l, "(gc:install-allocator)");
+    if r != "nil" {
+        println!("installing the allocator: {r}");
+        return false;
+    }
     // Anything compiled code will call that nothing ever defined shows up
     // here rather than as a wild jump at run time.
-    if let Ok(v) = l.eval_string("(lm:undefined-globals)", "<ctest>") {
+    if let Ok(v) = l.eval_string("(undefined-globals)", "<ctest>") {
         if v != NIL {
             println!("undefined globals: {}", l.h.write(v));
         }

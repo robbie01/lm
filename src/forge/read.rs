@@ -1,8 +1,13 @@
-//! The build-time reader. Text in, heap structure out.
+//! The bootstrap reader. Text in, heap structure out, and nothing else.
 //!
-//! There is a second reader written in Lisp that ends up compiled into the
-//! image for the REPL to use; this one exists only to break the bootstrap
-//! circle, since something has to read the reader.
+//! It knows how to make a list, a string, a number and a symbol. It does not
+//! know what a package is, what `pkg:name` means, or that `in-package` is
+//! anything but a call - all of that lives in `lisp/read.lisp`, in one copy,
+//! and this reader exists only to get far enough to run it.
+//!
+//! Everything it interns lands in one package, so the handful of names the
+//! bootstrap has to agree with the real reader about - the special forms, the
+//! intrinsics, `t` - are the same objects either way.
 
 use crate::heap::*;
 
@@ -12,12 +17,6 @@ pub struct Reader<'a, 'b> {
     pos: usize,
     pub file: String,
     pub line: u32,
-    /// Inside a `defpackage` or `in-package` form, where the names are the
-    /// names of packages that may not exist yet. Reading them as symbols
-    /// would intern them in whatever package happens to be current, which is
-    /// exactly the wrong one.
-    raw: bool,
-    depth: u32,
 }
 
 #[derive(Debug)]
@@ -43,8 +42,6 @@ impl<'a, 'b> Reader<'a, 'b> {
             pos: 0,
             file: file.to_string(),
             line: 1,
-            raw: false,
-            depth: 0,
         }
     }
 
@@ -286,8 +283,6 @@ impl<'a, 'b> Reader<'a, 'b> {
     fn read_list(&mut self, close: char) -> R<V> {
         let mut items: Vec<V> = Vec::new();
         let mut tail = NIL;
-        let outer_raw = self.raw;
-        self.depth += 1;
         loop {
             self.skip_space()?;
             match self.peek() {
@@ -316,26 +311,11 @@ impl<'a, 'b> Reader<'a, 'b> {
                     break;
                 }
                 _ => match self.read()? {
-                    Some(v) => {
-                        // The head of the form decides how the rest of it is
-                        // read: package names are names, not symbols.
-                        // Only the outermost form: `(define (defpackage
-                        // name . clauses) ...)` is a definition of it, not a
-                        // use of it, and its parameters are parameters.
-                        if items.is_empty() && self.depth == 1 && self.h.is_symbol(v) {
-                            let n = self.h.sym_name(v);
-                            if n == "defpackage" || n == "in-package" {
-                                self.raw = true;
-                            }
-                        }
-                        items.push(v)
-                    }
+                    Some(v) => items.push(v),
                     None => return self.err("unterminated list"),
                 },
             }
         }
-        self.raw = outer_raw;
-        self.depth -= 1;
         let mut r = tail;
         for &x in items.iter().rev() {
             r = self.h.cons(x, r);
@@ -364,31 +344,10 @@ impl<'a, 'b> Reader<'a, 'b> {
         s
     }
 
-    /// Split `pkg:name` or `pkg::name`. Answers the package part, the name,
-    /// and whether the internal symbols were asked for.
-    fn split_qualified(tok: &str) -> Option<(String, String, bool)> {
-        let i = tok.find(':')?;
-        if i == 0 {
-            return None; // a name that merely starts with a colon
-        }
-        let rest = &tok[i + 1..];
-        let (name, double) = match rest.strip_prefix(':') {
-            Some(r) => (r, true),
-            None => (rest, false),
-        };
-        if name.is_empty() || name.contains(':') {
-            return None;
-        }
-        Some((tok[..i].to_string(), name.to_string(), double))
-    }
-
     fn read_atom(&mut self) -> R<V> {
         let tok = self.token();
         if tok.is_empty() {
             return self.err("empty token");
-        }
-        if self.raw {
-            return Ok(self.h.string(&tok));
         }
         if let Some(v) = parse_number(&tok) {
             return Ok(match v {
@@ -404,81 +363,13 @@ impl<'a, 'b> Reader<'a, 'b> {
         if tok == "nil" {
             return Ok(NIL);
         }
-        if let Some((pkg, name, internal)) = Reader::split_qualified(&tok) {
-            let p = match self.h.find_package(&pkg) {
-                Some(p) => p,
-                None => return self.err(format!("no package named {pkg}")),
-            };
-            let s = self.h.find_in(p, &name);
-            if s != NIL {
-                if !internal && !self.h.exported(s) {
-                    return self.err(format!("{pkg} does not export {name}"));
-                }
-                return Ok(s);
-            }
-            if !internal {
-                return self.err(format!("{pkg} does not export {name}"));
-            }
-            return Ok(self.h.intern_in(p, &name));
-        }
-        let cur = self.h.cur_package();
-        Ok(self.h.intern_visible(cur, &tok))
-    }
-
-    /// `in-package` and `defpackage` take effect as they are read, because
-    /// everything after them in the file is read in the package they name.
-    /// The evaluator does the same thing again later, to no further effect.
-    pub fn package_form(&mut self, form: V) {
-        if !is_cons(form) {
-            return;
-        }
-        let head = self.h.car(form);
-        if !self.h.is_symbol(head) {
-            return;
-        }
-        let hn = self.h.sym_name(head);
-        let args = self.h.cdr(form);
-        if !is_cons(args) {
-            return;
-        }
-        let first = self.h.car(args);
-        if self.h.otype_is_string(first) {
-            let name = self.h.str_of(first);
-            if hn == "in-package" {
-                let p = self.h.package(&name);
-                self.h.set_cur_package(p);
-            } else if hn == "defpackage" {
-                let p = self.h.package(&name);
-                let mut names: Vec<String> = Vec::new();
-                let mut in_use = false;
-                let mut w = self.h.cdr(args);
-                while is_cons(w) {
-                    let x = self.h.car(w);
-                    if self.h.otype_is_string(x) {
-                        let sx = self.h.str_of(x);
-                        if sx == "use" {
-                            in_use = true;
-                        } else if in_use {
-                            names.push(sx);
-                        }
-                    }
-                    w = self.h.cdr(w);
-                }
-                let mut list = NIL;
-                for nm in names.iter().rev() {
-                    let used = self.h.package(nm);
-                    list = self.h.cons(used, list);
-                }
-                self.h.set_slot(p, PKG_USE, list);
-            }
-        }
+        Ok(self.h.intern(&tok))
     }
 
     /// Read every form in the text into a list.
     pub fn read_all(&mut self) -> R<Vec<V>> {
         let mut out = Vec::new();
         while let Some(v) = self.read()? {
-            self.package_form(v);
             out.push(v);
         }
         Ok(out)

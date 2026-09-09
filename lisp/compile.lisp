@@ -1672,10 +1672,21 @@
               ;; compiled later in the same build will read it as a constant,
               ;; and the initialiser is also recorded so that a booting image
               ;; re-runs it in source order.
-              (let ((name (cadr form))
-                    (expr (if (%cons? (cddr form)) (caddr form) nil)))
-                (%set-symbol-value! name (compile-time-eval expr))
-                (record-initialiser name expr)
+              ;;
+              ;; `(define name)` with nothing to run is a declaration and not
+              ;; a definition: it names the variable, leaves any value already
+              ;; there alone, and puts nothing on the boot list. That is what
+              ;; a cell somebody installs into can be spelled as - the machine
+              ;; recompiling its own sources walks over its own `define`s, and
+              ;; must not knock out the allocator it is allocating through.
+              (let ((name (cadr form)))
+                (if (%cons? (cddr form))
+                    (let ((expr (caddr form)))
+                      (%set-symbol-value! name (compile-time-eval expr))
+                      (record-initialiser name expr))
+                    (if (%eq? (%symbol-value name) *unbound*)
+                        (%set-symbol-value! name nil)
+                        nil))
                 name)))
          ;; A macro is needed twice: by the compiler running now, and by the
          ;; machine's own compiler once the image boots. So it is registered

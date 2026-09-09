@@ -2,7 +2,7 @@
 ;;; The single source of truth for these numbers is src/map.rs
 ;;; and src/heap.rs; this file is regenerated on every build.
 
-(in-package mem)
+(in-package lm)
 
 ;; ---- memory map ----
 (define ram-size #x10000000)

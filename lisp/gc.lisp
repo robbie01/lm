@@ -813,22 +813,6 @@
               (begin (%set-global! lg-obj-ptr (%+ q size)) q)
               0)))))
 
-(define (alloc-object type len)
-  (let* ((size (%logand (%+ (%+ 4 (object-payload type len)) 7) -8))
-         (p (obj-take size)))
-    (if (%= p 0)
-        (begin
-          (gc-collect)
-          (set! p (obj-take size))
-          (if (%= p 0) (out-of-memory "object space") nil))
-        nil)
-    (%st32! p (%logior (%lsh len 8) type))
-    (let ((i 4))
-      (while (%< i size)
-        (%st32! (%+ p i) 0)
-        (set! i (%+ i 4))))
-    (%from-addr (%+ p 4))))
-
 ;; ---------------------------------------------------------------- code space
 ;;
 ;; Code is collected but not moved. Not moved for the same reason objects are
@@ -985,5 +969,18 @@
   (emit-str (number->string (%- pool-limit pool-base)))
   (newline)
   nil)
+
+(define (install-allocator)
+  ;; What the prelude's `alloc-object` calls. It cannot name these itself, so
+  ;; the kickstart puts them in place before anything has a chance to
+  ;; allocate - which is before the boot list, since the first thing the boot
+  ;; list does is make a package.
+  ;;
+  ;; The functions themselves, not lambdas wrapping them: a closure would have
+  ;; to be allocated, and allocating is the thing that does not work yet.
+  (set! *object-allocator* obj-take)
+  (set! *collector* gc-collect)
+  nil)
+
 
 (define (gc) (gc-collect))

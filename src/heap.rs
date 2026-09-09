@@ -497,42 +497,6 @@ impl<'a> Heap<'a> {
         self.package("lm")
     }
 
-    /// The package a bare name is read in. One cell, so the forge's reader
-    /// and the machine's reader cannot drift apart about it.
-    pub fn cur_package(&mut self) -> V {
-        let p = self.g(LG_PACKAGE);
-        if p != NIL {
-            return p;
-        }
-        let base = self.base_package();
-        self.set_g(LG_PACKAGE, base);
-        base
-    }
-
-    pub fn set_cur_package(&mut self, p: V) {
-        self.set_g(LG_PACKAGE, p);
-    }
-
-    pub fn find_package(&mut self, name: &str) -> Option<V> {
-        let mut p = self.g(LG_PACKAGES);
-        while p != NIL {
-            let pkg = self.car(p);
-            if self.package_name(pkg) == name {
-                return Some(pkg);
-            }
-            p = self.cdr(p);
-        }
-        None
-    }
-
-    pub fn otype_is_string(&self, v: V) -> bool {
-        is_obj(v) && self.otype(v) == T_STRING
-    }
-
-    pub fn is_package(&self, v: V) -> bool {
-        is_obj(v) && self.otype(v) == T_RECORD && self.olen(v) == PKG_SLOTS
-    }
-
     pub fn exported(&self, s: V) -> bool {
         unfix(self.slot(s, SYM_FLAGS)) & SYM_EXPORTED != 0
     }
@@ -587,75 +551,6 @@ impl<'a> Heap<'a> {
         let cell2 = self.cons(s, all);
         self.set_g(LG_SYMLIST, cell2);
         s
-    }
-
-    /// The read-only halves, for the printer, which must not create a package
-    /// or an obarray as a side effect of describing something.
-    pub fn find_in_ro(&self, pkg: V, name: &str) -> V {
-        let ob = self.g(LG_OBARRAY);
-        if ob == NIL || pkg == NIL {
-            return NIL;
-        }
-        let n = self.olen(ob);
-        let b = Heap::qual_hash(&self.package_name(pkg), name) % n;
-        let mut chain = self.slot(ob, b);
-        while chain != NIL {
-            let s = self.car(chain);
-            if self.slot(s, SYM_PACKAGE) == pkg && self.str_of(self.slot(s, SYM_NAME)) == name {
-                return s;
-            }
-            chain = self.cdr(chain);
-        }
-        NIL
-    }
-
-    pub fn find_visible_ro(&self, pkg: V, name: &str) -> V {
-        if pkg == NIL {
-            return NIL;
-        }
-        let here = self.find_in_ro(pkg, name);
-        if here != NIL {
-            return here;
-        }
-        let mut u = self.slot(pkg, PKG_USE);
-        while u != NIL {
-            let used = self.car(u);
-            let s = self.find_in_ro(used, name);
-            if s != NIL && self.exported(s) {
-                return s;
-            }
-            u = self.cdr(u);
-        }
-        NIL
-    }
-
-    /// What a bare name would resolve to here, without making anything.
-    pub fn find_visible(&mut self, pkg: V, name: &str) -> V {
-        let here = self.find_in(pkg, name);
-        if here != NIL {
-            return here;
-        }
-        let mut u = self.slot(pkg, PKG_USE);
-        while u != NIL {
-            let used = self.car(u);
-            let s = self.find_in(used, name);
-            if s != NIL && self.exported(s) {
-                return s;
-            }
-            u = self.cdr(u);
-        }
-        NIL
-    }
-
-    /// Resolve a bare name the way a reader does: this package first, then
-    /// whatever the packages it uses have exported, and failing both a new
-    /// symbol of its own.
-    pub fn intern_visible(&mut self, pkg: V, name: &str) -> V {
-        let v = self.find_visible(pkg, name);
-        if v != NIL {
-            return v;
-        }
-        self.intern_in(pkg, name)
     }
 
     pub fn intern(&mut self, name: &str) -> V {
@@ -818,24 +713,10 @@ impl<'a> Heap<'a> {
         if is_obj(v) {
             match self.otype(v) {
                 T_SYMBOL => {
-                    // Short if the current package would read this name back
-                    // as this symbol; qualified otherwise, with two colons
-                    // for one that was never exported.
-                    let name = self.sym_name(v);
-                    let cur = self.g(LG_PACKAGE);
-                    if self.find_visible_ro(cur, &name) == v {
-                        out.push_str(&name);
-                    } else {
-                        let pkg = self.slot(v, SYM_PACKAGE);
-                        let pn = if pkg == NIL {
-                            "?".to_string()
-                        } else {
-                            self.package_name(pkg)
-                        };
-                        out.push_str(&pn);
-                        out.push_str(if self.exported(v) { ":" } else { "::" });
-                        out.push_str(&name);
-                    }
+                    // The bootstrap prints a bare name: it has one package,
+                    // and the machine's own printer is the one that has to
+                    // decide when a name needs qualifying.
+                    out.push_str(&self.sym_name(v))
                 }
                 T_STRING => {
                     let s = self.str_of(v);

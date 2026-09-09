@@ -15,44 +15,30 @@
 ;;; the interface into a package private business, and says so.
 
 ;; ---------------------------------------------------------------- modules
-(defpackage mem use lm)                                                ; the memory map and object layout, generated from the Rust side
-(defpackage lm use mem gc hw exec)                                     ; the prelude: everything a program is expected to have to hand
-(defpackage gc use mem lm hw)                                          ; the collector
-(defpackage hw use mem lm)                                             ; the custom chips
-(defpackage asm use mem lm gc)                                         ; the assembler
-(defpackage compiler use mem lm hw asm sys)                            ; Lisp to native RISC-V
-(defpackage sys use mem lm gc asm compiler exec)                       ; the kickstart: traps, reader, prompt
-(defpackage exec use mem lm gc hw asm sys)                             ; the kernel: tasks, signals, ports, libraries
-(defpackage snap use mem lm gc hw sys exec)                            ; saving the machine
-(defpackage wb use lm hw sys exec)                                     ; the workbench: windows and shells
-(defpackage eyes use mem lm gc hw exec sys wb)                          ; xeyes, one instance per pair
-(defpackage user use mem lm gc hw asm compiler sys exec snap wb eyes)       ; where a prompt starts, and the demos
-(defpackage boot use mem lm gc hw asm compiler sys exec)               ; the reset and trap stubs, built by the forge
-(defpackage hostio use mem lm gc hw asm compiler sys exec snap wb user) ; the forge standing in for the machine
+(defpackage lm use gc hw exec)                                     ; the prelude: everything a program is expected to have to hand
+(defpackage gc use lm hw)                                          ; the collector
+(defpackage hw use lm)                                             ; the custom chips
+(defpackage asm use lm gc)                                         ; the assembler
+(defpackage compiler use lm hw asm sys)                            ; Lisp to native RISC-V
+(defpackage sys use lm gc asm compiler exec)                       ; the kickstart: traps, reader, prompt
+(defpackage exec use lm gc hw asm sys)                             ; the kernel: tasks, signals, ports, libraries
+(defpackage snap use lm gc hw sys exec)                            ; saving the machine
+(defpackage wb use lm hw sys exec)                                 ; the workbench: windows and shells
+(defpackage eyes use lm gc hw exec sys wb)                         ; xeyes, one instance per pair
+(defpackage user use lm gc hw asm compiler sys exec snap wb eyes)  ; where a prompt starts, and the demos
+(defpackage boot use lm gc hw asm compiler sys exec)               ; the reset and trap stubs, built by the forge
+(defpackage hostio use lm gc hw asm compiler sys exec snap wb user) ; the forge standing in for the machine
 
 ;; ---------------------------------------------------------------- exports
-
-(in-package mem)
-;; 84 public, out of 116 definitions.
-(export '(
-  clo-code clo-free code-base code-lits code-name cons-base cons-limit
-  dev-blit dev-disk dev-gfx dev-input dev-sys dev-timer dev-uart fast-base
-  imm-unbound int-soft lg-bootlist lg-code-end lg-code-free lg-code-free-n
-  lg-code-ptr lg-code-reg lg-code-reg-n lg-cons-free lg-cons-free-n
-  lg-cons-ptr lg-cons-run lg-cons-run-end lg-errhandler lg-gccount
-  lg-gchook lg-imgentry lg-obarray lg-obj-end lg-obj-free-n lg-obj-ptr
-  lg-package lg-packages lg-pool-free lg-poolend lg-poolptr lg-refill
-  lg-roots lg-scratch0 lg-scratch1 lg-stackbot lg-stacktop lg-startup
-  lg-stub-hi lg-stub-lo lg-symcount lg-symlist lg-sysbase lg-toplevel
-  lg-traphook lg-trapsave mmio-base obj-base obj-limit pkg-name pkg-slots
-  pkg-tag pkg-use pool-base pool-limit sym-exported sym-flags sym-function
-  sym-macro sym-name sym-package sym-plist sym-slots sym-value sysbase-ptr
-  t-bytes t-closure t-code t-float t-record t-string t-symbol t-vector
-))
-
+;; The prelude goes first: every other list below is read in the package it
+;; belongs to, and reading `export` there means finding it here.
 (in-package lm)
-;; 429 public, out of 320 definitions.
+;; 541 public, out of 474 definitions plus the primitives and the special
+;; forms. The prelude is a library, so its interface is the library.
 (export '(
+  alloc-object *object-allocator* *collector*
+  ;; the memory map and object layout, generated from the Rust side
+  clo-code clo-free code-base code-lits code-name cons-base cons-limit dev-blit dev-disk dev-gfx dev-input dev-sys dev-timer dev-uart fast-base imm-unbound int-soft lg-bootlist lg-code-end lg-code-free lg-code-free-n lg-code-ptr lg-code-reg lg-code-reg-n lg-cons-free lg-cons-free-n lg-cons-ptr lg-cons-run lg-cons-run-end lg-errhandler lg-gccount lg-gchook lg-imgentry lg-obarray lg-obj-end lg-obj-free-n lg-obj-ptr lg-package lg-packages lg-pool-free lg-poolend lg-poolptr lg-refill lg-roots lg-scratch0 lg-scratch1 lg-stackbot lg-stacktop lg-startup lg-stub-hi lg-stub-lo lg-symcount lg-symlist lg-sysbase lg-toplevel lg-traphook lg-trapsave mmio-base obj-base obj-limit pkg-name pkg-slots pkg-tag pkg-use pool-base pool-limit sym-exported sym-flags sym-function sym-macro sym-name sym-package sym-plist sym-slots sym-value sysbase-ptr t-bytes t-closure t-code t-float t-record t-string t-symbol t-vector
   %* %+ %- %/ %< %<= %= %> %>= %addr-of %alloc-code %alloc-pool %apply %ash
   %bytes-length %bytes-ref %bytes-set! %bytes? %car %cdr %char->int %char?
   %closure? %cons %cons? %ctest-entry %cycles %disable %display %dv %ecall
@@ -60,7 +46,7 @@
   %frame-pointer %from-addr %funcall %gensym %global %halt %instance %set-instance! %int->char
   %intern %ld16 %ld32 %ld8 %logand %logior %lognot %logxor %lsh %macro?
   %macroexpand-1 %make-bytes %make-string %make-vector %mod %newline %null?
-  %obj-len %obj-type %object? %raw-ld %raw-st! %read-file %read-from-string
+  %obj-len %obj-type %object? %raw-ld %raw-st! %read-file
   %record? %reload-cons-run %rem %set-car! %set-cdr! %set-context
   %set-global! %set-slot! %set-symbol-flags! %set-symbol-function!
   %set-symbol-plist! %set-symbol-value! %slot %st16! %st32! %st8!
@@ -95,6 +81,11 @@
   package-use package? pair? pop position positive? princ print print-list
   print-obj print-record print-symbol print-vector push put qualified-hash
   quasiquote quote quotient reduce rem remainder remove-if rest revappend
+  read-char-or-nil read-form read-forms-from-string read-from-string
+  peek-char wait-char skip-space string-stream with-input-from-string
+  *peeked* *eof-ok* *reader-eof* start-reading-string stop-reading read-next
+  act-on-package-form form-head-named?
+  set-package-by-name define-package-by-name package-designator
   remove-eq reverse second set! set-car! set-cdr! set-current-package!
   set-package-use! set-symbol-function! set-symbol-value! setf sort space
   stream-get stream-put stream-wait string string->list string->number
@@ -113,19 +104,17 @@
   with-output-to-string write write-char-name write-string-quoted
   write-to-string zero?
 ))
-
 (in-package gc)
-;; 18 public, out of 100 definitions.
+;; 21 public, out of 101 definitions.
 (export '(
   alloc-code alloc-object frame-ok? gc gc-collect gc-extra-roots
-  gc-for-image gc-forget-scratch gc-scan-conservative gc-scan-frames
+  gc-for-image gc-forget-scratch install-allocator obj-take gc-scan-conservative gc-scan-frames
   gc-slot in-stub?
   refill-cons register-code room stub-args-off stub-frame-size
   stub-mask-off stub-raw-off
 ))
-
 (in-package hw)
-;; 52 public, out of 131 definitions.
+;; 83 public, out of 165 definitions.
 (export '(
   *screen* *screen-h* *screen-w* alloc-pool blit-rect blt-dmod blt-dst
   blt-h blt-op blt-smod blt-src blt-w clamp clear-screen disk-write
@@ -134,7 +123,7 @@
   set-rp-origin! set-rp-region! use-rastport screen-fill-rect screen-plot
   screen-blit-rect rect rect-x rect-y rect-w rect-h rect-x2 rect-y2 rect-ok?
   rect-intersect rect-contains? rect-subtract region-subtract-rect region-area
-  region-intersect-rect region-subtract region-area
+  region-intersect-rect region-subtract
   event-ascii fill-circle isqrt
   event-kind fill-rect free-pool gfx-ctrl gfx-on gfx-vbirq input-event
   input-pending int-ack int-disable int-enable int-pending int-raise millis
@@ -143,9 +132,8 @@
   screen-width
   timer-set-in vblank-count
 ))
-
 (in-package asm)
-;; 100 public, out of 171 definitions.
+;; 101 public, out of 147 definitions.
 (export '(
   $a0 $a1 $a2 $a3 $a4 $a5 $a6 $a7 $gp $ra $s0 $s1 $s2 $sp $t0 $t1 $t2 $t3 $t4
   $t5 $t6 $tp $zero asm-code-object asm-gensym-label asm-label asm-len
@@ -158,42 +146,37 @@
   i-sh i-sll i-slli i-slt i-snez i-sra i-srai i-srl i-srli i-stx i-stxb
   i-sub i-sw i-sw-abs i-wfi i-xor i-xori literal-offset op-index
 ))
-
 (in-package compiler)
-;; 10 public, out of 79 definitions.
+;; 11 public, out of 100 definitions.
 (export '(
   *boot-thunks* add-boot-thunk compile-file-forms compile-function
   compile-top register-instance-layout-in! setup-intrinsics trap-arity
   trap-error trap-oom trap-type
 ))
-
 (in-package sys)
-;; 26 public, out of 84 definitions.
+;; 26 public, out of 69 definitions.
 (export '(
-  *peeked* *repl-restart* *return-addr-fn* *stack-top-fn* *task-abort-fn*
+  *repl-restart* *return-addr-fn* *stack-top-fn* *task-abort-fn*
   bye compile-time-eval eval eval-form expand-macro handle-trap
   int-external int-software int-timer kickstart macro-form? print-backtrace
-  read-form rebuild rebuild-end record-initialiser register-macro repl
+  rebuild rebuild-end record-initialiser register-macro repl
   resume-kickstart
   start-repl system-name top-level-form trap-reschedule
 ))
-
 (in-package exec)
-;; 18 public, out of 179 definitions.
+;; 19 public, out of 183 definitions.
 (export '(
   add-task cause ctx-bytes disable enable exec-init exec-start forbid
   handle-interrupt permit rem-task reschedule signal spawn switch-tasks sysbase
   task-count tasks wait
 ))
-
 (in-package snap)
-;; 1 public, out of 5 definitions.
+;; 2 public, out of 7 definitions.
 (export '(
   save-image save-rebuilt
 ))
-
 (in-package wb)
-;; 13 public, out of 80 definitions.
+;; 33 public, out of 88 definitions.
 (export '(
   *windows* front-window make-window new-shell title-height wb-back
   window-rastport wb-update compute-regions draw-through
@@ -202,21 +185,18 @@
   win-task window-close window-open
   win-get win-h win-w win-x win-y window-push-key workbench
 ))
-
 (in-package boot)
 ;; 2 public, out of 21 definitions.
 (export '(
   build-boot-code reserve-reset
 ))
-
 (in-package hostio)
-;; 2 public, out of 23 definitions.
+;; 2 public, out of 24 definitions.
 (export '(
   *compile-trace* compile-file
 ))
-
 (in-package eyes)
-;; 12 public, out of the shape and the handful of things that work it.
+;; 13 public, out of 16 definitions.
 (export '(
   *eyes-instances* close-eyes eyes eyes? look-at look-x-of look-y-of
   make-eyes rad-of set-look-x-of! set-look-y-of! set-rad-of! window-of

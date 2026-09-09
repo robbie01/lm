@@ -47,7 +47,8 @@ tests.
 
 | the forge | |
 |---|---|
-| `src/forge/hostlisp.rs` `src/forge/read.rs` | the bootstrap interpreter |
+| `src/forge/hostlisp.rs` | the bootstrap interpreter |
+| `src/forge/read.rs` | the bootstrap reader: lists, and nothing else |
 | `src/forge/mod.rs` | the build driver |
 | `lisp/asm.lisp` | RV32 assembler, in Lisp |
 | `lisp/compile.lisp` | Lisp → RISC-V compiler, in Lisp |
@@ -56,7 +57,8 @@ tests.
 | `lisp/packages.lisp` | every module, and the names it makes public |
 | `lisp/hw.lisp` | the custom chips |
 | `lisp/eyes.lisp` | xeyes, and the demonstration that instances work |
-| `lisp/sys.lisp` | reader, printer, REPL, trap handling |
+| `lisp/read.lisp` | the reader, and the only one |
+| `lisp/sys.lisp` | the kickstart: traps, REPL, rebuild |
 
 | the bench | |
 |---|---|
@@ -206,15 +208,15 @@ both. The export lists were computed from actual cross-package use rather than
 guessed, which is why they are as small as they are:
 
 ```
-compiler     9 public of  79 definitions
-gc          17 of 100
-exec        18 of 179
-sys         24 of  84
-wb          13 of  80
-lm         429 of 302 definitions plus the primitives and special forms
+compiler    11 public of 100 definitions
+gc          21 of 101
+exec        19 of 183
+sys         26 of  69
+wb          33 of  88
+lm         541 of 474 definitions plus the primitives and special forms
 ```
 
-Roughly seven definitions in ten are now private. The prelude is the exception
+Roughly four definitions in five are now private. The prelude is the exception
 and should be: it is a library, so its interface is the library.
 
 The current package is **per task**, swapped by the scheduler along with the
@@ -237,12 +239,13 @@ compiler was interning `make-closure` and `t` *by name at compile time*, in
 whatever package happened to be current - so compiling `wb.lisp` was quietly
 creating `wb::make-closure`. Both were invisible in a flat namespace.
 
-`lmdev readers` is the check that keeps the two implementations of "what does
-this name mean" honest, the same way `lmdev asm` does for the two instruction
-encoders. It resolves the same names on both sides and compares the **address**
-of the symbol each settled on, so a hash that disagreed - which would silently
-intern a second symbol of the same name - shows up as a different number rather
-than as the same text.
+`lmdev readers` is what holds the rules down. There used to be two readers to
+keep honest; now there is one, so what it checks is behaviour rather than
+agreement — that a bare name finds what its package can see, that `pkg:name`
+reaches an export and `pkg::name` reaches past the interface, that asking a
+package for something it does not export is an error rather than a quietly
+interned second symbol, and that the same new name read in two packages is two
+symbols.
 
 ## Instances
 
@@ -475,13 +478,28 @@ allocated to build itself.
 
 ## The bootstrap, and building without it
 
-There are two ways to make an image.
+There are two ways to make an image, and neither of them carries a second copy
+of the language.
 
-`lmforge build` is the one that needs nothing: a small interpreter in Rust
-brings up the Lisp sources, and then the compiler — one of those sources,
-written in Lisp — compiles the whole system including itself into the same
-heap the interpreter has been filling all along. What is left in memory at the
-end is the image.
+`lmforge build` is the one that needs nothing. It comes up in two stages. The
+first is a reader in Rust that knows how to make a list and nothing else — no
+packages, no `pkg:name`, no idea that `in-package` is anything but a call —
+and a small interpreter that runs what it reads. That is enough to bring up
+the prelude, and the last file in the prelude is `lisp/read.lisp`: **the
+reader, written in Lisp**. From there the bootstrap reads with that, itself
+included, and the compiler — one of the sources, also written in Lisp —
+compiles the whole system into the same heap the interpreter has been filling
+all along. What is left in memory at the end is the image.
+
+```
+boot0 layout stream core macros runtime hostio read     <- read by Rust
+packages gc hw exec asm compile boot                    <- read by read.lisp
+```
+
+The split is a rule, not an accident: everything the Rust reader touches is
+one namespace, which is why it is exactly the prelude. `boot0.lisp` is two
+no-op macros so those files can still say which package they are in;
+`read.lisp` replaces them with the real ones on its way past.
 
 `lmforge rebuild` is the one that needs an image: it boots a previous one,
 **types the sources at its console**, and lets the machine compile them into a
@@ -490,29 +508,31 @@ a compiler and an image writer; what it does not have is a filesystem, and a
 console is a perfectly good substitute.
 
 The measurement that decides which is which: the machine compiles a five-line
-function in **108,600 cycles, 0.26 ms**. Over 1,427 top-level forms that is
-about a second of machine time — so the self-hosted path is **faster than the
-bootstrap it replaces**, not a sacrifice:
+function in **148,600 cycles, 0.35 ms**. Over 1,446 top-level forms that is
+about two seconds of machine time — so the self-hosted path is **faster than
+the bootstrap it replaces**, not a sacrifice:
 
 ```
-lmforge build                       kick.img in 7.0s
-lmforge rebuild --from kick.img     next.img in 2.2s, 1427 forms
+lmforge build                       kick.img in 10.6s
+lmforge rebuild --from kick.img     next.img in 2.2s, 1446 forms
 lmforge rebuild --check             compile everything, collect, write nothing
 ```
 
-What that buys is the end of mirroring. A change to the Lisp reader used to
-need a matching change in `src/forge/read.rs`, because both readers have to
-agree about what a name means. With `rebuild` they only have to agree when
-somebody builds from scratch — and layout is already single-sourced out of
-`map.rs` and `heap.rs`.
+What both of these buy is the end of mirroring. There used to be a second
+reader in `src/forge/read.rs` that knew about packages, `pkg:name`, use lists
+and the symbol hash, because a symbol read at build time has to be the same
+symbol read at run time — and every change to one of them had to be made
+twice. What is left cannot disagree about a name, because it does not resolve
+names: it interns every token into one package and stops. Layout is already
+single-sourced out of `map.rs` and `heap.rs`.
 
-Two things to know. The compiler being recompiled is the compiler doing the
-compiling, and calls go through symbol value cells, so the new one takes over
-partway through and finishes the job; if it is broken, the way you find out is
-that the build goes wrong somewhere confusing. And a rebuilt image is a **used
-machine** rather than a fresh one — it carries the holes left by the code it
-replaced, so it is bigger, and each generation is a little bigger again.
-`lmforge build` is how you renormalise.
+Two things to know about the rebuild. The compiler being recompiled is the
+compiler doing the compiling, and calls go through symbol value cells, so the
+new one takes over partway through and finishes the job; if it is broken, the
+way you find out is that the build goes wrong somewhere confusing. And a
+rebuilt image is a **used machine** rather than a fresh one — it carries the
+holes left by the code it replaced, so it is bigger, and each generation is a
+little bigger again. `lmforge build` is how you renormalise.
 
 ## Exec
 
@@ -616,9 +636,9 @@ to hardware from Lisp is peek and poke.
 lmdev all             every suite
 lmdev cpu             96 processor conformance cases
 lmdev asm             the Lisp assembler against an independent Rust encoder
-lmdev compiler        146 end-to-end cases: source in, machine code out, compare
+lmdev compiler        153 end-to-end cases: source in, machine code out, compare
 lmdev bench           measure the interpreter
-lmdev readers         the two readers, resolving names to the same symbol
+lmdev readers         name resolution: use lists, pkg:name, pkg::name
 lmforge rebuild --check   compile every source on the machine, then collect
 lmdev inspect [IMG]   look inside an image without running it
 lmdev eval EXPR       compile and run one expression, for debugging the compiler

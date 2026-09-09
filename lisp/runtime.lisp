@@ -47,6 +47,39 @@
 (define (make-bytes-n n)
   (alloc-object t-bytes n))
 
+;; Allocation lives here rather than with the collector: everything below is
+;; built out of it, and it is the prelude that everything below is in.
+;;
+;; It asks the collector for space through a pair of hooks rather than by
+;; name, because it cannot name the collector's functions. The forge reads the
+;; prelude with the bootstrap reader, which has one namespace, so every name
+;; mentioned here becomes a name of the prelude's own - and `obj-take` written
+;; here would be `lm:obj-take`, which is not the collector's. A hook says what
+;; is going on anyway: allocation is the caller, collection is what it falls
+;; back on when there is no room.
+;;
+;; Declared, not initialised. `install-allocator` fills them in before the
+;; boot list runs, and a `(define ... nil)` would put a `(set! ... nil)` on
+;; that list to undo the installation on the way past.
+(define *object-allocator*)
+(define *collector*)
+
+(define (alloc-object type len)
+  (let* ((size (%logand (%+ (%+ 4 (object-payload type len)) 7) -8))
+         (p (%funcall *object-allocator* size)))
+    (if (%= p 0)
+        (begin
+          (%funcall *collector*)
+          (set! p (%funcall *object-allocator* size))
+          (if (%= p 0) (out-of-memory "object space") nil))
+        nil)
+    (%st32! p (%logior (%lsh len 8) type))
+    (let ((i 4))
+      (while (%< i size)
+        (%st32! (%+ p i) 0)
+        (set! i (%+ i 4))))
+    (%from-addr (%+ p 4))))
+
 (define (make-record n tag)
   (let ((r (alloc-object t-record n)))
     (%set-slot! r 0 tag)
@@ -192,20 +225,38 @@
 ;; has to, because everything after them in a file is read in the package they
 ;; name. Doing it again here changes nothing, and is what makes them work when
 ;; they are typed at a prompt.
-(define (in-package name)
-  (set-current-package! (make-package name))
+;; A package name arrives as a string from the reader that knows about
+;; packages, and as a symbol from the one that does not - the bootstrap reads
+;; these forms before there is any such thing as a package. Both spellings
+;; mean the same package.
+(define (package-designator x)
+  (if (%symbol? x) (%symbol-name x) x))
+
+;; in-package and defpackage are macros so that their arguments are names
+;; rather than expressions, whichever reader read them: the bootstrap reader
+;; hands over symbols and the real one hands over strings, and a macro can
+;; quote either without evaluating it.
+(define (set-package-by-name name)
+  (set-current-package! (make-package (package-designator name)))
   nil)
 
-(define (defpackage name . words)
+
+
+(define (define-package-by-name all)
+  (let ((name (%car all)) (words (%cdr all)))
+    (defpackage-1 name words)))
+
+(define (defpackage-1 name words)
   ;; Flat rather than nested - (defpackage wb use lm hw exec) - because the
   ;; reader hands these over as names, and a nested list of names would be
   ;; read by the evaluator as something to call.
   ;;
   ;; No dolist and no reverse here either: this file is compiled before the
   ;; macros and the library exist, so it says what it means the long way.
-  (let ((p (make-package name)) (used nil) (last nil) (w words) (in-use nil))
+  (let ((p (make-package (package-designator name)))
+        (used nil) (last nil) (w words) (in-use nil))
     (while (%cons? w)
-      (let ((x (%car w)))
+      (let ((x (package-designator (%car w))))
         (if (string=? x "use")
             (set! in-use t)
             (if in-use

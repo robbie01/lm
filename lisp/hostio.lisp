@@ -41,13 +41,16 @@
       (if (%symbol? (%car form)) (%macro? (%car form)) nil)
       nil))
 (define (expand-macro form) (%macroexpand-1 form))
+(define (alloc-object type len) (%alloc-obj type len))
 (define (alloc-code n) (%alloc-code n))
 
 ;; Reading source files is the forge's job; the machine has no filesystem.
 (define *compile-trace* nil)
 
 (define (compile-file path)
-  (let ((forms (%read-from-string (%read-file path))))
+  ;; read-forms-from-string is the machine's own reader, running here. The
+  ;; forge has no reader of its own past the one that got this far.
+  (let ((forms (read-forms-from-string (%read-file path))))
     (dolist (f forms)
       (if *compile-trace*
           (begin

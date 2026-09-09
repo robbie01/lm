@@ -194,8 +194,8 @@ pub fn run() -> bool {
         eprint!("{e}");
         return false;
     }
-    let len = crate::heap::unfix(l.global("asm:*asm-len*")) as usize;
-    let buf = l.global("asm:*asm-buf*");
+    let len = crate::heap::unfix(l.global("*asm-len*")) as usize;
+    let buf = l.global("*asm-buf*");
     let mut got = Vec::with_capacity(len);
     for i in 0..len {
         got.push(l.h.m.peek8(buf + i as u32));

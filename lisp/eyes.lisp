@@ -80,8 +80,13 @@
              (win-inner-w window) (win-inner-h window) wb-face)
   (draw-eye lx ly)
   (draw-eye rx ry)
+  ;; Both pupils are gone with the fill, so neither remembered position is
+  ;; true any more: track draws only what moved, and would otherwise leave an
+  ;; eye blank until the mouse happened to shift it.
   (set! px1 -1)
   (set! py1 -1)
+  (set! px2 -1)
+  (set! py2 -1)
   (track))
 
 ;; Only the eye that changed is redrawn, and only when it changed: at sixty

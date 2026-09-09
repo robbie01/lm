@@ -39,7 +39,7 @@ enum Cmd {
         verbose: bool,
     },
 
-    /// The two readers, in Rust and in Lisp, resolving names to the same symbol
+    /// Name resolution: what a package can see, and what pkg:name reaches
     ///
     /// Two implementations of what a name means agreeing is evidence; one
     /// agreeing with itself is not.

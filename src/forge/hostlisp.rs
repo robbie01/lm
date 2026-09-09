@@ -89,11 +89,17 @@ pub struct Lisp<'a> {
     /// would saw off the branch it is sitting on. Keeping the interpreter's
     /// bindings out here lets the whole library be compiled while the
     /// interpreted definitions carry on working.
-    pub globals: std::collections::HashMap<V, V>,
+    /// Keyed by name rather than by symbol. The bootstrap reader has one flat
+    /// namespace - that is the whole point of it - while the sources it reads
+    /// are divided into packages, so the same function is `hw:dev-addr` to the
+    /// compiler and plain `dev-addr` here. The interpreter has to find it
+    /// under the name the compiler asks for.
+    pub globals: std::collections::HashMap<String, V>,
     /// Build-time macros, kept out of the symbols' function cells for the same
     /// reason as `globals`: the function cell is where `compile-top` puts the
     /// compiled expander the machine's own compiler will use.
-    pub macros: std::collections::HashMap<V, V>,
+    /// Keyed by name, for the same reason `globals` is.
+    pub macros: std::collections::HashMap<String, V>,
     /// Environments captured by interpreted closures. A heap slot cannot hold
     /// an Rc, so the closure stores an index into this table instead.
     pub envs: Vec<Env>,
@@ -148,7 +154,7 @@ impl<'a> Lisp<'a> {
             macros: std::collections::HashMap::new(),
             envs: Vec::new(),
         };
-        l.globals.insert(tt, tt);
+        l.globals.insert("t".to_string(), tt);
         l.install_primitives();
         l
     }
@@ -217,10 +223,16 @@ impl<'a> Lisp<'a> {
                     if let Some(v) = self.lookup(form, &env) {
                         break Ok(v);
                     }
-                    match self.globals.get(&form) {
+                    let n = self.h.sym_name(form);
+                    match self.globals.get(&n) {
                         Some(v) => break Ok(*v),
                         None => {
-                            let n = self.h.sym_name(form);
+                            // A constant the compiler has just worked out
+                            // lives in the symbol's own cell in the heap.
+                            let cell = self.h.sym_value(form);
+                            if cell != UNBOUND {
+                                break Ok(cell);
+                            }
                             break Err(LErr::new(format!("unbound variable {n}")));
                         }
                     }
@@ -289,7 +301,8 @@ impl<'a> Lisp<'a> {
                         Err(e) => break Err(e),
                     };
                     if !self.set_var(name, &env, val) {
-                        self.globals.insert(name, val);
+                        let key = self.h.sym_name(name);
+                        self.globals.insert(key, val);
                     }
                     break Ok(val);
                 }
@@ -339,13 +352,16 @@ impl<'a> Lisp<'a> {
                         return self.pop_err(e);
                     }
                     env = Lisp::extend(&env, vars);
-                    form = self.h.cons(self.s.begin, body);
+                    form = match self.body_tail(body, &env) {
+                        Ok(f) => f,
+                        Err(e) => return self.pop_err(e),
+                    };
                     continue;
                 }
 
                 // ---- macro ----
                 if self.is_macro(head) {
-                    let mac = self.macros[&head];
+                    let mac = self.macros[&self.h.sym_name(head)];
                     let margs = self.h.list_vec(args);
                     let expansion = match self.apply(mac, &margs) {
                         Ok(v) => v,
@@ -422,22 +438,22 @@ impl<'a> Lisp<'a> {
             if let Some(v) = self.lookup(head, env) {
                 return Ok(v);
             }
-            match self.globals.get(&head) {
+            let n = self.h.sym_name(head);
+            match self.globals.get(&n) {
                 Some(v) => return Ok(*v),
-                None => bail!("undefined function {}", self.h.sym_name(head)),
+                None => bail!("undefined function {n}"),
             }
         }
         self.eval(head, env)
     }
 
     fn is_macro(&self, sym: V) -> bool {
-        self.macros.contains_key(&sym)
+        self.macros.contains_key(&self.h.sym_name(sym))
     }
 
     /// Look up a build-time global by name.
     pub fn global(&mut self, name: &str) -> V {
-        let s = self.h.intern_path(name);
-        self.globals.get(&s).copied().unwrap_or(UNBOUND)
+        self.globals.get(name).copied().unwrap_or(UNBOUND)
     }
 
     /// An interpreted closure. Slot 0 is zero, which is what marks it as
@@ -463,7 +479,8 @@ impl<'a> Lisp<'a> {
             let params = self.h.cdr(target);
             let body = self.h.cdr(args);
             let c = self.make_closure(params, body, env, name);
-            self.globals.insert(name, c);
+            let key = self.h.sym_name(name);
+            self.globals.insert(key, c);
             return Ok(name);
         }
         let val = if self.h.cdr(args) == NIL {
@@ -475,7 +492,8 @@ impl<'a> Lisp<'a> {
             // An internal define adds to the innermost frame.
             Some(f) => f.vars.borrow_mut().push((target, val)),
             None => {
-                self.globals.insert(target, val);
+                let key = self.h.sym_name(target);
+                self.globals.insert(key, val);
             }
         }
         Ok(target)
@@ -486,7 +504,8 @@ impl<'a> Lisp<'a> {
         let params = self.h.cadr(args);
         let body = self.h.cddr(args);
         let c = self.make_closure(params, body, env, name);
-        self.macros.insert(name, c);
+        let key = self.h.sym_name(name);
+        self.macros.insert(key, c);
         Ok(name)
     }
 
@@ -514,8 +533,27 @@ impl<'a> Lisp<'a> {
         let cenv = self.envs[unfix(self.h.slot(f, CLO_ENV)) as usize].clone();
         let vars = self.bind_params(f, params, argv)?;
         let env = Lisp::extend(&cenv, vars);
-        let body_form = self.h.cons(self.s.begin, body);
-        Ok(Step::Tail(body_form, env))
+        let tail = self.body_tail(body, &env)?;
+        Ok(Step::Tail(tail, env))
+    }
+
+    /// Run everything but the last form of a body, and hand the last one back
+    /// for the caller to continue with in tail position.
+    ///
+    /// The obvious way to do this is to build `(begin . body)` and loop on
+    /// that, and it costs one pair per call. The forge has no collector, so
+    /// pairs spent are pairs gone - and the interpreter reads and compiles the
+    /// whole system, which is millions of calls. This does the same thing and
+    /// allocates nothing.
+    fn body_tail(&mut self, body: V, env: &Env) -> Result<V, LErr> {
+        let items = self.h.list_vec(body);
+        let Some((last, rest)) = items.split_last() else {
+            return Ok(NIL);
+        };
+        for x in rest {
+            self.eval(*x, env)?;
+        }
+        Ok(*last)
     }
 
     fn bind_params(&mut self, f: V, params: V, argv: &[V]) -> Result<Vec<(V, V)>, LErr> {
@@ -606,11 +644,61 @@ impl<'a> Lisp<'a> {
         Ok(last)
     }
 
+    /// Read and evaluate, using the reader written in Lisp rather than the
+    /// bootstrap one. Everything the forge does after `read.lisp` is loaded
+    /// goes through here, which is what makes the Lisp reader the only reader
+    /// that decides what a name means.
+    pub fn have_lisp_reader(&mut self) -> bool {
+        let r = self.global("read-forms-from-string");
+        r != UNBOUND && r != NIL
+    }
+
+    pub fn eval_lisp(&mut self, text: &str) -> Res {
+        let start = self.global("start-reading-string");
+        let next = self.global("read-next");
+        let stop = self.global("stop-reading");
+        let eof = self.global("*reader-eof*");
+        if start == UNBOUND || next == UNBOUND {
+            bail!("the Lisp reader is not loaded yet");
+        }
+        let arg = self.h.string(text);
+        self.apply(start, &[arg])?;
+        let mut last = NIL;
+        loop {
+            let f = match self.apply(next, &[]) {
+                Ok(f) => f,
+                Err(e) => {
+                    let _ = self.apply(stop, &[]);
+                    return Err(e);
+                }
+            };
+            if f == eof {
+                break;
+            }
+            match self.eval(f, &None) {
+                Ok(v) => last = v,
+                Err(mut e) => {
+                    e.trace.push(format!("in <lisp>: {}", self.h.write(f)));
+                    let _ = self.apply(stop, &[]);
+                    return Err(e);
+                }
+            }
+        }
+        self.apply(stop, &[])?;
+        Ok(last)
+    }
+
     pub fn load(&mut self, name: &str) -> Res {
         for dir in self.load_path.clone() {
             let p = format!("{dir}/{name}");
             if let Ok(text) = std::fs::read_to_string(&p) {
-                return self.eval_string(&text, &p);
+                // Once the real reader is up it reads everything, so a file
+                // loaded by hand is read the way the machine would read it.
+                return if self.have_lisp_reader() {
+                    self.eval_lisp(&text)
+                } else {
+                    self.eval_string(&text, &p)
+                };
             }
         }
         bail!("cannot find {name}")
@@ -625,7 +713,7 @@ impl<'a> Lisp<'a> {
         let p = self.h.alloc_obj(T_PRIM, 2);
         self.h.set_slot(p, 0, idx);
         self.h.set_slot(p, 1, sym);
-        self.globals.insert(sym, p);
+        self.globals.insert(name.to_string(), p);
     }
 
     fn install_primitives(&mut self) {
@@ -1154,52 +1242,6 @@ impl<'a> Lisp<'a> {
                 }
                 bail!("{msg}")
             }
-            // The package forms. The reader has already acted on the first
-            // two by the time they are evaluated - it has to, since what
-            // follows them in the file is read in the package they name - so
-            // these exist for the forge's sake, and to keep `export` from
-            // needing the library that has not been loaded yet.
-            "in-package" => {
-                need!(1);
-                let name = self.h.str_of(a[0]);
-                let p = self.h.package(&name);
-                self.h.set_cur_package(p);
-                NIL
-            }
-            "defpackage" => {
-                need!(1);
-                let name = self.h.str_of(a[0]);
-                let p = self.h.package(&name);
-                let mut names: Vec<String> = Vec::new();
-                let mut in_use = false;
-                for x in &a[1..] {
-                    if self.h.otype_is_string(*x) {
-                        let sx = self.h.str_of(*x);
-                        if sx == "use" {
-                            in_use = true;
-                        } else if in_use {
-                            names.push(sx);
-                        }
-                    }
-                }
-                let mut list = NIL;
-                for nm in names.iter().rev() {
-                    let used = self.h.package(nm);
-                    list = self.h.cons(used, list);
-                }
-                self.h.set_slot(p, PKG_USE, list);
-                p
-            }
-            "export" => {
-                need!(1);
-                let mut l = a[0];
-                while l != NIL {
-                    let s = self.h.car(l);
-                    self.h.set_exported(s);
-                    l = self.h.cdr(l);
-                }
-                NIL
-            }
             "%read-file" => {
                 need!(1);
                 let path = self.h.str_of(a[0]);
@@ -1207,18 +1249,6 @@ impl<'a> Lisp<'a> {
                     Ok(t) => self.h.string(&t),
                     Err(e) => bail!("cannot read {path}: {e}"),
                 }
-            }
-            "%read-from-string" => {
-                need!(1);
-                let text = self.h.str_of(a[0]);
-                let forms = {
-                    let mut r = Reader::new(&mut self.h, &text, "<string>");
-                    match r.read_all() {
-                        Ok(f) => f,
-                        Err(e) => bail!("{e}"),
-                    }
-                };
-                self.h.list(&forms)
             }
             "%load" => {
                 need!(1);
@@ -1231,7 +1261,7 @@ impl<'a> Lisp<'a> {
                 if is_cons(form) {
                     let head = self.h.car(form);
                     if self.is_macro(head) {
-                        let mac = self.macros[&head];
+                        let mac = self.macros[&self.h.sym_name(head)];
                         let args = self.h.list_vec(self.h.cdr(form));
                         return self.apply(mac, &args);
                     }
@@ -1373,11 +1403,7 @@ pub static PRIMS: &[(&str, u32)] = &[
     ("%newline", 0),
     ("%flush", 0),
     ("%error", 1),
-    ("in-package", 1),
-    ("defpackage", 1),
-    ("export", 1),
     ("%read-file", 1),
-    ("%read-from-string", 1),
     ("%load", 1),
     ("%macroexpand-1", 1),
     ("%macro?", 1),
