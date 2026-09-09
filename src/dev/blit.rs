@@ -23,6 +23,16 @@ pub const B_Y0: u32 = 0x28;
 pub const B_X1: u32 = 0x2c;
 pub const B_Y1: u32 = 0x30;
 pub const B_CTRL: u32 = 0x34; // bit0: raise INT_BLIT on completion
+/// Write the address of a twelve-word command block; the chip fetches its own
+/// parameters and runs. One store, so programming the blitter is atomic
+/// without anybody holding anything off - provided the block belongs to
+/// whoever filled it, which is the caller's business and not the chip's.
+///
+///     0 src   1 dst   2 w      3 h
+///     4 smod  5 dmod  6 val    7 op
+///     8 x0    9 y0   10 x1    11 y1
+pub const B_LIST: u32 = 0x38;
+pub const LIST_WORDS: u32 = 12;
 
 pub const OP_COPY: u32 = 0;
 pub const OP_FILL: u32 = 1;
@@ -111,12 +121,42 @@ pub fn command(m: &mut Machine, reg: u32, v: u32) {
             B_Y1 => b.y1 = v,
             B_CTRL => b.ctrl = v,
             B_OP => {}
+            B_LIST => {}
             _ => return,
         }
-        if reg != B_OP {
+        if reg != B_OP && reg != B_LIST {
             return;
         }
     }
+    // A command block: the chip reads its own parameters. Everything the
+    // register path would have latched on the op write comes from memory
+    // instead, in one go, so there is nothing for an interrupt to land in the
+    // middle of.
+    let v = if reg == B_LIST {
+        let base = v;
+        if !m.in_ram(base, LIST_WORDS * 4) {
+            return;
+        }
+        let mut q = [0u32; LIST_WORDS as usize];
+        for (i, w) in q.iter_mut().enumerate() {
+            *w = unsafe { m.rd32(base + (i as u32) * 4) };
+        }
+        let b = &mut m.blit.pending;
+        b.src = q[0];
+        b.dst = q[1];
+        b.w = q[2];
+        b.h = q[3];
+        b.smod = q[4];
+        b.dmod = q[5];
+        b.val = q[6];
+        b.x0 = q[8];
+        b.y0 = q[9];
+        b.x1 = q[10];
+        b.y1 = q[11];
+        q[7]
+    } else {
+        v
+    };
     // The op write is the commit: everything programmed since the last one
     // takes effect together, or none of it does.
     m.blit.live = m.blit.pending;

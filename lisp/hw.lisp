@@ -185,6 +185,46 @@
 (define blt-y0 (dev-addr dev-blit #x28))
 (define blt-x1 (dev-addr dev-blit #x2c))
 (define blt-y1 (dev-addr dev-blit #x30))
+(define blt-list (dev-addr dev-blit #x38)) ; the address of a command block
+
+;; ---------------------------------------------------------------- commands
+;; The blitter takes its whole command from a block in memory, in one store, so
+;; nothing has to be held off while it is programmed.
+;;
+;; That works only because the block belongs to whoever is filling it. A shared
+;; block would have exactly the race the registers had: an interrupt server
+;; that blits inside a task's setup would overwrite the half the task had
+;; written, and the task would then commit a coherent command made of both.
+;; So every task has a block of its own, swapped in by the scheduler the way
+;; `*out*` and `*rp*` are, and interrupt servers have one more. Two contexts
+;; are never half way through the same block.
+(define bl-src 0)
+(define bl-dst 4)
+(define bl-w 8)
+(define bl-h 12)
+(define bl-smod 16)
+(define bl-dmod 20)
+(define bl-val 24)
+(define bl-op 28)
+(define bl-x0 32)
+(define bl-y0 36)
+(define bl-x1 40)
+(define bl-y1 44)
+(define blit-list-size 48)
+
+(define *blit-list* 0)
+
+;; The collector clears its bit maps with the blitter, and that can happen
+;; before there is an Exec to have handed out a block, so the first caller
+;; makes one.
+(define (blit-block)
+  (if (%= *blit-list* 0) (set! *blit-list* (alloc-pool blit-list-size)) nil)
+  *blit-list*)
+
+(define (blit-go b op)
+  (poke (%+ b bl-op) op)
+  (poke blt-list b)
+  nil)
 
 (define op-copy 0)
 (define op-fill 1)
@@ -226,13 +266,13 @@
 (define (bm-fill-rect bm bw bh x y w h c)
   (let ((r (bm-clip bw bh x y w h)))
     (if r
-        (without-interrupts
-          (poke blt-dst (%+ bm (%+ (%* (cadr r) bw) (%car r))))
-          (poke blt-w (caddr r))
-          (poke blt-h (cadddr r))
-          (poke blt-dmod bw)
-          (poke blt-val c)
-          (poke blt-op op-fill))
+        (let ((b (blit-block)))
+          (poke (%+ b bl-dst) (%+ bm (%+ (%* (cadr r) bw) (%car r))))
+          (poke (%+ b bl-w) (caddr r))
+          (poke (%+ b bl-h) (cadddr r))
+          (poke (%+ b bl-dmod) bw)
+          (poke (%+ b bl-val) c)
+          (blit-go b op-fill))
         nil)))
 
 (define (screen-fill-rect x y w h c)
@@ -248,14 +288,14 @@
   (let* ((sr (bm-clip sbw sbh sx sy w h))
          (dr (if sr (bm-clip dbw dbh dx dy (caddr sr) (cadddr sr)) nil)))
     (if dr
-        (without-interrupts
-          (poke blt-src (%+ sbm (%+ (%* (cadr sr) sbw) (%car sr))))
-          (poke blt-dst (%+ dbm (%+ (%* (cadr dr) dbw) (%car dr))))
-          (poke blt-w (caddr dr))
-          (poke blt-h (cadddr dr))
-          (poke blt-smod sbw)
-          (poke blt-dmod dbw)
-          (poke blt-op op-copy))
+        (let ((b (blit-block)))
+          (poke (%+ b bl-src) (%+ sbm (%+ (%* (cadr sr) sbw) (%car sr))))
+          (poke (%+ b bl-dst) (%+ dbm (%+ (%* (cadr dr) dbw) (%car dr))))
+          (poke (%+ b bl-w) (caddr dr))
+          (poke (%+ b bl-h) (cadddr dr))
+          (poke (%+ b bl-smod) sbw)
+          (poke (%+ b bl-dmod) dbw)
+          (blit-go b op-copy))
         nil)))
 
 (define (screen-blit-rect sx sy dx dy w h)
@@ -472,15 +512,15 @@
   (set! x1 (clamp (%+ x1 ox) 0 (%- bw 1)))
   (set! y0 (clamp (%+ y0 oy) 0 (%- bh 1)))
   (set! y1 (clamp (%+ y1 oy) 0 (%- bh 1)))
-  (without-interrupts
-    (poke blt-dst bm)
-    (poke blt-dmod bw)
-    (poke blt-x0 x0)
-    (poke blt-y0 y0)
-    (poke blt-x1 x1)
-    (poke blt-y1 y1)
-    (poke blt-val c)
-    (poke blt-op op-line))))
+  (let ((b (blit-block)))
+    (poke (%+ b bl-dst) bm)
+    (poke (%+ b bl-dmod) bw)
+    (poke (%+ b bl-x0) x0)
+    (poke (%+ b bl-y0) y0)
+    (poke (%+ b bl-x1) x1)
+    (poke (%+ b bl-y1) y1)
+    (poke (%+ b bl-val) c)
+    (blit-go b op-line))))
 
 ;; Integer square root, by Newton. Wanted by anything that has to turn a
 ;; distance into a length, which on a machine with no floats is more things

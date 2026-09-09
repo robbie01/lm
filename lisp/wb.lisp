@@ -269,6 +269,15 @@
 (define (composite r)
   ;; Filling 1024 by 768 costs 786,432 cycles and a frame is 333,333, so the
   ;; desktop is painted only where it will actually show.
+  ;;
+  ;; The critical section is a workaround, not a design, and it is here rather
+  ;; than around the blitter because that is where it was doing its work: the
+  ;; blit paths used to hold it and something in this loop needs it. Taking it
+  ;; off kills the compositor with `car: expected a pair` on a damage
+  ;; rectangle, once three or four windows are open. See docs/open-items.md.
+  (without-interrupts (composite-1 r)))
+
+(define (composite-1 r)
   (if (covered? r)
       nil
       (let ((saved *rp*))

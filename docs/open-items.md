@@ -127,42 +127,55 @@ or the register allocator would remove those loads instead.
 
 ## The blitter
 
-**The shadow bank is not enough, and this is why the critical sections stay.**
-Writes land in `pending` and the op write commits the whole of it, so the chip
-never *runs* a half-programmed command. But `pending` is still one shared bank.
-An interrupt server that blits inside a task's setup overwrites the parameters
-the task has written so far; the task then finishes writing its own and commits
-a mixture. The chip runs a coherent command — somebody else's.
+**Done: the chip takes its whole command from a block in memory.** One store of
+an address to `blt-list`, twelve words read by the chip, no lock. Programming
+it is atomic because the store is, and the *fill* is safe because the block
+belongs to whoever is filling it: every task has one, handed round by the
+scheduler with `*out*` and `*rp*`, and interrupt servers have one more. Two
+contexts are never half way through the same block.
 
-That is not a hypothetical. Taking `without-interrupts` off `bm-fill-rect`,
-`bm-blit-rect` and `draw-line` makes the demos die within seconds, three tasks
-at a time, with
+A shadow bank alone was not enough and it is worth writing down why, because it
+looks like it should be. It makes the chip never *run* a half-programmed
+command — but `pending` is still one bank, so a server that blits inside a
+task's setup overwrites the half already written and the task then commits a
+coherent command made of both. The list fixes that by giving each context its
+own memory; a shared block would have had exactly the same race.
 
-    *** instruction access fault at pc 37f7f7f6
+**Still open: long blits block interrupts.** A full-screen fill is 786,432
+cycles charged inside one store, and a frame is 333,333. Nothing preempts an
+instruction, so the only fix is a state machine the outer loop advances — which
+means every caller waits for completion, and a spinning waiter and the blit
+would charge the same cycles. A change to what a blit *means*, not a tuning.
 
-— a blit with one task's destination and another's width writing over stacks.
-(An earlier run of the same experiment corrupted the damage list instead and
-came out as `car: expected a pair, got 90`. Same cause.)
+## The compositor loses a damage rectangle
 
-Three ways out, and the shadow bank is a prerequisite for all of them:
+`composite` holds `without-interrupts` across its whole body, and it is a
+workaround rather than a design. Taking it off kills the compositor within
+seconds of three or four windows being open:
 
-1. **Keep the critical section.** What we do. Correct, and it stops the clock
-   for the length of a blit setup.
-2. **Own the blitter.** A semaphore held across programming and release —
-   `OwnBlitter`/`DisownBlitter`, which is exactly what the Amiga has and for
-   exactly this reason. This is the first concrete customer for semaphores.
-3. **Hand the chip a parameter block.** One register takes the address of an
-   eight-word block and the chip reads its own parameters. Then programming is
-   a single store: atomic by construction, no lock, and one poke instead of
-   six. Cheapest of the three and the most Amiga-shaped — it is a blitter list.
+    *** car: expected a pair, got 90
+    backtrace:
+      rect-x
+      wb-composite
+      wb-compositor-task
 
-**Long blits still block interrupts, and only asynchrony fixes it.** A
-full-screen fill is 786,432 cycles charged inside one store instruction, and a
-frame is 333,333. Nothing can preempt an instruction, so the only fix is to
-make the blitter a state machine the outer loop advances — which means every
-caller has to wait for completion, and a spinning waiter and the blit would
-both charge the same cycles. Worth doing, but it is a change to what a blit
-*means*, not a tuning.
+— a fixnum where a rectangle should be. What is known:
+
+- It is **not** the blitter. The blitter's own race is gone (per-context
+  command blocks) and this survives it unchanged. The blit paths used to hold
+  the critical section, which is the only reason it looked like the blitter.
+- It is **not** `*damage*` being torn: `damage` and the steal in `wb-composite`
+  are both under `without-preemption`, and only tasks add damage.
+- It is **not** the `damage-max` collapse path: raising the limit so it never
+  runs does not help.
+- It is **not** `*windows*`: `remove-eq` builds a fresh list, so a walker sees
+  the old one or the new one, both well formed. (It is locked now anyway.)
+- It **is** inside `composite`, because putting the section there and nowhere
+  else makes it go away.
+
+Next thing to try: `composite` reads `*rp*` and swaps it with `use-rastport`
+around `draw-desktop`, and `*rp*` is per-task. Reversed by the context switch,
+in principle. That is the remaining shared thing in the loop.
 
 ## Images the machine writes itself
 

@@ -126,6 +126,7 @@
 (in-package hw)
 ;; 83 public, out of 165 definitions.
 (export '(
+  *blit-list* blit-list-size
   *screen* *screen-h* *screen-w* alloc-pool bm-blit-rect bm-clip bm-fill-rect
   bm-plot bm-point make-bitmap-rastport make-rastport-on rp-bitmap
   rp-bitmap-h rp-bitmap-w set-rp-bitmap! blit-rect blt-dmod blt-dst blt-val op-fill

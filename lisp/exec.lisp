@@ -301,7 +301,7 @@
 ;; the scheduler, saving them into the task leaving the processor and loading
 ;; the arriving one's. That is what a context switch is for, and it is why two
 ;; REPLs can read from two different windows without either knowing.
-(define env-slots 7)
+(define env-slots 8)
 (define env-out 0)
 (define env-in 1)
 (define env-wait 2)
@@ -309,6 +309,7 @@
 (define env-restart 4)
 (define env-package 5)
 (define env-rp 6)
+(define env-blit 7)     ; this task's blitter command block
 
 (define (task-env task) (%record-ref task tc-userdata))
 (define (set-task-env! task e) (%record-set! task tc-userdata e))
@@ -321,6 +322,9 @@
     (%vector-set! e env-wait *wait*)
     (%vector-set! e env-package (current-package))
     (%vector-set! e env-rp *rp*)
+    ;; A block of its own, so that programming the blitter needs no lock: two
+    ;; tasks are never half way through the same one.
+    (%vector-set! e env-blit (alloc-pool blit-list-size))
     e))
 
 (define (save-task-env task)
@@ -333,7 +337,8 @@
           (%vector-set! e env-peeked *peeked*)
           (%vector-set! e env-restart *repl-restart*)
           (%vector-set! e env-package (current-package))
-          (%vector-set! e env-rp *rp*))
+          (%vector-set! e env-rp *rp*)
+          (%vector-set! e env-blit *blit-list*))
         nil)))
 
 (define (load-task-env task)
@@ -346,7 +351,8 @@
           (set! *peeked* (%vector-ref e env-peeked))
           (set! *repl-restart* (%vector-ref e env-restart))
           (set-current-package! (%vector-ref e env-package))
-          (set! *rp* (%vector-ref e env-rp)))
+          (set! *rp* (%vector-ref e env-rp))
+          (set! *blit-list* (%vector-ref e env-blit)))
         nil)))
 
 ;; Dead tasks waiting to be reclaimed. A task cannot free the stack it is
@@ -929,10 +935,18 @@
 ;; Everything that interrupts the machine arrives here, on the trap stack,
 ;; with the interrupted task's registers already in its context block.
 (define *in-interrupt* nil)
+(define *int-blit-list* 0)
 
 (define (handle-interrupt n ctx)
+  ;; A server draws with the blitter too, and the task it interrupted may be
+  ;; half way through filling its own command block. So servers get one of
+  ;; their own for the duration. They do not nest - interrupts are off inside
+  ;; the handler - so one is enough.
   (set! *in-interrupt* t)
-  (handle-interrupt-1 n ctx)
+  (let ((saved *blit-list*))
+    (set! *blit-list* *int-blit-list*)
+    (handle-interrupt-1 n ctx)
+    (set! *blit-list* saved))
   (set! *in-interrupt* nil)
   nil)
 
@@ -985,6 +999,7 @@
       (%vector-set! *int-vectors* i (new-list))
       (set! i (%+ i 1))))
   (set! *quantum* default-quantum)
+  (set! *int-blit-list* (alloc-pool blit-list-size))
   (begin
     ;; The code that is already running becomes task zero. Its context is the
     ;; block the trap stub has been using all along, so it is already correct.
