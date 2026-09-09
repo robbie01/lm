@@ -392,6 +392,16 @@
       (i-mv (cx-asm c) (local-reg n) reg)
       (i-sw (cx-asm c) reg $s0 (local-off n))))
 
+;; Where this function's closure is. A framed function saved it at s0-12 and
+;; has to load it back; a leaf still has it in t0, because a leaf calls nothing
+;; and nothing else in a body touches t0. So a captured variable costs a leaf
+;; one instruction rather than two - and, more to the point, a function that
+;; captures can be a leaf at all.
+(define (closure-reg c scratch)
+  (if (cx-leaf? c)
+      $t0
+      (begin (i-lw (cx-asm c) scratch $s0 clo-slot) scratch)))
+
 (define (emit-load c loc reg)
   (let ((a (cx-asm c)) (kind (%car loc)))
     (cond
@@ -400,11 +410,9 @@
       (load-local c (cadr loc) reg)
       (i-lref a reg reg 0))
      ((%eq? kind 'free)
-      (i-lw a $t6 $s0 clo-slot)
-      (i-lobj a reg $t6 (%* 4 (%+ clo-free (cadr loc)))))
+      (i-lobj a reg (closure-reg c $t6) (%* 4 (%+ clo-free (cadr loc)))))
      ((%eq? kind 'boxed-free)
-      (i-lw a $t6 $s0 clo-slot)
-      (i-lobj a reg $t6 (%* 4 (%+ clo-free (cadr loc))))
+      (i-lobj a reg (closure-reg c $t6) (%* 4 (%+ clo-free (cadr loc))))
       (i-lref a reg reg 0))
      ;; One instruction, off the register that says which instance is running.
      ((%eq? kind 'instance) (i-lw a reg $s2 (%* 4 (cadr loc))))
@@ -436,11 +444,9 @@
      ((%eq? kind 'local) (load-local c (cadr loc) reg))
      ((%eq? kind 'boxed-local) (load-local c (cadr loc) reg))
      ((%eq? kind 'free)
-      (i-lw a $t6 $s0 clo-slot)
-      (i-lobj a reg $t6 (%* 4 (%+ clo-free (cadr loc)))))
+      (i-lobj a reg (closure-reg c $t6) (%* 4 (%+ clo-free (cadr loc)))))
      ((%eq? kind 'boxed-free)
-      (i-lw a $t6 $s0 clo-slot)
-      (i-lobj a reg $t6 (%* 4 (%+ clo-free (cadr loc)))))
+      (i-lobj a reg (closure-reg c $t6) (%* 4 (%+ clo-free (cadr loc)))))
      (else (emit-load c loc reg)))))
 
 (define (boxed-location? loc)
@@ -454,11 +460,10 @@
       (load-local c (cadr loc) $t6)
       (i-sref a reg $t6 0))
      ((%eq? kind 'free)
-      (i-lw a $t6 $s0 clo-slot)
-      (i-sobj a reg $t6 (%* 4 (%+ clo-free (cadr loc)))))
+      (i-sobj a reg (closure-reg c $t6) (%* 4 (%+ clo-free (cadr loc)))))
      ((%eq? kind 'boxed-free)
-      (i-lw a $t6 $s0 clo-slot)
-      (i-lobj a $t6 $t6 (%* 4 (%+ clo-free (cadr loc))))
+      (let ((cr (closure-reg c $t6)))
+        (i-lobj a $t6 cr (%* 4 (%+ clo-free (cadr loc)))))
       (i-sref a reg $t6 0))
      ((%eq? kind 'instance) (i-sw a reg $s2 (%* 4 (cadr loc))))
      (else
@@ -1901,20 +1906,16 @@
 
 (define (leaf-function? c forms names rest free)
   ;; Not variadic, because the rest list is a cons. Nothing boxed, because a
-  ;; box is a cons. No free variables, because those are read through the
-  ;; closure and a leaf keeps its closure in t0 rather than in a frame - a
-  ;; separate change, not made yet. Locals within the eight registers. And
-  ;; nothing in the body that can call.
+  ;; box is a cons. Locals within the eight registers. And nothing in the body
+  ;; that can call. Captured variables are fine: they are read through t0.
   (if rest
       nil
-      (if (%cons? free)
+      (if (%cons? (cx-boxed c))
           nil
-          (if (%cons? (cx-boxed c))
-              nil
-              (let ((bound (bound-names (%cons 'begin forms) names)))
-                (if (%> (length bound) leaf-locals)
-                    nil
-                    (leaf-body? forms bound)))))))
+          (let ((bound (bound-names (%cons 'begin forms) names)))
+            (if (%> (length bound) leaf-locals)
+                nil
+                (leaf-body? forms bound))))))
 
 ;; Compile a lambda body into fresh code. Returns (entry-address . code-object).
 (define (compile-function params body name free . free-boxed-opt)

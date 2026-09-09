@@ -1213,6 +1213,13 @@ fn c_jalr_mv(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
                 return illegal(m, w, pc, fuel);
             }
             let t = r(m, d) & !1;
+            // A return, when it is the return address being jumped through.
+            if m.prof_on {
+                m.watch.new_block();
+                if d == 1 {
+                    prof_ret(m);
+                }
+            }
             next!(m, t, fuel - 1)
         } else {
             // c.mv
@@ -1227,6 +1234,10 @@ fn c_jalr_mv(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         }
         // c.jalr
         let t = r(m, d) & !1;
+        if m.prof_on {
+            m.watch.new_block();
+            prof_call(m, t);
+        }
         w_(m, 1, pc.wrapping_add(2));
         next!(m, t, fuel - 1)
     } else {
