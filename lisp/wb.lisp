@@ -140,7 +140,10 @@
   ;; have a union that is nearly the whole screen, and a compositor asked to
   ;; repaint the whole screen sixty times a second is a compositor that never
   ;; finishes one - which looks exactly like a window that will not appear.
-  (without-interrupts
+  ;; Forbid, not Disable. Only tasks ever add damage - the vblank and input
+  ;; servers signal, they do not draw - so there is no reason to stop the clock
+  ;; and the keyboard for the length of this walk.
+  (without-preemption
     ;; Six tasks drawing into one window ask for the same rectangle six times.
     ;; Dropping what is already covered is what keeps the list short enough
     ;; that it never has to be merged into one screen-sized regret.
@@ -301,7 +304,7 @@
 
 ;; One pass of the compositor: take whatever damage has accumulated and pay it.
 (define (wb-composite)
-  (let ((ds (without-interrupts (let ((d *damage*)) (set! *damage* nil) d)))
+  (let ((ds (without-preemption (let ((d *damage*)) (set! *damage* nil) d)))
         (screen (rect 0 0 *screen-w* *screen-h*)))
     (dolist (d ds)
       (let ((i (rect-intersect d screen)))
@@ -374,14 +377,18 @@
   (%+ (window-bitmap win)
       (%+ (%* (%+ y (win-inner-y win)) (win-get win win-w)) (win-inner-x win))))
 
+;; The window list is read by the compositor and written by whoever opens,
+;; closes or raises a window - all tasks, so Forbid is the lock. Only the
+;; read-modify-write is inside it: painting the window is far too long to hold
+;; every other task off for.
 (define (window-open win)
-  (set! *windows* (%cons win *windows*))
+  (without-preemption (set! *windows* (%cons win *windows*)))
   (window-draw win)
   (wb-update)
   win)
 
 (define (window-close win)
-  (set! *windows* (remove-eq win *windows*))
+  (without-preemption (set! *windows* (remove-eq win *windows*)))
   (let ((task (win-get win win-task)))
     (if task (begin (rem-task task) (win-set! win win-task nil)) nil))
   ;; The hole it leaves has to be repainted before its bitmap goes back.
@@ -395,7 +402,8 @@
   (if (%eq? win (front-window))
       nil
       (begin
-        (set! *windows* (%cons win (remove-eq win *windows*)))
+        (without-preemption
+          (set! *windows* (%cons win (remove-eq win *windows*))))
         (wb-update))))
 
 (define (window-at x y)

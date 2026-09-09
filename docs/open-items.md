@@ -127,28 +127,34 @@ or the register allocator would remove those loads instead.
 
 ## The blitter
 
-**The chip is atomic now; the software critical sections around it are not yet
-gone.** Writes land in a shadow bank and the op write commits the whole of it,
-so an interrupt that blits inside somebody else's setup cannot be seen by the
-chip. That was the bug that once drew a line across the screen.
+**The shadow bank is not enough, and this is why the critical sections stay.**
+Writes land in `pending` and the op write commits the whole of it, so the chip
+never *runs* a half-programmed command. But `pending` is still one shared bank.
+An interrupt server that blits inside a task's setup overwrites the parameters
+the task has written so far; the task then finishes writing its own and commits
+a mixture. The chip runs a coherent command — somebody else's.
 
-Taking `without-interrupts` back off `bm-fill-rect`, `bm-blit-rect` and
-`draw-line` *should* now be free, and it is not: doing it makes the compositor
-die with
+That is not a hypothetical. Taking `without-interrupts` off `bm-fill-rect`,
+`bm-blit-rect` and `draw-line` makes the demos die within seconds, three tasks
+at a time, with
 
-    *** car: expected a pair, got 90, at pc 101cc9e
-    backtrace:
-      rect-x at 101cc9e
-      wb-composite at 1048260
-      wb-compositor-task at 104abb4
+    *** instruction access fault at pc 37f7f7f6
 
-after two or three demo windows are open — a fixnum where a rectangle should
-be. Those critical sections were incidentally keeping interrupts off for most
-of the compositor's inner loop and masking a race somewhere in the damage
-handling. `damage` and the steal in `wb-composite` are both already inside
-`without-interrupts`, so it is not the obvious one. The unfixed version is in
-`hw.lisp` at the three sites; removing them is a one-line change each once the
-race is found.
+— a blit with one task's destination and another's width writing over stacks.
+(An earlier run of the same experiment corrupted the damage list instead and
+came out as `car: expected a pair, got 90`. Same cause.)
+
+Three ways out, and the shadow bank is a prerequisite for all of them:
+
+1. **Keep the critical section.** What we do. Correct, and it stops the clock
+   for the length of a blit setup.
+2. **Own the blitter.** A semaphore held across programming and release —
+   `OwnBlitter`/`DisownBlitter`, which is exactly what the Amiga has and for
+   exactly this reason. This is the first concrete customer for semaphores.
+3. **Hand the chip a parameter block.** One register takes the address of an
+   eight-word block and the chip reads its own parameters. Then programming is
+   a single store: atomic by construction, no lock, and one poke instead of
+   six. Cheapest of the three and the most Amiga-shaped — it is a blitter list.
 
 **Long blits still block interrupts, and only asynchrony fixes it.** A
 full-screen fill is 786,432 cycles charged inside one store instruction, and a
@@ -196,9 +202,9 @@ back, which no lexical form expresses.
 
 **Semaphores are the missing piece.** An Exec semaphore is a node with a
 nesting count, an owner, and a queue of waiters, with Obtain/Release/Attempt
-built on Wait and Signal. Perhaps sixty lines. Nothing needs one yet because
-nothing holds a lock across a block; the first customer will be a file system
-or a disk queue.
+built on Wait and Signal. Perhaps sixty lines. Left open deliberately: the
+only thing that wants one today is the blitter, and a parameter-block
+interface would remove that need entirely.
 
 ## A clean self-hosted rebuild
 

@@ -194,9 +194,7 @@
 (define *lib-list* nil)
 (define *port-list* nil)
 (define *int-vectors* nil)     ; a vector of eight lists
-(define *idnest* 0)            ; Disable nesting
 (define *tdnest* 0)            ; Forbid nesting
-(define *int-state-saved* 0)   ; the interrupt state the outermost Disable found
 (define *attn-resched* 0)      ; a switch a Forbid deferred
 (define *quantum* 0)
 (define *disp-count* 0)
@@ -227,29 +225,26 @@
 (define reg-a7 17)
 
 ;; ---------------------------------------------------------------- critical
-;; Disable turns interrupts off at the processor. Forbid leaves them on but
-;; tells the scheduler not to switch: an interrupt still runs, it just cannot
-;; take the processor away.
-;; The count is what a debugger reads; what makes the pair correct is the
-;; state the outermost Disable found. Enable used to turn interrupts on when
-;; the count reached zero, which is wrong wherever the count did not start at
-;; zero-with-interrupts-on - and an interrupt handler is exactly that place.
-;; A server that called Signal, whose Enable balanced, re-enabled interrupts
-;; in the middle of the handler.
-(define (disable)
-  (let ((was (%disable))
-        (n *idnest*))
-    (if (%= n 0) (set! *int-state-saved* was) nil)
-    (set! *idnest* (%+ n 1)))
-  nil)
-
-(define (enable)
-  (let ((n (%- *idnest* 1)))
-    (set! *idnest* (if (%< n 0) 0 n))
-    (if (%<= n 0)
-        (%restore-interrupts *int-state-saved*)
-        nil))
-  nil)
+;; Two ways to be atomic, and which one you want depends on who else touches
+;; the thing you are protecting.
+;;
+;; `without-interrupts` turns interrupts off at the processor. It is the one to
+;; use when an interrupt server touches the data - the scheduler's lists, the
+;; signal bits, the pool free list - and the price is that the clock stops, the
+;; keyboard stops and the frame stops for as long as it is held.
+;;
+;; `without-preemption` (Forbid) leaves interrupts on and holds off the
+;; scheduler, so no other *task* can run. It is the one to use when only tasks
+;; touch the data. It costs one increment, needs nothing declared, and cannot
+;; deadlock; what it cannot do is let you block, because nothing else will run
+;; to wake you.
+;;
+;; There used to be a counted Disable/Enable pair here as well, with a nesting
+;; depth and the interrupt state the outermost one found. It is gone.
+;; `without-interrupts` already saves and restores that state, which makes it
+;; nestable without a counter and correct in places the counter was not - and
+;; the depth was read by nothing except the pair itself. The one section that
+;; is not lexical is in `wait`, and it works the state by hand.
 
 (define (forbid)
   (set! *tdnest* (%+ *tdnest* 1))
@@ -280,7 +275,7 @@
 ;; It restores the nesting depth it found rather than decrementing, so an
 ;; unbalanced Forbid somewhere inside the body cannot leave the scheduler
 ;; switched off for good.
-(defmacro without-tasks body
+(defmacro without-preemption body
   (let ((saved (gensym)) (result (gensym)))
     `(let ((,saved *tdnest*))
        (set! *tdnest* (%+ ,saved 1))
@@ -401,23 +396,24 @@
 ;; ---------------------------------------------------------------- signals
 (define (alloc-signal task)
   ;; Signals 0..15 are reserved the way Exec reserves them; 16..31 are free.
-  (disable)
-  (let ((alloc (%record-ref task tc-sigalloc)) (n 16) (got -1))
-    (while (if (%< n 32) (%< got 0) nil)
-      (if (%= 0 (%logand alloc (%lsh 1 n)))
-          (begin
-            (%record-set! task tc-sigalloc (%logior alloc (%lsh 1 n)))
-            (set! got n))
-          (set! n (%+ n 1))))
-    (enable)
+  ;; The failure is raised outside the critical section, because an error here
+  ;; abandons the stack and would abandon the section with it.
+  (let ((got (without-interrupts
+               (let ((alloc (%record-ref task tc-sigalloc)) (n 16) (g -1))
+                 (while (if (%< n 32) (%< g 0) nil)
+                   (if (%= 0 (%logand alloc (%lsh 1 n)))
+                       (begin
+                         (%record-set! task tc-sigalloc (%logior alloc (%lsh 1 n)))
+                         (set! g n))
+                       (set! n (%+ n 1))))
+                 g))))
     (if (%< got 0) (error "alloc-signal: none left") nil)
     got))
 
 (define (free-signal task n)
-  (disable)
-  (%record-set! task tc-sigalloc
-              (%logand (%record-ref task tc-sigalloc) (%lognot (%lsh 1 n))))
-  (enable)
+  (without-interrupts
+    (%record-set! task tc-sigalloc
+                  (%logand (%record-ref task tc-sigalloc) (%lognot (%lsh 1 n)))))
   nil)
 
 ;;
@@ -430,20 +426,19 @@
 
 (define (signal task mask)
   (if (task? task) nil (error "signal: not a task" task))
-  (disable)
-  (%record-set! task tc-sigrecvd (%logior (%record-ref task tc-sigrecvd) mask))
-  (if (%= (%record-ref task tc-state) ts-wait)
-      (if (%> (%logand (%record-ref task tc-sigrecvd) (%record-ref task tc-sigwait)) 0)
-          (begin
-            (remove-node task)
-            (task-ready! task)
-            ;; A woken task of higher priority should get the processor now.
-            (if (%> (%record-ref task ln-pri) (%record-ref (this-task) ln-pri))
-                (set! *attn-resched* 1)
-                nil))
-          nil)
-      nil)
-  (enable)
+  (without-interrupts
+    (%record-set! task tc-sigrecvd (%logior (%record-ref task tc-sigrecvd) mask))
+    (if (%= (%record-ref task tc-state) ts-wait)
+        (if (%> (%logand (%record-ref task tc-sigrecvd) (%record-ref task tc-sigwait)) 0)
+            (begin
+              (remove-node task)
+              (task-ready! task)
+              ;; A woken task of higher priority should get the processor now.
+              (if (%> (%record-ref task ln-pri) (%record-ref (this-task) ln-pri))
+                  (set! *attn-resched* 1)
+                  nil))
+            nil)
+        nil))
   nil)
 
 (define (wait mask)
@@ -454,31 +449,38 @@
   ;; asking to be rescheduled is an ecall - a trap taken from inside the trap
   ;; handler, on the trap stack, with the interrupted task's context half
   ;; saved. There is no task there to block.
+  ;; The one critical section in the machine that is not lexical, and the only
+  ;; reason the interrupt state is still worked by hand anywhere: it is opened
+  ;; here, released around the reschedule that blocks - you cannot block with
+  ;; interrupts off - and taken again on the way back. `without-interrupts`
+  ;; cannot say that, so this says it, and restores what it found each time
+  ;; rather than assuming interrupts were on.
   (if *in-interrupt* (error "wait: called from an interrupt server") nil)
-  (disable)
-  (let ((task (this-task)) (got 0))
-    (while (%= got 0)
-      (set! got (%logand (%record-ref task tc-sigrecvd) mask))
-      (if (%= got 0)
-          (begin
-            (%record-set! task tc-sigwait mask)
-            (%record-set! task tc-state ts-wait)
-            (add-tail (wait-list) task)
-            (enable)
-            (reschedule)
-            (disable))
-          nil))
-    (%record-set! task tc-sigrecvd (%logand (%record-ref task tc-sigrecvd) (%lognot got)))
-    (%record-set! task tc-sigwait 0)
-    (enable)
-    got))
+  (let ((saved (%disable)))
+    (let ((task (this-task)) (got 0))
+      (while (%= got 0)
+        (set! got (%logand (%record-ref task tc-sigrecvd) mask))
+        (if (%= got 0)
+            (begin
+              (%record-set! task tc-sigwait mask)
+              (%record-set! task tc-state ts-wait)
+              (add-tail (wait-list) task)
+              (%restore-interrupts saved)
+              (reschedule)
+              (set! saved (%disable)))
+            nil))
+      (%record-set! task tc-sigrecvd
+                    (%logand (%record-ref task tc-sigrecvd) (%lognot got)))
+      (%record-set! task tc-sigwait 0)
+      (%restore-interrupts saved)
+      got)))
 
 (define (set-signal task new mask)
-  (disable)
-  (let ((old (%record-ref task tc-sigrecvd)))
-    (%record-set! task tc-sigrecvd (%logior (%logand old (%lognot mask)) (%logand new mask)))
-    (enable)
-    old))
+  (without-interrupts
+    (let ((old (%record-ref task tc-sigrecvd)))
+      (%record-set! task tc-sigrecvd
+                    (%logior (%logand old (%lognot mask)) (%logand new mask)))
+      old)))
 
 ;; ---------------------------------------------------------------- tasks
 ;; Slot 0 of a closure holds a raw code address rather than a tagged value, so
@@ -530,10 +532,9 @@
     (poke (ctx-reg ctx reg-ra) *task-exit-stub*)
     (%raw-st! (ctx-reg ctx reg-t0) fn)
     (poke (ctx-reg ctx reg-t1) 0)
-    (disable)
-    (task-ready! task)
-    (set! *task-count* (%+ *task-count* 1))
-    (enable)
+    (without-interrupts
+      (task-ready! task)
+      (set! *task-count* (%+ *task-count* 1)))
     task))
 
 ;; A task that runs as an instance. Nothing else is different: s2 lives in the
@@ -553,13 +554,12 @@
     task))
 
 (define (rem-task task)
-  (disable)
   ;; A task that has ended stays a task and says so. Signalling it does
   ;; nothing, because it is in no state to be woken; that is the whole
   ;; difference from a handle that could come back as somebody else.
-  (%record-set! task tc-state ts-removed)
-  (set! *task-count* (%- *task-count* 1))
-  (enable)
+  (without-interrupts
+    (%record-set! task tc-state ts-removed)
+    (set! *task-count* (%- *task-count* 1)))
   (if (%eq? task (this-task))
       (begin
         ;; The current task cannot free its own stack while standing on it, so
@@ -675,11 +675,11 @@
     (%record-set! p mp-msglist (new-list))
     (if (%null? name)
         nil
-        (begin (disable) (enqueue *port-list* p) (enable)))
+        (without-interrupts (enqueue *port-list* p)))
     p))
 
 (define (delete-port p)
-  (if (%null? (node-name p)) nil (begin (disable) (forget-node p) (enable)))
+  (if (%null? (node-name p)) nil (without-interrupts (forget-node p)))
   (free-signal (%record-ref p mp-sigtask) (%record-ref p mp-sigbit))
   nil)
 
@@ -696,18 +696,17 @@
 (define (set-message-body! m v) (%record-set! m mn-body v))
 
 (define (put-msg port msg)
-  (disable)
-  (add-tail (%record-ref port mp-msglist) msg)
-  (let ((task (%record-ref port mp-sigtask)))
-    (enable)
+  ;; The signal is sent outside the section on purpose: Signal takes it again,
+  ;; and holding it across a wake-up is holding it for longer than the list
+  ;; needs.
+  (let ((task (without-interrupts
+                (add-tail (%record-ref port mp-msglist) msg)
+                (%record-ref port mp-sigtask))))
     (if task (signal task (%lsh 1 (%record-ref port mp-sigbit))) nil))
   msg)
 
 (define (get-msg port)
-  (disable)
-  (let ((m (rem-head (%record-ref port mp-msglist))))
-    (enable)
-    m))
+  (without-interrupts (rem-head (%record-ref port mp-msglist))))
 
 (define (wait-port port)
   (let ((m nil))
@@ -715,9 +714,7 @@
       (set! m (get-msg port))
       (if (%null? m) (wait (%lsh 1 (%record-ref port mp-sigbit))) nil))
     ;; Put it back: WaitPort tells you a message is there without taking it.
-    (disable)
-    (add-head (%record-ref port mp-msglist) m)
-    (enable)
+    (without-interrupts (add-head (%record-ref port mp-msglist) m))
     m))
 
 ;; Nothing to free: a message nobody holds is collected like anything else.
@@ -756,9 +753,7 @@
       (%vector-set! v i fn)
       (poke (%- base (%* 8 (%+ i 1))) (closure-entry fn))
       (set! i (%+ i 1)))
-    (disable)
-    (enqueue *lib-list* lib)
-    (enable)
+    (without-interrupts (enqueue *lib-list* lib))
     lib))
 
 (define (lvo lib n) (%vector-ref (%record-ref lib lib-entries) (%- n 1)))
@@ -895,17 +890,15 @@
   *vblank-int*)
 
 (define (add-int-server line int)
-  (disable)
-  (enqueue (int-vector line) int)
-  (int-enable line)
-  (enable)
+  (without-interrupts
+    (enqueue (int-vector line) int)
+    (int-enable line))
   int)
 
 (define (rem-int-server line int)
-  (disable)
-  (remove-node int)
-  (if (list-empty? (int-vector line)) (int-disable line) nil)
-  (enable)
+  (without-interrupts
+    (remove-node int)
+    (if (list-empty? (int-vector line)) (int-disable line) nil))
   nil)
 
 ;; Cause is Exec's software interrupt: run something soon, but not here.
@@ -976,9 +969,7 @@
   ;; variables, saying so is the price of not having a base pointer.
   (set! *this-task* 0)
   (set! *idle-task* 0)
-  (set! *idnest* 0)
   (set! *tdnest* 0)
-  (set! *int-state-saved* 0)
   (set! *attn-resched* 0)
   (set! *disp-count* 0)
   (set! *switch-count* 0)
@@ -1021,7 +1012,6 @@
     (idle-start)
     (set! *abort-cleanup-fn*
           (lambda ()
-            (set! *idnest* 0)
             (set! *tdnest* 0)
             (set! *attn-resched* 0)
             ;; A fault inside an interrupt server never reaches the line that
@@ -1039,7 +1029,7 @@
 ;; stops is being taken off the processor against your will.
 ;;
 ;; There is one caller and it is the one that needs it. A rebuild recompiles
-;; exec.lisp into the machine it is running on, and every `(define *idnest* 0)`
+;; exec.lisp into the machine it is running on, and every `(define *tdnest* 0)`
 ;; in it is a top level form like any other: for the rest of that rebuild the
 ;; kernel's state resets under it, one variable at a time. Nothing notices as
 ;; long as nothing calls into the kernel - and a timer interrupt is exactly

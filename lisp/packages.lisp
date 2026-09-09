@@ -203,11 +203,11 @@
 (in-package exec)
 ;; 19 public, out of 183 definitions.
 (export '(
-  add-task cause ctx-bytes disable enable exec-init exec-start forbid
+  add-task cause ctx-bytes exec-init exec-start forbid
   ;; handle-interrupt and switch-tasks are the trap handler's, and the trap
   ;; handler is in sys: exported to one caller, not to applications.
   handle-interrupt switch-tasks
-  idle? idle-start input-listen permit permit-deferred without-tasks
+  idle? idle-start input-listen permit permit-deferred without-preemption
   preemption-off preemption-on
   task-snapshot task?
   this-task
