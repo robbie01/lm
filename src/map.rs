@@ -25,7 +25,6 @@ pub const RAM_SIZE: u32 = CHIP_SIZE + FAST_SIZE;
 pub const CHIP_END: u32 = RAM_BASE + CHIP_SIZE;
 
 pub const NIL_CELL: u32 = 0x0000_0000;
-pub const SYSBASE_PTR: u32 = 0x0000_0008;
 
 /// Lisp global block. Every slot is reachable with a single `lw`/`sw` off x0
 /// because the whole block sits inside the 12-bit immediate range.
@@ -105,7 +104,6 @@ globals! {
     LG_MARKBASE   = 0x24, "markbase";    // mark bitmap, 1 bit per 8 heap bytes
     LG_GCCOUNT    = 0x28, "gccount";
     LG_GCTHRESH   = 0x2c, "gcthresh";    // free words below which a gc is due
-    LG_SYSBASE    = 0x30, "sysbase";     // ExecBase, mirrored out of low memory
     LG_STACKTOP   = 0x34, "stacktop";    // top of the boot stack
     LG_STACKBOT   = 0x38, "stackbot";
     LG_TOPLEVEL   = 0x3c, "toplevel";    // closure the kickstart enters

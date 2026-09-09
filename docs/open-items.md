@@ -113,20 +113,6 @@ forge-built one is a freshly constructed one.
 
 ## Loose ends
 
-**`sysbase-ptr` (address 8) and `lg-sysbase` are dead.** Nothing writes them
-since ExecBase became variables. They are still in the Rust memory map. Either
-remove them or point them at something real.
-
-**`preemption-off` silences the vblank and input interrupts and never turns
-them back on.** That is correct for a rebuild, which writes an image and stops.
-If a rebuild ever needs to leave the machine usable, it needs a matching
-`preemption-on`.
-
-**The profiler is behind a cargo feature.** `--features isaprof` adds a counter
-per dispatch slot, a per-mnemonic breakdown of the custom opcodes, memory
-traffic by base register, a leaf-function census and a count of what tagging
-costs. It needs a rebuild to use. Consider a runtime flag instead.
-
 ## Note to self
 
 The desktop needs roughly four billion instructions to finish drawing all four

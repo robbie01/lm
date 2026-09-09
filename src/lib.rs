@@ -27,7 +27,6 @@ pub mod heap;
 pub mod image;
 pub mod mach;
 pub mod map;
-#[cfg(feature = "isaprof")]
 pub mod prof;
 pub mod run;
 pub mod rvenc;

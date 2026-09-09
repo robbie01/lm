@@ -73,6 +73,7 @@ pub fn rebuild(from: &str, out: &str, verbose: bool, check: bool) -> i32 {
         budget: u64::MAX,
         disk: if check { None } else { Some(out.to_string()) },
         trace_exit: verbose,
+        isaprof: false,
         screenshot: None,
         trace_traps: false,
     };
@@ -139,7 +140,6 @@ pub fn write_layout() {
     def!("ram-size", RAM_SIZE);
     def!("chip-size", CHIP_SIZE);
     def!("nil-cell", NIL_CELL);
-    def!("sysbase-ptr", SYSBASE_PTR);
     def!("lg-base", LG_BASE);
     def!("trap-base", TRAP_BASE);
     def!("pool-base", POOL_BASE);

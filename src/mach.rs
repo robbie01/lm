@@ -83,10 +83,15 @@ pub struct Machine {
 
     /// Dynamic instruction histogram. Slots 0..63 are dispatch tokens; the
     /// rest break down what a token alone cannot say. See `prof::NAMES`.
-    #[cfg(feature = "isaprof")]
+    /// Instruction counters. Present always, filled only when `prof_on` is
+    /// set - `--isaprof` on the command line - so that measuring the machine
+    /// does not need a different build of it.
     pub prof: Box<[u64; crate::prof::SLOTS]>,
-    #[cfg(feature = "isaprof")]
     pub watch: Box<crate::prof::Watch>,
+    pub prof_on: bool,
+    /// Which dispatch table the core is using: the plain one, or the one that
+    /// counts on the way past.
+    pub table: &'static [crate::cpu::Handler; 64],
 
     // --- custom chips ---
     pub intreq: u32,
@@ -132,10 +137,10 @@ impl Machine {
             mtval: 0,
             cycles: 0,
             trap: (0, 0, 0),
-            #[cfg(feature = "isaprof")]
             prof: Box::new([0; crate::prof::SLOTS]),
-            #[cfg(feature = "isaprof")]
             watch: Box::default(),
+            prof_on: false,
+            table: &crate::cpu::TABLE,
             intreq: 0,
             intena: 0,
             uart: Uart::new(),
@@ -251,8 +256,9 @@ impl Machine {
     #[inline(never)]
     #[cold]
     pub fn fault(&mut self, cause: u32, tval: u32, epc: u32, fuel: u32) -> Stop {
-        #[cfg(feature = "isaprof")]
-        self.watch.new_block();
+        if self.prof_on {
+            self.watch.new_block();
+        }
         self.trap = (cause, tval, epc);
         self.pc = epc;
         self.fuel_left = fuel;

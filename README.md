@@ -1053,14 +1053,20 @@ about what runs, and the two distributions are not the same - a prologue is
 emitted once per function and executed once per call. For the other half:
 
 ```
-cargo build --release --features isaprof
-lm kick.img --stats --script '...'
+lm kick.img --isaprof --script '...'
 ```
 
-which adds one counter per dispatch slot, in the threaded core's `next!`, and
-prints a sorted histogram on exit with the custom opcodes broken down by form.
-A feature rather than a flag because that increment is in the path every single
-instruction takes: off, it is not there at all. The total it prints is smaller
+which prints a sorted histogram on exit, with the custom opcodes broken down by
+form, memory traffic by base register, a census of which functions never call
+anything, and a count of the instructions that exist only because values carry
+a tag.
+
+Counting is a *second dispatch table* rather than a test in the threaded core's
+`next!`. A branch there would cost more than everything it guarded, because
+that macro is the one piece of code every instruction expands; swapping the
+table costs one load of a pointer that is already hot, and measures as free.
+Every entry in the counting table is the same function, because it can work out
+which slot it is from the instruction word it was handed. The total it prints is smaller
 than the instruction count beside it, and the difference is real - `cycles` is
 the machine's timebase, and a machine parked on `wfi` has its clock moved
 forward to the next interrupt without executing anything.

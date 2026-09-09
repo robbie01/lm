@@ -52,8 +52,7 @@ fn w_(m: &mut Machine, i: u32, v: u32) {
         *m.x.get_unchecked_mut((i & 31) as usize) = v;
         *m.x.get_unchecked_mut(0) = 0;
     }
-    #[cfg(feature = "isaprof")]
-    {
+    if m.prof_on {
         m.watch.gen[(i & 31) as usize] = 0;
     }
 }
@@ -163,11 +162,7 @@ macro_rules! next {
         } else {
             ((w & 3) << 3) | ((w >> 13) & 7)
         };
-        #[cfg(feature = "isaprof")]
-        unsafe {
-            *m.prof.get_unchecked_mut(tok as usize) += 1;
-        }
-        become (unsafe { *TABLE.get_unchecked(tok as usize) })(m, w, pc, fuel)
+        become (unsafe { *m.table.get_unchecked(tok as usize) })(m, w, pc, fuel)
     }};
 }
 
@@ -221,8 +216,7 @@ fn op_auipc(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 // ---- jumps ----------------------------------------------------------------
 #[inline(never)]
 fn op_jal(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
-    #[cfg(feature = "isaprof")]
-    {
+    if m.prof_on {
         m.watch.new_block();
         if rd(w) == 1 {
             prof_call(m, pc.wrapping_add(imm_j(w)));
@@ -242,7 +236,6 @@ fn op_jal(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 /// the caller's frame is already gone and the callee's activation is charged
 /// to the same slot, so a tail-calling leaf is not counted as one. That
 /// undercounts, which is the safe direction.
-#[cfg(feature = "isaprof")]
 fn prof_call(m: &mut Machine, target: u32) {
     let d = m.watch.depth;
     // The caller is a function that calls, whatever this particular
@@ -254,13 +247,12 @@ fn prof_call(m: &mut Machine, target: u32) {
         m.watch.depth = d + 1;
         m.watch.called[d + 1] = false;
         m.watch.entry_pc[d + 1] = target;
-        m.watch.entry_ins[d + 1] = m.prof[..64].iter().sum();
+        m.watch.entry_ins[d + 1] = m.prof[crate::prof::TOTAL];
     }
     m.watch.funcs.entry(target).or_insert((0, false)).0 += 1;
     m.prof[crate::prof::CALLS] += 1;
 }
 
-#[cfg(feature = "isaprof")]
 fn prof_ret(m: &mut Machine) {
     let d = m.watch.depth;
     if d == 0 {
@@ -268,7 +260,7 @@ fn prof_ret(m: &mut Machine) {
     }
     if !m.watch.called[d] {
         m.prof[crate::prof::LEAF_CALLS] += 1;
-        let now: u64 = m.prof[..64].iter().sum();
+        let now: u64 = m.prof[crate::prof::TOTAL];
         m.prof[crate::prof::LEAF_INS] += now.saturating_sub(m.watch.entry_ins[d]);
     }
     m.watch.depth = d - 1;
@@ -280,8 +272,7 @@ fn op_jalr(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         return illegal(m, w, pc, fuel);
     }
     let t = r(m, rs1(w)).wrapping_add(imm_i(w)) & !1;
-    #[cfg(feature = "isaprof")]
-    {
+    if m.prof_on {
         m.watch.new_block();
         if rd(w) == 1 {
             prof_call(m, t);
@@ -295,8 +286,7 @@ fn op_jalr(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 
 #[inline(never)]
 fn op_branch(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
-    #[cfg(feature = "isaprof")]
-    {
+    if m.prof_on {
         if m.watch.li_pc.wrapping_add(4) == pc
             && (m.watch.li_rd == rs1(w) || m.watch.li_rd == rs2(w))
         {
@@ -350,21 +340,18 @@ fn do_load(m: &mut Machine, a: u32, f: u32, fuel: u32) -> Option<u32> {
 
 #[inline(never)]
 fn op_load(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
-    #[cfg(feature = "isaprof")]
-    unsafe {
+    if m.prof_on { unsafe {
         *m.prof.get_unchecked_mut(crate::prof::mem_slot(rs1(w), false)) += 1;
-    }
+    }}
     let a = r(m, rs1(w)).wrapping_add(imm_i(w));
-    #[cfg(feature = "isaprof")]
-    if f3(w) == 2 && (rs1(w) == 8 || rs1(w) == 2) {
+    if m.prof_on && f3(w) == 2 && (rs1(w) == 8 || rs1(w) == 2) {
         prof_load(m, a, pc, rd(w));
     }
     match do_load(m, a, f3(w), fuel) {
         Some(v) => w_(m, rd(w), v),
         None => return m.fault(C_LFAULT, a, pc, fuel),
     }
-    #[cfg(feature = "isaprof")]
-    {
+    if m.prof_on {
         let d = rd(w) as usize;
         m.watch.addr[d] = a;
         m.watch.gen[d] = m.watch.block;
@@ -375,7 +362,6 @@ fn op_load(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 /// Was this word already in a register, put there earlier in this same
 /// straight-line run? That is exactly what a basic-block peephole can see,
 /// and the number decides whether one is worth writing.
-#[cfg(feature = "isaprof")]
 fn prof_load(m: &mut Machine, a: u32, pc: u32, dst: u32) {
     let gen = m.watch.block;
     let mut hit = false;
@@ -421,16 +407,14 @@ fn do_store(m: &mut Machine, a: u32, f: u32, v: u32, fuel: u32) -> bool {
 #[inline(never)]
 fn op_store(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let a = r(m, rs1(w)).wrapping_add(imm_s(w));
-    #[cfg(feature = "isaprof")]
-    unsafe {
+    if m.prof_on { unsafe {
         *m.prof.get_unchecked_mut(crate::prof::mem_slot(rs1(w), true)) += 1;
-    }
+    }}
     let v = r(m, rs2(w));
     if !do_store(m, a, f3(w), v, fuel) {
         return m.fault(C_SFAULT, a, pc, fuel);
     }
-    #[cfg(feature = "isaprof")]
-    if f3(w) == 2 && (rs1(w) == 8 || rs1(w) == 2) {
+    if m.prof_on && f3(w) == 2 && (rs1(w) == 8 || rs1(w) == 2) {
         // Whatever else claimed this address holds the old value now.
         let gen = m.watch.block;
         for k in 1..32 {
@@ -452,7 +436,6 @@ fn op_store(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 /// histogram. The base ISA's own funct7 values (0x00 for the arithmetic and
 /// logical forms, 0x20 for sub and the arithmetic shifts, 0x01 for M) are not
 /// counted; everything else here was added by Zba, Zbb, Zbs or Zicond.
-#[cfg(feature = "isaprof")]
 fn prof_ext(m: &mut Machine, f7: u32, f3: u32) {
     let slot = match f7 {
         0x10 => crate::prof::ZBA,
@@ -473,8 +456,7 @@ fn op_imm(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let a = r(m, rs1(w));
     let i = imm_i(w);
     let sh = (w >> 20) & 31;
-    #[cfg(feature = "isaprof")]
-    {
+    if m.prof_on {
         prof_ext(m, w >> 25, f3(w));
         if f3(w) == 0 && rs1(w) == 0 {
             m.prof[crate::prof::LI_TOTAL] += 1;
@@ -537,8 +519,7 @@ fn op_reg(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let a = r(m, rs1(w));
     let b = r(m, rs2(w));
     let f = f3(w);
-    #[cfg(feature = "isaprof")]
-    {
+    if m.prof_on {
         prof_ext(m, w >> 25, f);
         let f7 = w >> 25;
         if (f7 == 0 && f == 0) || (f7 == 0x20 && f == 0) {
@@ -836,10 +817,9 @@ fn op_index(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         return m.fault(C_TYPE, obj, pc, fuel);
     }
     let f = f3(w);
-    #[cfg(feature = "isaprof")]
-    unsafe {
+    if m.prof_on { unsafe {
         *m.prof.get_unchecked_mut(crate::prof::INDEX0 + f as usize) += 1;
-    }
+    }}
     // An immediate index is trusted to be a small non-negative number, because
     // the compiler put it there. A register index is a Lisp value and is not.
     let i = if f & 4 != 0 {
@@ -917,11 +897,10 @@ fn op_fixnum(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     }
     let f = f3(w);
     let f7 = w >> 25;
-    #[cfg(feature = "isaprof")]
-    unsafe {
+    if m.prof_on { unsafe {
         let base = if f7 == 1 { crate::prof::FIX1 } else { crate::prof::FIX0 };
         *m.prof.get_unchecked_mut(base + f as usize) += 1;
-    }
+    }}
     let x = (a as i32) >> 1;
     let y = (b as i32) >> 1;
     let v = match f7 {
@@ -989,10 +968,9 @@ fn op_fixnum(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 #[inline(never)]
 fn op_tagged(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let f = f3(w);
-    #[cfg(feature = "isaprof")]
-    unsafe {
+    if m.prof_on { unsafe {
         *m.prof.get_unchecked_mut(crate::prof::TAGD + f as usize) += 1;
-    }
+    }}
     let a = r(m, rs1(w));
     if a & 1 == 0 {
         return m.fault(C_TYPE, a, pc, fuel);
@@ -1260,8 +1238,30 @@ fn c_jalr_mv(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 }
 
 // ===================================================================== table
+/// Counting is a second dispatch table rather than a test in the dispatch
+/// macro. A branch there costs more than everything it guards, because that
+/// macro is the one piece of code every instruction in the machine expands;
+/// swapping the table costs one load of a pointer that is already hot.
+///
+/// Every entry is the same function, because it can work out which slot it is
+/// from the instruction word it was handed anyway.
+#[inline(never)]
+fn prof_hook(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
+    let tok = if w & 3 == 3 {
+        32 + ((w >> 2) & 31)
+    } else {
+        ((w & 3) << 3) | ((w >> 13) & 7)
+    } as usize;
+    unsafe {
+        *m.prof.get_unchecked_mut(tok) += 1;
+        *m.prof.get_unchecked_mut(crate::prof::TOTAL) += 1;
+    }
+    become (unsafe { *TABLE.get_unchecked(tok) })(m, w, pc, fuel)
+}
 
-static TABLE: [Handler; 64] = [
+pub static PROF_TABLE: [Handler; 64] = [prof_hook; 64];
+
+pub static TABLE: [Handler; 64] = [
     // ---- quadrant 0 (tok 0..7) ----
     c_addi4spn, // 000 c.addi4spn
     op_bad,     // 001 c.fld

@@ -1020,6 +1020,11 @@
 ;; kernel's state resets under it, one variable at a time. Nothing notices as
 ;; long as nothing calls into the kernel - and a timer interrupt is exactly
 ;; that call, arriving unasked.
+;; Forbid is not this. Forbid stops the *scheduler* from taking the processor
+;; away, and leaves the interrupts on - a server still runs, and a server calls
+;; into the kernel, which is exactly what must not happen while a rebuild is
+;; redefining the kernel's variables one `define` at a time. This turns the
+;; sources of those calls off.
 (define (preemption-off)
   ;; The chips too, not just the clock. Every top level `define` in this file
   ;; resets a kernel variable as the rebuild goes past, so for a moment there
@@ -1031,6 +1036,15 @@
   (timer-never)
   (int-disable int-vblank)
   (int-disable int-input)
+  nil)
+
+;; And back on, for a caller that wants the machine afterwards. `rebuild` does
+;; not: by the time it returns it has overwritten the kernel it would be
+;; handing back to, and the image it writes turns preemption on for itself.
+(define (preemption-on)
+  (int-enable int-vblank)
+  (int-enable int-input)
+  (timer-set-in *quantum*)
   nil)
 
 (define (exec-start)

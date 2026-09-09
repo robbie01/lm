@@ -64,6 +64,9 @@ pub const TAG_UNTAG: usize = 99;
 pub const TAG_RETAG: usize = 100;
 /// Register-register arithmetic, for scale.
 pub const ARITH: usize = 101;
+/// A running count of everything, kept so that charging instructions to an
+/// activation does not have to add up sixty-four slots per call.
+pub const TOTAL: usize = 102;
 /// custom-2 and custom-3 broken down the way custom-0 and custom-1 are.
 pub const FIX0: usize = 104;   // + funct3, funct7 0x00
 pub const FIX1: usize = 112;   // + funct3, funct7 0x01
@@ -192,7 +195,7 @@ pub const NAMES: [&str; SLOTS] = [
 /// How much of the machine's time goes into functions that never call
 /// anything, and would therefore need no stack frame at all.
 pub fn leaf_report(prof: &[u64; SLOTS], w: &Watch) -> String {
-    let total: u64 = prof[..64].iter().sum();
+    let total: u64 = prof[TOTAL];
     let mut leaf_entries = 0u64;
     let mut leaf_fns = 0usize;
     let mut all_entries = 0u64;
@@ -241,7 +244,7 @@ calls: {}, to {} distinct entry points
 pub fn report(prof: &[u64; SLOTS]) -> String {
     // The 64 dispatch tokens are the whole of what ran; the breakdown slots
     // are subsets of them and must not be added in again.
-    let total: u64 = prof[..64].iter().sum();
+    let total: u64 = prof[TOTAL];
     let mut out = String::new();
     out.push_str(&format!("\ninstructions executed: {}\n", total));
     if total == 0 {

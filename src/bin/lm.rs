@@ -51,6 +51,15 @@ struct Cli {
     #[arg(long)]
     stats: bool,
 
+    /// Count what the machine executes, and print the histogram on exit
+    ///
+    /// One counter per dispatch slot, the custom opcodes broken down by form,
+    /// memory traffic by base register, a census of which functions never call
+    /// anything, and how many instructions exist only because values are
+    /// tagged. Implies --stats.
+    #[arg(long)]
+    isaprof: bool,
+
     /// Write the final display contents as a PPM
     #[arg(long, value_name = "FILE")]
     shot: Option<String>,
@@ -70,7 +79,8 @@ fn main() -> std::process::ExitCode {
         interactive: !cli.batch,
         budget: cli.budget.unwrap_or(u64::MAX),
         disk: cli.disk,
-        trace_exit: cli.stats,
+        trace_exit: cli.stats || cli.isaprof,
+        isaprof: cli.isaprof,
         screenshot: cli.shot,
         trace_traps: cli.trace_traps,
     };

@@ -14,6 +14,7 @@ pub struct Options {
     pub budget: u64,
     pub disk: Option<String>,
     pub trace_exit: bool,
+    pub isaprof: bool,
     pub screenshot: Option<String>,
     pub trace_traps: bool,
 }
@@ -29,6 +30,7 @@ impl Default for Options {
             budget: u64::MAX,
             disk: None,
             trace_exit: false,
+            isaprof: false,
             screenshot: None,
             trace_traps: false,
         }
@@ -71,6 +73,10 @@ pub fn boot(o: &Options) -> i32 {
         }
     }
     m.gfx.next_vbl = run::vbl_period();
+    if o.isaprof {
+        m.prof_on = true;
+        m.table = &crate::cpu::PROF_TABLE;
+    }
 
     let t = std::time::Instant::now();
     let stop = run::run(&mut m, o.budget);
@@ -85,8 +91,7 @@ pub fn boot(o: &Options) -> i32 {
             secs,
             m.cycles as f64 / secs / 1e6
         );
-        #[cfg(feature = "isaprof")]
-        {
+        if m.prof_on {
             eprint!("{}", crate::prof::report(&m.prof));
             eprint!("{}", crate::prof::leaf_report(&m.prof, &m.watch));
         }
