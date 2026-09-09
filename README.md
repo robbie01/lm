@@ -835,6 +835,23 @@ above is doing what it claims.
   reach is pinned for that cycle. `(room)` reports how many.
 - A collection walks the whole used heap, so it costs proportional to the high
   water mark rather than to the live set. Generations would fix that.
+- **A collection is about 110 million cycles and every one of them has
+  interrupts off** - three hundred frames at sixty hertz, five seconds at
+  20 MHz, during which the machine hears nothing. It was 175 million until the
+  mark bitmap stopped being cleared a word at a time over a hundred and
+  ninety-two megabytes of address space that has never been touched, the
+  forwarding tables stopped being filled in for a quarter of a million blocks
+  nothing reads, and the compacting walk stopped asking a lookup table for an
+  answer it could carry in a register. What is left is mostly the update pass
+  paying Lisp call overhead per pointer. It is the largest single defect in
+  the system and it wants a different shape, not another constant factor:
+  interrupts have to stay off for the root scan and the pointer update,
+  because those walk Exec's lists, but the marking and the sweeps touch only
+  the heap and could run with them on.
+- A task pointer is the only handle Exec has, and the memory it names is freed
+  when the task ends. `task?` catches the usual mistake - `signal` on a task
+  that has gone now reports rather than writing into whatever the pool handed
+  out next - but a block reused as another task passes that test.
 - More than eight arguments works, but not in tail position: the caller pushes
   the overflow and a tail call's epilogue would move the stack out from under
   it, so such a call is compiled as an ordinary one followed by a return.
