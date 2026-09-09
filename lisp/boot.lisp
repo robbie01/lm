@@ -9,7 +9,12 @@
 ;;; context, on purpose. Taking a trap and switching tasks are the same
 ;;; operation seen from two directions.
 
+;; Declared here rather than in packages.lisp: this file is read by the forge
+;; and never compiled into an image, so the machine has no use for the
+;; namespace and should not be carrying it.
+(defpackage boot use lm gc hw asm compiler sys exec)
 (in-package boot)
+(export '(build-boot-code reserve-reset))
 
 ;; ---------------------------------------------------------------- context
 ;; 32 words: word 0 is the pc, words 1..31 are x1..x31.

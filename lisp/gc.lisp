@@ -970,6 +970,74 @@
   (newline)
   nil)
 
+;; ---------------------------------------------------------------- namespaces
+;; A package the forge needed and the machine cannot use.
+;;
+;; boot.lisp and hostio.lisp are read by the forge and never compiled into an
+;; image, so the packages they declare reach the machine holding nothing at
+;; all: a name, a use list, and a few symbols bound to nothing. Dropping them
+;; before the image is collected is what keeps them out of the file - and the
+;; test is what they hold rather than a list of names kept somewhere, so a
+;; package that stops being used stops being carried without anyone noticing.
+
+(define (symbol-holds-anything? s)
+  (if (%eq? (%symbol-value s) *unbound*)
+      (if (%symbol-function s) t (if (%symbol-plist s) t nil))
+      t))
+
+(define (package-in-use? p)
+  (let ((l (%raw-ld lg-symlist)) (used nil))
+    (while (%cons? l)
+      (let ((s (%car l)))
+        (if (%eq? (symbol-package s) p)
+            (if (symbol-holds-anything? s) (set! used t) nil)
+            nil))
+      (set! l (if used nil (%cdr l))))
+    used))
+
+(define (mine? p s) (%eq? (symbol-package s) p))
+
+(define (drop-symbols-of p l)
+  ;; Splice this package's symbols out of a list, in place. `remove-if` would
+  ;; say it in one line and allocate a closure for every obarray bucket, at
+  ;; the exact moment the image is about to be written - and objects are never
+  ;; moved, so a closure made here is a hole in the file that nothing can
+  ;; close. Splicing allocates nothing at all.
+  (let ((head l))
+    (while (if (%cons? head) (mine? p (%car head)) nil)
+      (set! head (%cdr head)))
+    (let ((prev head))
+      (while (%cons? prev)
+        (let ((next (%cdr prev)))
+          (if (if (%cons? next) (mine? p (%car next)) nil)
+              (%set-cdr! prev (%cdr next))
+              (set! prev next)))))
+    head))
+
+(define (forget-package p)
+  ;; Out of the obarray, out of the symbol list, out of the package list. The
+  ;; symbols go when the collector next runs, unless something is still
+  ;; holding one - which is what uninterning means anywhere else too.
+  (let* ((ob (%raw-ld lg-obarray))
+         (n (%vector-length ob))
+         (i 0))
+    (while (%< i n)
+      (%vector-set! ob i (drop-symbols-of p (%vector-ref ob i)))
+      (set! i (%+ i 1))))
+  (%raw-st! lg-symlist (drop-symbols-of p (%raw-ld lg-symlist)))
+  (%raw-st! lg-packages (remove-eq p (%raw-ld lg-packages)))
+  p)
+
+(define (forget-unused-packages)
+  ;; The names dropped, for whoever wants to say so.
+  (let ((dropped nil))
+    (dolist (p (list-copy (all-packages)))
+      (if (package-in-use? p)
+          nil
+          (begin (forget-package p)
+                 (set! dropped (%cons (package-name p) dropped)))))
+    dropped))
+
 (define (install-allocator)
   ;; What the prelude's `alloc-object` calls. It cannot name these itself, so
   ;; the kickstart puts them in place before anything has a chance to

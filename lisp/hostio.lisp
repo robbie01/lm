@@ -5,7 +5,11 @@
 ;;; does the same jobs against the serial port and the heap rather than against
 ;;; the host's stdio. This file exists so that core.lisp can stay compilable.
 
-(in-package hostio)
+;; The prelude, like everything else the bootstrap reader reads - and that is
+;; what makes this file work at all. The names below are the names core.lisp
+;; and runtime.lisp use; defining them again here is how the forge ends up
+;; with its own version of each.
+(in-package lm)
 
 (define (write x) (%write x))
 (define (display x) (%display x))

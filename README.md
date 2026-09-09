@@ -204,12 +204,20 @@ running machine not one instruction**.
 `lisp/packages.lisp` is the whole module structure in one file, read first on
 both sides of the bootstrap - which matters, because the forge and the machine
 load the sources in different orders and a name has to mean the same thing in
-both. The export lists were computed from actual cross-package use rather than
+both. It holds only the packages the *machine* has: `packages.lisp` is
+compiled into the image, so a package declared there is a package the image
+carries, and the forge's own namespace for the assembly stubs is declared at
+the head of `boot.lisp` instead. Anything left over — a package the build made
+and nothing was compiled into — is dropped before the image is collected, so
+`(all-packages)` on a fresh machine lists eleven and every one of them has
+code in it.
+
+The export lists were computed from actual cross-package use rather than
 guessed, which is why they are as small as they are:
 
 ```
 compiler    11 public of 100 definitions
-gc          21 of 101
+gc          23 of 105
 exec        19 of 183
 sys         26 of  69
 wb          33 of  88

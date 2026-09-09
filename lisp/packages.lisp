@@ -15,6 +15,10 @@
 ;;; the interface into a package private business, and says so.
 
 ;; ---------------------------------------------------------------- modules
+;; Every package here is one the machine has. The forge declares one more for
+;; itself - `boot`, at the head of boot.lisp, for the stubs it assembles - and
+;; that one is not written here, because this file is compiled into the image
+;; and a package declared in it is a package the image carries.
 (defpackage lm use gc hw exec)                                     ; the prelude: everything a program is expected to have to hand
 (defpackage gc use lm hw)                                          ; the collector
 (defpackage hw use lm)                                             ; the custom chips
@@ -26,8 +30,6 @@
 (defpackage wb use lm hw sys exec)                                 ; the workbench: windows and shells
 (defpackage eyes use lm gc hw exec sys wb)                         ; xeyes, one instance per pair
 (defpackage user use lm gc hw asm compiler sys exec snap wb eyes)  ; where a prompt starts, and the demos
-(defpackage boot use lm gc hw asm compiler sys exec)               ; the reset and trap stubs, built by the forge
-(defpackage hostio use lm gc hw asm compiler sys exec snap wb user) ; the forge standing in for the machine
 
 ;; ---------------------------------------------------------------- exports
 ;; The prelude goes first: every other list below is read in the package it
@@ -104,15 +106,17 @@
   with-output-to-string write write-char-name write-string-quoted
   write-to-string zero?
 ))
+
 (in-package gc)
-;; 21 public, out of 101 definitions.
+;; 23 public, out of 105 definitions.
 (export '(
-  alloc-code alloc-object frame-ok? gc gc-collect gc-extra-roots
-  gc-for-image gc-forget-scratch install-allocator obj-take gc-scan-conservative gc-scan-frames
-  gc-slot in-stub?
+  alloc-code alloc-object forget-package forget-unused-packages frame-ok?
+  gc gc-collect gc-extra-roots gc-for-image gc-forget-scratch gc-slot
+  gc-scan-conservative gc-scan-frames in-stub? install-allocator obj-take
   refill-cons register-code room stub-args-off stub-frame-size
   stub-mask-off stub-raw-off
 ))
+
 (in-package hw)
 ;; 83 public, out of 165 definitions.
 (export '(
@@ -132,6 +136,7 @@
   screen-width
   timer-set-in vblank-count
 ))
+
 (in-package asm)
 ;; 101 public, out of 147 definitions.
 (export '(
@@ -146,6 +151,7 @@
   i-sh i-sll i-slli i-slt i-snez i-sra i-srai i-srl i-srli i-stx i-stxb
   i-sub i-sw i-sw-abs i-wfi i-xor i-xori literal-offset op-index
 ))
+
 (in-package compiler)
 ;; 11 public, out of 100 definitions.
 (export '(
@@ -153,6 +159,7 @@
   compile-top register-instance-layout-in! setup-intrinsics trap-arity
   trap-error trap-oom trap-type
 ))
+
 (in-package sys)
 ;; 26 public, out of 69 definitions.
 (export '(
@@ -163,6 +170,7 @@
   resume-kickstart
   start-repl system-name top-level-form trap-reschedule
 ))
+
 (in-package exec)
 ;; 19 public, out of 183 definitions.
 (export '(
@@ -170,11 +178,13 @@
   handle-interrupt permit rem-task reschedule signal spawn switch-tasks sysbase
   task-count tasks wait
 ))
+
 (in-package snap)
 ;; 2 public, out of 7 definitions.
 (export '(
   save-image save-rebuilt
 ))
+
 (in-package wb)
 ;; 33 public, out of 88 definitions.
 (export '(
@@ -185,16 +195,7 @@
   win-task window-close window-open
   win-get win-h win-w win-x win-y window-push-key workbench
 ))
-(in-package boot)
-;; 2 public, out of 21 definitions.
-(export '(
-  build-boot-code reserve-reset
-))
-(in-package hostio)
-;; 2 public, out of 24 definitions.
-(export '(
-  *compile-trace* compile-file
-))
+
 (in-package eyes)
 ;; 13 public, out of 16 definitions.
 (export '(
@@ -203,4 +204,5 @@
 ))
 
 ;; A prompt starts here.
+
 (in-package user)

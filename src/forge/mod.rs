@@ -345,15 +345,15 @@ pub fn host_run(files: &[String]) -> i32 {
     0
 }
 
-/// Evaluate one step of the build, standing in `hostio`.
+/// Evaluate one step of the build, standing in the prelude.
 ///
 /// Read by the Lisp reader, not the bootstrap one: `sys:kickstart` names a
 /// symbol in a package, and only the real reader knows that. Each step says
-/// where it is standing because compiling a file leaves the reader in
-/// whatever package that file ended in.
+/// where it is standing, because compiling a file leaves the reader in
+/// whatever package that file ended in - and it stands in `lm`, which is
+/// where the bootstrap reader put everything hostio.lisp defines.
 fn drive(l: &mut Lisp, src: &str) -> crate::forge::hostlisp::Res {
-    l.eval_lisp(&format!("(in-package hostio)
-{src}"))
+    l.eval_lisp(&format!("(in-package lm) {src}"))
 }
 
 /// Build the kickstart image.
@@ -409,7 +409,7 @@ pub fn build(out: &str, verbose: bool) -> i32 {
         "(%raw-st! lg-toplevel (%symbol-value 'sys:kickstart))",
         "(%raw-st! lg-refill (%symbol-value 'gc:refill-cons))",
         "(%raw-st! lg-traphook (%symbol-value 'sys:handle-trap))",
-        "(%raw-st! lg-bootlist (reverse *boot-thunks*))",
+        "(%raw-st! lg-bootlist (reverse compiler:*boot-thunks*))",
     ] {
         if let Err(e) = drive(&mut l, step) {
             eprint!("wiring {step}: {e}");
@@ -460,6 +460,24 @@ pub fn build(out: &str, verbose: bool) -> i32 {
     let cons_ptr = l.h.g(LG_CONS_PTR);
     l.h.set_g(LG_IMGENTRY, entry);
     l.h.set_g(LG_IMGVERSION, 1);
+
+    // The forge declares packages for files it reads and never compiles -
+    // its own I/O, the assembly stubs - and those reach the machine holding
+    // nothing. Dropping them here is the last thing done to the heap, and it
+    // leaves the reader standing somewhere that still exists.
+    match l.eval_lisp("(in-package user) (gc:forget-unused-packages)") {
+        Ok(v) if v != crate::heap::NIL => {
+            let names: Vec<String> = l.h.list_vec(v).iter().map(|s| l.h.str_of(*s)).collect();
+            if verbose {
+                eprintln!("dropped {} empty packages: {}", names.len(), names.join(" "));
+            }
+        }
+        Ok(_) => {}
+        Err(e) => {
+            eprint!("dropping the forge's own packages: {e}");
+            return 1;
+        }
+    }
 
     // Run the machine's own collector, on the machine, before writing the
     // image. Everything the compiler consed while building - expanded macro
