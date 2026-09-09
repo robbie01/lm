@@ -1074,11 +1074,44 @@
         (i-srai a $t2 $a0 1)
         (i-li a $t3 mmio-base)
         (i-sw a $t2 $t3 0))))
+  ;; Turning interrupts off answers whether they were on, because the
+  ;; instruction that does it computes that for free and the only question is
+  ;; whether the answer is kept. Keeping it is what makes a critical section
+  ;; nestable without a counter anybody has to agree about: every caller puts
+  ;; back what it found, and nobody can turn interrupts on underneath somebody
+  ;; who wanted them off.
   (definline '%disable 0
     (lambda (c)
       (let ((a (cx-asm c)))
-        (i-csrrci a $zero csr-mstatus 8)
+        (i-csrrci a $a0 csr-mstatus 8)
+        (i-srli a $a0 $a0 3)
+        (i-andi a $a0 $a0 1)
+        (i-slli a $a0 $a0 1)
+        (i-ori a $a0 $a0 1))))
+  ;; Put them back the way `%disable` found them. Branchless: the saved fixnum
+  ;; becomes the MIE bit or zero, and setting no bits is a write of what was
+  ;; already there.
+  (definline '%restore-interrupts 1
+    (lambda (c)
+      (let ((a (cx-asm c)))
+        (i-srai a $a0 $a0 1)
+        (i-slli a $a0 $a0 3)
+        (i-csrrs a $zero csr-mstatus $a0)
         (i-mv a $a0 $zero))))
+  ;; A trap returns through mret, which puts back the interrupt state the
+  ;; faulting code had. An error abandons that code, so it must not inherit its
+  ;; critical section: this sets the bit mret will restore from. The immediate
+  ;; form of the CSR instructions only carries five bits and this one is bit
+  ;; seven, so it goes through a register.
+  (definline '%enable-after-trap 0
+    (lambda (c)
+      (let ((a (cx-asm c)))
+        (i-li a $t2 128)
+        (i-csrrs a $zero csr-mstatus $t2)
+        (i-mv a $a0 $zero))))
+  ;; Unconditional, for the two places that are establishing a state rather
+  ;; than restoring one: the kernel starting up, and an error unwinding to a
+  ;; prompt with no idea what it interrupted.
   (definline '%enable 0
     (lambda (c)
       (let ((a (cx-asm c)))

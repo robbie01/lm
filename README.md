@@ -608,7 +608,51 @@ same operation seen from two directions.
 
 Preemption is the timer interrupt; a task that blocks asks for a reschedule
 with an `ecall`, so the switch always happens inside the handler where the
-registers are already saved.
+registers are already saved. It is on from the moment the kickstart finishes,
+which it did not used to be — you had to ask for it, so nothing was ever
+tested against it.
+
+### Being interruptible
+
+Turning it on for good meant making everything that touches shared state safe
+to be interrupted in the middle of, and the shape that took is worth
+describing because it is not the obvious one.
+
+**Interrupts are saved and restored, not turned on and off.** `%disable`
+answers whether they *were* on — the instruction that clears the bit computes
+that for free, and the only question was whether anyone kept the answer — and
+`%restore-interrupts` puts back what it found. So there is no "enable"
+operation for anything to get wrong, and no shared nesting count that everyone
+has to agree to maintain: each caller keeps its own answer on its own stack.
+Exec's `Disable`/`Enable` counter is still there, and still what a debugger
+would read, but nothing depends on it for correctness. `without-interrupts` is
+the form you write, and it is a macro rather than something taking a thunk,
+because a thunk that captures anything is a closure and the collector may not
+allocate.
+
+What it does not do is unwind. An error abandons the stack it happened on, so
+`abort-to-repl` re-establishes the interrupt state rather than restoring it,
+and zeroes Exec's nesting counts on the way past — otherwise one bad
+expression inside a critical section would leave the machine deaf for as long
+as it ran.
+
+**Every task allocates out of its own run.** This is the one that had teeth.
+The inline allocator is four instructions — check for room, store the car,
+store the cdr, bump — and it is not atomic. `gp` and `tp` used to be machine
+wide and deliberately *not* restored on a context switch, which was exactly
+right when switches only happened at a `reschedule` and exactly wrong the
+moment a timer could land between the store and the bump: two tasks would
+write the same cell and carry on, and it would surface much later as a pair
+holding somebody else's cdr. Now `refill-cons` carves a 256 KiB chunk out of
+the frontier for the asking task alone, the trap stub restores `gp` and `tp`
+with everything else, and the sequence is private to one task. After a
+compaction every run describes the wrong heap, so the collector zeroes each
+suspended task's saved pair and each one refills on its next allocation.
+
+**A device command is a critical section.** Setting up a blit is several
+register writes and then the one that starts it; two tasks interleaved there
+start each other's work. That one is visible — it draws a line across the
+screen from a rectangle that was supposed to be clipped to a window.
 
 ## The Workbench
 
@@ -723,7 +767,9 @@ above is doing what it claims.
   not affect code already compiled against it.
 - No condition system: an error prints a backtrace and restarts the reader on a
   fresh stack. That is a reset, not an unwind — nothing gets a chance to clean
-  up on the way past, and there is no way to catch anything.
+  up on the way past, and there is no way to catch anything. The restart puts
+  the interrupt state and Exec's nesting counts back by hand, because nothing
+  else would.
 - The machine collects objects and code but never moves them, so object space
   can still fragment over a long session. Its free lists are exact-fit and
   segregated, which handles the usual case where sizes repeat, and the forge
@@ -731,6 +777,14 @@ above is doing what it claims.
   has mattered so far.
 - A fault inside a task with a prompt behind it restarts that prompt; one
   without a prompt ends the task. Neither unwinds anything on the way.
+- A rebuild turns preemption off and does not turn it back on. It is
+  recompiling exec.lisp into the machine it is running on, and `(define
+  *sysbase* nil)` is a top level form like any other — for the rest of that
+  rebuild there is no ExecBase for a timer interrupt to find. The image it
+  writes turns preemption on for itself when it boots.
+- A task holding a partly used run keeps it until the next collection. At 256
+  KiB a chunk that is the worst case, and only for tasks that allocated once
+  and stopped.
 - A rebuilt image carries the holes left in *code space* by the functions it
   replaced — object space is compacted, code space is not, because moving
   machine code means finding every call site. So it is bigger than a freshly

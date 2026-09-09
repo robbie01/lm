@@ -51,16 +51,20 @@
 
 (define (timer-set-in n)
   ;; Fire n ticks from now. The compare is 64-bit; the low half is written
-  ;; second so a wrap cannot leave a compare in the past.
-  (let* ((lo (peek tmr-lo))
-         (hi (peek tmr-hi))
-         (sum (%+ (%logand lo 1073741823) n)))
-    (poke tmr-cmphi (if (%> sum 1073741823) (%+ hi 1) hi))
-    (poke tmr-cmplo (%logior (%logand lo -1073741824) (%logand sum 1073741823)))))
+  ;; second so a wrap cannot leave a compare in the past - and both halves go
+  ;; out together, or the interrupt that arrives in between reads half of one
+  ;; deadline and half of another.
+  (without-interrupts
+    (let* ((lo (peek tmr-lo))
+           (hi (peek tmr-hi))
+           (sum (%+ (%logand lo 1073741823) n)))
+      (poke tmr-cmphi (if (%> sum 1073741823) (%+ hi 1) hi))
+      (poke tmr-cmplo (%logior (%logand lo -1073741824) (%logand sum 1073741823))))))
 
 (define (timer-never)
-  (poke tmr-cmphi -1)
-  (poke tmr-cmplo -1))
+  (without-interrupts
+    (poke tmr-cmphi -1)
+    (poke tmr-cmplo -1)))
 
 ;; ---------------------------------------------------------------- display
 (define gfx-base (dev-addr dev-gfx #x00))
@@ -103,8 +107,10 @@
     bm))
 
 (define (set-colour i rgb)
-  (poke gfx-palidx i)
-  (poke gfx-paldat rgb))
+  ;; An index register and a data register: two writes that mean one thing.
+  (without-interrupts
+    (poke gfx-palidx i)
+    (poke gfx-paldat rgb)))
 
 (define (rgb r g b)
   (%logior (%lsh (%logand r 255) 16)
@@ -185,10 +191,17 @@
         (list x0 y0 (%- x1 x0) (%- y1 y0))
         nil)))
 
+;; A device command is several register writes and then the one that starts
+;; it. Those writes are a single act: two tasks interleaved in here would each
+;; start the other's blit, which shows up as a stray line across the screen
+;; from a rectangle that was supposed to be clipped to a window.
+;;
+;; The clipping is computed first, outside, because it is the expensive half
+;; and it touches nothing shared.
 (define (screen-fill-rect x y w h c)
   (let ((r (clip-rect x y w h)))
     (if r
-        (begin
+        (without-interrupts
           (poke blt-dst (%+ *screen* (%+ (%* (cadr r) *screen-w*) (%car r))))
           (poke blt-w (caddr r))
           (poke blt-h (cadddr r))
@@ -205,7 +218,7 @@
   (let* ((sr (clip-rect sx sy w h))
          (dr (if sr (clip-rect dx dy (caddr sr) (cadddr sr)) nil)))
     (if dr
-        (begin
+        (without-interrupts
           (poke blt-src (%+ *screen* (%+ (%* (cadr sr) *screen-w*) (%car sr))))
           (poke blt-dst (%+ *screen* (%+ (%* (cadr dr) *screen-w*) (%car dr))))
           (poke blt-w (caddr dr))
@@ -387,14 +400,15 @@
   (set! x1 (clamp x1 0 (%- *screen-w* 1)))
   (set! y0 (clamp y0 0 (%- *screen-h* 1)))
   (set! y1 (clamp y1 0 (%- *screen-h* 1)))
-  (poke blt-dst *screen*)
-  (poke blt-dmod *screen-w*)
-  (poke blt-x0 x0)
-  (poke blt-y0 y0)
-  (poke blt-x1 x1)
-  (poke blt-y1 y1)
-  (poke blt-val c)
-  (poke blt-op op-line))
+  (without-interrupts
+    (poke blt-dst *screen*)
+    (poke blt-dmod *screen-w*)
+    (poke blt-x0 x0)
+    (poke blt-y0 y0)
+    (poke blt-x1 x1)
+    (poke blt-y1 y1)
+    (poke blt-val c)
+    (poke blt-op op-line)))
 
 ;; Integer square root, by Newton. Wanted by anything that has to turn a
 ;; distance into a length, which on a machine with no floats is more things
@@ -478,18 +492,20 @@
 (define dsk-blocks (dev-addr dev-disk #x14))
 
 (define (disk-read addr block n)
-  (poke dsk-addr addr)
-  (poke dsk-block block)
-  (poke dsk-count n)
-  (poke dsk-cmd 1)
-  (peek dsk-status))
+  (without-interrupts
+    (poke dsk-addr addr)
+    (poke dsk-block block)
+    (poke dsk-count n)
+    (poke dsk-cmd 1)
+    (peek dsk-status)))
 
 (define (disk-write addr block n)
-  (poke dsk-addr addr)
-  (poke dsk-block block)
-  (poke dsk-count n)
-  (poke dsk-cmd 2)
-  (peek dsk-status))
+  (without-interrupts
+    (poke dsk-addr addr)
+    (poke dsk-block block)
+    (poke dsk-count n)
+    (poke dsk-cmd 2)
+    (peek dsk-status)))
 
 (define (disk-blocks) (peek dsk-blocks))
 
@@ -545,6 +561,11 @@
     b))
 
 (define (alloc-pool nbytes)
+  ;; The free list is threaded through the blocks themselves and the bump
+  ;; pointer is a global, so finding a block and claiming it is one act. The
+  ;; zeroing is inside the same block only because the pool is claimed rarely
+  ;; and in small pieces.
+  (without-interrupts
   (let* ((need (let ((n (%logand (%+ (%+ nbytes 8) 7) -8)))
                  (if (%< n pool-min) pool-min n)))
          (b (let ((p (%global lg-pool-free)) (prev nil) (found nil))
@@ -557,10 +578,11 @@
                                 n)))))
     (%st32! (%+ b 4) pool-tag)
     (pool-zero (%+ b 8) (%- (pool-size b) 8))
-    (%+ b 8)))
+    (%+ b 8))))
 
 (define (free-pool p)
   ;; Insert in address order, joining up with either neighbour that touches.
+  (without-interrupts
   (let ((b (%- p 8)))
     (if (%= (%ld32 (%+ b 4)) pool-tag)
         nil
@@ -586,7 +608,7 @@
           (if prev
               (pool-set-next! prev b)
               (%set-global! lg-pool-free b)))
-      nil)))
+      nil))))
 
 (define (pool-used) (%- (%global lg-poolptr) pool-base))
 

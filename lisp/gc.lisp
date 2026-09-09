@@ -698,11 +698,15 @@
     (if *gc-check* (gc-verify cons-top) nil)
     (gc-blank cons-top cons-hi)
     (%set-global! lg-cons-ptr cons-top)
+    ;; An empty run, for this task and for every other. Nobody is holding a
+    ;; pointer into the heap that just slid out from under them: the next cons
+    ;; anybody does finds no room and asks for a fresh chunk.
     (%set-global! lg-cons-run cons-top)
-    (%set-global! lg-cons-run-end cons-limit)
+    (%set-global! lg-cons-run-end cons-top)
     (%set-global! lg-cons-free 0)
     (%set-global! lg-cons-free-n (%lsh (%- cons-limit cons-top) -3))
     (%reload-cons-run)
+    (gc-invalidate-runs)
     (set! *gc-compacted* t)
     (%lsh (%- cons-limit cons-top) -3)))
 
@@ -719,59 +723,78 @@
 (define (gc-forget-scratch) (set! *gc-ready* nil))
 
 (define (gc-collect)
+  ;; Interrupts are off for the whole of this and back on afterwards only if
+  ;; they were on before. The collector used to end by turning them on
+  ;; unconditionally, which quietly reopened the critical section of anybody
+  ;; who was holding Disable and happened to allocate.
   (let ((t0 (%cycles)))
-    (%disable)
-    (if *gc-ready* nil (begin (gc-build-popcount) (set! *gc-ready* t)))
-    ;; The inline allocator bumps gp through the current run without telling
-    ;; anyone, so gp - not the last recorded value - is how far the heap has
-    ;; actually been used. Writing it back is what makes the sweep range and
-    ;; the pointer-validity test cover everything allocated since the last
-    ;; collection.
-    (%sync-cons-run)
-    (%set-global! lg-cons-ptr (%global lg-cons-run))
-    (set! *mark-sp* 0)
-    (set! *pinned* 0)
-    (gc-clear-bitmap)
-    (gc-roots)
-    (gc-drain)
-    ;; Code before objects. Sweeping object space writes free-list links over
-    ;; dead objects' headers and first slots, and a dead code object's first
-    ;; slot is the address of the code it owns - read it afterwards and the
-    ;; code sweeper frees whatever the link happened to look like.
-    (let ((k (gc-sweep-code))
-          (c (gc-compact))
-          (o (gc-sweep-objects)))
-      (set! *gc-count* (%+ *gc-count* 1))
-      (set! *gc-cycles* (%+ *gc-cycles* (%- (%cycles) t0)))
-      (%set-global! lg-gccount *gc-count*)
-      (%enable)
-      (if *gc-verbose*
-          (begin
-            (uart-string "[gc ")
-            (uart-num-raw c)
-            (uart-string " pairs, ")
-            (uart-num-raw o)
-            (uart-string " bytes, ")
-            (uart-num-raw (%logand (%- (%cycles) t0) 1073741823))
-            (uart-string " cycles]")
-            (uart-nl))
-          nil)
-      c)))
+    (without-interrupts
+      (if *gc-ready* nil (begin (gc-build-popcount) (set! *gc-ready* t)))
+      ;; No need to ask any task how far it has got: runs are carved out of
+      ;; lg-cons-ptr, so that is already above every pair anyone has been
+      ;; handed. What is left unused inside a task's run is simply unmarked,
+      ;; and the compaction closes it up like any other gap.
+      (set! *mark-sp* 0)
+      (set! *pinned* 0)
+      (gc-clear-bitmap)
+      (gc-roots)
+      (gc-drain)
+      ;; Code before objects. Sweeping object space writes free-list links over
+      ;; dead objects' headers and first slots, and a dead code object's first
+      ;; slot is the address of the code it owns - read it afterwards and the
+      ;; code sweeper frees whatever the link happened to look like.
+      (let ((k (gc-sweep-code))
+            (c (gc-compact))
+            (o (gc-sweep-objects)))
+        (set! *gc-count* (%+ *gc-count* 1))
+        (set! *gc-cycles* (%+ *gc-cycles* (%- (%cycles) t0)))
+        (%set-global! lg-gccount *gc-count*)
+        ;; Reporting stays inside: it is off unless something is being debugged,
+        ;; and it writes to the uart directly rather than allocating a string.
+        (if *gc-verbose*
+            (begin
+              (uart-string "[gc ")
+              (uart-num-raw c)
+              (uart-string " pairs, ")
+              (uart-num-raw o)
+              (uart-string " bytes, ")
+              (uart-num-raw (%logand (%- (%cycles) t0) 1073741823))
+              (uart-string " cycles]")
+              (uart-nl))
+            nil)
+        c))))
 
 ;; ---------------------------------------------------------------- refill
 ;; Called from the assembly stub when the inline allocator runs out of run.
 ;; Every caller-saved register was spilled to the stack on the way in, so the
 ;; collector's conservative scan can see them.
+;; How much a task is given at a time. Big enough that refilling is rare and
+;; small enough that a task which stops allocating is not sitting on much.
+(define cons-chunk 262144)     ; 32768 pairs
+
+;; Replaced by exec.lisp once there are other tasks to tell.
+(define (gc-invalidate-runs) nil)
+
 (define (refill-cons)
-  ;; The run is used up. Collecting compacts the pairs and leaves exactly one
-  ;; run, contiguous, above the live data - so there is no free list to walk
-  ;; and nothing to choose between. The stub reloads gp and tp from these two
-  ;; globals on the way out.
-  (gc-collect)
-  (let ((run (%global lg-cons-run))
-        (end (%global lg-cons-run-end)))
-    (if (%<= (%- end run) 0) (out-of-memory "cons space") nil)
-    run))
+  ;; This task's run is used up, so carve it another out of the unclaimed
+  ;; ground above lg-cons-ptr - which is the frontier, and therefore the high
+  ;; water mark the collector sweeps to. Only when there is not enough left to
+  ;; carve is it worth collecting.
+  ;;
+  ;; The chunk is this task's alone until it is exhausted. That is the whole
+  ;; reason it exists: the four-instruction allocator is not atomic, and a run
+  ;; shared between tasks would hand the same cell to two of them.
+  (without-interrupts
+    (let ((p (%global lg-cons-ptr)))
+      (if (%< (%- cons-limit p) cons-chunk)
+          (begin (gc-collect) (set! p (%global lg-cons-ptr)))
+          nil)
+      (if (%<= (%- cons-limit p) 0) (out-of-memory "cons space") nil)
+      (let ((top (if (%< (%- cons-limit p) cons-chunk) cons-limit (%+ p cons-chunk))))
+        (%set-global! lg-cons-ptr top)
+        (%set-global! lg-cons-run p)
+        (%set-global! lg-cons-run-end top)
+        p))))
 
 ;; ---------------------------------------------------------------- allocation
 (define (obj-take size)
@@ -839,6 +862,7 @@
           a))))
 
 (define (register-code obj)
+  (without-interrupts
   (let ((r (code-registry))
         (n (%global lg-code-reg-n)))
     (if (%>= n code-registry-max)
@@ -846,7 +870,7 @@
         nil)
     (%raw-st! (%+ r (%lsh n 2)) obj)
     (%set-global! lg-code-reg-n (%+ n 1))
-    obj))
+    obj)))
 
 ;; Free blocks describe themselves: size first, then the next block.
 (define (code-take size)
@@ -873,6 +897,9 @@
   (%set-global! lg-code-free-n (%+ (%global lg-code-free-n) size)))
 
 (define (alloc-code nbytes)
+  ;; Code space has a free list and a bump pointer, the same shape as object
+  ;; space and with the same requirement.
+  (without-interrupts
   (let* ((size (%logand (%+ nbytes 7) -8))
          (p (code-take size)))
     (if (%> p 0)
@@ -882,7 +909,7 @@
               (out-of-memory "code space")
               nil)
           (%set-global! lg-code-ptr (%+ q size))
-          q))))
+          q)))))
 
 (define (gc-sweep-code)
   ;; Compact the registry in place, keeping the entries whose code object

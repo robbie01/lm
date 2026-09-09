@@ -196,8 +196,13 @@
 (define *gensym-count* 0)
 
 (define (gensym-1)
-  (set! *gensym-count* (%+ *gensym-count* 1))
-  (intern-string (string-append "g" (number->string *gensym-count*))))
+  ;; The counter is what makes the name unique, so reading and bumping it is
+  ;; one act: two tasks that both read the old value make two symbols with the
+  ;; same name, which is the one thing a gensym must never be.
+  (let ((n (without-interrupts
+             (set! *gensym-count* (%+ *gensym-count* 1))
+             *gensym-count*)))
+    (intern-string (string-append "g" (number->string n)))))
 
 ;; ---------------------------------------------------------------- clock
 (define (cycles) (%cycles))

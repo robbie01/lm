@@ -64,7 +64,24 @@
 (define *object-allocator*)
 (define *collector*)
 
+;; All of it is one critical section, not just the part that touches the free
+;; list, and the reason is worth writing down because the narrower version
+;; looks obviously sufficient and is not.
+;;
+;; A block between being taken and being filled in is in the worst possible
+;; state. Its header still says `t-free`, because taking it only unlinks it;
+;; and the raw address held here is not a tagged object pointer, so no
+;; conservative scan of this task's registers will recognise it. A collection
+;; that ran in that window would sweep the block back onto a free list and
+;; hand it out a second time. Nothing announces that: the two owners simply
+;; write over each other, and it surfaces later as a string with a nonsense
+;; length or a record with somebody else's fields.
+;;
+;; So the block is not let go of until it is a well formed object of a known
+;; type. The zero fill is inside for the same reason - until it is done the
+;; slots hold whatever the last owner left, which the collector would trace.
 (define (alloc-object type len)
+  (without-interrupts
   (let* ((size (%logand (%+ (%+ 4 (object-payload type len)) 7) -8))
          (p (%funcall *object-allocator* size)))
     (if (%= p 0)
@@ -78,7 +95,7 @@
       (while (%< i size)
         (%st32! (%+ p i) 0)
         (set! i (%+ i 4))))
-    (%from-addr (%+ p 4))))
+    (%from-addr (%+ p 4)))))
 
 (define (make-record n tag)
   (let ((r (alloc-object t-record n)))
@@ -130,6 +147,7 @@
     found))
 
 (define (make-package name)
+  (without-interrupts
   (let ((old (find-package name)))
     (if old
         old
@@ -138,7 +156,7 @@
           (%set-slot! p pkg-use nil)
           (%raw-st! lg-packages (%cons p (%raw-ld lg-packages)))
           (%set-slot! p pkg-tag (intern-in p "package"))
-          p))))
+          p)))))
 
 (define (symbol-exported? s)
   (%= sym-exported (%logand (symbol-flags s) sym-exported)))
@@ -167,6 +185,11 @@
     found))
 
 (define (intern-in pkg s)
+  ;; Looking and creating have to be one indivisible act. Two tasks interning
+  ;; the same name at once would otherwise both look, both miss, and both make
+  ;; a symbol - and two symbols of one name in one package is a machine where
+  ;; eq? has stopped meaning anything.
+  (without-interrupts
   (let ((found (find-symbol-in pkg s)))
     (if found
         found
@@ -187,7 +210,7 @@
           (%set-slot! sym sym-package pkg)
           (%vector-set! ob b (%cons sym (%vector-ref ob b)))
           (%raw-st! lg-symlist (%cons sym (%raw-ld lg-symlist)))
-          sym))))
+          sym)))))
 
 ;; What a bare name means here: this package first, then whatever the packages
 ;; it uses have exported, and failing both a new symbol of its own.

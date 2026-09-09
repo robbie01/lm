@@ -49,7 +49,6 @@
                 0
                 (ball-task (%+ 1 (%mod i 11)) (%+ 3 (%* i 37))))
       (set! i (%+ i 1))))
-  (exec-start)
   n)
 
 ;; ---------------------------------------------------------------- mandelbrot
@@ -187,7 +186,7 @@
   (emit-str "  (balls 6)              six tasks, one framebuffer\n")
   (emit-str "  (mandelbrot)           fixed point, straight to the bitmap\n")
   (emit-str "  (life 200)             life, with the blitter for the copy\n")
-  (emit-str "  (exec-start)           turn on preemption\n")
+  (emit-str "  (tasks)                what is running; preemption is already on\n")
   (emit-str "  (save-image)           write this machine to the disk\n")
   (emit-str "  bye                    stop the machine\n")
   nil)

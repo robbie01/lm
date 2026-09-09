@@ -1016,6 +1016,8 @@ impl<'a> Lisp<'a> {
             "%enable-timer" => NIL,
             "%cycles" => fix(0),
             "%disable" => NIL,
+            "%restore-interrupts" => NIL,
+            "%enable-after-trap" => NIL,
             "%enable" => NIL,
             "%halt" => {
                 bail!("the build tried to halt the machine")
@@ -1360,6 +1362,8 @@ pub static PRIMS: &[(&str, u32)] = &[
     ("%enable-timer", 0),
     ("%cycles", 0),
     ("%disable", 0),
+    ("%restore-interrupts", 1),
+    ("%enable-after-trap", 0),
     ("%enable", 0),
     ("%halt", 1),
     ("%addr-of", 1),

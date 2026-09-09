@@ -193,6 +193,8 @@
 (define (ctx-reg c n) (%+ c (%* 4 n)))
 (define reg-ra 1)
 (define reg-sp 2)
+(define reg-gp 3)
+(define reg-tp 4)
 (define reg-t0 5)
 (define reg-t1 6)
 (define reg-s2 18)
@@ -777,11 +779,27 @@
     ;; than halting the machine.
     (set! *stack-top-fn* (lambda () (peek (%+ (this-task) tc-spupper))))
     (set! *return-addr-fn* (lambda () *task-exit-stub*))
+    (set! *abort-cleanup-fn*
+          (lambda ()
+            (poke (%+ sb eb-idnest) 0)
+            (poke (%+ sb eb-tdnest) 0)
+            (poke (%+ sb eb-attnresched) 0)))
     (set! *task-abort-fn*
           (lambda ()
             (emit-str "task ended by an error\n")
             (task-finished)))
     sb))
+
+;; Stop the clock driving the scheduler. Nothing else changes: tasks still
+;; switch when they ask to, signals still work, interrupts still arrive. What
+;; stops is being taken off the processor against your will.
+;;
+;; There is one caller and it is the one that needs it. A rebuild recompiles
+;; exec.lisp into the machine it is running on, and `(define *sysbase* nil)`
+;; is a top level form like any other: for the rest of that rebuild the kernel
+;; has no ExecBase. Nothing notices as long as nothing calls into the kernel -
+;; and a timer interrupt is exactly that call, arriving unasked.
+(define (preemption-off) (timer-never) nil)
 
 (define (exec-start)
   ;; Turn on preemption. From here the timer interrupt drives the scheduler.
@@ -796,6 +814,26 @@
 ;; kernel has to hand over the Lisp values it is holding. Nothing here may
 ;; allocate: these run inside a collection, so the list walks are done by hand
 ;; rather than through list-nodes, which conses.
+
+;; A collection moved every pair, so every run any task was holding describes
+;; the wrong part of the heap. Zeroing the saved pair of registers is enough:
+;; the allocator checks for room before it stores anything, finds none, and
+;; asks for a fresh chunk. The task that is running gets the same treatment
+;; from `%reload-cons-run`.
+(define (drop-task-run task)
+  (let ((ctx (peek (%+ task tc-context))))
+    (if (%> ctx 0)
+        (begin (poke (ctx-reg ctx reg-gp) 0)
+               (poke (ctx-reg ctx reg-tp) 0))
+        nil)))
+
+(define (gc-invalidate-runs)
+  (if (%= *sysbase* 0)
+      nil
+      (begin
+        (gc-scan-list-of (ready-list) drop-task-run)
+        (gc-scan-list-of (wait-list) drop-task-run)))
+  nil)
 
 (define (gc-scan-task task)
   (gc-slot (%+ task ln-name))

@@ -240,3 +240,23 @@
        (display "  ") (display (%- (cycles) %t0)) (display " cycles")
        (newline)
        %v)))
+
+;; ---------------------------------------------------------------- atomicity
+;; Run the body with interrupts off, and put them back the way they were.
+;;
+;; A macro rather than something taking a thunk, for two reasons. A thunk that
+;; captures anything is a closure, and a closure is an allocation - and the
+;; collector, which is the most important caller here, may not allocate. And
+;; the expansion is the same straight-line code the raw calls would have been,
+;; so nothing pays for the shape.
+;;
+;; What it does not do is unwind. An error inside the body does not come back
+;; through here; it resets to a prompt on a fresh stack, and putting interrupts
+;; back is that path's job (see `restart-stack` in sys.lisp). Everything that
+;; returns normally, which is everything else, restores exactly what it found.
+(defmacro without-interrupts body
+  (let ((saved (gensym)) (result (gensym)))
+    `(let ((,saved (%disable)))
+       (let ((,result (begin ,@body)))
+         (%restore-interrupts ,saved)
+         ,result))))

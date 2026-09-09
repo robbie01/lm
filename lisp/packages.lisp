@@ -49,7 +49,8 @@
   %intern %ld16 %ld32 %ld8 %logand %logior %lognot %logxor %lsh %macro?
   %macroexpand-1 %make-bytes %make-string %make-vector %mod %newline %null?
   %obj-len %obj-type %object? %raw-ld %raw-st! %read-file
-  %record? %reload-cons-run %rem %set-car! %set-cdr! %set-context
+  %enable-after-trap %record? %reload-cons-run %rem %restore-interrupts %set-car! %set-cdr!
+  %set-context
   %set-global! %set-slot! %set-symbol-flags! %set-symbol-function!
   %set-symbol-plist! %set-symbol-value! %slot %st16! %st32! %st8!
   %stack-pointer %string-length %string-ref %string-set! %string?
@@ -103,6 +104,7 @@
   undefined-globals unless unquote unquote-splicing use-stream! vector
   vector->list vector-equal? vector-fill! vector-grow vector-length
   vector-map vector-ref vector-set! vector? warn when when-let while
+  without-interrupts
   with-output-to-string write write-char-name write-string-quoted
   write-to-string zero?
 ))
@@ -111,7 +113,8 @@
 ;; 24 public, out of 107 definitions.
 (export '(
   alloc-code alloc-object forget-package forget-unused-packages frame-ok?
-  gc gc-blank-free-objects gc-collect gc-extra-roots gc-for-image
+  cons-chunk gc gc-blank-free-objects gc-collect gc-extra-roots gc-for-image
+  gc-invalidate-runs
   gc-forget-scratch gc-slot
   gc-scan-conservative gc-scan-frames in-stub? install-allocator obj-take
   refill-cons register-code room stub-args-off stub-frame-size
@@ -135,7 +138,7 @@
   mouse-x mouse-y op-copy open-screen peek peek8 plot poke poke8
   pool-free-bytes pool-tag pool-used random screen-height screen-sync
   screen-width
-  timer-set-in vblank-count
+  timer-never timer-set-in vblank-count
 ))
 
 (in-package asm)
@@ -164,7 +167,8 @@
 (in-package sys)
 ;; 26 public, out of 69 definitions.
 (export '(
-  *repl-restart* *return-addr-fn* *stack-top-fn* *task-abort-fn*
+  *abort-cleanup-fn* *repl-restart* *return-addr-fn* *stack-top-fn*
+  *task-abort-fn*
   bye compile-time-eval eval eval-form expand-macro handle-trap
   int-external int-software int-timer kickstart macro-form? print-backtrace
   rebuild rebuild-end record-initialiser register-macro repl
@@ -176,7 +180,8 @@
 ;; 19 public, out of 183 definitions.
 (export '(
   add-task cause ctx-bytes disable enable exec-init exec-start forbid
-  handle-interrupt permit rem-task reschedule signal spawn switch-tasks sysbase
+  handle-interrupt permit preemption-off rem-task reschedule signal spawn
+  switch-tasks sysbase
   task-count tasks wait
 ))
 

@@ -175,13 +175,18 @@
     (i-csrrs a $t0 csr-mscratch $zero)
     (i-lw a $ra $t0 (ctx-off 0))
     (i-csrrw a $zero csr-mepc $ra)
-    ;; gp and tp are not restored. They are the cons allocator's run pointers,
-    ;; which belong to the machine rather than to any one context: the handler
-    ;; may well have collected and moved on to a different run, and putting
-    ;; the interrupted task's stale pair back would hand out cells twice.
+    ;; gp and tp go back with everything else. They are this task's cons run,
+    ;; and they have to be per task: the inline allocator stores into the cell
+    ;; at gp and only afterwards bumps it, which is four instructions that an
+    ;; interrupt can land in the middle of. Share one run between tasks and two
+    ;; of them write the same pair. Give each its own and the sequence is
+    ;; private, so there is nothing to race with.
+    ;;
+    ;; What the collector does about the runs it invalidates by compacting is
+    ;; in gc.lisp, under `gc-invalidate-runs`.
     (let ((r 1))
       (while (%< r 32)
-        (if (memq r (list 3 4 5)) nil (i-lw a r $t0 (ctx-off r)))
+        (if (memq r (list 5)) nil (i-lw a r $t0 (ctx-off r)))
         (set! r (%+ r 1))))
     (i-lw a $t0 $t0 (ctx-off 5))
     (i-mret a)

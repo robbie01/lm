@@ -293,6 +293,10 @@
 (define *stack-top-fn* nil)
 (define *task-abort-fn* nil)
 (define *return-addr-fn* nil)
+;; Exec keeps nesting counts for Disable and Forbid. An abort walks out of
+;; however many of those the faulting code was holding, so they have to be put
+;; back to nothing - and only Exec knows where they live.
+(define *abort-cleanup-fn* nil)
 
 (define (restart-stack)
   ;; A task must restart on its own stack. Putting it back on the boot task's
@@ -316,6 +320,13 @@
   nil)
 
 (define (abort-to-repl ctx)
+  ;; There is no unwinding here: the stack the fault happened on is abandoned
+  ;; where it stands, and nothing on it gets a chance to put anything back. So
+  ;; the interrupt state is re-established rather than restored. Without this,
+  ;; an error inside `without-interrupts` would leave the machine deaf for as
+  ;; long as it ran.
+  (%enable-after-trap)
+  (if *abort-cleanup-fn* (%funcall *abort-cleanup-fn*) nil)
   (cond (*repl-restart* (enter-closure ctx *repl-restart* (restart-stack)))
         ;; A task with no prompt behind it does not get to take the machine
         ;; down with it; it just stops being a task.
@@ -362,6 +373,10 @@
 ;; is; if the new compiler is broken, the way you find out is that the build
 ;; goes wrong in a confusing place.
 (define (rebuild)
+  ;; And it does not come back on: by the time this returns, the ExecBase the
+  ;; scheduler needs has been overwritten by the sources going past. The image
+  ;; this writes turns preemption on for itself when it boots.
+  (preemption-off)
   (set! *boot-thunks* nil)
   (set! *recording* t)
   (let ((go t) (n 0))
@@ -469,6 +484,11 @@
   ;; running becomes task zero, and its context is the trap frame the stub has
   ;; been saving into since the machine started.
   (exec-init)
+  ;; And preemption with it. It used to be something you turned on by hand,
+  ;; which meant nothing was ever tested against it; everything that touches
+  ;; shared state now takes a critical section, so there is no reason to wait
+  ;; to be asked.
+  (exec-start)
   (banner)
   (banner-exec)
   (emit-str "type (help) for what to try
