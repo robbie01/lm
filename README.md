@@ -200,6 +200,70 @@ backtrace:
 *** call: undefined function, at pc 105ce44
 ```
 
+### Arithmetic is checked too
+
+The machine used to go to real trouble over `car` of a fixnum and
+`vector-ref` of a string, and then let this happen:
+
+```
+> (+ "abc" 2)
+(#\  . #<immediate>)
+> (car (+ "abc" 2))
+#\
+```
+
+`(+ "abc" 2)` returned a **cons**. A string is an object pointer with its low
+three bits equal to four, adding a tagged two adds four, and four plus four is
+the pair tag — so one addition fabricates a pointer into the middle of a
+string, and `car` reads it. `(+ nil 1)` gave you a character. `(* (vector 1 2
+3) 2)` gave you half a heap address wearing an integer's clothes.
+
+custom-2 is the arithmetic, checked. Both operands must be fixnums, the
+offending one goes in `mtval`, and the handler names the operation the source
+used:
+
+```
+> (+ "abc" 2)
+*** +: expected a number, got "abc", at pc 1053b20
+> (+ nil 1)
+*** +: expected a number, got nil, at pc 1053b90
+> (/ 5 0)
+*** /: division by zero, at pc 1053bc0
+> (peek "abc")
+*** peek: expected a number, got "abc", at pc 1053bec
+```
+
+It is cheaper as well as safer, because the tag arithmetic goes into the
+instruction. `%+` was `add` and a correcting `addi`; it is one `fadd`. `%*`
+was four instructions, `%/` five; they are one each. A comparison was an
+unchecked `slt` and is now a checked `flt` for the same single instruction,
+because 2n+1 preserves the order either way. `%eq?` is deliberately *not* one
+of these: it compares identity, on values of any kind, and asking it for two
+numbers would be asking it the wrong question.
+
+custom-3 carries the same operations against a written-down constant, and the
+other half of what a tag costs: memory reached through a tagged address.
+`peek` was four instructions — strip the tag off the address, load, shift the
+word up, put a tag back on — and the collector's inner loops are made of
+little else. It is one `tlw`.
+
+Measured over a run, instructions that exist only because values carry a tag
+were 4.2% of `fib`, 9.4% of a collection-heavy workload and 7.3% of the
+workbench, with roughly one tag correction for every arithmetic instruction.
+
+**Overflow is a different question and is not switched on.** The trapping
+forms exist, are tested, and nothing emits them: `string-hash` multiplies its
+way past 2^30 on purpose and the fixed-point Mandelbrot relies on wrapping.
+What should happen there is a decision about a numeric tower, not a change of
+encoding — but an operation that cannot notice it overflowed is one bignums
+could never be retrofitted onto, so the notice is built.
+
+The one thing still unchecked is the *fused* comparison, where `(< i n)` is
+the test of an `if` and compiles to a bare `blt`. Checking it would double the
+instruction count in the hottest position in the machine, and its failure mode
+is a branch going the wrong way rather than a forged pointer. In practice its
+operands nearly always come from an operation that already checked them.
+
 ### And a good deal of it was already standard
 
 Before inventing an instruction it is worth checking whether the committee got
@@ -937,7 +1001,7 @@ to hardware from Lisp is peek and poke.
 
 ```
 lmdev all             every suite
-lmdev cpu             138 processor conformance cases
+lmdev cpu             174 processor conformance cases
 lmdev asm             the Lisp assembler against an independent Rust encoder
 lmdev compiler        153 end-to-end cases: source in, machine code out, compare
 lmdev bench           measure the interpreter

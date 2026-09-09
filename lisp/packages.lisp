@@ -170,6 +170,11 @@
   i-clz i-cpop i-ctz i-czero-eqz i-czero-nez i-max i-maxu i-min i-minu
   i-orcb i-orn i-rev8 i-rol i-ror i-rori i-sextb i-sexth i-sh1add i-sh2add
   i-sh3add i-xnor i-zexth
+  ;; custom-2 and custom-3: checked fixnum arithmetic, and memory through a
+  ;; tagged address.
+  i-fadd i-faddi i-faddo i-fand i-fandi i-fdiv i-feq i-flt i-fltu i-fmul
+  i-fmulo i-for i-fori i-frem i-fshi i-fsll i-fsra i-fsrl i-fsub i-fsubo
+  i-fxor i-tlb i-tlw i-tsb i-tsw op-fixnum op-tagged
 ))
 
 (in-package compiler)

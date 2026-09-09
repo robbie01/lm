@@ -153,6 +153,9 @@ pub fn cause_name(c: u32) -> &'static str {
         C_SFAULT => "store access fault",
         C_ECALL => "ecall",
         C_TYPE => "wrong type",
+        C_RANGE => "index out of range",
+        C_OVER => "fixnum overflow",
+        C_DIVZERO => "division by zero",
         _ => "trap",
     }
 }

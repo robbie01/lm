@@ -24,6 +24,14 @@ pub const C_ECALL: u32 = 11;
 pub const C_TYPE: u32 = 24;
 /// An index outside the object it was applied to. `mtval` carries the index.
 pub const C_RANGE: u32 = 25;
+/// A fixnum result that will not fit in thirty-one bits. Nothing emits the
+/// checking forms yet - `string-hash` multiplies its way past 2^30 on purpose
+/// - but the instructions are here, because an operation that cannot notice
+/// it overflowed is one bignums can never be retrofitted onto.
+pub const C_OVER: u32 = 26;
+/// Division by zero, which the base ISA defines as returning -1 and this
+/// machine would rather say out loud.
+pub const C_DIVZERO: u32 = 27;
 
 pub const IRQ_SOFT: u32 = 3; // machine software interrupt
 pub const IRQ_TIMER: u32 = 7;

@@ -284,6 +284,44 @@
 (define (i-ldxbi a rd obj i ty)  (i-r a ty rd obj i 6 op-index))
 (define (i-stxbi a val obj i ty) (i-r a ty val obj i 7 op-index))
 
+;; custom-2: fixnum arithmetic. Both operands are checked, which is the check
+;; the machine never had - (+ "abc" 2) used to make a cons out of a string.
+(define op-fixnum #x5b)
+;; custom-3: a fixnum against a constant, and memory through a tagged address.
+(define op-tagged #x7b)
+
+(define (i-fadd a rd rs1 rs2) (i-r a #x00 rd rs1 rs2 0 op-fixnum))
+(define (i-fsub a rd rs1 rs2) (i-r a #x00 rd rs1 rs2 1 op-fixnum))
+(define (i-fmul a rd rs1 rs2) (i-r a #x00 rd rs1 rs2 2 op-fixnum))
+(define (i-fdiv a rd rs1 rs2) (i-r a #x00 rd rs1 rs2 3 op-fixnum))
+(define (i-frem a rd rs1 rs2) (i-r a #x00 rd rs1 rs2 4 op-fixnum))
+(define (i-fand a rd rs1 rs2) (i-r a #x00 rd rs1 rs2 5 op-fixnum))
+(define (i-for a rd rs1 rs2)  (i-r a #x00 rd rs1 rs2 6 op-fixnum))
+(define (i-fxor a rd rs1 rs2) (i-r a #x00 rd rs1 rs2 7 op-fixnum))
+;; The same three, trapping on a result that will not fit in thirty-one bits.
+;; Nothing emits them yet: string-hash multiplies past 2^30 on purpose, and
+;; what should happen there is a question about bignums, not about encoding.
+(define (i-faddo a rd rs1 rs2) (i-r a #x20 rd rs1 rs2 0 op-fixnum))
+(define (i-fsubo a rd rs1 rs2) (i-r a #x20 rd rs1 rs2 1 op-fixnum))
+(define (i-fmulo a rd rs1 rs2) (i-r a #x20 rd rs1 rs2 2 op-fixnum))
+(define (i-fsll a rd rs1 rs2)  (i-r a #x01 rd rs1 rs2 0 op-fixnum))
+(define (i-fsrl a rd rs1 rs2)  (i-r a #x01 rd rs1 rs2 1 op-fixnum))
+(define (i-fsra a rd rs1 rs2)  (i-r a #x01 rd rs1 rs2 2 op-fixnum))
+(define (i-flt a rd rs1 rs2)   (i-r a #x01 rd rs1 rs2 3 op-fixnum))
+(define (i-fltu a rd rs1 rs2)  (i-r a #x01 rd rs1 rs2 4 op-fixnum))
+(define (i-feq a rd rs1 rs2)   (i-r a #x01 rd rs1 rs2 5 op-fixnum))
+
+(define (i-faddi a rd rs1 imm) (i-i a rd rs1 imm 0 op-tagged))
+(define (i-fandi a rd rs1 imm) (i-i a rd rs1 imm 1 op-tagged))
+(define (i-fori a rd rs1 imm)  (i-i a rd rs1 imm 2 op-tagged))
+;; kind 0 left, 1 right logical, 2 right arithmetic.
+(define (i-fshi a rd rs1 kind sh)
+  (i-i a rd rs1 (%logior (%lsh kind 5) sh) 3 op-tagged))
+(define (i-tlw a rd rs1 off) (i-i a rd rs1 off 4 op-tagged))
+(define (i-tlb a rd rs1 off) (i-i a rd rs1 off 5 op-tagged))
+(define (i-tsw a rs2 rs1 off) (i-s a rs1 rs2 off 6 op-tagged))
+(define (i-tsb a rs2 rs1 off) (i-s a rs1 rs2 off 7 op-tagged))
+
 ;; ---- B extension: Zba, Zbb, Zbs; and Zicond ----
 ;; Ratified RISC-V rather than ours. Taking these first is what stops the
 ;; custom opcodes growing to cover ground the committee already covered.

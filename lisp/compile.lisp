@@ -683,7 +683,10 @@
 ;; thirty-one bits, so testing 2k for range would itself overflow and wrap a
 ;; large constant round into a small one. 2k and 2k+1 both fit a twelve-bit
 ;; signed immediate exactly when k is in [-1024, 1023].
-(define (fits-tagged-imm? k) (if (%>= k -1024) (%< k 1024) nil))
+;; The immediate is the constant itself now rather than the tagged constant,
+;; so the range is the instruction's twelve signed bits - and negating it for
+;; a subtraction has to stay inside them too.
+(define (fits-tagged-imm? k) (if (%>= k -2047) (%< k 2048) nil))
 (define (shift-amount? k) (if (%> k -32) (%< k 32) nil))
 
 (define (const-arg-entry h args)
@@ -703,33 +706,23 @@
 ;; A tagged fixnum is 2n+1, so adding the constant k means adding 2k: the two
 ;; tag bits cancel and the correcting `addi` the general form needs disappears
 ;; along with the `li`.
-(define (emit-add-const c k)
-  (i-addi (cx-asm c) $a0 $a0 (%* 2 k)))
-(define (emit-sub-const c k)
-  (i-addi (cx-asm c) $a0 $a0 (%- 0 (%* 2 k))))
+(define (emit-add-const c k) (i-faddi (cx-asm c) $a0 $a0 k))
+(define (emit-sub-const c k) (i-faddi (cx-asm c) $a0 $a0 (%- 0 k)))
 ;; and / or keep the low bit set when both sides have it, so the constant
 ;; goes in tagged and the answer comes out tagged. (xor does not, which is
 ;; why it is not here: it would need the correcting `ori` back again.)
-(define (emit-and-const c k)
-  (i-andi (cx-asm c) $a0 $a0 (%+ (%* 2 k) 1)))
-(define (emit-or-const c k)
-  (i-ori (cx-asm c) $a0 $a0 (%+ (%* 2 k) 1)))
+(define (emit-and-const c k) (i-fandi (cx-asm c) $a0 $a0 k))
+(define (emit-or-const c k) (i-fori (cx-asm c) $a0 $a0 k))
 
 (define (emit-shift-const c k arith)
-  ;; Untag, shift by a constant in one instruction, retag. The general form
-  ;; branches on the sign of the shift at run time; here the sign is known.
+  ;; One instruction: the direction is known here, so nothing branches, and
+  ;; the instruction does its own untagging and retagging.
   (let ((a (cx-asm c)))
     (if (%= k 0)
         nil
-        (begin
-          (i-srai a $t2 $a0 1)
-          (if (%> k 0)
-              (i-slli a $t2 $t2 k)
-              (if arith
-                  (i-srai a $t2 $t2 (%- 0 k))
-                  (i-srli a $t2 $t2 (%- 0 k))))
-          (i-slli a $a0 $t2 1)
-          (i-ori a $a0 $a0 1)))))
+        (if (%> k 0)
+            (i-fshi a $a0 $a0 0 k)
+            (i-fshi a $a0 $a0 (if arith 2 1) (%- 0 k))))))
 
 (define (emit-lsh-const c k) (emit-shift-const c k nil))
 (define (emit-ash-const c k) (emit-shift-const c k t))
@@ -802,94 +795,68 @@
   (definline '%cons 2 (lambda (c) (emit-cons c $a0 $a1 $a0)))
 
   ;; ---- fixnum arithmetic ----
-  ;; Tagging is 2n+1, so a sum needs one correction and nothing else.
-  (definline '%+ 2
-    (lambda (c) (i-add (cx-asm c) $a0 $a0 $a1) (i-addi (cx-asm c) $a0 $a0 -1)))
-  (definline '%- 2
-    (lambda (c) (i-sub (cx-asm c) $a0 $a0 $a1) (i-addi (cx-asm c) $a0 $a0 1)))
-  (definline '%* 2
-    (lambda (c)
-      (let ((a (cx-asm c)))
-        (i-srai a $t2 $a0 1)
-        (i-addi a $t3 $a1 -1)
-        (i-mul a $a0 $t2 $t3)
-        (i-addi a $a0 $a0 1))))
-  (definline '%/ 2
-    (lambda (c)
-      (let ((a (cx-asm c)))
-        (i-srai a $t2 $a0 1)
-        (i-srai a $t3 $a1 1)
-        (i-div a $a0 $t2 $t3)
-        (i-slli a $a0 $a0 1)
-        (i-ori a $a0 $a0 1))))
-  (definline '%rem 2
-    (lambda (c)
-      (let ((a (cx-asm c)))
-        (i-srai a $t2 $a0 1)
-        (i-srai a $t3 $a1 1)
-        (i-rem a $a0 $t2 $t3)
-        (i-slli a $a0 $a0 1)
-        (i-ori a $a0 $a0 1))))
+  ;; One checked instruction each. These used to be two to five unchecked
+  ;; ones, and the check is the point: (+ "abc" 2) returned a *cons*, because
+  ;; a string is an object pointer with its low three bits equal to four,
+  ;; adding a tagged two adds four, and four plus four is the pair tag. A
+  ;; pointer into the middle of a string, fabricated with one addition, and
+  ;; car would read it.
+  (definline '%+ 2 (lambda (c) (i-fadd (cx-asm c) $a0 $a0 $a1)))
+  (definline '%- 2 (lambda (c) (i-fsub (cx-asm c) $a0 $a0 $a1)))
+  (definline '%* 2 (lambda (c) (i-fmul (cx-asm c) $a0 $a0 $a1)))
+  (definline '%/ 2 (lambda (c) (i-fdiv (cx-asm c) $a0 $a0 $a1)))
+  (definline '%rem 2 (lambda (c) (i-frem (cx-asm c) $a0 $a0 $a1)))
   (definline '%mod 2
     (lambda (c)
-      ;; Euclidean: the sign of the result follows the divisor.
+      ;; Euclidean: the sign of the result follows the divisor. Tagging keeps
+      ;; the sign, so the test is the one it always was.
       (let ((a (cx-asm c)) (done (asm-gensym-label "mod")))
-        (i-srai a $t2 $a0 1)
-        (i-srai a $t3 $a1 1)
-        (i-rem a $t4 $t2 $t3)
-        (i-beqz a $t4 done)
-        (i-xor a $t5 $t4 $t3)
-        (i-bge a $t5 $zero done)
-        (i-add a $t4 $t4 $t3)
+        (i-frem a $t2 $a0 $a1)
+        (i-li a $t3 1)                  ; the fixnum zero
+        (i-beq a $t2 $t3 done)
+        (i-fxor a $t4 $t2 $a1)
+        (i-bge a $t4 $zero done)
+        (i-fadd a $t2 $t2 $a1)
         (asm-label a done)
-        (i-slli a $a0 $t4 1)
-        (i-ori a $a0 $a0 1))))
+        (i-mv a $a0 $t2))))
 
-  ;; ---- bitwise. The low tag bit survives and/or/xor with a correction. ----
-  (definline '%logand 2
-    (lambda (c) (i-and (cx-asm c) $a0 $a0 $a1)))
-  (definline '%logior 2
-    (lambda (c) (i-or (cx-asm c) $a0 $a0 $a1)))
-  (definline '%logxor 2
-    (lambda (c)
-      (let ((a (cx-asm c)))
-        (i-xor a $a0 $a0 $a1)
-        (i-ori a $a0 $a0 1))))
+  ;; ---- bitwise ----
+  (definline '%logand 2 (lambda (c) (i-fand (cx-asm c) $a0 $a0 $a1)))
+  (definline '%logior 2 (lambda (c) (i-for (cx-asm c) $a0 $a0 $a1)))
+  (definline '%logxor 2 (lambda (c) (i-fxor (cx-asm c) $a0 $a0 $a1)))
   (definline '%lognot 1
     (lambda (c)
       (let ((a (cx-asm c)))
-        (i-not a $a0 $a0)
-        (i-ori a $a0 $a0 1))))
+        (i-li a $t2 -1)                 ; the fixnum -1 is also the word -1
+        (i-fxor a $a0 $a0 $t2))))
+
+  ;; A shift whose direction is only known at run time still needs its branch.
+  ;; What it no longer needs is untagging both sides and retagging the answer.
+  ;; A shift by a written-down amount is one instruction; see emit-shift-const.
   (definline '%ash 2
     (lambda (c)
       (let ((a (cx-asm c)) (right (asm-gensym-label "ash"))
             (done (asm-gensym-label "ash")))
-        (i-srai a $t2 $a0 1)
-        (i-srai a $t3 $a1 1)
-        (i-bltz-helper a $t3 right)
-        (i-sll a $t2 $t2 $t3)
+        (i-li a $t2 1)                  ; the fixnum zero
+        (i-blt a $a1 $t2 right)
+        (i-fsll a $a0 $a0 $a1)
         (i-j a done)
         (asm-label a right)
-        (i-sub a $t3 $zero $t3)
-        (i-sra a $t2 $t2 $t3)
-        (asm-label a done)
-        (i-slli a $a0 $t2 1)
-        (i-ori a $a0 $a0 1))))
+        (i-fsub a $t2 $t2 $a1)
+        (i-fsra a $a0 $a0 $t2)
+        (asm-label a done))))
   (definline '%lsh 2
     (lambda (c)
       (let ((a (cx-asm c)) (right (asm-gensym-label "lsh"))
             (done (asm-gensym-label "lsh")))
-        (i-srai a $t2 $a0 1)
-        (i-srai a $t3 $a1 1)
-        (i-bltz-helper a $t3 right)
-        (i-sll a $t2 $t2 $t3)
+        (i-li a $t2 1)
+        (i-blt a $a1 $t2 right)
+        (i-fsll a $a0 $a0 $a1)
         (i-j a done)
         (asm-label a right)
-        (i-sub a $t3 $zero $t3)
-        (i-srl a $t2 $t2 $t3)
-        (asm-label a done)
-        (i-slli a $a0 $t2 1)
-        (i-ori a $a0 $a0 1))))
+        (i-fsub a $t2 $t2 $a1)
+        (i-fsrl a $a0 $a0 $t2)
+        (asm-label a done))))
 
   ;; ---- comparisons producing a value ----
   (definline '%eq? 2
@@ -898,33 +865,38 @@
         (i-sub a $t2 $a0 $a1)
         (i-seqz a $t2 $t2)
         (emit-bool-from-flag c $t2 $a0))))
+  ;; Checked, and no dearer than the unchecked slt they replace: a fixnum is
+  ;; 2n+1, so the order is the same order either way.
+  ;;
+  ;; %eq? above is deliberately not one of these. It compares identity, on
+  ;; values of any kind at all, and asking it for two numbers would be asking
+  ;; it the wrong question.
   (definline '%< 2
     (lambda (c)
       (let ((a (cx-asm c)))
-        (i-slt a $t2 $a0 $a1)
+        (i-flt a $t2 $a0 $a1)
         (emit-bool-from-flag c $t2 $a0))))
   (definline '%> 2
     (lambda (c)
       (let ((a (cx-asm c)))
-        (i-slt a $t2 $a1 $a0)
+        (i-flt a $t2 $a1 $a0)
         (emit-bool-from-flag c $t2 $a0))))
   (definline '%<= 2
     (lambda (c)
       (let ((a (cx-asm c)))
-        (i-slt a $t2 $a1 $a0)
+        (i-flt a $t2 $a1 $a0)
         (i-xori a $t2 $t2 1)
         (emit-bool-from-flag c $t2 $a0))))
   (definline '%>= 2
     (lambda (c)
       (let ((a (cx-asm c)))
-        (i-slt a $t2 $a0 $a1)
+        (i-flt a $t2 $a0 $a1)
         (i-xori a $t2 $t2 1)
         (emit-bool-from-flag c $t2 $a0))))
   (definline '%= 2
     (lambda (c)
       (let ((a (cx-asm c)))
-        (i-sub a $t2 $a0 $a1)
-        (i-seqz a $t2 $t2)
+        (i-feq a $t2 $a0 $a1)
         (emit-bool-from-flag c $t2 $a0))))
 
   ;; ---- type tests ----
@@ -1063,13 +1035,10 @@
         (i-ori a $a0 $a0 2))))
 
   ;; ---- raw memory ----
-  (definline '%ld8 1
-    (lambda (c)
-      (let ((a (cx-asm c)))
-        (i-srai a $t2 $a0 1)
-        (i-lbu a $t2 $t2 0)
-        (i-slli a $a0 $t2 1)
-        (i-ori a $a0 $a0 1))))
+  ;; A word or a byte at a tagged address. This was four instructions - strip
+  ;; the tag off the address, load, shift the word up, put a tag back on - and
+  ;; the collector's inner loops are made of little else.
+  (definline '%ld8 1 (lambda (c) (i-tlb (cx-asm c) $a0 $a0 0)))
   (definline '%ld16 1
     (lambda (c)
       (let ((a (cx-asm c)))
@@ -1077,20 +1046,11 @@
         (i-lhu a $t2 $t2 0)
         (i-slli a $a0 $t2 1)
         (i-ori a $a0 $a0 1))))
-  (definline '%ld32 1
-    (lambda (c)
-      (let ((a (cx-asm c)))
-        (i-srai a $t2 $a0 1)
-        (i-lw a $t2 $t2 0)
-        (i-slli a $a0 $t2 1)
-        (i-ori a $a0 $a0 1))))
+  (definline '%ld32 1 (lambda (c) (i-tlw (cx-asm c) $a0 $a0 0)))
   (definline '%st8! 2
     (lambda (c)
-      (let ((a (cx-asm c)))
-        (i-srai a $t2 $a0 1)
-        (i-srai a $t3 $a1 1)
-        (i-sb a $t3 $t2 0)
-        (i-mv a $a0 $a1))))
+      (i-tsb (cx-asm c) $a1 $a0 0)
+      (i-mv (cx-asm c) $a0 $a1)))
   (definline '%st16! 2
     (lambda (c)
       (let ((a (cx-asm c)))
@@ -1100,11 +1060,8 @@
         (i-mv a $a0 $a1))))
   (definline '%st32! 2
     (lambda (c)
-      (let ((a (cx-asm c)))
-        (i-srai a $t2 $a0 1)
-        (i-srai a $t3 $a1 1)
-        (i-sw a $t3 $t2 0)
-        (i-mv a $a0 $a1))))
+      (i-tsw (cx-asm c) $a1 $a0 0)
+      (i-mv (cx-asm c) $a0 $a1)))
   ;; Read and write a slot without retagging, for moving raw tagged words
   ;; around, and for reaching the machine's registers from Lisp.
   (definline '%raw-ld 1

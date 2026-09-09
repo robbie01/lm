@@ -1020,7 +1020,18 @@
 ;; kernel's state resets under it, one variable at a time. Nothing notices as
 ;; long as nothing calls into the kernel - and a timer interrupt is exactly
 ;; that call, arriving unasked.
-(define (preemption-off) (timer-never) nil)
+(define (preemption-off)
+  ;; The chips too, not just the clock. Every top level `define` in this file
+  ;; resets a kernel variable as the rebuild goes past, so for a moment there
+  ;; is no ready list, no server list and no current task. An interrupt
+  ;; arriving in that window used to enqueue a task into address zero and get
+  ;; away with it, because a base pointer of zero plus a small offset is low
+  ;; memory and low memory is zeroed. It says so now, which is an improvement
+  ;; - and the answer is for it not to arrive.
+  (timer-never)
+  (int-disable int-vblank)
+  (int-disable int-input)
+  nil)
 
 (define (exec-start)
   ;; Turn on preemption. From here the timer interrupt drives the scheduler.

@@ -71,6 +71,33 @@ const LISP_SIDE: &str = r#"
 (i-stxi a $a3 $a1 31 3)
 (i-ldxbi a $t0 $s1 7 2)
 (i-stxbi a $t0 $s1 12 4)
+(i-fadd a $a0 $a1 $a2)
+(i-fsub a $a0 $a1 $a2)
+(i-fmul a $t0 $t1 $t2)
+(i-fdiv a $t0 $t1 $t2)
+(i-frem a $t0 $t1 $t2)
+(i-fand a $s0 $s1 $a0)
+(i-for a $s0 $s1 $a0)
+(i-fxor a $s0 $s1 $a0)
+(i-faddo a $a0 $a1 $a2)
+(i-fsubo a $a0 $a1 $a2)
+(i-fmulo a $a0 $a1 $a2)
+(i-fsll a $a3 $a4 $a5)
+(i-fsrl a $a3 $a4 $a5)
+(i-fsra a $a3 $a4 $a5)
+(i-flt a $a3 $a4 $a5)
+(i-fltu a $a3 $a4 $a5)
+(i-feq a $a3 $a4 $a5)
+(i-faddi a $a0 $a1 -7)
+(i-fandi a $a0 $a1 2047)
+(i-fori a $a0 $a1 -2048)
+(i-fshi a $a0 $a1 0 31)
+(i-fshi a $a0 $a1 1 3)
+(i-fshi a $a0 $a1 2 17)
+(i-tlw a $a0 $a1 100)
+(i-tlb a $t0 $s1 -4)
+(i-tsw a $a2 $sp 44)
+(i-tsb a $a2 $sp -44)
 (i-sh1add a $a0 $a1 $a2)
 (i-sh2add a $a0 $a1 $a2)
 (i-sh3add a $a0 $a1 $a2)
@@ -182,6 +209,33 @@ fn rust_side() -> Vec<u8> {
     w.push(stxi(A3, A1, 31, 3));
     w.push(ldxbi(T0, S1, 7, 2));
     w.push(stxbi(T0, S1, 12, 4));
+    w.push(fadd(A0, A1, A2));
+    w.push(fsub(A0, A1, A2));
+    w.push(fmul(T0, T1, T2));
+    w.push(fdiv(T0, T1, T2));
+    w.push(frem(T0, T1, T2));
+    w.push(fand(S0, S1, A0));
+    w.push(f_or(S0, S1, A0));
+    w.push(fxor(S0, S1, A0));
+    w.push(faddo(A0, A1, A2));
+    w.push(fsubo(A0, A1, A2));
+    w.push(fmulo(A0, A1, A2));
+    w.push(fsll(A3, A4, A5));
+    w.push(fsrl(A3, A4, A5));
+    w.push(fsra(A3, A4, A5));
+    w.push(flt(A3, A4, A5));
+    w.push(fltu(A3, A4, A5));
+    w.push(feq(A3, A4, A5));
+    w.push(faddi(A0, A1, -7));
+    w.push(fandi(A0, A1, 2047));
+    w.push(fori(A0, A1, -2048));
+    w.push(fshi(A0, A1, 0, 31));
+    w.push(fshi(A0, A1, 1, 3));
+    w.push(fshi(A0, A1, 2, 17));
+    w.push(tlw(A0, A1, 100));
+    w.push(tlb(T0, S1, -4));
+    w.push(tsw(A2, SP, 44));
+    w.push(tsb(A2, SP, -44));
     w.push(sh1add(A0, A1, A2));
     w.push(sh2add(A0, A1, A2));
     w.push(sh3add(A0, A1, A2));

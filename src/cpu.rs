@@ -872,6 +872,176 @@ fn op_index(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     next!(m, pc.wrapping_add(4), fuel - 1)
 }
 
+/// The largest and smallest a fixnum can be: thirty-one bits, tagged 2n+1.
+const FIX_MAX: i64 = (1 << 30) - 1;
+const FIX_MIN: i64 = -(1 << 30);
+
+#[inline(always)]
+fn tag(v: i32) -> u32 {
+    ((v as u32) << 1) | 1
+}
+
+/// The custom-2 opcode space: fixnum arithmetic, checked.
+///
+/// This is the hole the rest of the machine did not have. `car` of a fixnum
+/// traps, `vector-ref` of a string traps, calling a number traps - and until
+/// this instruction existed, `(+ "abc" 2)` returned a *cons*: a string is an
+/// object pointer with its low three bits equal to four, adding a tagged two
+/// adds four, and four plus four is the pair tag. You could fabricate a
+/// pointer to the middle of a string with one addition, and `car` would read
+/// it. Both operands are checked here, and the offending one is what lands in
+/// `mtval` for the handler to name.
+///
+///     funct7 0x00   add sub mul div rem and or xor, wrapping at 31 bits
+///     funct7 0x20   the same five arithmetic forms, trapping on overflow
+///     funct7 0x01   sll srl sra lt ltu eq
+///
+/// The comparisons leave a raw 0 or 1, the way `slt` does, because what
+/// follows is either a branch or the two instructions that turn a flag into
+/// `t` and `nil`.
+#[inline(never)]
+fn op_fixnum(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
+    let a = r(m, rs1(w));
+    let b = r(m, rs2(w));
+    if a & 1 == 0 {
+        return m.fault(C_TYPE, a, pc, fuel);
+    }
+    if b & 1 == 0 {
+        return m.fault(C_TYPE, b, pc, fuel);
+    }
+    let f = f3(w);
+    let f7 = w >> 25;
+    let x = (a as i32) >> 1;
+    let y = (b as i32) >> 1;
+    let v = match f7 {
+        0x01 => match f {
+            0 => tag(((x as u32) << (y & 31)) as i32),
+            1 => tag(((x as u32) >> (y & 31)) as i32),
+            2 => tag(x >> (y & 31)),
+            3 => (x < y) as u32,
+            4 => ((x as u32) < (y as u32)) as u32,
+            5 => (x == y) as u32,
+            _ => return illegal(m, w, pc, fuel),
+        },
+        0x00 | 0x20 => match f {
+            // and and or keep the low bit when both sides have it; xor clears
+            // it and has to put it back.
+            5 => a & b,
+            6 => a | b,
+            7 => (a ^ b) | 1,
+            _ => {
+                let n: i64 = match f {
+                    0 => x as i64 + y as i64,
+                    1 => x as i64 - y as i64,
+                    2 => x as i64 * y as i64,
+                    _ => {
+                        if y == 0 {
+                            return m.fault(C_DIVZERO, a, pc, fuel);
+                        }
+                        // A fixnum is never i32::MIN, so neither of these can
+                        // overflow the way i32::MIN / -1 does.
+                        if f == 3 {
+                            (x / y) as i64
+                        } else {
+                            (x % y) as i64
+                        }
+                    }
+                };
+                if f7 == 0x20 && (n < FIX_MIN || n > FIX_MAX) {
+                    return m.fault(C_OVER, tag(n as i32), pc, fuel);
+                }
+                tag(n as i32)
+            }
+        },
+        _ => return illegal(m, w, pc, fuel),
+    };
+    w_(m, rd(w), v);
+    next!(m, pc.wrapping_add(4), fuel - 1)
+}
+
+/// The custom-3 opcode space: a fixnum against a constant, and memory reached
+/// through a tagged address.
+///
+/// The second half is the bigger one. `peek` was four instructions - strip the
+/// tag off the address, load, shift the word up, put a tag on - and the
+/// collector's own code is nothing but that. One instruction does it, and
+/// checks that the address was a number rather than, say, a string.
+///
+///     funct3 0  faddi rd, rs1, imm   rd <- rs1 + 2*imm
+///     funct3 1  fandi rd, rs1, imm   rd <- rs1 & (2*imm | 1)
+///     funct3 2  fori  rd, rs1, imm   rd <- rs1 | (2*imm | 1)
+///     funct3 3  fshi  rd, rs1, imm   imm[4:0] amount, imm[6:5] 0 sll 1 srl 2 sra
+///     funct3 4  tlw   rd, imm(rs1)   rd <- tagged word at (rs1 >> 1) + imm
+///     funct3 5  tlb   rd, imm(rs1)   the same for a zero-extended byte
+///     funct3 6  tsw   rs2, imm(rs1)  store rs2 >> 1 there, S-type
+///     funct3 7  tsb   rs2, imm(rs1)
+#[inline(never)]
+fn op_tagged(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
+    let f = f3(w);
+    let a = r(m, rs1(w));
+    if a & 1 == 0 {
+        return m.fault(C_TYPE, a, pc, fuel);
+    }
+    let x = (a as i32) >> 1;
+    if f >= 4 {
+        return op_tagged_mem(m, w, pc, fuel);
+    }
+    {
+        let i = imm_i(w) as i32;
+        let v = match f {
+            0 => tag(x.wrapping_add(i)),
+            1 => a & tag(i),
+            2 => a | tag(i),
+            _ => {
+                let sh = (i as u32) & 31;
+                match ((i as u32) >> 5) & 3 {
+                    0 => tag(((x as u32) << sh) as i32),
+                    1 => tag(((x as u32) >> sh) as i32),
+                    2 => tag(x >> sh),
+                    _ => return illegal(m, w, pc, fuel),
+                }
+            }
+        };
+        w_(m, rd(w), v);
+        next!(m, pc.wrapping_add(4), fuel - 1)
+    }
+}
+
+/// The memory half of custom-3, split out so that the arithmetic half can end
+/// in a tail call of its own rather than fall past one.
+///
+/// It goes through the same `do_load` and `do_store` the base ISA uses, which
+/// matters more than it looks: a device register is at `mmio-base`, and
+/// `mmio-base` is a *negative* fixnum. An address that is not RAM is not
+/// automatically a fault.
+#[inline(never)]
+fn op_tagged_mem(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
+    let f = f3(w);
+    let x = (r(m, rs1(w)) as i32) >> 1;
+    let store = f & 2 != 0;
+    let off = if store { imm_s(w) } else { imm_i(w) } as i32;
+    let addr = (x as u32).wrapping_add(off as u32);
+    if store {
+        let val = r(m, rs2(w));
+        if val & 1 == 0 {
+            return m.fault(C_TYPE, val, pc, fuel);
+        }
+        // sw or sb, and the value goes in untagged.
+        let sz = if f & 1 == 0 { 2 } else { 0 };
+        if !do_store(m, addr, sz, ((val as i32) >> 1) as u32, fuel) {
+            return m.fault(C_SFAULT, addr, pc, fuel);
+        }
+    } else {
+        // lw, or lbu so that a byte arrives without a sign on it.
+        let sz = if f & 1 == 0 { 2 } else { 4 };
+        match do_load(m, addr, sz, fuel) {
+            Some(v) => w_(m, rd(w), tag(v as i32)),
+            None => return m.fault(C_LFAULT, addr, pc, fuel),
+        }
+    }
+    next!(m, pc.wrapping_add(4), fuel - 1)
+}
+
 // =========================================================== compressed, Q0
 
 #[inline(never)]
@@ -1129,7 +1299,7 @@ static TABLE: [Handler; 64] = [
     op_bad,    // 13 NMADD
     op_bad,    // 14 OP-FP
     op_bad,    // 15 reserved
-    op_bad,    // 16 custom-2
+    op_fixnum, // 16 custom-2: fixnum arithmetic, checked
     op_bad,    // 17 (48-bit)
     op_branch, // 18 BRANCH
     op_jalr,   // 19 JALR
@@ -1137,6 +1307,6 @@ static TABLE: [Handler; 64] = [
     op_jal,    // 1b JAL
     op_system, // 1c SYSTEM
     op_bad,    // 1d reserved
-    op_bad,    // 1e custom-3
+    op_tagged, // 1e custom-3: constants, and memory through a tagged address
     op_bad,    // 1f (>= 80-bit)
 ];

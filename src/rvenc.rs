@@ -247,6 +247,90 @@ pub fn stxbi(rs3: u32, rs1: u32, i: u32, ty: u32) -> u32 {
     r_type(ty, i, rs1, 7, rs3, 0x2b)
 }
 
+// ---- custom-2: fixnum arithmetic, checked ----
+fn fx(f7: u32, rd: u32, rs1: u32, rs2: u32, f3: u32) -> u32 {
+    r_type(f7, rs2, rs1, f3, rd, 0x5b)
+}
+pub fn fadd(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    fx(0x00, rd, rs1, rs2, 0)
+}
+pub fn fsub(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    fx(0x00, rd, rs1, rs2, 1)
+}
+pub fn fmul(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    fx(0x00, rd, rs1, rs2, 2)
+}
+pub fn fdiv(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    fx(0x00, rd, rs1, rs2, 3)
+}
+pub fn frem(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    fx(0x00, rd, rs1, rs2, 4)
+}
+pub fn fand(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    fx(0x00, rd, rs1, rs2, 5)
+}
+pub fn f_or(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    fx(0x00, rd, rs1, rs2, 6)
+}
+pub fn fxor(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    fx(0x00, rd, rs1, rs2, 7)
+}
+/// The same five arithmetic forms, trapping rather than wrapping.
+pub fn faddo(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    fx(0x20, rd, rs1, rs2, 0)
+}
+pub fn fsubo(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    fx(0x20, rd, rs1, rs2, 1)
+}
+pub fn fmulo(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    fx(0x20, rd, rs1, rs2, 2)
+}
+pub fn fsll(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    fx(0x01, rd, rs1, rs2, 0)
+}
+pub fn fsrl(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    fx(0x01, rd, rs1, rs2, 1)
+}
+pub fn fsra(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    fx(0x01, rd, rs1, rs2, 2)
+}
+pub fn flt(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    fx(0x01, rd, rs1, rs2, 3)
+}
+pub fn fltu(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    fx(0x01, rd, rs1, rs2, 4)
+}
+pub fn feq(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    fx(0x01, rd, rs1, rs2, 5)
+}
+
+// ---- custom-3: a fixnum against a constant, and tagged-address memory ----
+pub fn faddi(rd: u32, rs1: u32, imm: i32) -> u32 {
+    i_type(imm, rs1, 0, rd, 0x7b)
+}
+pub fn fandi(rd: u32, rs1: u32, imm: i32) -> u32 {
+    i_type(imm, rs1, 1, rd, 0x7b)
+}
+pub fn fori(rd: u32, rs1: u32, imm: i32) -> u32 {
+    i_type(imm, rs1, 2, rd, 0x7b)
+}
+/// kind: 0 shift left, 1 shift right logical, 2 shift right arithmetic.
+pub fn fshi(rd: u32, rs1: u32, kind: u32, sh: u32) -> u32 {
+    i_type(((kind << 5) | sh) as i32, rs1, 3, rd, 0x7b)
+}
+pub fn tlw(rd: u32, rs1: u32, off: i32) -> u32 {
+    i_type(off, rs1, 4, rd, 0x7b)
+}
+pub fn tlb(rd: u32, rs1: u32, off: i32) -> u32 {
+    i_type(off, rs1, 5, rd, 0x7b)
+}
+pub fn tsw(rs2: u32, rs1: u32, off: i32) -> u32 {
+    s_type(off, rs2, rs1, 6, 0x7b)
+}
+pub fn tsb(rs2: u32, rs1: u32, off: i32) -> u32 {
+    s_type(off, rs2, rs1, 7, 0x7b)
+}
+
 // ---- custom-0: pairs, checked ----
 pub fn car(rd: u32, rs1: u32) -> u32 {
     i_type(0, rs1, 0, rd, 0x0b)

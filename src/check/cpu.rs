@@ -86,6 +86,78 @@ fn cases() -> Vec<Case> {
     );
     c("lui", vec![lui(A0, 0xabcde)], A0, 0xabcd_e000);
 
+    // ---- custom-2: checked fixnum arithmetic ----
+    // A fixnum is 2n+1, so 5 is 11, 3 is 7, and 0 is 1.
+    let two = |x: i32, y: i32, op: fn(u32, u32, u32) -> u32| -> Vec<u32> {
+        vec![addi(A1, ZERO, x * 2 + 1), addi(A2, ZERO, y * 2 + 1), op(A0, A1, A2)]
+    };
+    c("fadd", two(5, 3, fadd), A0, 17); // 8
+    c("fadd negative", two(5, -8, fadd), A0, (-3i32 * 2 + 1) as u32);
+    c("fsub", two(5, 3, fsub), A0, 5); // 2
+    c("fmul", two(5, 3, fmul), A0, 31); // 15
+    c("fdiv", two(15, 3, fdiv), A0, 11); // 5
+    c("fdiv truncates", two(-7, 2, fdiv), A0, (-3i32 * 2 + 1) as u32);
+    c("frem", two(17, 5, frem), A0, 5); // 2
+    c("fand", two(12, 10, fand), A0, 17); // 8
+    c("for", two(12, 10, f_or), A0, 29); // 14
+    c("fxor", two(12, 10, fxor), A0, 13); // 6
+    c("fsll", two(3, 2, fsll), A0, 25); // 12
+    c("fsrl", two(12, 2, fsrl), A0, 7); // 3
+    c("fsra", two(-8, 1, fsra), A0, (-4i32 * 2 + 1) as u32);
+    c("flt", two(3, 5, flt), A0, 1);
+    c("flt not", two(5, 3, flt), A0, 0);
+    c("flt signed", two(-1, 1, flt), A0, 1);
+    c("feq", two(5, 5, feq), A0, 1);
+    c("feq not", two(5, 4, feq), A0, 0);
+    // Wrapping is what the software sequences always did, and string-hash
+    // depends on it.
+    // 3 * 2^29 does not fit in thirty-one bits. Wrapping is what the software
+    // sequence always did, and `string-hash` depends on it.
+    {
+        let mut v = vec![addi(A1, ZERO, 7)];
+        li32(&mut v, A2, (1u32 << 30) | 1);
+        v.push(fmul(A0, A1, A2));
+        c("fmul wraps", v, A0, ((3u32 << 29) << 1) | 1);
+    }
+
+    // ---- custom-3: a constant, and memory through a tagged address ----
+    c("faddi", vec![addi(A1, ZERO, 11), faddi(A0, A1, -7)], A0, (-2i32 * 2 + 1) as u32);
+    c("fandi", vec![addi(A1, ZERO, 25), fandi(A0, A1, 10)], A0, 17);
+    c("fori", vec![addi(A1, ZERO, 25), fori(A0, A1, 10)], A0, 29);
+    c("fshi left", vec![addi(A1, ZERO, 7), fshi(A0, A1, 0, 2)], A0, 25);
+    c("fshi right", vec![addi(A1, ZERO, 25), fshi(A0, A1, 1, 2)], A0, 7);
+    c(
+        "fshi arithmetic",
+        vec![addi(A1, ZERO, -15), fshi(A0, A1, 2, 1)],
+        A0,
+        (-4i32 * 2 + 1) as u32,
+    );
+    // A tagged address: 0x3000 is held as 0x6001.
+    c(
+        "tsw then tlw",
+        vec![
+            lui(A1, 6),
+            addi(A1, A1, 1),
+            addi(A2, ZERO, 43), // the fixnum 21
+            tsw(A2, A1, 8),
+            tlw(A0, A1, 8),
+        ],
+        A0,
+        43,
+    );
+    c(
+        "tsb then tlb",
+        vec![
+            lui(A1, 6),
+            addi(A1, A1, 1),
+            addi(A2, ZERO, 511), // the fixnum 255
+            tsb(A2, A1, 3),
+            tlb(A0, A1, 3),
+        ],
+        A0,
+        511,
+    );
+
     // ---- B extension: Zba, Zbb, Zbs, and Zicond ----
     c(
         "sh2add",
@@ -742,6 +814,67 @@ pub fn run_all() -> bool {
         run::run(&mut m, 40);
         extra.push(("illegal traps to mtvec", m.x[A1 as usize] == C_ILLEGAL));
         extra.push(("mepc points at the fault", m.mepc == BASE + 8));
+    }
+
+    // The whole point of custom-2: an operand that is not a number is a trap
+    // naming the value, not a silently fabricated pointer.
+    {
+        let trap = |body: Vec<u32>| -> (u32, u32) {
+            let mut m = Machine::new();
+            let mut code = vec![];
+            li32(&mut code, A0, 0x2000);
+            code.push(csrrw(ZERO, 0x305, A0));
+            code.extend(body);
+            let end = emit(&mut m, BASE, &code);
+            m.poke32(end, jal(ZERO, 0));
+            let h = vec![csrrs(A1, 0x342, ZERO), csrrs(A2, 0x343, ZERO), jal(ZERO, 0)];
+            emit(&mut m, 0x2000, &h);
+            m.pc = BASE;
+            m.mtimecmp = u64::MAX;
+            m.gfx.next_vbl = u64::MAX;
+            run::run(&mut m, 100);
+            (m.x[A1 as usize], m.x[A2 as usize])
+        };
+        // 0x3004 looks like an object pointer; adding to it used to make a
+        // pointer of a different kind.
+        let mut body = vec![];
+        li32(&mut body, A3, 0x3004);
+        body.push(addi(A4, ZERO, 5));
+        body.push(fadd(A0, A3, A4));
+        let (cause, tval) = trap(body);
+        extra.push(("fadd of a non-number traps", cause == C_TYPE));
+        extra.push(("...naming the value", tval == 0x3004));
+
+        let mut v = vec![addi(A3, ZERO, 7)];
+        li32(&mut v, A4, (1u32 << 30) | 1);
+        v.push(fmulo(A0, A3, A4));
+        let (cause, _) = trap(v);
+        extra.push(("fmulo traps where fmul wraps", cause == C_OVER));
+
+        let (cause, _) = trap(vec![addi(A3, ZERO, 11), addi(A4, ZERO, 0), fdiv(A0, A3, A4)]);
+        extra.push(("fdiv by a non-number traps first", cause == C_TYPE));
+
+        let (cause, _) = trap(vec![addi(A3, ZERO, 11), addi(A4, ZERO, 1), fdiv(A0, A3, A4)]);
+        extra.push(("fdiv by zero traps", cause == C_DIVZERO));
+
+        // The checking forms exist even though nothing emits them yet.
+        let mut big = vec![];
+        li32(&mut big, A3, ((1u32 << 30) - 1) * 2 + 1);
+        big.push(addi(A4, ZERO, 3));
+        big.push(faddo(A0, A3, A4));
+        let (cause, _) = trap(big);
+        extra.push(("faddo traps past 2^30", cause == C_OVER));
+
+        let mut big = vec![];
+        li32(&mut big, A3, ((1u32 << 30) - 1) * 2 + 1);
+        big.push(addi(A4, ZERO, 3));
+        big.push(fadd(A0, A3, A4));
+        let (cause, _) = trap(big);
+        extra.push(("fadd does not", cause == 0));
+
+        let (cause, tval) = trap(vec![addi(A3, ZERO, 4), tlw(A0, A3, 0)]);
+        extra.push(("tlw of a non-address traps", cause == C_TYPE));
+        extra.push(("...naming that value too", tval == 4));
     }
 
     {

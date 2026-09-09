@@ -38,6 +38,8 @@
 
 (define cause-wrong-type 24)
 (define cause-range 25)
+(define cause-overflow 26)
+(define cause-divzero 27)
 
 (define (cause-name c)
   (cond ((%= c 0) "misaligned fetch")
@@ -51,6 +53,8 @@
         ((%= c 11) "ecall")
         ((%= c cause-wrong-type) "wrong type")
         ((%= c cause-range) "index out of range")
+        ((%= c cause-overflow) "fixnum overflow")
+        ((%= c cause-divzero) "division by zero")
         (else "trap")))
 
 ;; The trap stub hands over the cause with the interrupt flag moved from bit
@@ -67,8 +71,10 @@
   (if (interrupt? cause)
       (handle-interrupt (interrupt-number cause) ctx)
       (cond ((%= cause 11) (handle-ecall epc ctx))
-            ((%= cause cause-wrong-type) (check-trap epc tval ctx))
-            ((%= cause cause-range) (check-trap epc tval ctx))
+            ((%= cause cause-wrong-type) (check-trap cause epc tval ctx))
+            ((%= cause cause-range) (check-trap cause epc tval ctx))
+            ((%= cause cause-overflow) (check-trap cause epc tval ctx))
+            ((%= cause cause-divzero) (check-trap cause epc tval ctx))
             (else (fatal-trap cause epc tval ctx)))))
 
 ;; ------------------------- the instructions that check their operands
@@ -177,12 +183,43 @@
       (emit-str " is outside ") (emit-type-name ty)
       (emit-str " of ") (emit-str (number->string (%obj-len obj)))))))
 
-(define (check-trap epc tval ctx)
+;; Which arithmetic instruction this was, said the way the source says it.
+;; The register forms are custom-2 and split into two banks by funct7; the
+;; forms with a constant are custom-3, which also carries the two tagged
+;; address accesses that peek and poke compile to.
+(define (fixnum-op-name w)
+  (let ((f (insn-f3 w)))
+    (if (%= (insn-f7 w) 1)
+        (cond ((%= f 0) "ash") ((%= f 1) "lsh") ((%= f 2) "ash")
+              ((%= f 5) "=") (else "<"))
+        (cond ((%= f 0) "+") ((%= f 1) "-") ((%= f 2) "*") ((%= f 3) "/")
+              ((%= f 4) "rem") ((%= f 5) "logand") ((%= f 6) "logior")
+              (else "logxor")))))
+
+(define (tagged-op-name w)
+  (let ((f (insn-f3 w)))
+    (cond ((%= f 0) "+") ((%= f 1) "logand") ((%= f 2) "logior")
+          ((%= f 3) "ash") ((%= f 4) "peek") ((%= f 5) "peek8")
+          ((%= f 6) "poke") (else "poke8"))))
+
+(define (emit-arith-fault name cause tval)
+  (emit-str name)
+  (cond
+   ((%= cause cause-divzero) (emit-str ": division by zero"))
+   ((%= cause cause-overflow)
+    (emit-str ": the result does not fit in a fixnum"))
+   (else (emit-str ": expected a number, got ") (emit-value tval))))
+
+(define (check-trap cause epc tval ctx)
   (let ((w (%ld32 epc)))
     (emit-str "\n*** ")
-    (if (%= (insn-op w) op-index)
-        (emit-index-fault w ctx)
-        (emit-pair-fault w tval))
+    (cond
+     ((%= (insn-op w) op-index) (emit-index-fault w ctx))
+     ((%= (insn-op w) op-fixnum)
+      (emit-arith-fault (fixnum-op-name w) cause tval))
+     ((%= (insn-op w) op-tagged)
+      (emit-arith-fault (tagged-op-name w) cause tval))
+     (else (emit-pair-fault w tval)))
     (emit-str ", at pc ")
     (emit-str (number->hex epc))
     (emit-str "\n")
