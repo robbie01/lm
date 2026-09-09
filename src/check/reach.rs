@@ -167,9 +167,10 @@ pub fn run(path: &str, json: bool) -> i32 {
     let code_high = (h.g(LG_CODE_PTR) - CODE_BASE) as u64;
     let pair_high = (h.g(LG_CONS_PTR) - CONS_BASE) as u64;
 
-    // How much of the dead object space could actually leave the file. The
-    // image writer skips a page only if it is entirely empty, and objects are
-    // never moved, so one survivor holds a whole page down.
+    // Dead object space, split by whether it can leave the file. The writer
+    // skips a page of zeroes, and `gc-for-image` blanks every free block, so a
+    // page with nothing live on it costs nothing. A page with one survivor on
+    // it costs the whole page - that part is what compacting would reclaim.
     let obj_pages = (obj_high as usize + 4095) / 4096;
     let mut page_used = vec![false; obj_pages.max(1)];
     for v in reach(&h, &roots) {
@@ -238,9 +239,17 @@ pub fn run(path: &str, json: bool) -> i32 {
     println!("    pairs   {live_pairs:>9} live of {pair_high:>9}");
     println!("    objects {live_objs:>9} live of {obj_high:>9}");
     println!("    code    {live_code:>9} live of {code_high:>9}");
+    let dead = obj_high - live_objs;
+    let blanked = (empty_pages * 4096) as u64;
     println!(
-        "    {empty_pages} of {obj_pages} object pages hold nothing live: {} KiB the file carries for no one",
-        empty_pages * 4096 / 1024
+        "    {} KiB of object space is dead: {} KiB on {empty_pages} empty pages the writer skips,",
+        dead / 1024,
+        blanked / 1024
+    );
+    println!(
+        "      {} KiB stranded on {} pages that still hold something live",
+        dead.saturating_sub(blanked) / 1024,
+        obj_pages - empty_pages
     );
     if homeless > 0 {
         println!("  ({homeless} symbols belong to no package)");

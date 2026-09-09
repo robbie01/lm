@@ -108,10 +108,11 @@
 ))
 
 (in-package gc)
-;; 23 public, out of 105 definitions.
+;; 24 public, out of 107 definitions.
 (export '(
   alloc-code alloc-object forget-package forget-unused-packages frame-ok?
-  gc gc-collect gc-extra-roots gc-for-image gc-forget-scratch gc-slot
+  gc gc-blank-free-objects gc-collect gc-extra-roots gc-for-image
+  gc-forget-scratch gc-slot
   gc-scan-conservative gc-scan-frames in-stub? install-allocator obj-take
   refill-cons register-code room stub-args-off stub-frame-size
   stub-mask-off stub-raw-off

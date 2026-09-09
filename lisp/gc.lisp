@@ -913,33 +913,42 @@
 
 ;; Collect, then blank what was reclaimed.
 ;;
-;; Used by the forge, once, just before it writes the image. Mark and sweep
-;; does not compact, so the free pairs stay exactly where they were and the
-;; image would carry every page the compiler ever touched. Zeroing them does
-;; not move anything - it just makes the pages empty, and the image writer
-;; skips empty pages. The result is an image the size of what is actually in
-;; it rather than the size of the high water mark.
+;; Used by the forge, once, just before it writes the image.
+;;
+;; Pairs need nothing done to them: they are compacted, and the collector
+;; already blanks everything above the live data. Objects are never moved, so
+;; what the build threw away is still sitting where it fell, and the image
+;; carries every page the compiler ever touched. Zeroing the inside of every
+;; free block does not move anything - it just makes a page of nothing into a
+;; page of zeroes, which the image writer skips.
+;;
+;; It only wins on a page with nothing live on it at all. One survivor holds a
+;; whole page down; that is what compacting object space would fix, and this
+;; is what can be had without it.
 ;;
 ;; Far too expensive to do on an ordinary collection, which is why it is a
 ;; separate entry point.
+(define (gc-blank-free-objects)
+  (let ((p obj-base)
+        (hi (%global lg-obj-ptr))
+        (zeroed 0))
+    (while (%< p hi)
+      (let* ((h (%ld32 p))
+             (size (obj-block-size h)))
+        (if (%<= size 0) (gc-corrupt p) nil)
+        (if (%= (%logand h 255) t-free)
+            ;; Words 0 and 1 are the block's size and its place on the bin
+            ;; chain: the free list has to survive its own scrubbing.
+            (begin
+              (gc-blank (%+ p 8) (%+ p size))
+              (set! zeroed (%+ zeroed (%- size 8))))
+            nil)
+        (set! p (%+ p size))))
+    zeroed))
+
 (define (gc-for-image)
   (gc-collect)
-  (let ((r (%global lg-cons-free)) (zeroed 0))
-    (while (%> r 0)
-      (let ((end (%ld32 r))
-            (next (%ld32 (%+ r 4)))
-            (p 0))
-        (set! p r)
-        (while (%< p end)
-          (%st32! p 0)
-          (%st32! (%+ p 4) 0)
-          (set! p (%+ p 8)))
-        (set! zeroed (%+ zeroed (%lsh (%- end r) -3)))
-        ;; Put the run header back: the chain has to survive its own scrubbing.
-        (%st32! r end)
-        (%st32! (%+ r 4) next)
-        (set! r next)))
-    zeroed))
+  (gc-blank-free-objects))
 
 ;; ---------------------------------------------------------------- reporting
 (define (room)

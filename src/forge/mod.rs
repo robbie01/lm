@@ -580,7 +580,7 @@ fn collect_before_saving(l: &mut Lisp, verbose: bool) -> u32 {
             let n = crate::heap::unfix(v) as u32;
             let _ = before;
             if verbose {
-                eprintln!("collected: {n} free pairs blanked");
+                eprintln!("collected: {n} bytes of dead object space blanked");
             }
             n
         }

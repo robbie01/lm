@@ -666,9 +666,12 @@ anything in the heap.
 
 `lmdev reach` walks the heap once per package, from that package's own symbols,
 and records for every cell the set of packages that can get to it. It answers
-what a namespace actually weighs - and it is how the 2.5 MB of dead object
-space in a fresh image was found, which is real: pairs are compacted and 100%
-of them are live, code is 99% live, and objects are 14%.
+what a namespace actually weighs - and it is how the dead object space in a
+fresh image was found. Pairs are compacted, so 100% of the pairs in the file
+are live; code is 99% live; objects are 14%. `gc-for-image` now blanks every
+free block on its way out, which drops the pages that hold nothing at all
+(568 KiB, a fifth of the file). The 1.9 MB still stranded is on pages that
+hold one survivor each, and only compacting object space would reclaim it.
 
 ## Known limits
 
