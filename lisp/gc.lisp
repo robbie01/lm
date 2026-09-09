@@ -112,11 +112,21 @@
          (a (%+ gc-pinmap (%lsh i -3))))
     (%st8! a (%logior (%ld8 a) (%lsh 1 (%logand i 7))))))
 
+;; Six megabytes of mark bits, cleared twice a collection. A Lisp loop stores
+;; one word per thirty cycles and takes forty-seven million of them to do it;
+;; the blitter fills a byte a cycle and is sitting right there. It is a device
+;; and this is the collector, but nothing about a fill touches the heap.
+(define gc-clear-w 4096)
+
 (define (gc-clear-map base)
-  (let ((p base) (e (%+ base gc-bitmap-size)))
-    (while (%< p e)
-      (%st32! p 0)
-      (set! p (%+ p 4)))))
+  (without-interrupts
+    (poke blt-dst base)
+    (poke blt-w gc-clear-w)
+    (poke blt-h (%/ gc-bitmap-size gc-clear-w))
+    (poke blt-dmod gc-clear-w)
+    (poke blt-val 0)
+    (poke blt-op op-fill))
+  nil)
 
 ;; A byte-at-a-time population count. There is no such instruction in the
 ;; base integer set, and the usual bit-twiddling constants do not fit in a

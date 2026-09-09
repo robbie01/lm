@@ -633,10 +633,18 @@
     b))
 
 (define (alloc-pool nbytes)
-  ;; The free list is threaded through the blocks themselves and the bump
-  ;; pointer is a global, so finding a block and claiming it is one act. The
-  ;; zeroing is inside the same block only because the pool is claimed rarely
-  ;; and in small pieces.
+  ;; Finding a block and claiming it is one act: the free list is threaded
+  ;; through the blocks themselves and the bump pointer is a global.
+  ;;
+  ;; Clearing it is not, and must not be. A window bitmap is 141,696 bytes and
+  ;; the screen is 786,432; zeroing that with interrupts off is most of a
+  ;; frame during which the machine hears nothing at all. Once the block is
+  ;; claimed it belongs to this caller and nobody else can be inside it.
+  (let ((b (claim-pool nbytes)))
+    (pool-zero (%+ b 8) (%- (pool-size b) 8))
+    (%+ b 8)))
+
+(define (claim-pool nbytes)
   (without-interrupts
   (let* ((need (let ((n (%logand (%+ (%+ nbytes 8) 7) -8)))
                  (if (%< n pool-min) pool-min n)))
@@ -649,8 +657,7 @@
                                 (pool-set-size! n need)
                                 n)))))
     (%st32! (%+ b 4) pool-tag)
-    (pool-zero (%+ b 8) (%- (pool-size b) 8))
-    (%+ b 8))))
+    b)))
 
 (define (free-pool p)
   ;; Insert in address order, joining up with either neighbour that touches.
