@@ -366,6 +366,7 @@
             (set! got n))
           (set! n (%+ n 1))))
     (enable)
+    (if (%< got 0) (error "alloc-signal: none left") nil)
     got))
 
 (define (free-signal task n)
@@ -375,7 +376,22 @@
   (enable)
   nil)
 
+;; A task pointer is the only handle Exec has, and a handle that is also the
+;; address of memory that gets freed is a handle you can be wrong about. There
+;; is no cheap way to make that safe, but there is a cheap way to make the
+;; usual mistake harmless: `rem-task` stops the node calling itself a task, so
+;; signalling one that has ended does nothing instead of writing into whatever
+;; the pool handed out next.
+;;
+;; It is not proof. A block reused as another task passes this test, and then
+;; the signal goes to the wrong task rather than to nobody. Holding a pointer
+;; to a task that can end is still the caller's problem; this only stops the
+;; common case from being memory corruption.
+(define (task? p)
+  (if (%> p 0) (%= (peek (%+ p ln-type)) nt-task) nil))
+
 (define (signal task mask)
+  (if (task? task) nil (error "signal: not a task" task))
   (disable)
   (poke (%+ task tc-sigrecvd) (%logior (peek (%+ task tc-sigrecvd)) mask))
   (if (%= (peek (%+ task tc-state)) ts-wait)
@@ -395,6 +411,12 @@
 (define (wait mask)
   ;; Block until one of the signals in mask arrives, then take those bits and
   ;; leave the rest for the next Wait.
+  ;;
+  ;; Not from an interrupt server. Waiting means asking to be rescheduled, and
+  ;; asking to be rescheduled is an ecall - a trap taken from inside the trap
+  ;; handler, on the trap stack, with the interrupted task's context half
+  ;; saved. There is no task there to block.
+  (if *in-interrupt* (error "wait: called from an interrupt server") nil)
   (disable)
   (let ((task (this-task)) (got 0))
     (while (%= got 0)
@@ -430,10 +452,17 @@
 (define default-quantum 200000)
 
 (define (add-task name pri fn . opts)
-  (let* ((stack (if (%cons? opts) (%car opts) default-stack))
+  (let* ((env (new-task-env))
+         (stack (if (%cons? opts) (%car opts) default-stack))
          (task (alloc-pool task-size))
          (ctx (alloc-pool ctx-bytes))
          (sp (alloc-pool stack)))
+    ;; The environment is built before the task struct holds any Lisp value.
+    ;; Between the first `%raw-st!` below and `task-ready!`, the task is on no
+    ;; list, so `gc-extra-roots` cannot see it - and a collection in that
+    ;; window would trace neither its name, its function nor its environment.
+    ;; They survive today because they are also in this task's registers,
+    ;; which is luck rather than design; allocating first removes the window.
     (%raw-st! (%+ task ln-name) name)
     (poke (%+ task ln-type) nt-task)
     (poke (%+ task ln-pri) pri)
@@ -442,7 +471,7 @@
     (poke (%+ task tc-spupper) (%+ sp stack))
     (poke (%+ task tc-context) ctx)
     (%raw-st! (%+ task tc-fn) fn)
-    (set-task-env! task (new-task-env))
+    (set-task-env! task env)
     (poke (%+ task tc-quantum) default-quantum)
     (poke (%+ task tc-sigalloc) 65535)
     ;; The context is built to look as though the task had just been
@@ -476,6 +505,9 @@
 
 (define (rem-task task)
   (disable)
+  ;; Say it is not a task any more before anything else, so that a signal
+  ;; arriving from another task finds out rather than guesses.
+  (poke (%+ task ln-type) 0)
   (poke (%+ task tc-state) ts-removed)
   (poke (%+ *sysbase* eb-taskcount) (%- (peek (%+ *sysbase* eb-taskcount)) 1))
   (enable)
@@ -845,7 +877,15 @@
 ;; ---------------------------------------------------------------- dispatch
 ;; Everything that interrupts the machine arrives here, on the trap stack,
 ;; with the interrupted task's registers already in its context block.
+(define *in-interrupt* nil)
+
 (define (handle-interrupt n ctx)
+  (set! *in-interrupt* t)
+  (handle-interrupt-1 n ctx)
+  (set! *in-interrupt* nil)
+  nil)
+
+(define (handle-interrupt-1 n ctx)
   (cond
    ((%= n int-timer)
     (poke (%+ *sysbase* eb-dispcount) (%+ (peek (%+ *sysbase* eb-dispcount)) 1))
@@ -916,7 +956,11 @@
           (lambda ()
             (poke (%+ sb eb-idnest) 0)
             (poke (%+ sb eb-tdnest) 0)
-            (poke (%+ sb eb-attnresched) 0)))
+            (poke (%+ sb eb-attnresched) 0)
+            ;; A fault inside an interrupt server never reaches the line that
+            ;; clears this, and a machine that believes it is permanently
+            ;; inside a handler refuses every Wait after.
+            (set! *in-interrupt* nil)))
     (set! *task-abort-fn*
           (lambda ()
             (emit-str "task ended by an error\n")

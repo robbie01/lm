@@ -185,12 +185,13 @@
 ;; 19 public, out of 183 definitions.
 (export '(
   add-task cause ctx-bytes disable enable exec-init exec-start forbid
-  handle-interrupt idle? idle-start input-listen permit preemption-off
-  task-snapshot
+  ;; handle-interrupt and switch-tasks are the trap handler's, and the trap
+  ;; handler is in sys: exported to one caller, not to applications.
+  handle-interrupt switch-tasks
+  idle? idle-start input-listen permit preemption-off task-snapshot task?
   this-task
   rem-task reschedule sigb-input sigb-vblank sigf-input sigf-vblank signal
-  spawn switch-tasks sysbase *vblank-count* vblank-start wait-input
-  wait-vblank
+  spawn sysbase *vblank-count* vblank-start wait-input wait-vblank
   task-count tasks wait
 ))
 

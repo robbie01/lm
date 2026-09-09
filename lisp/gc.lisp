@@ -55,9 +55,14 @@
 ;; about. Blocks are small enough that the replay is short and numerous enough
 ;; that the tables stay well under a megabyte.
 (define gc-popcount-table gc-stack-end)
-(define cons-block-bytes 512)                ; 64 pairs
+(define cons-block-bytes 64)                 ; 8 pairs
+;; Eight rather than the sixty-four this started with. Every pointer the
+;; update pass rewrites costs one replay of its block's mark bits, and a
+;; sixty-four pair block is eight bytes of popcount a lookup; eight pairs is
+;; one. The table is eight times larger and lives in scratch, which is not
+;; saved and has a hundred and twenty-eight megabytes to spend.
 (define gc-cons-prefix (%+ gc-popcount-table 256))
-(define gc-cons-blocks (%lsh (%- cons-limit cons-base) -9))
+(define gc-cons-blocks (%lsh (%- cons-limit cons-base) -6))
 (define obj-block-bytes 1024)
 (define gc-obj-prefix (%+ gc-cons-prefix (%lsh gc-cons-blocks 2)))
 (define gc-obj-blocks (%lsh (%- obj-limit obj-base) -10))
@@ -72,6 +77,17 @@
 (define *mark-sp* 0)
 (define *run-last* 0)
 (define *gc-count* 0)
+(define *t-clear* 0)
+(define *t-roots* 0)
+(define *t-drain* 0)
+(define *t-code* 0)
+(define *t-compact* 0)
+(define *t-obj* 0)
+(define *t-plan* 0)
+(define *t-upd* 0)
+(define *t-mv* 0)
+(define *t-blank* 0)
+(define *t-mark* 0)
 (define *gc-cycles* 0)
 (define *gc-verbose* nil)
 ;; Costs a full extra pass over the live pairs, so it is off unless something
@@ -116,16 +132,43 @@
 ;; one word per thirty cycles and takes forty-seven million of them to do it;
 ;; the blitter fills a byte a cycle and is sitting right there. It is a device
 ;; and this is the collector, but nothing about a fill touches the heap.
-(define gc-clear-w 4096)
+;; Clearing the mark bits used to be six megabytes of Lisp loop, forty-seven
+;; million cycles with interrupts off, twice a collection. Two things were
+;; wrong with that. The blitter fills a byte a cycle and was sitting right
+;; there; and the map covers the whole hundred and ninety-two megabytes of
+;; heap address space when a megabyte of it has ever been used - and a mark
+;; can only ever land below the two allocation pointers, because that is what
+;; `gc-heap-pointer?` tests before it marks anything.
+;;
+;; So only the used part is cleared, with the blitter, in two fills.
+(define gc-clear-w 1024)
+
+(define (gc-map-byte p) (%lsh (%- p gc-heap-lo) -6))
+
+(define (gc-fill-bytes at n)
+  ;; n bytes of zero at `at`, as rows the blitter can take.
+  (if (%<= n 0)
+      nil
+      (let* ((w (if (%< n gc-clear-w) n gc-clear-w))
+             (rows (%/ (%+ n (%- w 1)) w)))
+        (without-interrupts
+          (poke blt-dst at)
+          (poke blt-w w)
+          (poke blt-h rows)
+          (poke blt-dmod w)
+          (poke blt-val 0)
+          (poke blt-op op-fill))))
+  nil)
 
 (define (gc-clear-map base)
-  (without-interrupts
-    (poke blt-dst base)
-    (poke blt-w gc-clear-w)
-    (poke blt-h (%/ gc-bitmap-size gc-clear-w))
-    (poke blt-dmod gc-clear-w)
-    (poke blt-val 0)
-    (poke blt-op op-fill))
+  ;; The cons half and the object half, each up to its allocation pointer,
+  ;; rounded out to whole bytes of the map.
+  (let ((c0 (gc-map-byte cons-base))
+        (c1 (%+ (gc-map-byte (%global lg-cons-ptr)) 1))
+        (o0 (gc-map-byte obj-base))
+        (o1 (%+ (gc-map-byte (%global lg-obj-ptr)) 1)))
+    (gc-fill-bytes (%+ base c0) (%- c1 c0))
+    (gc-fill-bytes (%+ base o0) (%- o1 o0)))
   nil)
 
 ;; A byte-at-a-time population count. There is no such instruction in the
@@ -477,7 +520,7 @@
 (define *gc-compacted* nil)
 
 ;; ---------------------------------------------------------------- forwarding
-(define (cons-block-of p) (%lsh (%- p cons-base) -9))
+(define (cons-block-of p) (%lsh (%- p cons-base) -6))
 (define (obj-block-of p) (%lsh (%- p obj-base) -10))
 
 (define (gc-plan-cons hi)
@@ -496,15 +539,19 @@
               (set! free (%+ free 8)))
           nil)
       (set! p (%+ p 8)))
-    ;; Every block above the live region starts where the walk finished.
-    (while (%< blk (%- gc-cons-blocks 1))
-      (set! blk (%+ blk 1))
-      (%st32! (%+ gc-cons-prefix (%lsh blk 2)) free))
+    ;; Every block up to the last one in use starts where the walk finished.
+    ;; Not every block in the heap: cons space is a hundred and twenty-eight
+    ;; megabytes and that is a quarter of a million entries, none of which is
+    ;; ever read, because nothing forwards a pointer that was never handed out.
+    (let ((last (cons-block-of hi)))
+      (while (%< blk last)
+        (set! blk (%+ blk 1))
+        (%st32! (%+ gc-cons-prefix (%lsh blk 2)) free)))
     free))
 
 (define (gc-forward-cons p)
   (let* ((b (cons-block-of p))
-         (start (%+ cons-base (%lsh b 9)))
+         (start (%+ cons-base (%lsh b 6)))
          (free (%ld32 (%+ gc-cons-prefix (%lsh b 2))))
          (q start))
     (if (gc-pinned? p)
@@ -566,10 +613,11 @@
                 (set! free (%+ free size)))
             nil)
         (set! p (%+ p size))))
-    (while (%< blk (%- gc-obj-blocks 1))
-      (set! blk (%+ blk 1))
-      (%st32! (%+ gc-obj-prefix (%lsh blk 2)) free)
-      (%st32! (%+ gc-obj-first (%lsh blk 2)) p))
+    (let ((last (obj-block-of hi)))
+      (while (%< blk last)
+        (set! blk (%+ blk 1))
+        (%st32! (%+ gc-obj-prefix (%lsh blk 2)) free)
+        (%st32! (%+ gc-obj-first (%lsh blk 2)) p)))
     free))
 
 (define (gc-forward-object p)
@@ -612,16 +660,25 @@
 
 ;; ---------------------------------------------------------------- move
 (define (gc-move-cons hi)
-  (let ((p cons-base) (n 0))
+  ;; The walk is in address order, so the destination is a running pointer and
+  ;; not a lookup. `gc-forward-cons` replays a block of mark bits every time it
+  ;; is asked, which is the right thing for the scattered questions the update
+  ;; pass asks and the wrong thing to do sixty thousand times in a row. The
+  ;; rule below is the same one `gc-plan-cons` used to build the table, so the
+  ;; two cannot disagree.
+  (let ((p cons-base) (free cons-base) (n 0))
     (while (%< p hi)
       (if (gc-marked? p)
-          (let ((to (gc-forward-cons p)))
-            (if (%= to p)
-                nil
-                (begin
-                  (%raw-st! to (%raw-ld p))
-                  (%raw-st! (%+ to 4) (%raw-ld (%+ p 4)))
-                  (set! n (%+ n 1)))))
+          (if (gc-pinned? p)
+              (if (%> (%+ p 8) free) (set! free (%+ p 8)) nil)
+              (begin
+                (if (%= free p)
+                    nil
+                    (begin
+                      (%raw-st! free (%raw-ld p))
+                      (%raw-st! (%+ free 4) (%raw-ld (%+ p 4)))
+                      (set! n (%+ n 1))))
+                (set! free (%+ free 8))))
           nil)
       (set! p (%+ p 8)))
     n))
@@ -688,6 +745,7 @@
   ;; Pairs are safe because nothing between updating and sliding dereferences
   ;; one, and pairs are where the space is: a few million of them against a
   ;; few thousand objects.
+  (set! *t-mark* (%cycles))
   (let* ((cons-hi (%global lg-cons-ptr))
          (obj-hi (%global lg-obj-ptr))
          (cons-top (gc-plan-cons cons-hi)))
@@ -700,13 +758,20 @@
         nil)
     ;; Rewrite every pointer to a pair, in the roots and in the live objects.
     ;; Nothing may follow a pair between here and the slide below.
+    (set! *t-plan* (%- (%cycles) *t-mark*))
     (set! *gc-updating* t)
     (gc-roots)
+    (set! *t-upd* (%cycles))
     (gc-update-live cons-hi obj-hi)
+    (set! *t-upd* (%- (%cycles) *t-upd*))
     (set! *gc-updating* nil)
+    (set! *t-mv* (%cycles))
     (set! *gc-moved* (gc-move-cons cons-hi))
+    (set! *t-mv* (%- (%cycles) *t-mv*))
     (if *gc-check* (gc-verify cons-top) nil)
+    (set! *t-blank* (%cycles))
     (gc-blank cons-top cons-hi)
+    (set! *t-blank* (%- (%cycles) *t-blank*))
     (%set-global! lg-cons-ptr cons-top)
     ;; An empty run, for this task and for every other. Nobody is holding a
     ;; pointer into the heap that just slid out from under them: the next cons
@@ -746,16 +811,30 @@
       ;; and the compaction closes it up like any other gap.
       (set! *mark-sp* 0)
       (set! *pinned* 0)
+      (set! *t-clear* (%- (%cycles) t0))
       (gc-clear-bitmap)
+      (set! *t-clear* (%- (%- (%cycles) t0) *t-clear*))
+      (set! *t-roots* (%- (%cycles) t0))
       (gc-roots)
+      (set! *t-roots* (%- (%- (%cycles) t0) *t-roots*))
+      (set! *t-drain* (%- (%cycles) t0))
       (gc-drain)
+      (set! *t-drain* (%- (%- (%cycles) t0) *t-drain*))
       ;; Code before objects. Sweeping object space writes free-list links over
       ;; dead objects' headers and first slots, and a dead code object's first
       ;; slot is the address of the code it owns - read it afterwards and the
       ;; code sweeper frees whatever the link happened to look like.
+      (set! *t-code* (%- (%cycles) t0))
       (let ((k (gc-sweep-code))
-            (c (gc-compact))
-            (o (gc-sweep-objects)))
+            (c (begin (set! *t-code* (%- (%- (%cycles) t0) *t-code*))
+                      (set! *t-compact* (%- (%cycles) t0))
+                      (let ((v (gc-compact)))
+                        (set! *t-compact* (%- (%- (%cycles) t0) *t-compact*))
+                        (set! *t-obj* (%- (%cycles) t0))
+                        v)))
+            (o (begin (let ((v (gc-sweep-objects)))
+                        (set! *t-obj* (%- (%- (%cycles) t0) *t-obj*))
+                        v))))
         (set! *gc-count* (%+ *gc-count* 1))
         (set! *gc-cycles* (%+ *gc-cycles* (%- (%cycles) t0)))
         (%set-global! lg-gccount *gc-count*)

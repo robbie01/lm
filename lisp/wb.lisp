@@ -381,7 +381,7 @@
 (define (window-close win)
   (set! *windows* (remove-eq win *windows*))
   (let ((task (win-get win win-task)))
-    (if task (rem-task task) nil))
+    (if task (begin (rem-task task) (win-set! win win-task nil)) nil))
   ;; The hole it leaves has to be repainted before its bitmap goes back.
   (damage (window-rect win))
   (if (win-get win win-bm) (free-pool (win-get win win-bm)) nil)
@@ -430,8 +430,12 @@
   ;; And wake whoever is reading that window. A shell blocked on its keyboard
   ;; should be woken by a keystroke, not by a clock it asks sixty times a
   ;; second whether one has arrived.
+  ;; The task may have ended - a shell's prompt is a task and `bye` ends it -
+  ;; and a window that outlives its task must not go on signalling it.
   (let ((task (win-get win win-task)))
-    (if task (signal task sigf-input) nil))
+    (if (if task (task? task) nil)
+        (signal task sigf-input)
+        (win-set! win win-task nil)))
   nil)
 
 (define (window-pop-key win)
