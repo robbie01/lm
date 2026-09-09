@@ -96,6 +96,39 @@ offsets from `s0` and the compressed forms only encode unsigned ones. Laying
 the frame out upward would make roughly 30% more of the image compressible —
 or the register allocator would remove those loads instead.
 
+## The blitter
+
+**The chip is atomic now; the software critical sections around it are not yet
+gone.** Writes land in a shadow bank and the op write commits the whole of it,
+so an interrupt that blits inside somebody else's setup cannot be seen by the
+chip. That was the bug that once drew a line across the screen.
+
+Taking `without-interrupts` back off `bm-fill-rect`, `bm-blit-rect` and
+`draw-line` *should* now be free, and it is not: doing it makes the compositor
+die with
+
+    *** car: expected a pair, got 90, at pc 101cc9e
+    backtrace:
+      rect-x at 101cc9e
+      wb-composite at 1048260
+      wb-compositor-task at 104abb4
+
+after two or three demo windows are open — a fixnum where a rectangle should
+be. Those critical sections were incidentally keeping interrupts off for most
+of the compositor's inner loop and masking a race somewhere in the damage
+handling. `damage` and the steal in `wb-composite` are both already inside
+`without-interrupts`, so it is not the obvious one. The unfixed version is in
+`hw.lisp` at the three sites; removing them is a one-line change each once the
+race is found.
+
+**Long blits still block interrupts, and only asynchrony fixes it.** A
+full-screen fill is 786,432 cycles charged inside one store instruction, and a
+frame is 333,333. Nothing can preempt an instruction, so the only fix is to
+make the blitter a state machine the outer loop advances — which means every
+caller has to wait for completion, and a spinning waiter and the blit would
+both charge the same cycles. Worth doing, but it is a change to what a blit
+*means*, not a tuning.
+
 ## Images the machine writes itself
 
 **Code space is never compacted, and that is most of why a rebuilt image is

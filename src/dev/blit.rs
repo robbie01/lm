@@ -33,7 +33,8 @@ pub const OP_MASK: u32 = 5; // copy, skipping bytes equal to B_VAL
 pub const OP_LINE: u32 = 6;
 pub const OP_ADD: u32 = 7; // saturating add
 
-pub struct Blitter {
+#[derive(Clone, Copy, Default)]
+pub struct Regs {
     pub src: u32,
     pub dst: u32,
     pub w: u32,
@@ -48,39 +49,46 @@ pub struct Blitter {
     pub y1: u32,
 }
 
+/// Two banks. Writes land in `pending`; writing the op register copies the
+/// whole of it into `live` and starts the transfer.
+///
+/// That is not decoration. A blit takes six or seven register writes to set
+/// up, and an interrupt arriving between two of them used to find the chip
+/// half-programmed - a vblank server that blits inside somebody else's setup
+/// drew a line across the screen once, and the fix was to wrap every blit in
+/// the machine in a critical section. A shadow bank makes the command atomic
+/// in the chip instead, which is how real hardware avoids the same problem,
+/// and every one of those critical sections goes away.
+pub struct Blitter {
+    pub live: Regs,
+    pub pending: Regs,
+}
+
 impl Blitter {
     pub fn new() -> Blitter {
         Blitter {
-            src: 0,
-            dst: 0,
-            w: 0,
-            h: 0,
-            smod: 0,
-            dmod: 0,
-            val: 0,
-            ctrl: 0,
-            x0: 0,
-            y0: 0,
-            x1: 0,
-            y1: 0,
+            live: Regs::default(),
+            pending: Regs::default(),
         }
     }
 
+    /// Reads see what was last written, not what is running.
     pub fn read(&mut self, reg: u32) -> u32 {
+        let p = &self.pending;
         match reg {
-            B_SRC => self.src,
-            B_DST => self.dst,
-            B_W => self.w,
-            B_H => self.h,
-            B_SMOD => self.smod,
-            B_DMOD => self.dmod,
-            B_VAL => self.val,
+            B_SRC => p.src,
+            B_DST => p.dst,
+            B_W => p.w,
+            B_H => p.h,
+            B_SMOD => p.smod,
+            B_DMOD => p.dmod,
+            B_VAL => p.val,
             B_STATUS => 0, // always idle: transfers are instantaneous
-            B_X0 => self.x0,
-            B_Y0 => self.y0,
-            B_X1 => self.x1,
-            B_Y1 => self.y1,
-            B_CTRL => self.ctrl,
+            B_X0 => p.x0,
+            B_Y0 => p.y0,
+            B_X1 => p.x1,
+            B_Y1 => p.y1,
+            B_CTRL => p.ctrl,
             _ => 0,
         }
     }
@@ -88,7 +96,7 @@ impl Blitter {
 
 pub fn command(m: &mut Machine, reg: u32, v: u32) {
     {
-        let b = &mut m.blit;
+        let b = &mut m.blit.pending;
         match reg {
             B_SRC => b.src = v,
             B_DST => b.dst = v,
@@ -109,20 +117,23 @@ pub fn command(m: &mut Machine, reg: u32, v: u32) {
             return;
         }
     }
+    // The op write is the commit: everything programmed since the last one
+    // takes effect together, or none of it does.
+    m.blit.live = m.blit.pending;
     let (src, dst, w, h, smod, dmod, val) = {
-        let b = &m.blit;
+        let b = &m.blit.live;
         (b.src, b.dst, b.w, b.h, b.smod, b.dmod, b.val)
     };
     let cost = if v == OP_LINE {
-        let dx = (m.blit.x1 as i32 - m.blit.x0 as i32).unsigned_abs();
-        let dy = (m.blit.y1 as i32 - m.blit.y0 as i32).unsigned_abs();
+        let dx = (m.blit.live.x1 as i32 - m.blit.live.x0 as i32).unsigned_abs();
+        let dy = (m.blit.live.y1 as i32 - m.blit.live.y0 as i32).unsigned_abs();
         dx.max(dy) as u64 + 1
     } else {
         (w as u64) * (h as u64)
     };
 
     if v == OP_LINE {
-        let (x0, y0, x1, y1) = (m.blit.x0, m.blit.y0, m.blit.x1, m.blit.y1);
+        let (x0, y0, x1, y1) = (m.blit.live.x0, m.blit.live.y0, m.blit.live.x1, m.blit.live.y1);
         line(m, dst, dmod, x0, y0, x1, y1, val as u8);
     } else {
         let ramlen = m.ramlen as usize;
@@ -171,7 +182,7 @@ pub fn command(m: &mut Machine, reg: u32, v: u32) {
     }
 
     m.cycles = m.cycles.wrapping_add(cost);
-    if m.blit.ctrl & 1 != 0 {
+    if m.blit.live.ctrl & 1 != 0 {
         m.raise(INT_BLIT);
     }
 }
