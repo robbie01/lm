@@ -82,6 +82,80 @@ one in graphics.
    waiting for a key should block on a signal raised when a key is delivered to
    its window, not wake on a clock to ask whether one arrived.
 
+## What it costs, measured
+
+Memory, on this machine:
+
+| | bytes |
+|---|---|
+| the screen, 640x400 at 8bpp | 256,000 |
+| a shell window's bitmap, 380x200 | 76,000 |
+| an eyes window's bitmap, 130x95 | 12,350 |
+| what a window costs *today* | 65,784 — almost all of it the 64 KiB task stack |
+| the Exec pool | 16,769,024 |
+
+So a backing store roughly doubles what a shell window costs and adds a fifth
+to what an eyes window costs, and ten buffered shells would be 760 KiB, or 4.5%
+of the pool. On memory grounds this is not a difficult decision.
+
+Bandwidth is the one that bites. The blitter is charged one cycle per pixel and
+the machine runs at 20 MHz, so a frame is 333,333 cycles and:
+
+```
+full screen  640x400   256,767 cycles    77% of a frame
+shell        380x200    76,767            23%
+eyes         130x95     13,117             4%
+```
+
+**Compositing the whole screen every frame does not fit.** Compositing only what
+changed does, easily: the four-eyes workbench is 54% of a frame even if every
+window redraws at once, and in practice only the two small windows move, which
+is 7%.
+
+## Would an old system have done this?
+
+No, and each of them tells you why in its API.
+
+- **Classic Mac OS (QuickDraw, 1984)** — no backing store at all. A GrafPort
+  has a `visRgn` and a `clipRgn`, you draw straight at the screen, and when a
+  window is uncovered you get an update event and repaint it yourself. That is
+  the entire reason `BeginUpdate`/`EndUpdate` exists. On a 128K Mac the screen
+  was 21,888 bytes — **17% of the machine**.
+- **AmigaOS (Intuition and Layers, 1985)** — three choices per window, and the
+  middle one is the interesting one. `SIMPLE_REFRESH` stores nothing and sends
+  the app a refresh message. `SMART_REFRESH` stores **only the obscured parts**,
+  as a bitmap per hidden ClipRect. `SUPER_BITMAP` gives the app a full bitmap
+  of its own. So the Amiga had full backing stores — as the expensive option an
+  application opted into, with "buffer only what is hidden" as the default
+  compromise. Its screen was 81,920 bytes of 512 KiB chip RAM, **16%**.
+- **X11 (1987)** — `backing_store` is a window attribute the server is free to
+  ignore, and servers generally did. Expose events instead.
+- **NeXTSTEP (1989)** — where it turns over. Windows are `Nonretained`,
+  `Retained` or `Buffered`, and buffered — a full offscreen buffer composited
+  by the Window Server — is the normal choice. The screen was 232,960 bytes of
+  8 MiB, **2.8%**.
+- **Mac OS X 10.0 (2001, Quartz)** and **Windows Vista (2006, DWM)** — every
+  window buffered, always, no option.
+
+The flip happens when the screen stops being a meaningful fraction of memory.
+Here it is 1.5% of the pool and 0.1% of RAM, which puts this machine past NeXT
+and comfortably in the buffer-everything era **on memory**. On bandwidth it is
+back in 1985: 20 MHz cannot composite a screen sixty times a second.
+
+Which gives the design: **buffer per window like NeXT, composite only damage
+like the Amiga.** The Amiga's cleverness of storing only the obscured
+rectangles was a response to 512 KiB and is not worth copying; its refusal to
+redraw the whole screen is a response to the clock, and that constraint is
+still here.
+
+One thing worth being honest about: on Amiga and Mac the application that drew
+outside its window was the single application you were running. Here it is one
+of seven preemptively scheduled tasks in a shared address space, and today it
+draws into the screen bitmap through a clipping region that has to be correct.
+A window bitmap does not *prevent* a task poking the screen — nothing can,
+without an MMU — but it removes the ordinary path by which drawing escapes,
+which is where both of the graphics bugs found in this session came from.
+
 ## The constrained-machine version
 
 None of this needs to be expensive. A window bitmap is pool memory the size of
