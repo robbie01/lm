@@ -36,8 +36,16 @@
     (set! lx (%+ x (%- (%lsh w -1) (%+ rad 2))))
     (set! rx (%+ x (%+ (%lsh w -1) (%+ rad 2))))))
 
-(define (target-x) (if (%< look-x 0) (mouse-x) look-x))
-(define (target-y) (if (%< look-y 0) (mouse-y) look-y))
+;; The mouse is in screen coordinates and the eyes are in the window's, so
+;; something has to convert; this is the only place in the application that
+;; knows the window is anywhere in particular.
+(define (target-x)
+  (%- (if (%< look-x 0) (mouse-x) look-x) (win-x-of window)))
+(define (target-y)
+  (%- (if (%< look-y 0) (mouse-y) look-y) (win-y-of window)))
+
+(define (win-x-of w) (win-get w win-x))
+(define (win-y-of w) (win-get w win-y))
 
 ;; Where a pupil sits when the eye is looking at a point: along the line to
 ;; it, and no further out than the white of the eye allows.
@@ -120,12 +128,11 @@
 
 ;; ---------------------------------------------------------------- the app
 (define (eyes-task)
-  ;; Once a frame, not as often as the scheduler will allow. The pupils cannot
-  ;; move more often than the screen is shown, so anything faster is work
-  ;; nobody sees - and under preemption it is work taken from somebody else.
+  ;; Once a frame, and said as a handover rather than as a wait on a clock:
+  ;; the frame is finished, show it, and do not run again until it has been.
   (while t
     (track)
-    (wait-vblank)))
+    (present window)))
 
 (define *eyes-count* 0)
 

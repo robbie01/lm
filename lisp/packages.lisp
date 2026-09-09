@@ -201,11 +201,12 @@
 ;; 33 public, out of 88 definitions.
 (export '(
   *windows* front-window make-window new-shell title-height wb-back
-  window-rastport wb-update compute-regions draw-through
+  window-rastport wb-update damage draw-in present window-bitmap
+  window-damage window-rect wb-composite
   wb-button-down wb-drag wb-face wb-repaint wb-shadow wb-text win-data
   win-inner-h win-inner-w win-inner-x win-inner-y win-refresh win-set!
   win-task window-close window-open
-  win-get win-h win-w win-x win-y window-push-key workbench
+  win-get win-h win-w win-x win-y window-push-key workbench win-bm
 ))
 
 (in-package eyes)

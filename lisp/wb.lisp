@@ -26,7 +26,7 @@
 (define wb-title-text-off 0)
 
 ;; ---------------------------------------------------------------- windows
-(define win-slots 10)
+(define win-slots 11)
 (define win-x 0)
 (define win-y 1)
 (define win-w 2)
@@ -36,7 +36,8 @@
 (define win-keys 6)       ; characters waiting, oldest first
 (define win-task 7)
 (define win-data 8)       ; whatever the window is for
-(define win-rp 9)        ; where this window is allowed to draw
+(define win-rp 9)        ; where this window draws: its own bitmap
+(define win-bm 10)       ; and the pool memory that bitmap lives in
 
 (define *windows* nil)    ; front to back
 (define *wb-running* nil)
@@ -47,45 +48,60 @@
 (define title-height 22)
 
 (define (make-window x y w h title)
+  ;; A window is a bitmap of its own, and everything it draws goes there
+  ;; rather than at the screen. Two windows cannot reach each other however
+  ;; wrong their arithmetic is, drawing does not have to be clipped to a
+  ;; region that somebody has to keep correct, and the order things appear in
+  ;; is decided once, by the compositor, instead of every time anybody paints.
   (let ((v (make-vector-n win-slots nil)))
     (win-set! v win-x x)
     (win-set! v win-y y)
     (win-set! v win-w w)
     (win-set! v win-h h)
     (win-set! v win-title title)
-    ;; Empty until the layout is worked out; a window that has not been
-    ;; placed yet owns nothing and may draw nowhere.
-    (win-set! v win-rp (make-rastport 0 0 nil))
+    (win-set! v win-bm (alloc-pool (%* w h)))
+    (win-set! v win-rp (make-bitmap-rastport (win-get v win-bm) w h))
     v))
 
 (define (window-rastport w) (win-get w win-rp))
+(define (window-bitmap w) (win-get w win-bm))
 
-;; The desktop is the bottom layer, and gets whatever no window is standing on.
-(define *desktop-rp* nil)
+(define (window-rect w)
+  (rect (win-get w win-x) (win-get w win-y) (win-get w win-w) (win-get w win-h)))
 
-;; Front to back: each window may draw on its own rectangle, less every
-;; rectangle in front of it. That is the whole of the occlusion model, and it
-;; is what stops a task at the back painting over a window at the front
-;; between one repaint and the next.
-(define (compute-regions)
-  (let ((claimed nil))
-    (dolist (w *windows*)
-      (let ((r (rect (win-get w win-x) (win-get w win-y)
-                     (win-get w win-w) (win-get w win-h))))
-        (set-rp-region! (win-get w win-rp) (region-subtract (list r) claimed))
-        (set! claimed (%cons r claimed))))
-    (if (%null? *desktop-rp*) (set! *desktop-rp* (make-rastport 0 0 nil)) nil)
-    (set-rp-region! *desktop-rp*
-                    (region-subtract (list (rect 0 0 *screen-w* *screen-h*))
-                                     claimed))
-    nil))
-
-(define (win-inner-x w) (%+ (win-get w win-x) 2))
-(define (win-inner-y w) (%+ (win-get w win-y) (%+ title-height 1)))
+;; Coordinates inside a window are the window's own: nothing here knows or
+;; cares where on the screen it ends up.
+(define (win-inner-x w) 2)
+(define (win-inner-y w) (%+ title-height 1))
 (define (win-inner-w w) (%- (win-get w win-w) 4))
 (define (win-inner-h w) (%- (win-get w win-h) (%+ title-height 3)))
 
 (define (front-window) (if (%cons? *windows*) (%car *windows*) nil))
+
+;; ---------------------------------------------------------------- damage
+;; What the compositor owes the screen: one rectangle, grown to cover
+;; everything anybody has changed since it last ran. A whole screen is 786,432
+;; pixels and the blitter is charged one cycle each, which is more than two
+;; frames at sixty hertz - so compositing everything every time is not a thing
+;; this machine can afford, and the union of what actually moved is.
+(define *damage* nil)
+
+(define (rect-union a b)
+  (if (%null? a)
+      b
+      (if (%null? b)
+          a
+          (let ((x (if (%< (rect-x a) (rect-x b)) (rect-x a) (rect-x b)))
+                (y (if (%< (rect-y a) (rect-y b)) (rect-y a) (rect-y b)))
+                (x2 (if (%> (rect-x2 a) (rect-x2 b)) (rect-x2 a) (rect-x2 b)))
+                (y2 (if (%> (rect-y2 a) (rect-y2 b)) (rect-y2 a) (rect-y2 b))))
+            (rect x y (%- x2 x) (%- y2 y))))))
+
+(define (damage r)
+  (without-interrupts (set! *damage* (rect-union *damage* r)))
+  nil)
+
+(define (window-damage w) (damage (window-rect w)))
 
 (define (draw-frame x y w h)
   ;; Two lines and two colours, which is all a raised edge ever was.
@@ -94,36 +110,37 @@
   (draw-line (%+ x (%- w 1)) y (%+ x (%- w 1)) (%+ y (%- h 1)) wb-shadow)
   (draw-line x (%+ y (%- h 1)) (%+ x (%- w 1)) (%+ y (%- h 1)) wb-shadow))
 
-;; Draw something through a region of its own, without disturbing the rastport
-;; the window's own task is using: a repaint borrows the pixels, it does not
-;; take the window over.
-(define (draw-through rgn thunk)
+;; Draw into a window's bitmap without disturbing the rastport the window's
+;; own task is using: a repaint borrows the pixels, it does not take the
+;; window over.
+(define (draw-in win thunk)
   (let ((saved *rp*))
-    (use-rastport (make-rastport 0 0 rgn))
+    (use-rastport (window-rastport win))
     (%funcall thunk)
     (use-rastport saved)
     nil))
 
 (define (window-draw win)
-  (let* ((x (win-get win win-x))
-         (y (win-get win win-y))
-         (w (win-get win win-w))
-         (h (win-get win win-h))
-         (front (%eq? win (front-window))))
-    (fill-rect x y w h wb-face)
-    (fill-rect (%+ x 1) (%+ y 1) (%- w 2) title-height
-               (if front wb-title-on wb-title-off))
-    (draw-text (%+ x 6) (%+ y 4) (win-get win win-title)
+  (let ((w (win-get win win-w))
+        (h (win-get win win-h))
+        (front (%eq? win (front-window)))
+        (saved *rp*))
+    (use-rastport (window-rastport win))
+    (fill-rect 0 0 w h wb-face)
+    (fill-rect 1 1 (%- w 2) title-height (if front wb-title-on wb-title-off))
+    (draw-text 6 4 (win-get win win-title)
                (if front wb-title-text-on wb-title-text-off) -1)
     ;; The close box, top right.
-    (fill-rect (%+ x (%- w 17)) (%+ y 5) 12 12 wb-face)
-    (draw-frame (%+ x (%- w 17)) (%+ y 5) 12 12)
+    (fill-rect (%- w 17) 5 12 12 wb-face)
+    (draw-frame (%- w 17) 5 12 12)
     (fill-rect (win-inner-x win) (win-inner-y win)
                (win-inner-w win) (win-inner-h win) wb-back)
-    (draw-frame x y w h)
+    (draw-frame 0 0 w h)
     (if (win-get win win-refresh)
         (%funcall (win-get win win-refresh) win)
         nil)
+    (use-rastport saved)
+    (window-damage win)
     nil))
 
 (define (draw-desktop)
@@ -134,62 +151,68 @@
   (draw-line 0 19 (%- *screen-w* 1) 19 wb-shadow)
   nil)
 
-;; Everything, from scratch. Order no longer matters: the regions do not
-;; overlap, so nobody can paint over anybody.
-(define (wb-repaint)
-  (compute-regions)
-  (draw-through (rp-region *desktop-rp*) (lambda () (draw-desktop)))
-  (dolist (w *windows*)
-    (draw-through (rp-region (win-get w win-rp)) (lambda () (window-draw w))))
+;; ---------------------------------------------------------------- composite
+;; Back to front, into the screen, over whatever was damaged. Overlap needs no
+;; arithmetic: a window in front is blitted after the one behind it and simply
+;; wins.
+(define (composite r)
+  (let ((saved *rp*))
+    (use-rastport (make-rastport-on *screen* *screen-w* *screen-h*
+                                    0 0 (list r)))
+    (draw-desktop)
+    (use-rastport saved))
+  (dolist (w (reverse *windows*))
+    (let* ((wr (window-rect w))
+           (i (rect-intersect wr r)))
+      (if i
+          (bm-blit-rect (window-bitmap w) (win-get w win-w) (win-get w win-h)
+                        *screen* *screen-w* *screen-h*
+                        (%- (rect-x i) (rect-x wr)) (%- (rect-y i) (rect-y wr))
+                        (rect-x i) (rect-y i) (rect-w i) (rect-h i))
+          nil)))
   nil)
 
-;; What actually happens when a window opens, closes, moves or comes forward:
-;; work out the new layout, and repaint only what was uncovered by it.
-;; Which window was in front last time the layout was worked out. A window
-;; that loses the front does not get uncovered by anything, so nothing would
-;; repaint it - and its title bar would go on claiming to be active.
+;; One pass of the compositor: take whatever damage has accumulated and pay it.
+(define (wb-composite)
+  (let ((r (without-interrupts (let ((d *damage*)) (set! *damage* nil) d))))
+    (if (%null? r)
+        nil
+        (composite (rect-intersect r (rect 0 0 *screen-w* *screen-h*))))))
+
+;; Finished drawing: hand the frame over and wait until it has been shown.
+;; This is what a drawing task should call instead of a bare wait - the
+;; throttling is the same, and the meaning is the handover rather than the
+;; clock.
+(define (present win)
+  (window-damage win)
+  (wait-vblank))
+
+;; Everything, from scratch.
+(define (wb-repaint)
+  (dolist (w *windows*)
+    (window-draw w))
+  (damage (rect 0 0 *screen-w* *screen-h*))
+  nil)
+
+;; What actually happens when a window opens, closes, moves or comes forward.
+;; Which window was in front last time, because the one that loses the front
+;; has to be told: nothing else would repaint its title bar, and it would go
+;; on claiming to be active.
 (define *front-was* nil)
 
-(define (title-rect win)
-  (rect (win-get win win-x) (win-get win win-y)
-        (win-get win win-w) (%+ title-height 2)))
-
-(define (repaint-title win)
-  ;; A window that has just been closed is not in the list any more and has no
-  ;; region worth speaking of; drawing its title bar again would put it back
-  ;; on the screen after the desktop had painted over it.
-  (if (if (%null? win) t (%null? (memq win *windows*)))
-      nil
-      (let ((rgn (region-intersect-rect (rp-region (win-get win win-rp))
-                                        (title-rect win))))
-        (if (%cons? rgn)
-            (draw-through rgn (lambda () (window-draw win)))
-            nil))))
-
 (define (wb-update)
-  (let ((olds nil) (old-desk (if *desktop-rp* (rp-region *desktop-rp*) nil)))
-    (dolist (w *windows*)
-      (set! olds (%cons (%cons w (rp-region (win-get w win-rp))) olds)))
-    (compute-regions)
-    (let ((exposed (region-subtract (rp-region *desktop-rp*) old-desk)))
-      (if (%cons? exposed)
-          (draw-through exposed (lambda () (draw-desktop)))
-          nil))
-    (dolist (w *windows*)
-      (let* ((p (assq w olds))
-             (was (if p (%cdr p) nil))
-             (new (region-subtract (rp-region (win-get w win-rp)) was)))
-        (if (%cons? new)
-            (draw-through new (lambda () (window-draw w)))
-            nil)))
-    ;; And whoever changed places at the front.
-    (if (%eq? *front-was* (front-window))
-        nil
-        (begin
-          (repaint-title *front-was*)
-          (repaint-title (front-window))
-          (set! *front-was* (front-window))))
-    nil))
+  ;; The occlusion model is the compositor's, so this only has to say what
+  ;; changed. Redrawing a window costs its own bitmap and nothing else.
+  (if (%eq? *front-was* (front-window))
+      nil
+      (begin
+        (if (if *front-was* (memq *front-was* *windows*) nil)
+            (window-draw *front-was*)
+            nil)
+        (if (front-window) (window-draw (front-window)) nil)
+        (set! *front-was* (front-window))))
+  (dolist (w *windows*) (window-damage w))
+  nil)
 
 (define (window-open win)
   (set! *windows* (%cons win *windows*))
@@ -200,6 +223,10 @@
   (set! *windows* (remove-eq win *windows*))
   (let ((task (win-get win win-task)))
     (if task (rem-task task) nil))
+  ;; The hole it leaves has to be repainted before its bitmap goes back.
+  (damage (window-rect win))
+  (if (win-get win win-bm) (free-pool (win-get win win-bm)) nil)
+  (win-set! win win-bm nil)
   (wb-update)
   nil)
 
@@ -322,6 +349,16 @@
               c))
 
 (define (shell-putc win sh c)
+  ;; Aimed at the window rather than wherever the task happened to be
+  ;; pointing, and no closure to do it: this runs once per character.
+  (let ((saved *rp*))
+    (use-rastport (window-rastport win))
+    (shell-putc-1 win sh c)
+    (use-rastport saved))
+  (window-damage win)
+  nil)
+
+(define (shell-putc-1 win sh c)
   (cond
    ((%= c 10) (shell-newline win sh))
    ((%= c 13) nil)
@@ -424,8 +461,9 @@
   (if *drag-win*
       (let ((nx (clamp (%- x *drag-dx*) 0
                        (%- *screen-w* (win-get *drag-win* win-w))))
-            (ny (clamp (%- y *drag-dy*) 13
-                       (%- *screen-h* (win-get *drag-win* win-h)))))
+            (ny (clamp (%- y *drag-dy*) 20
+                       (%- *screen-h* (win-get *drag-win* win-h))))
+            (was (window-rect *drag-win*)))
         (if (if (%= nx (win-get *drag-win* win-x))
                 (%= ny (win-get *drag-win* win-y))
                 nil)
@@ -433,10 +471,10 @@
             (begin
               (win-set! *drag-win* win-x nx)
               (win-set! *drag-win* win-y ny)
-              ;; A moved window repaints itself and uncovers whatever it left.
-              (wb-update)
-              (draw-through (rp-region (win-get *drag-win* win-rp))
-                            (lambda () (window-draw *drag-win*))))))
+              ;; The pixels have not changed - only where they go. Damage
+              ;; both ends: what the window has uncovered and where it is now.
+              (damage was)
+              (window-damage *drag-win*))))
       nil))
 
 (define (wb-event e)
@@ -449,6 +487,16 @@
      ((%= kind ev-buttonup) (set! *drag-win* nil))
      ((%= kind ev-mousemove) (wb-drag (mouse-x) (mouse-y)))
      (else nil))))
+
+;; The compositor. One pass a frame, and only if something changed - a task
+;; that draws nothing costs nothing, and a task that draws too fast is held to
+;; the display's rate by `present` rather than by a clock it has to remember
+;; to look at.
+(define (wb-compositor-task)
+  (while *wb-running*
+    (wait-vblank)
+    (wb-composite))
+  nil)
 
 (define (wb-input-task)
   ;; Drain whatever has arrived, then sleep until the device says there is
@@ -472,6 +520,7 @@
   (set! *windows* nil)
   (set! *wb-running* t)
   (wb-repaint)
+  (add-task "composite" 2 (lambda () (wb-compositor-task)))
   (add-task "input" 1 (lambda () (wb-input-task)))
   (new-shell)
   (emit-str "workbench: a shell is open on the display")
