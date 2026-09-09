@@ -55,6 +55,21 @@
 (define clo-slot -12)
 (define lit-slot -16)
 
+;; ---------------------------------------------------------------- leaves
+;; A function that calls nothing needs none of the frame it builds. It cannot
+;; be returned into, so `ra` survives; nothing can collect while it runs, so
+;; the closure need not be findable on a stack; and its locals cannot be
+;; clobbered by a callee, so they can stay in registers and never be stored at
+;; all. About seven functions in ten are leaves, and they take a bit over half
+;; the calls, so this is the largest single piece of the frame protocol.
+;;
+;; s3..s10 hold a leaf's locals and s11 holds its caller's literal vector.
+;; Nothing else in the machine touches those nine registers, so a leaf saves
+;; and restores none of them: there is nothing there to preserve.
+(define (local-reg n) (%+ $s3 n))
+(define leaf-locals 8)
+(define $lit-save $s11)
+
 ;; ---------------------------------------------------------------- ecall codes
 (define trap-arity 1)
 (define trap-type 2)
@@ -65,9 +80,9 @@
 ;; ---------------------------------------------------------------- context
 ;;  0 asm         1 env          2 nlocals    3 maxlocals   4 freevars
 ;;  5 boxed       6 name         7 frame-fix  8 outer-env   9 nparams
-;; 10 self-label  11 self-arity
+;; 10 self-label  11 self-arity  12 leaf?
 (define (cx-new asm name outer-env)
-  (let ((c (make-vector-n 12 nil)))
+  (let ((c (make-vector-n 13 nil)))
     (%vector-set! c 0 asm)
     (%vector-set! c 1 nil)
     (%vector-set! c 2 0)
@@ -80,15 +95,23 @@
     (%vector-set! c 9 0)
     (%vector-set! c 10 nil)
     (%vector-set! c 11 nil)
+    (%vector-set! c 12 nil)
     c))
 
 (define (cx-asm c) (%vector-ref c 0))
 (define (cx-env c) (%vector-ref c 1))
 (define (cx-set-env! c e) (%vector-set! c 1 e))
 (define (cx-name c) (%vector-ref c 6))
+(define (cx-leaf? c) (%vector-ref c 12))
 
 (define (cx-alloc-local c)
   (let ((n (%vector-ref c 2)))
+    ;; The pre-pass bounds this before deciding a function is a leaf, so
+    ;; reaching here means the bound was wrong rather than that the function
+    ;; is unusual.
+    (if (cx-leaf? c)
+        (if (%>= n leaf-locals) (error "compile: leaf out of registers" (cx-name c)) nil)
+        nil)
     (%vector-set! c 2 (%+ n 1))
     (if (%> (%+ n 1) (%vector-ref c 3)) (%vector-set! c 3 (%+ n 1)) nil)
     n))
@@ -326,12 +349,24 @@
         (let ((k (instance-slot sym)))
           (if k (list 'instance k) (list 'global sym))))))
 
+;; A local is a frame slot, or - in a leaf - a register, and these three are
+;; the only places that know which.
+(define (load-local c n reg)
+  (if (cx-leaf? c)
+      (i-mv (cx-asm c) reg (local-reg n))
+      (i-lw (cx-asm c) reg $s0 (local-off n))))
+
+(define (store-local c n reg)
+  (if (cx-leaf? c)
+      (i-mv (cx-asm c) (local-reg n) reg)
+      (i-sw (cx-asm c) reg $s0 (local-off n))))
+
 (define (emit-load c loc reg)
   (let ((a (cx-asm c)) (kind (%car loc)))
     (cond
-     ((%eq? kind 'local) (i-lw a reg $s0 (local-off (cadr loc))))
+     ((%eq? kind 'local) (load-local c (cadr loc) reg))
      ((%eq? kind 'boxed-local)
-      (i-lw a reg $s0 (local-off (cadr loc)))
+      (load-local c (cadr loc) reg)
       (i-lw a reg reg 0))
      ((%eq? kind 'free)
       (i-lw a $t6 $s0 clo-slot)
@@ -367,8 +402,8 @@
 (define (emit-load-cell c loc reg)
   (let ((a (cx-asm c)) (kind (%car loc)))
     (cond
-     ((%eq? kind 'local) (i-lw a reg $s0 (local-off (cadr loc))))
-     ((%eq? kind 'boxed-local) (i-lw a reg $s0 (local-off (cadr loc))))
+     ((%eq? kind 'local) (load-local c (cadr loc) reg))
+     ((%eq? kind 'boxed-local) (load-local c (cadr loc) reg))
      ((%eq? kind 'free)
       (i-lw a $t6 $s0 clo-slot)
       (i-lw a reg $t6 (%* 4 (%+ clo-free (cadr loc)))))
@@ -383,9 +418,9 @@
 (define (emit-store c loc reg)
   (let ((a (cx-asm c)) (kind (%car loc)))
     (cond
-     ((%eq? kind 'local) (i-sw a reg $s0 (local-off (cadr loc))))
+     ((%eq? kind 'local) (store-local c (cadr loc) reg))
      ((%eq? kind 'boxed-local)
-      (i-lw a $t6 $s0 (local-off (cadr loc)))
+      (load-local c (cadr loc) $t6)
       (i-sw a reg $t6 0))
      ((%eq? kind 'free)
       (i-lw a $t6 $s0 clo-slot)
@@ -461,39 +496,81 @@
     (i-li a $a7 trap-arity)
     (i-ecall a)
     (asm-label a ok)
-    ;; A function calling itself by name knows the answer to every question
-    ;; the general call sequence asks: which closure (the one it is running),
-    ;; how many arguments (the right number, or this would not compile), and
-    ;; where the code is (here). So it jumps straight in, past the check it
-    ;; would only be proving to itself. Variadic functions are left alone,
-    ;; because the rest-list code downstream reads the count out of t1.
-    (if variadic
-        nil
-        (begin (%vector-set! c 10 ok) (%vector-set! c 11 nreq)))
-    (i-mv a $t3 $sp)
-    (%vector-set! c 7 (asm-len a))      ; the one word that knows the frame size
-    (i-addi a $sp $sp 0)                ; patched by finish-frame
-    (i-sw a $ra $t3 -4)
-    (i-sw a $s0 $t3 -8)
-    (i-sw a $t0 $t3 -12)
-    (i-sw a $s1 $t3 -16)
-    (i-mv a $s0 $t3)
-    ;; Point s1 at this function's own literal vector, which lives in the code
-    ;; object hanging off the closure. Every constant, symbol and inner code
-    ;; object the body mentions is one load from here.
-    (i-lw a $s1 $t0 (%* 4 clo-code))))
+    ;; A leaf builds nothing at all. It keeps its caller's literal vector in
+    ;; s11 and picks up its own, and that is the whole of its prologue: sp
+    ;; does not move, s0 still names the caller's frame, ra is in no danger
+    ;; because nothing here will overwrite it, and its locals are registers
+    ;; nothing else in the machine uses.
+    (if (cx-leaf? c)
+        (begin
+          (i-mv a $lit-save $s1)
+          (i-lw a $s1 $t0 (%* 4 clo-code)))
+        (begin
+          ;; A function calling itself by name knows the answer to every
+          ;; question the general call sequence asks: which closure (the one
+          ;; it is running), how many arguments (the right number, or this
+          ;; would not compile), and where the code is (here). So it jumps
+          ;; straight in, past the check it would only be proving to itself.
+          ;; Variadic functions are left alone, because the rest-list code
+          ;; downstream reads the count out of t1.
+          (if variadic
+              nil
+              (begin (%vector-set! c 10 ok) (%vector-set! c 11 nreq)))
+          (i-mv a $t3 $sp)
+          (%vector-set! c 7 (asm-len a))  ; the one word that knows the frame size
+          (i-addi a $sp $sp 0)            ; patched by finish-frame
+          (i-sw a $ra $t3 -4)
+          (i-sw a $s0 $t3 -8)
+          (i-sw a $t0 $t3 -12)
+          (i-sw a $s1 $t3 -16)
+          (i-mv a $s0 $t3)
+          ;; Point s1 at this function's own literal vector, which lives in
+          ;; the code object hanging off the closure. Every constant, symbol
+          ;; and inner code object the body mentions is one load from here.
+          (i-lw a $s1 $t0 (%* 4 clo-code))))))
 
 (define (emit-epilogue c)
   (let ((a (cx-asm c)))
-    (i-lw a $ra $s0 -4)
-    (i-lw a $t3 $s0 -8)
-    (i-lw a $s1 $s0 -16)
-    (i-mv a $sp $s0)
-    (i-mv a $s0 $t3)))
+    (if (cx-leaf? c)
+        (i-mv a $s1 $lit-save)
+        (begin
+          (i-lw a $ra $s0 -4)
+          (i-lw a $t3 $s0 -8)
+          (i-lw a $s1 $s0 -16)
+          (i-mv a $sp $s0)
+          (i-mv a $s0 $t3)))))
 
 (define (finish-frame c)
   ;; Now that every local is known, size the frame and patch the single
-  ;; instruction in the prologue that mentions it.
+  ;; instruction in the prologue that mentions it. A leaf has no frame and
+  ;; nothing to patch - but it does have an assumption to check.
+  (if (cx-leaf? c) (check-leaf c) (size-frame c)))
+
+;; The pre-pass decides leaf-ness from the source, and a source pre-pass can
+;; be wrong. This looks at what actually came out: if anything in a leaf's own
+;; code writes ra, then ra does not survive after all and the function would
+;; return to the wrong place. A build failure is the right outcome; a silent
+;; miscompile of the return address is the worst one in the machine.
+(define (check-leaf c)
+  (let* ((a (cx-asm c))
+         (buf (%vector-ref a 0))
+         (len (%vector-ref a 1))
+         (i 0))
+    (while (%< i len)
+      (let ((w (%logior (%logior (%bytes-ref buf i)
+                                 (%lsh (%bytes-ref buf (%+ i 1)) 8))
+                        (%logior (%lsh (%bytes-ref buf (%+ i 2)) 16)
+                                 (%lsh (%bytes-ref buf (%+ i 3)) 24)))))
+        (if (%= 1 (%logand (%lsh w -7) 31))
+            (let ((op (%logand w 127)))
+              (if (if (%= op #x6f) t (%= op #x67))
+                  (error "compile: a leaf that calls" (cx-name c))
+                  nil))
+            nil))
+      (set! i (%+ i 4)))
+    0))
+
+(define (size-frame c)
   (let* ((a (cx-asm c))
          ;; +15 rather than +7: round up to eight and leave one spare word
          ;; below the last local, so a stray store cannot reach the caller.
@@ -1646,7 +1723,7 @@
     (dolist (b binds)
       (compile-expr c (cadr b) nil)
       (let ((slot (cx-alloc-local c)))
-        (i-sw (cx-asm c) $a0 $s0 (local-off slot))
+        (store-local c slot $a0)
         (set! slots (%cons (%cons (%car b) slot) slots))))
     (dolist (s (reverse slots))
       (cx-bind c (%car s) (box-or-plain c (%car s) (%cdr s))))
@@ -1664,11 +1741,12 @@
       (list 'local slot)))
 
 (define (emit-make-box c slot)
-  ;; Replace the slot's value with a one-cell box holding it.
+  ;; Replace the slot's value with a one-cell box holding it. Never reached in
+  ;; a leaf: boxing is a cons, and anything that conses is not one.
   (let ((a (cx-asm c)))
-    (i-lw a $a2 $s0 (local-off slot))
+    (load-local c slot $a2)
     (emit-cons c $a2 $zero $a2 4)
-    (i-sw a $a2 $s0 (local-off slot))))
+    (store-local c slot $a2)))
 
 (define (compile-while c form tail)
   (let* ((a (cx-asm c))
@@ -1694,12 +1772,12 @@
       (let ((name (caadr form)))
         (compile-closure c (cdadr form) (cddr form) name)
         (let ((slot (cx-alloc-local c)))
-          (i-sw (cx-asm c) $a0 $s0 (local-off slot))
+          (store-local c slot $a0)
           (cx-bind c name (list 'local slot))))
       (let ((name (cadr form)))
         (compile-expr c (if (%cons? (cddr form)) (caddr form) nil) nil)
         (let ((slot (cx-alloc-local c)))
-          (i-sw (cx-asm c) $a0 $s0 (local-off slot))
+          (store-local c slot $a0)
           (cx-bind c name (list 'local slot)))))
   (if tail (emit-return c) nil))
 
@@ -1740,6 +1818,91 @@
     (dolist (x xs) (if (memq x acc) nil (set! acc (%cons x acc))))
     (reverse acc)))
 
+;; ---------------------------------------------------------------- leaf test
+;; Three things put a jal or a jalr into a function's own code: an ordinary
+;; call, the allocator's slow path - so anything that conses - and building a
+;; closure. Anything this walk does not recognise counts as a call, so it is
+;; only ever wrong in the safe direction, and `check-leaf` reads the bytes
+;; afterwards in case it is wrong in the other one.
+
+(define (leaf-body? forms bound)
+  (let ((ok t))
+    (dolist (f forms) (if (leaf-form? f bound) nil (set! ok nil)))
+    ok))
+
+(define (leaf-binds? binds bound)
+  (let ((ok t))
+    (dolist (b binds) (if (leaf-form? (cadr b) bound) nil (set! ok nil)))
+    ok))
+
+(define (leaf-form? form bound)
+  (if (%cons? form)
+      (let ((h (%car form)))
+        (cond
+         ((%eq? h 'quote) t)
+         ((%eq? h 'lambda) nil)         ; make-closure is a call
+         ((%eq? h 'define) nil)         ; and an inner define may be one
+         ((%eq? h 'if) (leaf-body? (%cdr form) bound))
+         ((%eq? h 'begin) (leaf-body? (%cdr form) bound))
+         ((%eq? h 'while) (leaf-body? (%cdr form) bound))
+         ((%eq? h 'set!) (leaf-body? (cddr form) bound))
+         ((%eq? h 'with-instance) (leaf-body? (%cdr form) bound))
+         ((%eq? h 'let)
+          (if (leaf-binds? (cadr form) bound) (leaf-body? (cddr form) bound) nil))
+         ((%symbol? h)
+          ;; An open-coded operator is a leaf if its arguments are. A name the
+          ;; body binds shadows any intrinsic of the same name and makes an
+          ;; ordinary call of it; and cons is open-coded but its slow path
+          ;; calls the collector.
+          (cond
+           ((memq h bound) nil)
+           ((memq h '(%cons cons)) nil)
+           ((inline-entry h (length (%cdr form))) (leaf-body? (%cdr form) bound))
+           (else nil)))
+         (else nil)))
+      t))
+
+;; Every name the body binds, which is two questions at once: which names
+;; shadow an intrinsic, and how many locals there could be. A leaf's locals
+;; are eight registers and no more, and this over-counts (bindings in sibling
+;; scopes share a slot at compile time) which is the safe way round.
+(define (bound-names form acc)
+  (if (%cons? form)
+      (let ((h (%car form)))
+        (cond
+         ((%eq? h 'quote) acc)
+         ((%eq? h 'let)
+          (dolist (b (cadr form))
+            (set! acc (%cons (%car b) acc))
+            (set! acc (bound-names (cadr b) acc)))
+          (dolist (f (cddr form)) (set! acc (bound-names f acc)))
+          acc)
+         ((%eq? h 'define)
+          (set! acc (%cons (if (%cons? (cadr form)) (caadr form) (cadr form)) acc))
+          (dolist (f (cddr form)) (set! acc (bound-names f acc)))
+          acc)
+         (else
+          (dolist (f form) (set! acc (bound-names f acc)))
+          acc)))
+      acc))
+
+(define (leaf-function? c forms names rest free)
+  ;; Not variadic, because the rest list is a cons. Nothing boxed, because a
+  ;; box is a cons. No free variables, because those are read through the
+  ;; closure and a leaf keeps its closure in t0 rather than in a frame - a
+  ;; separate change, not made yet. Locals within the eight registers. And
+  ;; nothing in the body that can call.
+  (if rest
+      nil
+      (if (%cons? free)
+          nil
+          (if (%cons? (%vector-ref c 5))
+              nil
+              (let ((bound (bound-names (%cons 'begin forms) names)))
+                (if (%> (length bound) leaf-locals)
+                    nil
+                    (leaf-body? forms bound)))))))
+
 ;; Compile a lambda body into fresh code. Returns (entry-address . code-object).
 (define (compile-function params body name free . free-boxed-opt)
   (let* ((a (asm-new))
@@ -1753,6 +1916,10 @@
          (i 0))
     ;; Decide up front which variables need boxes.
     (%vector-set! c 5 (filter (lambda (s) (memq s captured)) (dedup assigned)))
+    ;; And whether this is a leaf, which decides the whole shape of the frame
+    ;; and where its locals live, so it has to be known before a word is
+    ;; emitted.
+    (%vector-set! c 12 (leaf-function? c expanded names rest free))
     (emit-prologue c nreq (if rest t nil))
     ;; Parameters land in the first local slots.
     (set! i 0)
@@ -1763,11 +1930,13 @@
             ;; The first eight arrive in registers; the rest were pushed by
             ;; the caller and sit above the frame pointer, argument 8+j at
             ;; 4j(s0).
+            ;; A leaf never gets here with i >= 8: nine parameters is nine
+            ;; locals, and eight is all the registers set aside for them.
             (if (%< i 8)
-                (i-sw a (%+ $a0 i) $s0 (local-off slot))
+                (store-local c slot (%+ $a0 i))
                 (begin
                   (i-lw a $t3 $s0 (%* 4 (%- i 8)))
-                  (i-sw a $t3 $s0 (local-off slot))))
+                  (store-local c slot $t3)))
             (cx-bind c p (list 'local slot))
             (set! i (%+ i 1)))))
     (if rest

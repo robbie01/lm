@@ -65,10 +65,21 @@ pub struct Watch {
     /// store-then-reload case a peephole would catch with no analysis at all.
     pub st_pc: u32,
     pub st_addr: u32,
-    /// A shadow call stack: did the activation at this depth call anything?
+    /// A shadow call stack: what was entered at this depth, and did that
+    /// activation call anything?
     pub depth: usize,
     pub called: [bool; 512],
     pub entry_ins: [u64; 512],
+    pub entry_pc: [u32; 512],
+    /// Per entry point: how many times it was entered, and whether the
+    /// *function* ever calls anything in any of its activations.
+    ///
+    /// The distinction matters and I got it wrong the first time. A recursive
+    /// function's base case is an activation that calls nothing, but the
+    /// function still needs a frame, because its other activations do. Only a
+    /// function that never calls anything, in any activation, can do without
+    /// one.
+    pub funcs: std::collections::HashMap<u32, (u64, bool)>,
 }
 
 impl Default for Watch {
@@ -82,6 +93,8 @@ impl Default for Watch {
             depth: 0,
             called: [false; 512],
             entry_ins: [0; 512],
+            entry_pc: [0; 512],
+            funcs: std::collections::HashMap::new(),
         }
     }
 }
@@ -143,6 +156,54 @@ pub const NAMES: [&str; SLOTS] = [
     "-", "-", "-", "-", "-", "-", "-", "-",
     "-", "-", "-", "-", "-", "-", "-", "-",
 ];
+
+/// How much of the machine's time goes into functions that never call
+/// anything, and would therefore need no stack frame at all.
+pub fn leaf_report(prof: &[u64; SLOTS], w: &Watch) -> String {
+    let total: u64 = prof[..64].iter().sum();
+    let mut leaf_entries = 0u64;
+    let mut leaf_fns = 0usize;
+    let mut all_entries = 0u64;
+    for (_, (n, calls)) in w.funcs.iter() {
+        all_entries += n;
+        if !calls {
+            leaf_entries += n;
+            leaf_fns += 1;
+        }
+    }
+    let mut out = String::new();
+    out.push_str(&format!(
+        "
+calls: {}, to {} distinct entry points
+",
+        all_entries,
+        w.funcs.len()
+    ));
+    out.push_str(&format!(
+        "  entries to functions that never call anything: {} ({:.0}% of calls, {} of {} entry points)
+",
+        leaf_entries,
+        100.0 * leaf_entries as f64 / all_entries.max(1) as f64,
+        leaf_fns,
+        w.funcs.len()
+    ));
+    out.push_str(&format!(
+        "  activations that happened not to call (base cases included): {} ({:.0}%)
+",
+        prof[LEAF_CALLS],
+        100.0 * prof[LEAF_CALLS] as f64 / all_entries.max(1) as f64
+    ));
+    for (label, per) in [("12 instructions", 12u64), ("14 instructions", 14)] {
+        out.push_str(&format!(
+            "  at {} of frame protocol saved per call: {} ({:.1}% of all instructions)
+",
+            label,
+            leaf_entries * per,
+            100.0 * (leaf_entries * per) as f64 / total.max(1) as f64
+        ));
+    }
+    out
+}
 
 /// A sorted table, and the share of the whole each line is.
 pub fn report(prof: &[u64; SLOTS]) -> String {
@@ -227,28 +288,6 @@ frame/spill loads of a value already in a register: {} ({:.1}% of all instructio
         prof[LD_REDUNDANT_ADJ],
         100.0 * prof[LD_REDUNDANT_ADJ] as f64 / total as f64
     ));
-    if prof[CALLS] > 0 {
-        out.push_str(&format!(
-            "
-calls: {}, of which leaf (returned without calling anything): {} ({:.0}%)
-",
-            prof[CALLS],
-            prof[LEAF_CALLS],
-            100.0 * prof[LEAF_CALLS] as f64 / prof[CALLS] as f64
-        ));
-        out.push_str(&format!(
-            "  instructions executed inside a leaf activation: {} ({:.1}%)
-",
-            prof[LEAF_INS],
-            100.0 * prof[LEAF_INS] as f64 / total as f64
-        ));
-        out.push_str(&format!(
-            "  a frame costs 16 instructions, so leaf frames are worth {} ({:.1}%)
-",
-            prof[LEAF_CALLS] * 16,
-            100.0 * (prof[LEAF_CALLS] * 16) as f64 / total as f64
-        ));
-    }
 
     let ext: u64 = prof[ZBA..=ZICOND].iter().sum();
     if ext > 0 {

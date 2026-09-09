@@ -151,7 +151,10 @@
 ;; 101 public, out of 147 definitions.
 (export '(
   $a0 $a1 $a2 $a3 $a4 $a5 $a6 $a7 $gp $ra $s0 $s1 $s2 $sp $t0 $t1 $t2 $t3 $t4
-  $t5 $t6 $tp $zero asm-code-object asm-gensym-label asm-label asm-len
+  $t5 $t6 $tp $zero
+  ;; s3..s11 are where a leaf function keeps its locals, and nothing else in
+  ;; the machine touches them.
+  $s3 $s4 $s5 $s6 $s7 $s8 $s9 $s10 $s11 asm-code-object asm-gensym-label asm-label asm-len
   asm-literal asm-new asm-origin asm-place asm-place-at csr-cycle
   csr-mcause csr-mepc csr-mie csr-mscratch csr-mstatus csr-mtval csr-mtvec
   i-add i-addi i-and i-andi i-beq i-beqz i-bge i-blt i-bltu i-bne i-bnez

@@ -225,7 +225,7 @@ fn op_jal(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     {
         m.watch.new_block();
         if rd(w) == 1 {
-            prof_call(m);
+            prof_call(m, pc.wrapping_add(imm_j(w)));
         }
     }
     w_(m, rd(w), pc.wrapping_add(4));
@@ -243,14 +243,20 @@ fn op_jal(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 /// to the same slot, so a tail-calling leaf is not counted as one. That
 /// undercounts, which is the safe direction.
 #[cfg(feature = "isaprof")]
-fn prof_call(m: &mut Machine) {
+fn prof_call(m: &mut Machine, target: u32) {
     let d = m.watch.depth;
+    // The caller is a function that calls, whatever this particular
+    // activation of it happens to do.
+    let here = m.watch.entry_pc[d];
+    m.watch.funcs.entry(here).or_insert((0, false)).1 = true;
+    m.watch.called[d] = true;
     if d < 511 {
-        m.watch.called[d] = true;
         m.watch.depth = d + 1;
         m.watch.called[d + 1] = false;
+        m.watch.entry_pc[d + 1] = target;
         m.watch.entry_ins[d + 1] = m.prof[..64].iter().sum();
     }
+    m.watch.funcs.entry(target).or_insert((0, false)).0 += 1;
     m.prof[crate::prof::CALLS] += 1;
 }
 
@@ -273,16 +279,16 @@ fn op_jalr(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     if f3(w) != 0 {
         return illegal(m, w, pc, fuel);
     }
+    let t = r(m, rs1(w)).wrapping_add(imm_i(w)) & !1;
     #[cfg(feature = "isaprof")]
     {
         m.watch.new_block();
         if rd(w) == 1 {
-            prof_call(m);
+            prof_call(m, t);
         } else if rd(w) == 0 && rs1(w) == 1 {
             prof_ret(m);
         }
     }
-    let t = r(m, rs1(w)).wrapping_add(imm_i(w)) & !1;
     w_(m, rd(w), pc.wrapping_add(4));
     next!(m, t, fuel - 1)
 }

@@ -86,7 +86,10 @@ pub fn boot(o: &Options) -> i32 {
             m.cycles as f64 / secs / 1e6
         );
         #[cfg(feature = "isaprof")]
-        eprint!("{}", crate::prof::report(&m.prof));
+        {
+            eprint!("{}", crate::prof::report(&m.prof));
+            eprint!("{}", crate::prof::leaf_report(&m.prof, &m.watch));
+        }
     }
     if let Some(path) = &o.screenshot {
         // Whatever the display was showing when the machine stopped, as a
