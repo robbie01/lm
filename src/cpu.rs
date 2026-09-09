@@ -481,6 +481,17 @@ fn op_imm(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
             m.watch.li_pc = pc;
             m.watch.li_rd = rd(w);
         }
+        let f = f3(w);
+        let im = imm_i(w) as i32;
+        if f == 0 && (im == 1 || im == -1) && m.watch.as_pc.wrapping_add(4) == pc
+            && m.watch.as_rd == rs1(w)
+        {
+            m.prof[crate::prof::TAG_FIX] += 1;
+        } else if f == 5 && w >> 25 == 0x20 && sh == 1 {
+            m.prof[crate::prof::TAG_UNTAG] += 1;
+        } else if (f == 1 && w >> 25 == 0 && sh == 1) || (f == 6 && im == 1) {
+            m.prof[crate::prof::TAG_RETAG] += 1;
+        }
     }
     let v = match f3(w) {
         0 => a.wrapping_add(i),
@@ -527,7 +538,17 @@ fn op_reg(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let b = r(m, rs2(w));
     let f = f3(w);
     #[cfg(feature = "isaprof")]
-    prof_ext(m, w >> 25, f);
+    {
+        prof_ext(m, w >> 25, f);
+        let f7 = w >> 25;
+        if (f7 == 0 && f == 0) || (f7 == 0x20 && f == 0) {
+            m.watch.as_pc = pc;
+            m.watch.as_rd = rd(w);
+            m.prof[crate::prof::ARITH] += 1;
+        } else if f7 == 1 {
+            m.prof[crate::prof::ARITH] += 1;
+        }
+    }
     let v = match w >> 25 {
         0 => match f {
             0 => a.wrapping_add(b),

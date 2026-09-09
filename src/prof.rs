@@ -56,6 +56,14 @@ pub const LEAF_INS: usize = 95;
 /// like, since RISC-V has no compare-immediate-and-branch.
 pub const LI_BRANCH: usize = 96;
 pub const LI_TOTAL: usize = 97;
+/// Instructions that exist only because a value carries a tag: the `addi -1`
+/// that corrects a sum, the `srai 1` that strips a tag before real work, and
+/// the `slli 1` / `ori 1` that put one back.
+pub const TAG_FIX: usize = 98;
+pub const TAG_UNTAG: usize = 99;
+pub const TAG_RETAG: usize = 100;
+/// Register-register arithmetic, for scale.
+pub const ARITH: usize = 101;
 
 /// The bookkeeping those four need. Not counters: the state a basic block and
 /// a call stack are tracked with.
@@ -73,6 +81,9 @@ pub struct Watch {
     /// The last `li`, for the compare-against-a-constant question.
     pub li_pc: u32,
     pub li_rd: u32,
+    /// The last add or sub, for spotting the tag correction after it.
+    pub as_pc: u32,
+    pub as_rd: u32,
     /// A shadow call stack: what was entered at this depth, and did that
     /// activation call anything?
     pub depth: usize,
@@ -100,6 +111,8 @@ impl Default for Watch {
             st_addr: 0,
             li_pc: u32::MAX,
             li_rd: 32,
+            as_pc: u32::MAX,
+            as_rd: 32,
             depth: 0,
             called: [false; 512],
             entry_ins: [0; 512],
@@ -162,7 +175,8 @@ pub const NAMES: [&str; SLOTS] = [
     "  st frame (s0)", "  st spill (sp)", "  st other",
     "redundant load", "  adjacent", "calls", "leaf calls", "leaf instructions",
     "li then branch", "li total",
-    "-", "-", "-", "-", "-", "-",
+    "tag fixup", "untag", "retag", "arithmetic",
+    "-", "-",
     "-", "-", "-", "-", "-", "-", "-", "-",
     "-", "-", "-", "-", "-", "-", "-", "-",
     "-", "-", "-", "-", "-", "-", "-", "-",
@@ -282,6 +296,24 @@ memory traffic: {} ({:.1}%)
             "frame + spill",
             home,
             100.0 * home as f64 / total as f64
+        ));
+    }
+
+    let tags = prof[TAG_FIX] + prof[TAG_UNTAG] + prof[TAG_RETAG];
+    out.push_str(&format!(
+        "
+instructions that exist only because values are tagged: {} ({:.1}%)
+",
+        tags,
+        100.0 * tags as f64 / total.max(1) as f64
+    ));
+    for k in [TAG_FIX, TAG_UNTAG, TAG_RETAG, ARITH] {
+        out.push_str(&format!(
+            "  {:<16} {:>12}  {:>5.1}%
+",
+            NAMES[k],
+            prof[k],
+            100.0 * prof[k] as f64 / total.max(1) as f64
         ));
     }
 
