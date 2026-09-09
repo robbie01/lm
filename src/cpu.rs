@@ -52,6 +52,10 @@ fn w_(m: &mut Machine, i: u32, v: u32) {
         *m.x.get_unchecked_mut((i & 31) as usize) = v;
         *m.x.get_unchecked_mut(0) = 0;
     }
+    #[cfg(feature = "isaprof")]
+    {
+        m.watch.gen[(i & 31) as usize] = 0;
+    }
 }
 
 /// orc.b: every byte that has any bit set becomes 0xff. The only Zbb
@@ -217,14 +221,66 @@ fn op_auipc(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 // ---- jumps ----------------------------------------------------------------
 #[inline(never)]
 fn op_jal(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
+    #[cfg(feature = "isaprof")]
+    {
+        m.watch.new_block();
+        if rd(w) == 1 {
+            prof_call(m);
+        }
+    }
     w_(m, rd(w), pc.wrapping_add(4));
     next!(m, pc.wrapping_add(imm_j(w)), fuel - 1)
+}
+
+/// A shadow call stack, to answer one question: how many activations return
+/// without having called anything? Those are the ones whose frame - eight
+/// instructions to build and six to take down - buys nothing, because a leaf
+/// has no callee to protect anything from.
+///
+/// `jal`/`jalr` writing ra is a call and `jalr x0, ra` is a return, which is
+/// exactly how this compiler spells them. A tail call is `jalr x0, <reg>`:
+/// the caller's frame is already gone and the callee's activation is charged
+/// to the same slot, so a tail-calling leaf is not counted as one. That
+/// undercounts, which is the safe direction.
+#[cfg(feature = "isaprof")]
+fn prof_call(m: &mut Machine) {
+    let d = m.watch.depth;
+    if d < 511 {
+        m.watch.called[d] = true;
+        m.watch.depth = d + 1;
+        m.watch.called[d + 1] = false;
+        m.watch.entry_ins[d + 1] = m.prof[..64].iter().sum();
+    }
+    m.prof[crate::prof::CALLS] += 1;
+}
+
+#[cfg(feature = "isaprof")]
+fn prof_ret(m: &mut Machine) {
+    let d = m.watch.depth;
+    if d == 0 {
+        return;
+    }
+    if !m.watch.called[d] {
+        m.prof[crate::prof::LEAF_CALLS] += 1;
+        let now: u64 = m.prof[..64].iter().sum();
+        m.prof[crate::prof::LEAF_INS] += now.saturating_sub(m.watch.entry_ins[d]);
+    }
+    m.watch.depth = d - 1;
 }
 
 #[inline(never)]
 fn op_jalr(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     if f3(w) != 0 {
         return illegal(m, w, pc, fuel);
+    }
+    #[cfg(feature = "isaprof")]
+    {
+        m.watch.new_block();
+        if rd(w) == 1 {
+            prof_call(m);
+        } else if rd(w) == 0 && rs1(w) == 1 {
+            prof_ret(m);
+        }
     }
     let t = r(m, rs1(w)).wrapping_add(imm_i(w)) & !1;
     w_(m, rd(w), pc.wrapping_add(4));
@@ -233,6 +289,8 @@ fn op_jalr(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 
 #[inline(never)]
 fn op_branch(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
+    #[cfg(feature = "isaprof")]
+    m.watch.new_block();
     let a = r(m, rs1(w));
     let b = r(m, rs2(w));
     let taken = match f3(w) {
@@ -284,11 +342,43 @@ fn op_load(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         *m.prof.get_unchecked_mut(crate::prof::mem_slot(rs1(w), false)) += 1;
     }
     let a = r(m, rs1(w)).wrapping_add(imm_i(w));
+    #[cfg(feature = "isaprof")]
+    if f3(w) == 2 && (rs1(w) == 8 || rs1(w) == 2) {
+        prof_load(m, a, pc, rd(w));
+    }
     match do_load(m, a, f3(w), fuel) {
         Some(v) => w_(m, rd(w), v),
         None => return m.fault(C_LFAULT, a, pc, fuel),
     }
+    #[cfg(feature = "isaprof")]
+    {
+        let d = rd(w) as usize;
+        m.watch.addr[d] = a;
+        m.watch.gen[d] = m.watch.block;
+    }
     next!(m, pc.wrapping_add(4), fuel - 1)
+}
+
+/// Was this word already in a register, put there earlier in this same
+/// straight-line run? That is exactly what a basic-block peephole can see,
+/// and the number decides whether one is worth writing.
+#[cfg(feature = "isaprof")]
+fn prof_load(m: &mut Machine, a: u32, pc: u32, dst: u32) {
+    let gen = m.watch.block;
+    let mut hit = false;
+    for k in 1..32 {
+        if k != dst as usize && m.watch.gen[k] == gen && m.watch.addr[k] == a {
+            hit = true;
+            break;
+        }
+    }
+    if !hit {
+        return;
+    }
+    m.prof[crate::prof::LD_REDUNDANT] += 1;
+    if m.watch.st_pc.wrapping_add(4) == pc && m.watch.st_addr == a {
+        m.prof[crate::prof::LD_REDUNDANT_ADJ] += 1;
+    }
 }
 
 #[inline(always)]
@@ -325,6 +415,21 @@ fn op_store(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let v = r(m, rs2(w));
     if !do_store(m, a, f3(w), v, fuel) {
         return m.fault(C_SFAULT, a, pc, fuel);
+    }
+    #[cfg(feature = "isaprof")]
+    if f3(w) == 2 && (rs1(w) == 8 || rs1(w) == 2) {
+        // Whatever else claimed this address holds the old value now.
+        let gen = m.watch.block;
+        for k in 1..32 {
+            if m.watch.gen[k] == gen && m.watch.addr[k] == a {
+                m.watch.gen[k] = 0;
+            }
+        }
+        let s = rs2(w) as usize;
+        m.watch.addr[s] = a;
+        m.watch.gen[s] = gen;
+        m.watch.st_pc = pc;
+        m.watch.st_addr = a;
     }
     next!(m, pc.wrapping_add(4), fuel - 1)
 }

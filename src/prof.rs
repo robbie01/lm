@@ -20,7 +20,7 @@
 //! forward to the next interrupt without executing anything. This counts
 //! instructions; that counts time.
 
-pub const SLOTS: usize = 96;
+pub const SLOTS: usize = 128;
 
 // Slots past the 64 dispatch tokens.
 pub const PAIR0: usize = 64; // + funct3: car, cdr, set-car!, set-cdr!
@@ -40,6 +40,63 @@ pub const LD_OTHER: usize = 87;
 pub const ST_FRAME: usize = 88;
 pub const ST_SPILL: usize = 89;
 pub const ST_OTHER: usize = 90;
+
+// ---- the two questions a peephole and a leaf-frame rule turn on ----
+/// A frame or spill load of a value that is already sitting in a register,
+/// established in this same straight-line run of instructions.
+pub const LD_REDUNDANT: usize = 91;
+/// ...of which: the value was put there by the store one instruction earlier.
+pub const LD_REDUNDANT_ADJ: usize = 92;
+/// Activations, and the ones that returned without calling anything.
+pub const CALLS: usize = 93;
+pub const LEAF_CALLS: usize = 94;
+pub const LEAF_INS: usize = 95;
+
+/// The bookkeeping those four need. Not counters: the state a basic block and
+/// a call stack are tracked with.
+pub struct Watch {
+    /// For each register, the address it currently mirrors, and the block it
+    /// was established in. A register written by anything else is invalidated
+    /// by setting its generation to zero, which never matches.
+    pub addr: [u32; 32],
+    pub gen: [u32; 32],
+    pub block: u32,
+    /// The pc of the last store and the address it went to, for the adjacent
+    /// store-then-reload case a peephole would catch with no analysis at all.
+    pub st_pc: u32,
+    pub st_addr: u32,
+    /// A shadow call stack: did the activation at this depth call anything?
+    pub depth: usize,
+    pub called: [bool; 512],
+    pub entry_ins: [u64; 512],
+}
+
+impl Default for Watch {
+    fn default() -> Self {
+        Watch {
+            addr: [0; 32],
+            gen: [0; 32],
+            block: 1,
+            st_pc: u32::MAX,
+            st_addr: 0,
+            depth: 0,
+            called: [false; 512],
+            entry_ins: [0; 512],
+        }
+    }
+}
+
+impl Watch {
+    /// A branch, a jump or a trap ends the straight-line run, and nothing
+    /// established before it can be relied on after.
+    #[inline(always)]
+    pub fn new_block(&mut self) {
+        self.block = self.block.wrapping_add(1);
+        if self.block == 0 {
+            self.block = 1;
+        }
+    }
+}
 
 /// The base register a load or a store used, as a slot. s0 is the frame
 /// pointer, sp the spill area, s1 the running function's literal vector.
@@ -80,7 +137,11 @@ pub const NAMES: [&str; SLOTS] = [
     "  Zba (sh*add)", "  Zbb", "  Zbs (b*)", "  Zicond (czero)",
     "  ld frame (s0)", "  ld spill (sp)", "  ld literal (s1)", "  ld other",
     "  st frame (s0)", "  st spill (sp)", "  st other",
-    "-", "-", "-", "-", "-",
+    "redundant load", "  adjacent", "calls", "leaf calls", "leaf instructions",
+    "-", "-", "-", "-", "-", "-", "-", "-",
+    "-", "-", "-", "-", "-", "-", "-", "-",
+    "-", "-", "-", "-", "-", "-", "-", "-",
+    "-", "-", "-", "-", "-", "-", "-", "-",
 ];
 
 /// A sorted table, and the share of the whole each line is.
@@ -149,6 +210,43 @@ memory traffic: {} ({:.1}%)
             "frame + spill",
             home,
             100.0 * home as f64 / total as f64
+        ));
+    }
+
+    // What a basic-block peephole and a leaf-frame rule are each worth.
+    out.push_str(&format!(
+        "
+frame/spill loads of a value already in a register: {} ({:.1}% of all instructions)
+",
+        prof[LD_REDUNDANT],
+        100.0 * prof[LD_REDUNDANT] as f64 / total as f64
+    ));
+    out.push_str(&format!(
+        "  of those, the reload of the store one instruction earlier: {} ({:.1}%)
+",
+        prof[LD_REDUNDANT_ADJ],
+        100.0 * prof[LD_REDUNDANT_ADJ] as f64 / total as f64
+    ));
+    if prof[CALLS] > 0 {
+        out.push_str(&format!(
+            "
+calls: {}, of which leaf (returned without calling anything): {} ({:.0}%)
+",
+            prof[CALLS],
+            prof[LEAF_CALLS],
+            100.0 * prof[LEAF_CALLS] as f64 / prof[CALLS] as f64
+        ));
+        out.push_str(&format!(
+            "  instructions executed inside a leaf activation: {} ({:.1}%)
+",
+            prof[LEAF_INS],
+            100.0 * prof[LEAF_INS] as f64 / total as f64
+        ));
+        out.push_str(&format!(
+            "  a frame costs 16 instructions, so leaf frames are worth {} ({:.1}%)
+",
+            prof[LEAF_CALLS] * 16,
+            100.0 * (prof[LEAF_CALLS] * 16) as f64 / total as f64
         ));
     }
 

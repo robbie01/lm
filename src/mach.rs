@@ -77,6 +77,8 @@ pub struct Machine {
     /// rest break down what a token alone cannot say. See `prof::NAMES`.
     #[cfg(feature = "isaprof")]
     pub prof: Box<[u64; crate::prof::SLOTS]>,
+    #[cfg(feature = "isaprof")]
+    pub watch: Box<crate::prof::Watch>,
 
     // --- custom chips ---
     pub intreq: u32,
@@ -124,6 +126,8 @@ impl Machine {
             trap: (0, 0, 0),
             #[cfg(feature = "isaprof")]
             prof: Box::new([0; crate::prof::SLOTS]),
+            #[cfg(feature = "isaprof")]
+            watch: Box::default(),
             intreq: 0,
             intena: 0,
             uart: Uart::new(),
@@ -239,6 +243,8 @@ impl Machine {
     #[inline(never)]
     #[cold]
     pub fn fault(&mut self, cause: u32, tval: u32, epc: u32, fuel: u32) -> Stop {
+        #[cfg(feature = "isaprof")]
+        self.watch.new_block();
         self.trap = (cause, tval, epc);
         self.pc = epc;
         self.fuel_left = fuel;
