@@ -62,11 +62,13 @@
                   (%+ cy (%/ (%* dy reach) d)))))))
 
 ;; ---------------------------------------------------------------- drawing
+;; Platinum's own colours rather than the workbench's foreground and
+;; background, which are now black on white and would give a black eye.
 (define (draw-eye cx cy)
-  (fill-circle cx cy rad wb-text)
-  (draw-circle cx cy rad wb-back))
+  (fill-circle cx cy rad pt-white)
+  (draw-circle cx cy rad pt-black))
 
-(define (draw-pupil x y) (fill-circle x y pr wb-back))
+(define (draw-pupil x y) (fill-circle x y pr pt-black))
 
 ;; Drawing establishes its own rastport rather than trusting the one the task
 ;; happens to be carrying: `(with-instance w (look-at ...))` from a prompt is
@@ -85,7 +87,7 @@
 (define (draw-all-1)
   (place-eyes)
   (fill-rect (win-inner-x window) (win-inner-y window)
-             (win-inner-w window) (win-inner-h window) wb-face)
+             (win-inner-w window) (win-inner-h window) pt-g3)
   (draw-eye lx ly)
   (draw-eye rx ry)
   ;; Both pupils are gone with the fill, so neither remembered position is

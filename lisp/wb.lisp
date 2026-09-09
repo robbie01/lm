@@ -14,16 +14,19 @@
 (in-package wb)
 
 ;; ---------------------------------------------------------------- palette
-(define wb-desktop 13)
-(define wb-face 12)
-(define wb-shadow 11)
-(define wb-light 1)
-(define wb-text 1)
-(define wb-back 0)
-(define wb-title-on 4)
-(define wb-title-off 11)
-(define wb-title-text-on 1)
-(define wb-title-text-off 0)
+;; The old names, pointed at Platinum. A window's interior is white with black
+;; text, which is what every Mac OS document window was; the workbench's own
+;; furniture is the grey ramp.
+(define wb-desktop pt-desktop)
+(define wb-face pt-g3)
+(define wb-shadow pt-g6)
+(define wb-light pt-white)
+(define wb-text pt-black)
+(define wb-back pt-white)
+(define wb-title-on pt-g3)
+(define wb-title-off pt-g3)
+(define wb-title-text-on pt-black)
+(define wb-title-text-off pt-g7)
 
 ;; ---------------------------------------------------------------- windows
 (define win-slots 11)
@@ -45,7 +48,7 @@
 (define (win-get w i) (%vector-ref w i))
 (define (win-set! w i v) (%vector-set! w i v))
 
-(define title-height 22)
+(define title-height pt-title-h)
 
 (define (make-window x y w h title)
   ;; A window is a bitmap of its own, and everything it draws goes there
@@ -71,10 +74,10 @@
 
 ;; Coordinates inside a window are the window's own: nothing here knows or
 ;; cares where on the screen it ends up.
-(define (win-inner-x w) 2)
-(define (win-inner-y w) (%+ title-height 1))
-(define (win-inner-w w) (%- (win-get w win-w) 4))
-(define (win-inner-h w) (%- (win-get w win-h) (%+ title-height 3)))
+(define (win-inner-x w) pt-band)
+(define (win-inner-y w) title-height)
+(define (win-inner-w w) (%- (win-get w win-w) (%* 2 pt-band)))
+(define (win-inner-h w) (%- (win-get w win-h) (%+ title-height pt-band)))
 
 (define (front-window) (if (%cons? *windows*) (%car *windows*) nil))
 
@@ -126,16 +129,9 @@
         (front (%eq? win (front-window)))
         (saved *rp*))
     (use-rastport (window-rastport win))
-    (fill-rect 0 0 w h wb-face)
-    (fill-rect 1 1 (%- w 2) title-height (if front wb-title-on wb-title-off))
-    (draw-text 6 4 (win-get win win-title)
-               (if front wb-title-text-on wb-title-text-off) -1)
-    ;; The close box, top right.
-    (fill-rect (%- w 17) 5 12 12 wb-face)
-    (draw-frame (%- w 17) 5 12 12)
+    (window-frame win w h front)
     (fill-rect (win-inner-x win) (win-inner-y win)
                (win-inner-w win) (win-inner-h win) wb-back)
-    (draw-frame 0 0 w h)
     (if (win-get win win-refresh)
         (%funcall (win-get win win-refresh) win)
         nil)
@@ -143,12 +139,51 @@
     (window-damage win)
     nil))
 
+;; The Platinum frame: a #CC face inside a black outline, raised six-pixel
+;; bands down the sides and along the bottom, a striped title bar with a box
+;; at each end, and a black border round the content.
+;;
+;; An inactive window keeps the face and loses everything else - no stripes,
+;; no boxes, grey text, a #55 outline. That is the whole of how Mac OS said
+;; "this one is not listening".
+(define (window-frame win w h front)
+  (let* ((outline (if front pt-black pt-g10))
+         (close-x pt-box-x)
+         (zoom-x (%- w (%+ pt-box-x pt-box)))
+         (title (text-truncate (win-get win win-title)
+                               (%- (%- zoom-x close-x) 40)))
+         (tw (text-width title))
+         (tx (let ((c (%/ (%- w tw) 2)))
+               (if (%< c (%+ close-x 20)) (%+ close-x 20) c))))
+    (fill-rect 0 0 w h pt-g3)
+    (pt-frame 0 0 w h outline)
+    (if front
+        (begin
+          ;; The raised bands: white outside, #99 inside.
+          (pt-hline 1 1 (%- w 2) pt-white)
+          (pt-vline 1 1 (%- h 2) pt-white)
+          (pt-vline (%- w 2) 2 (%- h 3) pt-g6)
+          (pt-hline 2 (%- h 2) (%- w 3) pt-g6)
+          (pt-hline 4 (%- pt-title-h 2) (%- w 8) pt-g6)
+          (pt-vline 4 (%- pt-title-h 2) (%- h (%+ pt-title-h 2)) pt-g6)
+          (pt-stripes (%+ close-x (%+ pt-box 5)) 4
+                      (%- (%- zoom-x 4) (%+ close-x (%+ pt-box 5)))
+                      (list (list (%- tx 7) (%+ (%+ tx tw) 7))))
+          (pt-title-box close-x pt-box-y 0)
+          (pt-title-box zoom-x pt-box-y 1)
+          (draw-text tx 4 title pt-black -1))
+        (draw-text tx 4 title pt-g7 -1))
+    ;; The content border, one pixel of outline round the interior.
+    (pt-frame (%- (win-inner-x win) 1) (%- (win-inner-y win) 1)
+              (%+ (win-inner-w win) 2) (%+ (win-inner-h win) 2) outline)
+    nil))
+
 (define (draw-desktop)
-  (fill-rect 0 0 *screen-w* *screen-h* wb-desktop)
+  (fill-rect 0 0 *screen-w* *screen-h* pt-desktop)
   ;; A menu bar with nothing in the menus yet, which is honest enough.
-  (fill-rect 0 0 *screen-w* 20 wb-face)
-  (draw-text 9 2 "Workbench" wb-back -1)
-  (draw-line 0 19 (%- *screen-w* 1) 19 wb-shadow)
+  (fill-rect 0 0 *screen-w* pt-menubar-h pt-g2)
+  (pt-hline 0 (%- pt-menubar-h 1) *screen-w* pt-g6)
+  (draw-text pt-menubar-first-x 3 "Workbench" pt-black -1)
   nil)
 
 ;; ---------------------------------------------------------------- composite
@@ -517,6 +552,7 @@
 (define (workbench)
   (if (%null? *screen*) (open-screen screen-width screen-height) nil)
   (if (%null? *font*) (begin (font-init) (mono-init)) nil)
+  (platinum-palette)
   (set! *windows* nil)
   (set! *wb-running* t)
   (wb-repaint)

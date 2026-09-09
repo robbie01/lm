@@ -136,6 +136,7 @@
   region-intersect-rect region-subtract
   event-ascii fill-circle isqrt
   event-kind fill-rect free-pool gfx-ctrl gfx-on gfx-vbirq inp-ctrl
+  set-colour rgb
   input-event
   input-pending int-ack int-disable int-enable int-pending int-raise millis
   mouse-x mouse-y op-copy open-screen peek peek8 plot poke poke8
@@ -207,6 +208,11 @@
   win-inner-h win-inner-w win-inner-x win-inner-y win-refresh win-set!
   win-task window-close window-open
   win-get win-h win-w win-x win-y window-push-key workbench win-bm
+  pt-black pt-white pt-g1 pt-g2 pt-g3 pt-g6 pt-g7 pt-g8 pt-g10 pt-g13
+  pt-lav pt-lav-dark pt-lav-light pt-desktop pt-grey pt-band pt-title-h
+  pt-hline pt-vline pt-frame pt-raised pt-sunken pt-title-box pt-grow-box
+  platinum-palette text-width text-truncate draw-text draw-char
+  draw-mono draw-mono-char mono-width mono-advance mono-height
 ))
 
 (in-package eyes)
