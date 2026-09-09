@@ -668,9 +668,31 @@ and `(wait-vblank)` blocks until the display has finished a frame. The eyes
 and the workbench's input task use it, and a task blocked there is off the
 ready list entirely.
 
+Then the rest of it, because a clock is only the right thing to wait on if you
+are watching the clock. A shell waiting for a key is woken by the key: the
+input task signals the window's task when it delivers one. The input task
+itself is woken by the input device's own interrupt rather than by asking sixty
+times a second whether anything arrived — and because that device holds its
+line up for as long as it has events, the server masks the line and the task
+turns it back on when the queue is dry, which is what makes a level-triggered
+device behave.
+
+And an idle task, which turns out to be load-bearing rather than tidy. With
+every task genuinely blocking, a machine where they all block at once has an
+empty ready list, and `switch-tasks` quietly declines to switch — so the task
+that just declared itself asleep carries on running, goes round `wait`'s loop
+and adds itself to the wait list a second time. A doubly linked list with one
+node in it twice is the end of the scheduler. Nothing noticed while every task
+was a spin loop. The idle task is always ready, runs `wfi`, and costs nothing.
+
 Four pairs of eyes open and nothing happening: three seconds of machine time
 now costs three seconds of wall clock, with the emulator idling through it.
-Spinning, the same three seconds had not arrived after 174.
+Spinning, the same three seconds had not arrived after 174. The input task went
+from 125,215 context switches in that window to one; the shell from 20,893 to
+one.
+
+What should happen next, and why `wait-vblank` is the mechanism rather than the
+interface, is in [docs/presenting.md](docs/presenting.md).
 
 ## The Workbench
 

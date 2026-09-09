@@ -537,8 +537,11 @@
   (let ((task (this-task)))
     (%raw-st! (%+ task tc-result) 0)
     ;; The last task to finish takes the machine with it: there is nothing
-    ;; left to schedule, and pretending otherwise is a hang.
-    (if (%<= (task-count) 1) (begin (emit-str "\n") (%halt 0)) nil)
+    ;; left to schedule, and pretending otherwise is a hang. The idle task does
+    ;; not count - it is always there and it never does anything.
+    (if (%<= (task-count) (if (%> (peek (%+ *sysbase* eb-idletask)) 0) 2 1))
+        (begin (emit-str "\n") (%halt 0))
+        nil)
     (rem-task task)
     ;; rem-task on the current task never returns, but if it somehow did,
     ;; spinning is better than running off the end of the world.
@@ -706,6 +709,8 @@
 ;; things like this.
 (define sigb-vblank 5)
 (define sigf-vblank 32)
+(define sigb-input 6)
+(define sigf-input 64)
 (define *vblank-int* 0)
 (define *vblank-count* 0)
 
@@ -730,6 +735,64 @@
 ;; waiting here is off the ready list entirely, so it costs nothing until the
 ;; frame arrives.
 (define (wait-vblank) (wait sigf-vblank))
+
+;; ---------------------------------------------------------------- idle
+;; Something always has to be ready to run, and this is it.
+;;
+;; Without it, a machine where every task is waiting has an empty ready list,
+;; and `switch-tasks` quietly declines to switch - so the task that just
+;; declared itself asleep carries on executing. `wait` then goes round its loop
+;; and adds itself to the wait list a second time, which is a doubly linked
+;; list with one node in it twice, which is the end of the scheduler. Nothing
+;; noticed while every task was a spin loop; the moment they started really
+;; blocking it became reachable.
+;;
+;; It runs `wfi`, so an idle machine costs nothing at all rather than costing
+;; one task's worth of spinning.
+(define (idle-task)
+  (while t
+    (poke (%+ *sysbase* eb-idlecount) (%+ (peek (%+ *sysbase* eb-idlecount)) 1))
+    (%wait-for-input)))
+
+(define (idle-start)
+  (if (%> (peek (%+ *sysbase* eb-idletask)) 0)
+      nil
+      (poke (%+ *sysbase* eb-idletask)
+            (add-task "idle" -128 (lambda () (idle-task)) 4096)))
+  (peek (%+ *sysbase* eb-idletask)))
+
+(define (idle? task) (%= task (peek (%+ *sysbase* eb-idletask))))
+
+;; ---------------------------------------------------------------- input
+;; The input device raises its line for as long as it has events, so a handler
+;; that only signalled would be re-entered forever. Masking the line is what
+;; makes a level-triggered device behave: the server hands the work to a task
+;; and stops listening, and the task turns it back on when the queue is dry.
+(define *input-int* 0)
+(define *input-task* 0)
+
+(define (input-server data)
+  (int-disable int-input)
+  (if (%> *input-task* 0) (signal *input-task* sigf-input) nil)
+  nil)
+
+(define (input-listen task)
+  (set! *input-task* task)
+  (poke inp-ctrl (%logior (peek inp-ctrl) 1))
+  (if (%> *input-int* 0)
+      nil
+      (begin
+        (set! *input-int*
+              (make-interrupt "input" 0 (lambda (d) (input-server d)) 0))
+        (add-int-server int-input *input-int*)))
+  (int-enable int-input)
+  nil)
+
+(define (wait-input)
+  ;; Drain first: the line was masked when the server fired, so anything that
+  ;; arrived since is sitting in the device with nobody listening.
+  (int-enable int-input)
+  (wait sigf-input))
 
 (define (vblank-start)
   (if (%> *vblank-int* 0)
@@ -832,6 +895,7 @@
     (set! *stack-top-fn* (lambda () (peek (%+ (this-task) tc-spupper))))
     (set! *return-addr-fn* (lambda () *task-exit-stub*))
     (vblank-start)
+    (idle-start)
     (set! *abort-cleanup-fn*
           (lambda ()
             (poke (%+ sb eb-idnest) 0)

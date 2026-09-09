@@ -268,6 +268,11 @@
 ;; shell's stream reads from it, which is the whole of the routing.
 (define (window-push-key win c)
   (win-set! win win-keys (append (win-get win win-keys) (list c)))
+  ;; And wake whoever is reading that window. A shell blocked on its keyboard
+  ;; should be woken by a keystroke, not by a clock it asks sixty times a
+  ;; second whether one has arrived.
+  (let ((task (win-get win win-task)))
+    (if task (signal task sigf-input) nil))
   nil)
 
 (define (window-pop-key win)
@@ -399,7 +404,8 @@
        (if k
            (begin (shell-putc win sh k) (%int->char k))
            nil)))
-   (lambda () (reschedule))))
+   ;; Nothing to read: sleep until `window-push-key` says otherwise.
+   (lambda () (wait sigf-input))))
 
 (define (new-shell . opts)
   ;; A window with a prompt in it, and a task of its own to run the prompt.
@@ -472,10 +478,10 @@
      (else nil))))
 
 (define (wb-input-task)
-  ;; Drain whatever has arrived, then sleep until the next frame. A mouse
-  ;; sampled sixty times a second is a mouse that feels immediate, and the
-  ;; alternative - asking again as fast as the processor can be handed back -
-  ;; was most of what this machine did while it looked idle.
+  ;; Drain whatever has arrived, then sleep until the device says there is
+  ;; more. This used to ask again as fast as the processor could be handed
+  ;; back, which was most of what the machine did while it looked idle.
+  (input-listen (this-task))
   (while *wb-running*
     (let ((n (input-pending)))
       (if (%> n 0)
@@ -483,7 +489,7 @@
             (while (%< i n)
               (wb-event (input-event))
               (set! i (%+ i 1))))
-          (wait-vblank))))
+          (wait-input))))
   nil)
 
 ;; ---------------------------------------------------------------- startup

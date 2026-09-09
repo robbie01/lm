@@ -40,7 +40,7 @@
 (export '(
   alloc-object *object-allocator* *collector*
   ;; the memory map and object layout, generated from the Rust side
-  clo-code clo-free code-base code-lits code-name cons-base cons-limit dev-blit dev-disk dev-gfx dev-input dev-sys dev-timer dev-uart fast-base imm-unbound int-soft int-vblank lg-bootlist lg-code-end lg-code-free lg-code-free-n lg-code-ptr lg-code-reg lg-code-reg-n lg-cons-free lg-cons-free-n lg-cons-ptr lg-cons-run lg-cons-run-end lg-errhandler lg-gccount lg-gchook lg-imgentry lg-obarray lg-obj-end lg-obj-free-n lg-obj-ptr lg-package lg-packages lg-pool-free lg-poolend lg-poolptr lg-refill lg-roots lg-scratch0 lg-scratch1 lg-stackbot lg-stacktop lg-startup lg-stub-hi lg-stub-lo lg-symcount lg-symlist lg-sysbase lg-toplevel lg-traphook lg-trapsave mmio-base obj-base obj-bins obj-bin-count obj-limit pkg-name pkg-slots pkg-tag pkg-use pool-base pool-limit sym-exported sym-flags sym-function sym-macro sym-name sym-package sym-plist sym-slots sym-value sysbase-ptr t-bytes t-closure t-code t-float t-free t-record t-string t-symbol t-vector
+  clo-code clo-free code-base code-lits code-name cons-base cons-limit dev-blit dev-disk dev-gfx dev-input dev-sys dev-timer dev-uart fast-base imm-unbound int-input int-soft int-vblank lg-bootlist lg-code-end lg-code-free lg-code-free-n lg-code-ptr lg-code-reg lg-code-reg-n lg-cons-free lg-cons-free-n lg-cons-ptr lg-cons-run lg-cons-run-end lg-errhandler lg-gccount lg-gchook lg-imgentry lg-obarray lg-obj-end lg-obj-free-n lg-obj-ptr lg-package lg-packages lg-pool-free lg-poolend lg-poolptr lg-refill lg-roots lg-scratch0 lg-scratch1 lg-stackbot lg-stacktop lg-startup lg-stub-hi lg-stub-lo lg-symcount lg-symlist lg-sysbase lg-toplevel lg-traphook lg-trapsave mmio-base obj-base obj-bins obj-bin-count obj-limit pkg-name pkg-slots pkg-tag pkg-use pool-base pool-limit sym-exported sym-flags sym-function sym-macro sym-name sym-package sym-plist sym-slots sym-value sysbase-ptr t-bytes t-closure t-code t-float t-free t-record t-string t-symbol t-vector
   %* %+ %- %/ %< %<= %= %> %>= %addr-of %alloc-code %alloc-pool %apply %ash
   %bytes-length %bytes-ref %bytes-set! %bytes? %car %cdr %char->int %char?
   %closure? %cons %cons? %ctest-entry %cycles %disable %display %dv %ecall
@@ -133,7 +133,8 @@
   rect-intersect rect-contains? rect-subtract region-subtract-rect region-area
   region-intersect-rect region-subtract
   event-ascii fill-circle isqrt
-  event-kind fill-rect free-pool gfx-ctrl gfx-on gfx-vbirq input-event
+  event-kind fill-rect free-pool gfx-ctrl gfx-on gfx-vbirq inp-ctrl
+  input-event
   input-pending int-ack int-disable int-enable int-pending int-raise millis
   mouse-x mouse-y op-copy open-screen peek peek8 plot poke poke8
   pool-free-bytes pool-tag pool-used random screen-height screen-sync
@@ -180,8 +181,10 @@
 ;; 19 public, out of 183 definitions.
 (export '(
   add-task cause ctx-bytes disable enable exec-init exec-start forbid
-  handle-interrupt permit preemption-off rem-task reschedule sigb-vblank
-  sigf-vblank signal spawn switch-tasks sysbase *vblank-count* vblank-start
+  handle-interrupt idle? idle-start input-listen permit preemption-off
+  this-task
+  rem-task reschedule sigb-input sigb-vblank sigf-input sigf-vblank signal
+  spawn switch-tasks sysbase *vblank-count* vblank-start wait-input
   wait-vblank
   task-count tasks wait
 ))
