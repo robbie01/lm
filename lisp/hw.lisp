@@ -146,15 +146,18 @@
 (define (vblank-count) (peek gfx-vcount))
 (define (screen-sync) (poke gfx-sync 1))
 
-(define (screen-plot x y c)
-  (if (if (%>= x 0) (if (%< x *screen-w*) (if (%>= y 0) (%< y *screen-h*) nil) nil) nil)
-      (poke8 (%+ *screen* (%+ (%* y *screen-w*) x)) c)
+(define (bm-plot bm bw bh x y c)
+  (if (if (%>= x 0) (if (%< x bw) (if (%>= y 0) (%< y bh) nil) nil) nil)
+      (poke8 (%+ bm (%+ (%* y bw) x)) c)
       nil))
 
-(define (point x y)
-  (if (if (%>= x 0) (if (%< x *screen-w*) (if (%>= y 0) (%< y *screen-h*) nil) nil) nil)
-      (peek8 (%+ *screen* (%+ (%* y *screen-w*) x)))
+(define (bm-point bm bw bh x y)
+  (if (if (%>= x 0) (if (%< x bw) (if (%>= y 0) (%< y bh) nil) nil) nil)
+      (peek8 (%+ bm (%+ (%* y bw) x)))
       0))
+
+(define (screen-plot x y c) (bm-plot *screen* *screen-w* *screen-h* x y c))
+(define (point x y) (bm-point *screen* *screen-w* *screen-h* x y))
 
 ;; ---------------------------------------------------------------- blitter
 (define blt-src (dev-addr dev-blit #x00))
@@ -184,15 +187,21 @@
 ;; pool memory with task structures and stacks immediately after it, so a
 ;; rectangle that runs off the right edge does not merely look wrong - it
 ;; writes over the scheduler.
-(define (clip-rect x y w h)
-  ;; Returns (x y w h) trimmed to the screen, or nil if nothing is left.
+(define (bm-clip bw bh x y w h)
+  ;; Returns (x y w h) trimmed to a bitmap that size, or nil if nothing is
+  ;; left. Every write to a bitmap goes through here first: bitmaps are raw
+  ;; pool memory with task structures and stacks immediately after them, so a
+  ;; rectangle that runs off the right edge does not merely look wrong - it
+  ;; writes over the scheduler.
   (let* ((x0 (if (%< x 0) 0 x))
          (y0 (if (%< y 0) 0 y))
-         (x1 (let ((e (%+ x w))) (if (%> e *screen-w*) *screen-w* e)))
-         (y1 (let ((e (%+ y h))) (if (%> e *screen-h*) *screen-h* e))))
+         (x1 (let ((e (%+ x w))) (if (%> e bw) bw e)))
+         (y1 (let ((e (%+ y h))) (if (%> e bh) bh e))))
     (if (if (%< x0 x1) (%< y0 y1) nil)
         (list x0 y0 (%- x1 x0) (%- y1 y0))
         nil)))
+
+(define (clip-rect x y w h) (bm-clip *screen-w* *screen-h* x y w h))
 
 ;; A device command is several register writes and then the one that starts
 ;; it. Those writes are a single act: two tasks interleaved in here would each
@@ -201,35 +210,44 @@
 ;;
 ;; The clipping is computed first, outside, because it is the expensive half
 ;; and it touches nothing shared.
-(define (screen-fill-rect x y w h c)
-  (let ((r (clip-rect x y w h)))
+(define (bm-fill-rect bm bw bh x y w h c)
+  (let ((r (bm-clip bw bh x y w h)))
     (if r
         (without-interrupts
-          (poke blt-dst (%+ *screen* (%+ (%* (cadr r) *screen-w*) (%car r))))
+          (poke blt-dst (%+ bm (%+ (%* (cadr r) bw) (%car r))))
           (poke blt-w (caddr r))
           (poke blt-h (cadddr r))
-          (poke blt-dmod *screen-w*)
+          (poke blt-dmod bw)
           (poke blt-val c)
           (poke blt-op op-fill))
         nil)))
 
+(define (screen-fill-rect x y w h c)
+  (bm-fill-rect *screen* *screen-w* *screen-h* x y w h c))
+
 (define (clear-screen c) (fill-rect 0 0 *screen-w* *screen-h* c))
 
-(define (screen-blit-rect sx sy dx dy w h)
+(define (bm-blit-rect sbm sbw sbh dbm dbw dbh sx sy dx dy w h)
   ;; Clipped against both ends: the source rectangle and the destination have
-  ;; to fit, and the smaller of the two wins.
-  (let* ((sr (clip-rect sx sy w h))
-         (dr (if sr (clip-rect dx dy (caddr sr) (cadddr sr)) nil)))
+  ;; to fit, and the smaller of the two wins. Source and destination may be
+  ;; the same bitmap, which is what a scroll inside a window is, or different
+  ;; ones, which is what compositing is.
+  (let* ((sr (bm-clip sbw sbh sx sy w h))
+         (dr (if sr (bm-clip dbw dbh dx dy (caddr sr) (cadddr sr)) nil)))
     (if dr
         (without-interrupts
-          (poke blt-src (%+ *screen* (%+ (%* (cadr sr) *screen-w*) (%car sr))))
-          (poke blt-dst (%+ *screen* (%+ (%* (cadr dr) *screen-w*) (%car dr))))
+          (poke blt-src (%+ sbm (%+ (%* (cadr sr) sbw) (%car sr))))
+          (poke blt-dst (%+ dbm (%+ (%* (cadr dr) dbw) (%car dr))))
           (poke blt-w (caddr dr))
           (poke blt-h (cadddr dr))
-          (poke blt-smod *screen-w*)
-          (poke blt-dmod *screen-w*)
+          (poke blt-smod sbw)
+          (poke blt-dmod dbw)
           (poke blt-op op-copy))
         nil)))
+
+(define (screen-blit-rect sx sy dx dy w h)
+  (bm-blit-rect *screen* *screen-w* *screen-h*
+                *screen* *screen-w* *screen-h* sx sy dx dy w h))
 
 ;; ---------------------------------------------------------------- regions
 ;; A region is a list of rectangles that do not overlap. Rectangles are lists
@@ -315,30 +333,56 @@
     n))
 
 ;; ---------------------------------------------------------------- rastports
-;; Where drawing goes: an origin to shift by, and the region it is allowed to
-;; touch. Everything below draws through the current one, and the current one
-;; travels with the task the way its streams do - so a task that draws is
-;; clipped to its own window without being told.
+;; Where drawing goes: a bitmap, an origin to shift by, and the region of that
+;; bitmap it is allowed to touch. Everything below draws through the current
+;; one, and the current one travels with the task the way its streams do - so
+;; a task that draws is aimed at its own window without being told.
 ;;
-;; Nothing set means the bare screen, which is what the demos and the boot
-;; messages want and what the machine did before any of this existed.
-(define rp-slots 4)
-(define rp-org-x 1)
-(define rp-org-y 2)
-(define rp-clip 3)
+;; Nothing set means the bare screen, which is what the boot messages want and
+;; what the machine did before any of this existed.
+;;
+;; The bitmap is the part that makes a window a window rather than a promise
+;; about clipping. Two tasks drawing into two bitmaps cannot reach each other
+;; however wrong their arithmetic is; two tasks drawing into one screen behind
+;; two clipping regions can, and did.
+(define rp-slots 7)
+(define rp-bm 1)
+(define rp-bw 2)
+(define rp-bh 3)
+(define rp-org-x 4)
+(define rp-org-y 5)
+(define rp-clip 6)
 
 (define *rp* nil)
 
-(define (make-rastport ox oy clip)
+(define (make-rastport-on bm bw bh ox oy clip)
   (let ((r (make-record rp-slots 'rastport)))
+    (%set-slot! r rp-bm bm)
+    (%set-slot! r rp-bw bw)
+    (%set-slot! r rp-bh bh)
     (%set-slot! r rp-org-x ox)
     (%set-slot! r rp-org-y oy)
     (%set-slot! r rp-clip clip)
     r))
 
+;; The screen is the default target, so the old three-argument form still
+;; means what it always did.
+(define (make-rastport ox oy clip)
+  (make-rastport-on *screen* *screen-w* *screen-h* ox oy clip))
+
+;; A whole bitmap of one's own: no origin to shift by and nothing to clip
+;; against but its own edges.
+(define (make-bitmap-rastport bm w h)
+  (make-rastport-on bm w h 0 0 (list (rect 0 0 w h))))
+
 (define (rastport? x)
   (if (%record? x) (%eq? (%slot x 0) 'rastport) nil))
 
+(define (rp-bitmap r) (%slot r rp-bm))
+(define (rp-bitmap-w r) (%slot r rp-bw))
+(define (rp-bitmap-h r) (%slot r rp-bh))
+(define (set-rp-bitmap! r bm w h)
+  (%set-slot! r rp-bm bm) (%set-slot! r rp-bw w) (%set-slot! r rp-bh h))
 (define (rp-origin-x r) (%slot r rp-org-x))
 (define (rp-origin-y r) (%slot r rp-org-y))
 (define (rp-region r) (%slot r rp-clip))
@@ -356,10 +400,11 @@
 ;; nothing.
 (define (fill-rect x y w h c)
   (if *rp*
-      (let ((r (rect (%+ x (rp-origin-x *rp*)) (%+ y (rp-origin-y *rp*)) w h)))
+      (let ((r (rect (%+ x (rp-origin-x *rp*)) (%+ y (rp-origin-y *rp*)) w h))
+            (bm (rp-bitmap *rp*)) (bw (rp-bitmap-w *rp*)) (bh (rp-bitmap-h *rp*)))
         (dolist (cr (rp-region *rp*))
           (let ((i (rect-intersect r cr)))
-            (if i (screen-fill-rect (rect-x i) (rect-y i) (rect-w i) (rect-h i) c)
+            (if i (bm-fill-rect bm bw bh (rect-x i) (rect-y i) (rect-w i) (rect-h i) c)
                 nil))))
       (screen-fill-rect x y w h c))
   nil)
@@ -371,7 +416,9 @@
             (go t))
         (dolist (cr (rp-region *rp*))
           (if (if go (rect-contains? cr px py) nil)
-              (begin (screen-plot px py c) (set! go nil))
+              (begin (bm-plot (rp-bitmap *rp*) (rp-bitmap-w *rp*) (rp-bitmap-h *rp*)
+                              px py c)
+                     (set! go nil))
               nil)))
       (screen-plot x y c))
   nil)
@@ -387,10 +434,14 @@
         (dolist (cr (rp-region *rp*))
           (let ((i (rect-intersect d cr)))
             (if i
-                (screen-blit-rect (%+ (%+ sx ox) (%- (rect-x i) (rect-x d)))
-                                  (%+ (%+ sy oy) (%- (rect-y i) (rect-y d)))
-                                  (rect-x i) (rect-y i)
-                                  (rect-w i) (rect-h i))
+                (let ((bm (rp-bitmap *rp*))
+                      (bw (rp-bitmap-w *rp*))
+                      (bh (rp-bitmap-h *rp*)))
+                  (bm-blit-rect bm bw bh bm bw bh
+                                (%+ (%+ sx ox) (%- (rect-x i) (rect-x d)))
+                                (%+ (%+ sy oy) (%- (rect-y i) (rect-y d)))
+                                (rect-x i) (rect-y i)
+                                (rect-w i) (rect-h i)))
                 nil))))
       (screen-blit-rect sx sy dx dy w h))
   nil)
@@ -399,19 +450,24 @@
   ;; Endpoints are clamped rather than properly clipped, so a line that leaves
   ;; the screen changes slope at the edge instead of being cut off. That keeps
   ;; it inside the bitmap, which is the part that matters.
-  (set! x0 (clamp x0 0 (%- *screen-w* 1)))
-  (set! x1 (clamp x1 0 (%- *screen-w* 1)))
-  (set! y0 (clamp y0 0 (%- *screen-h* 1)))
-  (set! y1 (clamp y1 0 (%- *screen-h* 1)))
+  (let ((bm (if *rp* (rp-bitmap *rp*) *screen*))
+        (bw (if *rp* (rp-bitmap-w *rp*) *screen-w*))
+        (bh (if *rp* (rp-bitmap-h *rp*) *screen-h*))
+        (ox (if *rp* (rp-origin-x *rp*) 0))
+        (oy (if *rp* (rp-origin-y *rp*) 0)))
+  (set! x0 (clamp (%+ x0 ox) 0 (%- bw 1)))
+  (set! x1 (clamp (%+ x1 ox) 0 (%- bw 1)))
+  (set! y0 (clamp (%+ y0 oy) 0 (%- bh 1)))
+  (set! y1 (clamp (%+ y1 oy) 0 (%- bh 1)))
   (without-interrupts
-    (poke blt-dst *screen*)
-    (poke blt-dmod *screen-w*)
+    (poke blt-dst bm)
+    (poke blt-dmod bw)
     (poke blt-x0 x0)
     (poke blt-y0 y0)
     (poke blt-x1 x1)
     (poke blt-y1 y1)
     (poke blt-val c)
-    (poke blt-op op-line)))
+    (poke blt-op op-line))))
 
 ;; Integer square root, by Newton. Wanted by anything that has to turn a
 ;; distance into a length, which on a machine with no floats is more things

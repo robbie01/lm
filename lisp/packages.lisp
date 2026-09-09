@@ -124,7 +124,9 @@
 (in-package hw)
 ;; 83 public, out of 165 definitions.
 (export '(
-  *screen* *screen-h* *screen-w* alloc-pool blit-rect blt-dmod blt-dst
+  *screen* *screen-h* *screen-w* alloc-pool bm-blit-rect bm-clip bm-fill-rect
+  bm-plot bm-point make-bitmap-rastport make-rastport-on rp-bitmap
+  rp-bitmap-h rp-bitmap-w set-rp-bitmap! blit-rect blt-dmod blt-dst
   blt-h blt-op blt-smod blt-src blt-w clamp clear-screen disk-write
   draw-circle draw-line ev-buttondown ev-buttonup ev-keydown ev-mousemove
   *rp* make-rastport rastport? rp-origin-x rp-origin-y rp-region
