@@ -126,11 +126,28 @@
         ((%= ty t-code) (emit-str "a code object"))
         (else (emit-str "an object"))))
 
-(define (emit-pair-op f)
-  (cond ((%= f 0) (emit-str "car"))
-        ((%= f 1) (emit-str "cdr"))
-        ((%= f 2) (emit-str "set-car!"))
-        (else (emit-str "set-cdr!"))))
+;; custom-0 is one load and one store now, so which operation it was is the
+;; offset rather than the funct3: car is slot 0 and cdr is slot 4 of the same
+;; instruction. Anything else is a slot access the compiler generated.
+;; Only the low bits of the offset, because the instruction word arrives here
+;; through `peek`, which loses bit 31 making it a fixnum. That is enough to
+;; tell slot 0 from slot 4, which is all this is for.
+(define (insn-imm-i w) (%logand (%lsh w -20) 2047))
+(define (insn-imm-s w) (%logand (%lsh w -7) 31))
+
+(define (emit-pair-op w)
+  (let ((f (insn-f3 w)))
+    (if (%= (%logand f 4) 4)
+        (let ((o (insn-imm-s w)))
+          (cond ((%= f 5) (emit-str "set-slot!"))
+                ((%= o 0) (emit-str "set-car!"))
+                ((%= o 4) (emit-str "set-cdr!"))
+                (else (emit-str "set-slot!"))))
+        (let ((o (insn-imm-i w)))
+          (cond ((%= f 1) (emit-str "slot"))
+                ((%= o 0) (emit-str "car"))
+                ((%= o 4) (emit-str "cdr"))
+                (else (emit-str "slot")))))))
 
 (define (emit-index-op ty f)
   (cond ((%= ty t-closure) (emit-str "call"))
@@ -140,12 +157,14 @@
         (else (emit-str (if (%= (%logand f 1) 1) "set-slot!" "slot")))))
 
 (define (emit-pair-fault w tval)
-  (emit-pair-op (insn-f3 w))
+  (emit-pair-op w)
   ;; nil reads as a pair of nils but has no cell to write to, so the store
   ;; side rejects it and deserves its own sentence.
-  (if (%= tval 0)
-      (emit-str ": nil has no cell to write")
-      (begin (emit-str ": expected a pair, got ") (emit-value tval))))
+  (cond
+   ((%= (%logand (insn-f3 w) 1) 1)
+    (emit-str ": expected an object, got ") (emit-value tval))
+   ((%= tval 0) (emit-str ": nil has no cell to write"))
+   (else (emit-str ": expected a pair, got ") (emit-value tval))))
 
 (define (emit-index-fault w ctx)
   ;; Both operands are still in the registers the instruction named, so the

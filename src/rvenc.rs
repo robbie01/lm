@@ -331,18 +331,31 @@ pub fn tsb(rs2: u32, rs1: u32, off: i32) -> u32 {
     s_type(off, rs2, rs1, 7, 0x7b)
 }
 
-// ---- custom-0: pairs, checked ----
+// ---- custom-0: a load or store through a checked reference ----
+/// LOAD and STORE shaped, always a word, funct3 saying what the base must be.
+pub fn lref(rd: u32, rs1: u32, off: i32) -> u32 {
+    i_type(off, rs1, 0, rd, 0x0b)
+}
+pub fn lobj(rd: u32, rs1: u32, off: i32) -> u32 {
+    i_type(off, rs1, 1, rd, 0x0b)
+}
+pub fn sref(rs2: u32, rs1: u32, off: i32) -> u32 {
+    s_type(off, rs2, rs1, 4, 0x0b)
+}
+pub fn sobj(rs2: u32, rs1: u32, off: i32) -> u32 {
+    s_type(off, rs2, rs1, 5, 0x0b)
+}
 pub fn car(rd: u32, rs1: u32) -> u32 {
-    i_type(0, rs1, 0, rd, 0x0b)
+    lref(rd, rs1, 0)
 }
 pub fn cdr(rd: u32, rs1: u32) -> u32 {
-    i_type(0, rs1, 1, rd, 0x0b)
+    lref(rd, rs1, 4)
 }
 pub fn setcar(rs2: u32, rs1: u32) -> u32 {
-    s_type(0, rs2, rs1, 2, 0x0b)
+    sref(rs2, rs1, 0)
 }
 pub fn setcdr(rs2: u32, rs1: u32) -> u32 {
-    s_type(0, rs2, rs1, 3, 0x0b)
+    sref(rs2, rs1, 4)
 }
 
 pub fn addi(rd: u32, rs1: u32, i: i32) -> u32 {

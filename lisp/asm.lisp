@@ -234,7 +234,7 @@
 (define op-jalr  #x67)
 (define op-jal   #x6f)
 (define op-sys   #x73)
-;; custom-0. The processor checks the tag as it forms the address, so a pair
+;; custom-0. The processor checks the tag as it forms the address, so a slot
 ;; access that is handed something else traps instead of loading rubbish.
 (define op-pair  #x0b)
 ;; custom-1: indexed access. funct7 carries the type the object has to be, so
@@ -285,10 +285,18 @@
 
 (define (i-jalr a rd rs1 off) (i-i a rd rs1 off 0 op-jalr))
 
-(define (i-car a rd rs1)      (i-i a rd rs1 0 0 op-pair))
-(define (i-cdr a rd rs1)      (i-i a rd rs1 0 1 op-pair))
-(define (i-set-car a rs2 rs1) (i-s a rs1 rs2 0 2 op-pair))
-(define (i-set-cdr a rs2 rs1) (i-s a rs1 rs2 0 3 op-pair))
+;; custom-0 is RV32I's load and store with the width field spent on the check.
+;; Always a word; funct3 says what the base register has to be; the offset says
+;; which slot. car and cdr are offsets 0 and 4 of the same instruction.
+(define (i-lref a rd rs1 off)  (i-i a rd rs1 off 0 op-pair))
+(define (i-lobj a rd rs1 off)  (i-i a rd rs1 off 1 op-pair))
+(define (i-sref a rs2 rs1 off) (i-s a rs1 rs2 off 4 op-pair))
+(define (i-sobj a rs2 rs1 off) (i-s a rs1 rs2 off 5 op-pair))
+
+(define (i-car a rd rs1)      (i-lref a rd rs1 0))
+(define (i-cdr a rd rs1)      (i-lref a rd rs1 4))
+(define (i-set-car a rs2 rs1) (i-sref a rs2 rs1 0))
+(define (i-set-cdr a rs2 rs1) (i-sref a rs2 rs1 4))
 
 ;; rd, object, index - and for the stores rd is the value being written.
 (define (i-ldx a rd obj idx ty)  (i-r a ty rd obj idx 0 op-index))

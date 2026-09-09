@@ -398,14 +398,14 @@
      ((%eq? kind 'local) (load-local c (cadr loc) reg))
      ((%eq? kind 'boxed-local)
       (load-local c (cadr loc) reg)
-      (i-lw a reg reg 0))
+      (i-lref a reg reg 0))
      ((%eq? kind 'free)
       (i-lw a $t6 $s0 clo-slot)
-      (i-lw a reg $t6 (%* 4 (%+ clo-free (cadr loc)))))
+      (i-lobj a reg $t6 (%* 4 (%+ clo-free (cadr loc)))))
      ((%eq? kind 'boxed-free)
       (i-lw a $t6 $s0 clo-slot)
-      (i-lw a reg $t6 (%* 4 (%+ clo-free (cadr loc))))
-      (i-lw a reg reg 0))
+      (i-lobj a reg $t6 (%* 4 (%+ clo-free (cadr loc))))
+      (i-lref a reg reg 0))
      ;; One instruction, off the register that says which instance is running.
      ((%eq? kind 'instance) (i-lw a reg $s2 (%* 4 (cadr loc))))
      (else
@@ -437,10 +437,10 @@
      ((%eq? kind 'boxed-local) (load-local c (cadr loc) reg))
      ((%eq? kind 'free)
       (i-lw a $t6 $s0 clo-slot)
-      (i-lw a reg $t6 (%* 4 (%+ clo-free (cadr loc)))))
+      (i-lobj a reg $t6 (%* 4 (%+ clo-free (cadr loc)))))
      ((%eq? kind 'boxed-free)
       (i-lw a $t6 $s0 clo-slot)
-      (i-lw a reg $t6 (%* 4 (%+ clo-free (cadr loc)))))
+      (i-lobj a reg $t6 (%* 4 (%+ clo-free (cadr loc)))))
      (else (emit-load c loc reg)))))
 
 (define (boxed-location? loc)
@@ -452,14 +452,14 @@
      ((%eq? kind 'local) (store-local c (cadr loc) reg))
      ((%eq? kind 'boxed-local)
       (load-local c (cadr loc) $t6)
-      (i-sw a reg $t6 0))
+      (i-sref a reg $t6 0))
      ((%eq? kind 'free)
       (i-lw a $t6 $s0 clo-slot)
-      (i-sw a reg $t6 (%* 4 (%+ clo-free (cadr loc)))))
+      (i-sobj a reg $t6 (%* 4 (%+ clo-free (cadr loc)))))
      ((%eq? kind 'boxed-free)
       (i-lw a $t6 $s0 clo-slot)
-      (i-lw a $t6 $t6 (%* 4 (%+ clo-free (cadr loc))))
-      (i-sw a reg $t6 0))
+      (i-lobj a $t6 $t6 (%* 4 (%+ clo-free (cadr loc))))
+      (i-sref a reg $t6 0))
      ((%eq? kind 'instance) (i-sw a reg $s2 (%* 4 (cadr loc))))
      (else
       (let ((sym (cadr loc)))
@@ -535,7 +535,7 @@
     (if (cx-leaf? c)
         (begin
           (i-mv a $lit-save $s1)
-          (i-lw a $s1 $t0 (%* 4 clo-code)))
+          (i-lobj a $s1 $t0 (%* 4 clo-code)))
         (begin
           ;; A function calling itself by name knows the answer to every
           ;; question the general call sequence asks: which closure (the one
@@ -558,7 +558,7 @@
           ;; Point s1 at this function's own literal vector, which lives in
           ;; the code object hanging off the closure. Every constant, symbol
           ;; and inner code object the body mentions is one load from here.
-          (i-lw a $s1 $t0 (%* 4 clo-code))))))
+          (i-lobj a $s1 $t0 (%* 4 clo-code))))))
 
 (define (emit-epilogue c)
   (let ((a (cx-asm c)))
@@ -979,14 +979,14 @@
   (definline '%obj-type 1
     (lambda (c)
       (let ((a (cx-asm c)))
-        (i-lw a $t2 $a0 -4)
+        (i-lobj a $t2 $a0 -4)
         (i-andi a $t2 $t2 255)
         (i-slli a $a0 $t2 1)
         (i-ori a $a0 $a0 1))))
   (definline '%obj-len 1
     (lambda (c)
       (let ((a (cx-asm c)))
-        (i-lw a $t2 $a0 -4)
+        (i-lobj a $t2 $a0 -4)
         (i-srli a $t2 $t2 8)
         (i-slli a $a0 $t2 1)
         (i-ori a $a0 $a0 1))))
@@ -1189,30 +1189,30 @@
 
   ;; ---- symbols ----
   (definline '%symbol-name 1
-    (lambda (c) (i-lw (cx-asm c) $a0 $a0 (%* 4 sym-name))))
+    (lambda (c) (i-lobj (cx-asm c) $a0 $a0 (%* 4 sym-name))))
   (definline '%symbol-value 1
-    (lambda (c) (i-lw (cx-asm c) $a0 $a0 (%* 4 sym-value))))
+    (lambda (c) (i-lobj (cx-asm c) $a0 $a0 (%* 4 sym-value))))
   (definline '%set-symbol-value! 2
     (lambda (c)
-      (i-sw (cx-asm c) $a1 $a0 (%* 4 sym-value))
+      (i-sobj (cx-asm c) $a1 $a0 (%* 4 sym-value))
       (i-mv (cx-asm c) $a0 $a1)))
   (definline '%symbol-function 1
-    (lambda (c) (i-lw (cx-asm c) $a0 $a0 (%* 4 sym-function))))
+    (lambda (c) (i-lobj (cx-asm c) $a0 $a0 (%* 4 sym-function))))
   (definline '%set-symbol-function! 2
     (lambda (c)
-      (i-sw (cx-asm c) $a1 $a0 (%* 4 sym-function))
+      (i-sobj (cx-asm c) $a1 $a0 (%* 4 sym-function))
       (i-mv (cx-asm c) $a0 $a1)))
   (definline '%symbol-plist 1
-    (lambda (c) (i-lw (cx-asm c) $a0 $a0 (%* 4 sym-plist))))
+    (lambda (c) (i-lobj (cx-asm c) $a0 $a0 (%* 4 sym-plist))))
   (definline '%set-symbol-plist! 2
     (lambda (c)
-      (i-sw (cx-asm c) $a1 $a0 (%* 4 sym-plist))
+      (i-sobj (cx-asm c) $a1 $a0 (%* 4 sym-plist))
       (i-mv (cx-asm c) $a0 $a1)))
   (definline '%symbol-flags 1
-    (lambda (c) (i-lw (cx-asm c) $a0 $a0 (%* 4 sym-flags))))
+    (lambda (c) (i-lobj (cx-asm c) $a0 $a0 (%* 4 sym-flags))))
   (definline '%set-symbol-flags! 2
     (lambda (c)
-      (i-sw (cx-asm c) $a1 $a0 (%* 4 sym-flags))
+      (i-sobj (cx-asm c) $a1 $a0 (%* 4 sym-flags))
       (i-mv (cx-asm c) $a0 $a1)))
 
   ;; ---- machine ----

@@ -740,41 +740,47 @@ fn op_bad(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 }
 
 // ------------------------------------------------------------------- pairs
-/// The custom-0 opcode space: `car`, `cdr`, `set-car!` and `set-cdr!`, with
-/// the type check in the instruction.
+/// The custom-0 opcode space: a load or a store through a checked reference.
 ///
-/// The tag scheme was built for this. A pair is a word whose low three bits
-/// are clear, so a fixnum (odd), an immediate (2 mod 8) and an object
-/// (4 mod 8) are all rejected by a mask the processor computes alongside the
-/// address it was going to form anyway. The check is therefore free, and
-/// `(car 5)` becomes a trap that names the value instead of a load from
-/// address 5.
+/// This is RV32I's LOAD and STORE with the width field spent on something
+/// better. Every access here is a word, because every Lisp value is; the three
+/// bits that would have said byte-or-halfword say instead what the base
+/// register has to be, and the twelve-bit offset says which slot.
 ///
-/// nil is the word 0, which passes: it is a legal pair whose car and cdr are
-/// both nil, and a great deal of list code leans on that. It does not pass on
-/// the store side, where writing through nil would quietly scribble on the
-/// global vector at address 0.
+///     funct3 0   load  through a pair;   nil is a pair and reads as nils
+///     funct3 1   load  through an object
+///     funct3 4   store through a pair;   nil has no cell and is refused
+///     funct3 5   store through an object
 ///
-///     funct3 0   car rd, rs1        rd <- [rs1]
-///     funct3 1   cdr rd, rs1        rd <- [rs1 + 4]
-///     funct3 2   set-car! rs2, rs1  [rs1] <- rs2      (S-type)
-///     funct3 3   set-cdr! rs2, rs1  [rs1 + 4] <- rs2
+/// `car` is offset 0 and `cdr` is offset 4 of the same instruction, which is
+/// how four opcodes became two. The offset is what makes it general: a
+/// symbol's value cell, a closure's code object and an object's header were
+/// all bare `lw`s that proved nothing, and they are checked now for the same
+/// one instruction they always cost.
+///
+/// What this does *not* do is bound the offset. That is `ldx`'s job, and it
+/// needs the length out of the header to do it. Here the offset is a constant
+/// the compiler wrote, into a layout it decided; the check is that the thing
+/// being reached into is the kind of thing that has such a layout at all.
 #[inline(never)]
-fn op_pair(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
+fn op_ref(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let f = f3(w);
-    #[cfg(feature = "isaprof")]
-    unsafe {
-        *m.prof.get_unchecked_mut(crate::prof::PAIR0 + f as usize) += 1;
-    }
-    if f > 3 {
+    if f & 3 > 1 {
         return illegal(m, w, pc, fuel);
     }
     let v = r(m, rs1(w));
-    let store = f & 2 != 0;
-    if v & 7 != 0 || (store && v == 0) {
+    let store = f & 4 != 0;
+    let want_object = f & 1 != 0;
+    let ok = if want_object {
+        v & 7 == 4
+    } else {
+        v & 7 == 0 && !(store && v == 0)
+    };
+    if !ok {
         return m.fault(C_TYPE, v, pc, fuel);
     }
-    let a = v + ((f & 1) << 2);
+    let off = if store { imm_s(w) } else { imm_i(w) };
+    let a = v.wrapping_add(off);
     if !m.in_ram(a, 4) {
         return m.fault(if store { C_SFAULT } else { C_LFAULT }, a, pc, fuel);
     }
@@ -1288,7 +1294,7 @@ static TABLE: [Handler; 64] = [
     // ---- 32-bit, indexed by opcode[6:2] (tok 32..63) ----
     op_load,   // 00 LOAD
     op_bad,    // 01 LOAD-FP
-    op_pair,   // 02 custom-0: car, cdr and their setters, tag-checked
+    op_ref,    // 02 custom-0: a load or store through a checked reference
     op_fence,  // 03 MISC-MEM
     op_imm,    // 04 OP-IMM
     op_auipc,  // 05 AUIPC

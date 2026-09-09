@@ -752,6 +752,28 @@ fn cases() -> Vec<Case> {
         v
     };
     c("car", pair(vec![car(A0, A1)]), A0, 111);
+    // car and cdr are offsets 0 and 4 of the same instruction now, and the
+    // offset is general: a slot access off an object is the same opcode with
+    // funct3 saying "object" instead of "pair".
+    c("lref at 4", pair(vec![lref(A0, A1, 4)]), A0, 222);
+    c(
+        "sref at 4",
+        pair(vec![addi(A3, ZERO, 77), sref(A3, A1, 4), lw(A0, A1, 4)]),
+        A0,
+        77,
+    );
+    c(
+        "lobj reads a header",
+        vec(vec![lobj(A0, A1, -4)]),
+        A0,
+        (3 << 8) | 3,
+    );
+    c(
+        "sobj at a slot",
+        vec(vec![addi(A3, ZERO, 88), sobj(A3, A1, 4), lw(A0, A1, 4)]),
+        A0,
+        88,
+    );
     c("cdr", pair(vec![cdr(A0, A1)]), A0, 222);
     c(
         "set-car!",
@@ -875,6 +897,26 @@ pub fn run_all() -> bool {
         let (cause, tval) = trap(vec![addi(A3, ZERO, 4), tlw(A0, A3, 0)]);
         extra.push(("tlw of a non-address traps", cause == C_TYPE));
         extra.push(("...naming that value too", tval == 4));
+
+        // A pair reference and an object reference are different checks, and
+        // each refuses what the other accepts.
+        let mut v = vec![];
+        li32(&mut v, A3, 0x3004); // an object pointer
+        v.push(lref(A0, A3, 0));
+        let (cause, _) = trap(v);
+        extra.push(("lref refuses an object", cause == C_TYPE));
+
+        let mut v = vec![];
+        li32(&mut v, A3, 0x3000); // a pair pointer
+        v.push(lobj(A0, A3, 0));
+        let (cause, _) = trap(v);
+        extra.push(("lobj refuses a pair", cause == C_TYPE));
+
+        let (cause, _) = trap(vec![lobj(A0, ZERO, 0)]);
+        extra.push(("lobj refuses nil", cause == C_TYPE));
+
+        let (cause, _) = trap(vec![addi(A3, ZERO, 77), sref(A3, ZERO, 0)]);
+        extra.push(("a store through nil still traps", cause == C_TYPE));
     }
 
     {
