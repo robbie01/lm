@@ -159,7 +159,8 @@
   asm-literal asm-new asm-origin asm-place asm-place-at asm-buf asm-fixups
   asm-labels asm-nlits asm-set-len! asm-set-origin! csr-cycle
   csr-mcause csr-mepc csr-mie csr-mscratch csr-mstatus csr-mtval csr-mtvec
-  i-add i-addi i-and i-andi i-beq i-beqz i-bge i-blt i-bltu i-bne i-bnez
+  i-add i-addi i-addi-w i-and i-andi i-beq i-beqz i-bge i-blt i-bltu i-bne
+  i-bnez
   i-call-reg i-car i-cdr i-lref i-lobj i-sref i-sobj i-csrrci i-csrrs i-csrrsi i-csrrw i-div i-ecall
   i-j i-jal i-jr i-lbu i-ldx i-ldxb i-ldxbi i-ldxi i-lhu i-li i-li-fixnum
   i-lw i-mret

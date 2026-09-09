@@ -244,7 +244,13 @@
 (define (i-lui a rd imm20)   (i-u a rd imm20 op-lui))
 (define (i-auipc a rd imm20) (i-u a rd imm20 op-auipc))
 
-(define (i-addi a rd rs1 imm) (i-i a rd rs1 imm 0 op-imm))
+(define (i-addi a rd rs1 imm)
+  (cond
+   ((if (%= rs1 $zero) (if (%> rd 0) (c-imm6? imm) nil) nil) (i-c-li a rd imm))
+   ((if (%= imm 0) (if (%> rd 0) (%> rs1 0) nil) nil) (i-c-mv a rd rs1))
+   ((if (%= rd rs1) (if (%> rd 0) (if (%= imm 0) nil (c-imm6? imm)) nil) nil)
+    (i-c-addi a rd imm))
+   (else (i-i a rd rs1 imm 0 op-imm))))
 (define (i-slti a rd rs1 imm) (i-i a rd rs1 imm 2 op-imm))
 (define (i-sltiu a rd rs1 imm) (i-i a rd rs1 imm 3 op-imm))
 (define (i-xori a rd rs1 imm) (i-i a rd rs1 imm 4 op-imm))
@@ -276,14 +282,84 @@
 
 (define (i-lb a rd rs1 off)  (i-i a rd rs1 off 0 op-load))
 (define (i-lh a rd rs1 off)  (i-i a rd rs1 off 1 op-load))
-(define (i-lw a rd rs1 off)  (i-i a rd rs1 off 2 op-load))
+;; ---------------------------------------------------------------- compressed
+;; The core has decoded sixteen-bit instructions since the day it was written
+;; and nothing ever emitted one. Forty-four per cent of the image turns out to
+;; fit, so the emitters below reach for a short form when there is one.
+;;
+;; Only forms whose encoding does not depend on a distance are compressed. That
+;; is what makes this safe with no relaxation pass: shortening an instruction
+;; can only shorten the branches around it, and branch offsets are patched from
+;; recorded positions after the layout is final. Jumps and branches with an
+;; immediate target are therefore left alone.
+;;
+;; The other rule is that anything re-emitted later at a recorded offset - the
+;; two halves of `la`, and the one instruction in the prologue that says how big
+;; the frame is - must keep its width. Those use the `-w` emitters below.
+(define (c-imm6? v) (if (%>= v -32) (%< v 32) nil))
+(define (c-reg? r) (if (%>= r 8) (%<= r 15) nil))
+(define (c-word-off? o hi)
+  (if (%>= o 0) (if (%< o hi) (%= 0 (%logand o 3)) nil) nil))
+
+(define (c-ci a base rd v)
+  (asm-half a (%logior base
+                       (%logior (%lsh (%logand rd 31) 7)
+                                (%logior (%lsh (%logand v 31) 2)
+                                         (%lsh (%logand v 32) 7))))))
+
+(define (i-c-addi a rd v) (c-ci a #x0001 rd v))
+(define (i-c-li a rd v)   (c-ci a #x4001 rd v))
+(define (i-c-mv a rd rs)
+  (asm-half a (%logior #x8002 (%logior (%lsh rd 7) (%lsh rs 2)))))
+(define (i-c-jr a rs)   (asm-half a (%logior #x8002 (%lsh rs 7))))
+(define (i-c-jalr a rs) (asm-half a (%logior #x9002 (%lsh rs 7))))
+(define (i-c-lwsp a rd off)
+  (asm-half a (%logior #x4002
+                       (%logior (%lsh rd 7)
+                                (%logior (%lsh (%logand off #x1c) 2)
+                                         (%logior (%lsh (%logand off #x20) 7)
+                                                  (%lsh (%logand off #xc0) -4)))))))
+(define (i-c-swsp a rs off)
+  (asm-half a (%logior #xc002
+                       (%logior (%lsh rs 2)
+                                (%logior (%lsh (%logand off #x3c) 7)
+                                         (%lsh (%logand off #xc0) 1))))))
+(define (c-mem a base rd rs1 off)
+  (asm-half a (%logior base
+                       (%logior (%lsh (%- rd 8) 2)
+                                (%logior (%lsh (%- rs1 8) 7)
+                                         (%logior (%lsh (%logand off #x38) 7)
+                                                  (%logior (%lsh (%logand off 4) 4)
+                                                           (%lsh (%logand off #x40) -1))))))))
+(define (i-c-lw a rd rs1 off) (c-mem a #x4000 rd rs1 off))
+(define (i-c-sw a rs2 rs1 off) (c-mem a #xc000 rs2 rs1 off))
+
+;; ---- the wide forms, for the two places that patch themselves ----
+(define (i-addi-w a rd rs1 imm) (i-i a rd rs1 imm 0 op-imm))
+
+(define (i-lw a rd rs1 off)
+  (cond
+   ((if (%= rs1 $sp) (if (%> rd 0) (c-word-off? off 256) nil) nil)
+    (i-c-lwsp a rd off))
+   ((if (c-reg? rd) (if (c-reg? rs1) (c-word-off? off 128) nil) nil)
+    (i-c-lw a rd rs1 off))
+   (else (i-i a rd rs1 off 2 op-load))))
 (define (i-lbu a rd rs1 off) (i-i a rd rs1 off 4 op-load))
 (define (i-lhu a rd rs1 off) (i-i a rd rs1 off 5 op-load))
 (define (i-sb a rs2 rs1 off) (i-s a rs1 rs2 off 0 op-store))
 (define (i-sh a rs2 rs1 off) (i-s a rs1 rs2 off 1 op-store))
-(define (i-sw a rs2 rs1 off) (i-s a rs1 rs2 off 2 op-store))
+(define (i-sw a rs2 rs1 off)
+  (cond
+   ((if (%= rs1 $sp) (c-word-off? off 256) nil) (i-c-swsp a rs2 off))
+   ((if (c-reg? rs2) (if (c-reg? rs1) (c-word-off? off 128) nil) nil)
+    (i-c-sw a rs2 rs1 off))
+   (else (i-s a rs1 rs2 off 2 op-store))))
 
-(define (i-jalr a rd rs1 off) (i-i a rd rs1 off 0 op-jalr))
+(define (i-jalr a rd rs1 off)
+  (cond
+   ((if (%= off 0) (if (%> rs1 0) (%= rd 0) nil) nil) (i-c-jr a rs1))
+   ((if (%= off 0) (if (%> rs1 0) (%= rd $ra) nil) nil) (i-c-jalr a rs1))
+   (else (i-i a rd rs1 off 0 op-jalr))))
 
 ;; custom-0 is RV32I's load and store with the width field spent on the check.
 ;; Always a word; funct3 says what the base register has to be; the offset says
@@ -487,9 +563,11 @@
 ;; Address of a label, as auipc + addi. Always two instructions so that
 ;; offsets stay stable.
 (define (i-la a rd label)
+  ;; Both halves stay wide: `asm-resolve` rewinds to this offset and writes
+  ;; them again, and it has to write the same number of bytes.
   (asm-fixup a 'la rd label)
   (i-auipc a rd 0)
-  (i-addi a rd rd 0))
+  (i-addi-w a rd rd 0))
 
 ;; ---------------------------------------------------------------- resolution
 (define (asm-resolve a)
@@ -530,7 +608,7 @@
                  (save (asm-len a)))
             (asm-set-len! a off)
             (i-auipc a rd hi)
-            (i-addi a rd rd lo-signed)
+            (i-addi-w a rd rd lo-signed)
             (asm-set-len! a save)))
          (else (error "assembler: unknown fixup" kind)))))
     (asm-set-fixups! a nil)

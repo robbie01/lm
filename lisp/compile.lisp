@@ -549,7 +549,7 @@
               (begin (cx-set-self-label! c ok) (cx-set-self-arity! c nreq)))
           (i-mv a $t3 $sp)
           (cx-set-framefix! c (asm-len a))  ; the one word that knows the frame size
-          (i-addi a $sp $sp 0)            ; patched by finish-frame
+          (i-addi-w a $sp $sp 0)          ; patched by size-frame, so it stays wide
           (i-sw a $ra $t3 -4)
           (i-sw a $s0 $t3 -8)
           (i-sw a $t0 $t3 -12)
@@ -588,17 +588,29 @@
          (len (asm-len a))
          (i 0))
     (while (%< i len)
-      (let ((w (%logior (%logior (%bytes-ref buf i)
-                                 (%lsh (%bytes-ref buf (%+ i 1)) 8))
-                        (%logior (%lsh (%bytes-ref buf (%+ i 2)) 16)
-                                 (%lsh (%bytes-ref buf (%+ i 3)) 24)))))
-        (if (%= 1 (%logand (%lsh w -7) 31))
-            (let ((op (%logand w 127)))
-              (if (if (%= op #x6f) t (%= op #x67))
+      (let ((lo (%logior (%bytes-ref buf i) (%lsh (%bytes-ref buf (%+ i 1)) 8))))
+        (if (%= 3 (%logand lo 3))
+            (begin
+              ;; jal or jalr writing ra
+              (if (%= 1 (%logand (%lsh lo -7) 31))
+                  (let ((op (%logand lo 127)))
+                    (if (if (%= op #x6f) t (%= op #x67))
+                        (error "compile: a leaf that calls" (cx-name c))
+                        nil))
+                  nil)
+              (set! i (%+ i 4)))
+            (begin
+              ;; c.jalr, which is c.ebreak when its register field is zero
+              (if (%= #x9002 (%logand lo #xf07f))
+                  (if (%> (%logand (%lsh lo -7) 31) 0)
+                      (error "compile: a leaf that calls" (cx-name c))
+                      nil)
+                  nil)
+              ;; and c.jal, which nothing emits but which would be a call
+              (if (%= #x2001 (%logand lo #xe003))
                   (error "compile: a leaf that calls" (cx-name c))
-                  nil))
-            nil))
-      (set! i (%+ i 4)))
+                  nil)
+              (set! i (%+ i 2))))))
     0))
 
 (define (size-frame c)
@@ -610,7 +622,7 @@
          (save (asm-len a)))
     (if (%> frame 2000) (error "compile: frame too large in" (cx-name c)) nil)
     (asm-set-len! a off)
-    (i-addi a $sp $sp (%- 0 frame))
+    (i-addi-w a $sp $sp (%- 0 frame))
     (asm-set-len! a save)
     frame))
 

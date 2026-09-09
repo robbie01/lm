@@ -80,10 +80,21 @@ per-task buffers cause trouble.
 make dispatch on type cheap. There are only 57 such sites today. Build it when
 there is a generic dispatch layer to justify it.
 
+**Compressed branches and jumps.** `c.j`, `c.jal`, `c.beqz` and `c.bnez` are
+not emitted, because their encoding depends on a distance and shortening one
+can put a target out of range — which needs a relaxation pass the assembler
+does not have. Everything else that fits is compressed. Worth about another
+1.6% of the image.
+
 **Compare-immediate-and-branch.** 2.8% of executed instructions are a `li`
 followed by a branch on it. There is no fix available: RISC-V has no such
 instruction, `slti; bnez` is the same two instructions, and inventing a branch
 format in custom space breaks every tool that walks the encoding.
+
+**`c.lw` and `c.sw` almost never apply**, because frame slots are at negative
+offsets from `s0` and the compressed forms only encode unsigned ones. Laying
+the frame out upward would make roughly 30% more of the image compressible —
+or the register allocator would remove those loads instead.
 
 ## Loose ends
 

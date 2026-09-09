@@ -476,6 +476,65 @@ pub fn fence() -> u32 {
     0x0ff0_000f
 }
 
+/// The rule for when a 32-bit instruction has a 16-bit equivalent, written
+/// out a second time so that the assembler's copy has something independent
+/// to disagree with. Returns the short form or the original.
+///
+/// Only forms whose encoding does not depend on a distance, which is what
+/// lets the assembler shorten instructions without a relaxation pass.
+pub fn compress(w: u32) -> u32 {
+    let rd = (w >> 7) & 31;
+    let rs1 = (w >> 15) & 31;
+    let rs2 = (w >> 20) & 31;
+    let f3 = (w >> 12) & 7;
+    let imm_i = ((w as i32) >> 20) as i32;
+    let imm_s = ((((w & 0xfe00_0000) as i32) >> 20) | ((w >> 7) & 0x1f) as i32) as i32;
+    let i6 = |v: i32| (-32..32).contains(&v);
+    let creg = |r: u32| (8..=15).contains(&r);
+    let woff = |o: i32, hi: i32| o >= 0 && o < hi && o % 4 == 0;
+    match w & 0x7f {
+        0x13 if f3 == 0 => {
+            if rs1 == 0 && rd != 0 && i6(imm_i) {
+                c_li(rd, imm_i)
+            } else if imm_i == 0 && rd != 0 && rs1 != 0 {
+                c_mv(rd, rs1)
+            } else if rd == rs1 && rd != 0 && imm_i != 0 && i6(imm_i) {
+                c_addi(rd, imm_i)
+            } else {
+                w
+            }
+        }
+        0x03 if f3 == 2 => {
+            if rs1 == SP && rd != 0 && woff(imm_i, 256) {
+                c_lwsp(rd, imm_i as u32)
+            } else if creg(rd) && creg(rs1) && woff(imm_i, 128) {
+                c_lw(rd, rs1, imm_i as u32)
+            } else {
+                w
+            }
+        }
+        0x23 if f3 == 2 => {
+            if rs1 == SP && woff(imm_s, 256) {
+                c_swsp(rs2, imm_s as u32)
+            } else if creg(rs2) && creg(rs1) && woff(imm_s, 128) {
+                c_sw(rs2, rs1, imm_s as u32)
+            } else {
+                w
+            }
+        }
+        0x67 if f3 == 0 && imm_i == 0 && rs1 != 0 => {
+            if rd == 0 {
+                c_jr(rs1)
+            } else if rd == RA {
+                c_jalr(rs1)
+            } else {
+                w
+            }
+        }
+        _ => w,
+    }
+}
+
 // -------------------------------------------------------------- compressed
 pub fn c_addi(rd: u32, i: i32) -> u32 {
     let u = i as u32;

@@ -304,13 +304,23 @@ fn rust_side() -> Vec<u8> {
     let lo = if lo >= 2048 { lo - 4096 } else { lo };
     let hi = ((d - lo) >> 12) & 0xfffff;
     w.push(auipc(A0, hi as u32));
+    // `la` patches itself later and so keeps its width on both sides.
+    let la_addi = w.len();
     w.push(addi(A0, A0, lo));
     w.push(addi(ZERO, ZERO, 0)); // nop
     w.push(jalr(ZERO, RA, 0)); // fwd: ret
 
+    // The Lisp side compresses as it emits; this side builds wide instructions
+    // and compresses at the end. Two routes to the same bytes, which is the
+    // point of having two encoders.
     let mut out = Vec::with_capacity(w.len() * 4);
-    for x in w {
-        out.extend_from_slice(&x.to_le_bytes());
+    for (i, x) in w.into_iter().enumerate() {
+        let c = if i == la_addi { x } else { compress(x) };
+        if c & 3 == 3 {
+            out.extend_from_slice(&c.to_le_bytes());
+        } else {
+            out.extend_from_slice(&(c as u16).to_le_bytes());
+        }
     }
     out
 }
@@ -342,19 +352,34 @@ pub fn run() -> bool {
         );
         return false;
     }
+    // Instruction by instruction, because they are not all the same length any
+    // more: a halfword whose low two bits are not both set is a compressed one.
     let mut bad = 0;
-    for i in (0..want.len()).step_by(4) {
-        let g = u32::from_le_bytes([got[i], got[i + 1], got[i + 2], got[i + 3]]);
-        let x = u32::from_le_bytes([want[i], want[i + 1], want[i + 2], want[i + 3]]);
+    let mut n = 0;
+    let mut i = 0;
+    while i < want.len() {
+        let half = u16::from_le_bytes([want[i], want[i + 1]]) as u32;
+        let wide = half & 3 == 3;
+        let sz = if wide { 4 } else { 2 };
+        let pick = |v: &[u8]| -> u32 {
+            if wide {
+                u32::from_le_bytes([v[i], v[i + 1], v[i + 2], v[i + 3]])
+            } else {
+                u16::from_le_bytes([v[i], v[i + 1]]) as u32
+            }
+        };
+        let (g, x) = (pick(&got), pick(&want));
         if g != x {
-            println!("asmdiff: word {:>3}: lisp {g:08x}  rust {x:08x}", i / 4);
+            println!("asmdiff: instruction {n:>3}: lisp {g:08x}  rust {x:08x}");
             bad += 1;
         }
+        n += 1;
+        i += sz;
     }
     if bad == 0 {
-        println!("asmdiff: {} instructions identical", want.len() / 4);
+        println!("asmdiff: {n} instructions identical, {} bytes", want.len());
     } else {
-        println!("asmdiff: {bad} of {} instructions differ", want.len() / 4);
+        println!("asmdiff: {bad} of {n} instructions differ");
     }
     bad == 0
 }
