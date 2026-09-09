@@ -78,6 +78,9 @@
 (define lg-package #x1d0)
 
 ;; ---- object representation ----
+(define obj-bins #x200)
+(define obj-bin-count #x40)
+(define t-free #x0)
 (define t-symbol #x1)
 (define t-string #x2)
 (define t-vector #x3)

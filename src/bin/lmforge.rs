@@ -59,6 +59,25 @@ enum Cmd {
         check: bool,
     },
 
+    /// Slide object space down in a saved image, and write it out again
+    ///
+    /// `build` does this on the way out. This is for an image that was written
+    /// by the machine itself - a rebuild, or a `(save-image)` - which has no
+    /// forge in the loop and so carries every hole the collector left.
+    Compact {
+        /// The image to compact
+        #[arg(short, long, default_value = "next.img")]
+        from: String,
+
+        /// Where to write the result
+        #[arg(short, long)]
+        out: Option<String>,
+
+        /// Report what moved and what was pinned
+        #[arg(short, long)]
+        verbose: bool,
+    },
+
     /// Regenerate lisp/layout.lisp from the Rust definitions
     ///
     /// The memory map and object layout are defined once, in Rust, and emitted
@@ -72,6 +91,10 @@ fn main() -> std::process::ExitCode {
     let code = match cli.command {
         Cmd::Build { out, verbose } => lm::forge::build(&out, verbose),
         Cmd::Rebuild { from, out, verbose, check } => lm::forge::rebuild(&from, &out, verbose, check),
+        Cmd::Compact { from, out, verbose } => {
+            let out = out.unwrap_or_else(|| from.clone());
+            lm::forge::compact::compact_image(&from, &out, verbose)
+        }
         Cmd::Layout => {
             lm::forge::write_layout();
             println!("wrote lisp/layout.lisp");

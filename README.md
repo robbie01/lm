@@ -50,6 +50,7 @@ tests.
 | `src/forge/hostlisp.rs` | the bootstrap interpreter |
 | `src/forge/read.rs` | the bootstrap reader: lists, and nothing else |
 | `src/forge/mod.rs` | the build driver |
+| `src/forge/compact.rs` | sliding object space down on the way into an image |
 | `lisp/asm.lisp` | RV32 assembler, in Lisp |
 | `lisp/compile.lisp` | Lisp → RISC-V compiler, in Lisp |
 | `lisp/gc.lisp` | the collector |
@@ -522,9 +523,10 @@ about two seconds of machine time — so the self-hosted path is **faster than
 the bootstrap it replaces**, not a sacrifice:
 
 ```
-lmforge build                       kick.img in 10.6s
-lmforge rebuild --from kick.img     next.img in 2.2s, 1446 forms
+lmforge build                       kick.img,  949 KiB, in 11s
+lmforge rebuild --from kick.img     next.img, 1697 KiB, in 2.4s, 1446 forms
 lmforge rebuild --check             compile everything, collect, write nothing
+lmforge compact [-f IMG] [-o OUT]   slide object space down in a saved image
 ```
 
 What both of these buy is the end of mirroring. There used to be a second
@@ -539,9 +541,47 @@ Two things to know about the rebuild. The compiler being recompiled is the
 compiler doing the compiling, and calls go through symbol value cells, so the
 new one takes over partway through and finishes the job; if it is broken, the
 way you find out is that the build goes wrong somewhere confusing. And a
-rebuilt image is a **used machine** rather than a fresh one — it carries the
-holes left by the code it replaced, so it is bigger, and each generation is a
-little bigger again. `lmforge build` is how you renormalise.
+rebuilt image is a **used machine** rather than a fresh one — every function
+it replaced left a hole where it used to be. The forge closes the ones in
+object space on the way out (see below); the ones in code space it cannot,
+because moving machine code means finding every call site, so a rebuilt image
+is still larger than a fresh one and grows a little each generation.
+`lmforge build` is how you renormalise.
+
+### Compacting on the way out
+
+Object space is written by an allocator that never moves anything, and by the
+end of a build most of it is holes: the compiler's expanded macro trees,
+assembler buffers and analysis lists, allocated once and dead ever since. That
+is not a fragmented heap, it is a **high water mark** — the build really did
+need the memory — but an image is a file, and a file should be the size of
+what is in it.
+
+The machine cannot fix this itself, and `gc.lisp` says why: its collector is
+written in the language it collects, and reaches its functions through symbol
+value cells and its constants through the literal vector of its own code
+object. Every one of those is an object. Move them and it loses the ability to
+run, halfway through running.
+
+The forge is under no such obligation. By the time `src/forge/compact.rs`
+runs, the heap has stopped, and liveness has already been decided by the
+machine's own collector — which knows about task stacks and pinned registers —
+so object space is a walkable sequence of live blocks and `t-free` holes, and
+all that is left is to close them. Pointers are rewritten first and everything
+slides afterwards, the same order the machine uses for pairs. Words in the
+Exec pool are raw, so anything there that looks like an object pointer pins
+what it names rather than being rewritten; on a freshly built image nothing
+does.
+
+```
+objects 2858 KiB -> 401 KiB, 17,185 blocks moved, 0 pinned
+kick.img         3403 KiB -> 949 KiB
+```
+
+`lmforge compact` is the same pass on an image that came off the disk, and
+`rebuild` runs it on its own output. A live image pins more — its tasks really
+are holding objects — so it compacts less well: 2570 KiB of object space with
+592 KiB live in it, which still takes the file from 4138 KiB to 1697 KiB.
 
 ## Exec
 
@@ -667,11 +707,9 @@ anything in the heap.
 `lmdev reach` walks the heap once per package, from that package's own symbols,
 and records for every cell the set of packages that can get to it. It answers
 what a namespace actually weighs - and it is how the dead object space in a
-fresh image was found. Pairs are compacted, so 100% of the pairs in the file
-are live; code is 99% live; objects are 14%. `gc-for-image` now blanks every
-free block on its way out, which drops the pages that hold nothing at all
-(568 KiB, a fifth of the file). The 1.9 MB still stranded is on pages that
-hold one survivor each, and only compacting object space would reclaim it.
+fresh image was found: pairs were 100% live, code 99%, and objects 14%. It
+now reports every space as fully live, which is the check that the compaction
+above is doing what it claims.
 
 ## Known limits
 
@@ -682,14 +720,17 @@ hold one survivor each, and only compacting object space would reclaim it.
 - No condition system: an error prints a backtrace and restarts the reader on a
   fresh stack. That is a reset, not an unwind — nothing gets a chance to clean
   up on the way past, and there is no way to catch anything.
-- Objects and code are collected but never moved, so object space can still
-  fragment over a long session. Its free lists are exact-fit and segregated,
-  which handles the usual case where sizes repeat.
+- The machine collects objects and code but never moves them, so object space
+  can still fragment over a long session. Its free lists are exact-fit and
+  segregated, which handles the usual case where sizes repeat, and the forge
+  compacts object space on the way into an image — which is the only place it
+  has mattered so far.
 - A fault inside a task with a prompt behind it restarts that prompt; one
   without a prompt ends the task. Neither unwinds anything on the way.
-- A rebuilt image carries the holes left by the code it replaced, so it is
-  bigger than a freshly built one and grows a little each generation.
-  `lmforge build` renormalises it.
+- A rebuilt image carries the holes left in *code space* by the functions it
+  replaced — object space is compacted, code space is not, because moving
+  machine code means finding every call site. So it is bigger than a freshly
+  built one and grows a little each generation. `lmforge build` renormalises.
 - Thirty-two words per suspended task are scanned conservatively, and what they
   reach is pinned for that cycle. `(room)` reports how many.
 - A collection walks the whole used heap, so it costs proportional to the high

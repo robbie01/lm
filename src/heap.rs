@@ -94,6 +94,7 @@ pub fn is_char(v: V) -> bool {
 }
 
 // ---- object types ----
+pub const T_FREE: u32 = 0; // a hole in object space: size in granules, then next
 pub const T_SYMBOL: u32 = 1; // 5 tagged words: name value function plist flags
 pub const T_STRING: u32 = 2; // len bytes
 pub const T_VECTOR: u32 = 3; // len tagged words

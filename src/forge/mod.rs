@@ -7,6 +7,7 @@
 //! itself included, into native RISC-V in the same heap. What falls out is the
 //! kickstart image.
 
+pub mod compact;
 pub mod hostlisp;
 pub mod read;
 
@@ -90,6 +91,12 @@ pub fn rebuild(from: &str, out: &str, verbose: bool, check: bool) -> i32 {
         eprintln!("lm: the rebuild did not finish cleanly (exit {code})");
         return 1;
     }
+    // The machine wrote that image with a collector that cannot move an
+    // object, so it carries every hole it ever made. Nothing is running now,
+    // so the forge can close them.
+    if crate::forge::compact::compact_image(out, out, verbose) != 0 {
+        return 1;
+    }
     match std::fs::metadata(out) {
         Ok(m) => {
             println!(
@@ -152,6 +159,9 @@ pub fn write_layout() {
     }
 
     s.push_str("\n;; ---- object representation ----\n");
+    def!("obj-bins", OBJ_BINS);
+    def!("obj-bin-count", OBJ_BIN_COUNT);
+    def!("t-free", T_FREE);
     def!("t-symbol", T_SYMBOL);
     def!("t-string", T_STRING);
     def!("t-vector", T_VECTOR);
@@ -486,6 +496,19 @@ pub fn build(out: &str, verbose: bool) -> i32 {
     // interpreter, which is about to be thrown away.
     collect_before_saving(&mut l, verbose);
 
+    blank_run_scratch(&mut l);
+
+    // Objects are never moved by the machine, for reasons `gc.lisp` explains
+    // at length; nothing stops the forge doing it here, on a heap that has
+    // stopped, and it is most of the file.
+    match crate::forge::compact::compact_objects(&mut l.h, verbose) {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("lm: compacting object space: {e}");
+            return 1;
+        }
+    }
+
     // The collection above already left the allocator pointing at the one run
     // above the live data, so there is nothing to set here; overwriting it
     // would throw away what the compactor decided.
@@ -564,6 +587,29 @@ fn call_on_machine(l: &mut Lisp, name: &str, entry_stub: u32) -> Option<u32> {
         return None;
     }
     Some(l.h.m.x[10])
+}
+
+/// The stack the machine ran the collector on, and the trap frame it would
+/// have saved registers into. Both live in the Exec pool, both are scratch,
+/// and both are full of whatever the collector last had in hand - Lisp values
+/// that are no longer live, written into the image, and words that a
+/// conservative scan would have to treat as pointers and pin. A booting image
+/// sets its own stack pointer in the reset stub, so nothing here survives.
+fn blank_run_scratch(l: &mut Lisp) {
+    let regions = [
+        (l.h.g(LG_STACKBOT), l.h.g(LG_STACKTOP)),
+        (l.h.g(LG_TRAPSAVE), l.h.g(LG_TRAPSAVE) + 128),
+    ];
+    for (lo, hi) in regions {
+        if lo == 0 || hi <= lo || hi > POOL_END {
+            continue;
+        }
+        let mut a = lo;
+        while a < hi {
+            l.h.st(a, 0);
+            a += 4;
+        }
+    }
 }
 
 fn collect_before_saving(l: &mut Lisp, verbose: bool) -> u32 {

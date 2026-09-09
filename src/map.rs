@@ -31,6 +31,12 @@ pub const SYSBASE_PTR: u32 = 0x0000_0008;
 /// because the whole block sits inside the 12-bit immediate range.
 pub const LG_BASE: u32 = 0x0000_0100;
 
+/// Exact-fit free lists for object space, one word per granule count, in
+/// reserved low memory above the Lisp global block. Entry 0 holds everything
+/// too big to have a list of its own.
+pub const OBJ_BINS: u32 = 0x0000_0200;
+pub const OBJ_BIN_COUNT: u32 = 64;
+
 pub const TRAP_BASE: u32 = 0x0000_1000;
 pub const POOL_BASE: u32 = 0x0000_2000;
 pub const POOL_END: u32 = 0x0100_0000;

@@ -63,14 +63,11 @@
 (define gc-obj-blocks (%lsh (%- obj-limit obj-base) -10))
 (define gc-obj-first (%+ gc-obj-prefix (%lsh gc-obj-blocks 2)))
 
-;; Free blocks in object space carry this type in their header, with the block
-;; size in granules of eight bytes where a live object keeps its length.
-(define t-free 0)
-;; Exact-fit free lists, one per granule count, in reserved low memory just
-;; above the Lisp global block. Entry 0 holds everything too big to have its
-;; own list.
-(define obj-bins #x200)
-(define obj-bin-count 64)
+;; `t-free`, `obj-bins` and `obj-bin-count` come from layout.lisp: a free block
+;; carries t-free in its header with the block size in granules of eight bytes
+;; where a live object keeps its length, and the bins are exact-fit free lists
+;; the forge has to know about too, because it compacts object space on the way
+;; into an image.
 
 (define *mark-sp* 0)
 (define *run-last* 0)
@@ -907,6 +904,14 @@
                   (begin (code-free-block entry len) (set! freed (%+ freed len)))
                   nil))))
       (set! i (%+ i 1)))
+    ;; Clear the tail the compaction left behind. Those words are dead, but
+    ;; they are object pointers sitting in the pool, and the pool is scanned
+    ;; without types: anything reading it has to treat a stale entry as a live
+    ;; reference and keep whatever it names exactly where it is.
+    (let ((j keep))
+      (while (%< j n)
+        (%raw-st! (%+ r (%lsh j 2)) 0)
+        (set! j (%+ j 1))))
     (%set-global! lg-code-reg-n keep)
     freed))
 
