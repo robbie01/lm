@@ -22,11 +22,10 @@
   nil)
 
 (define (banner-exec)
-  (emit-str "exec lists at ")
-  (emit-str (number->hex (exec-lists)))
-  (emit-str ", ")
+  (emit-str "exec: ")
   (emit-str (number->string (task-count)))
-  (emit-str " task\n"))
+  (emit-str " task")
+  (newline))
 
 ;; ---------------------------------------------------------------- traps
 ;; Everything that goes wrong arrives here, along with every interrupt.

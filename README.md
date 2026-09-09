@@ -701,35 +701,76 @@ mattered yet.
 ## Exec
 
 An Amiga Exec, in Lisp, in one shared address space with no MMU and no
-protection. Doubly linked lists with a virtual head and tail node so removal
-needs no special cases; tasks with 32 signal bits and `Wait`/`Signal`; message
-ports on top of signals; `Forbid`/`Permit` for cooperative critical sections and
+protection. Tasks with 32 signal bits and `Wait`/`Signal`; message ports on top
+of signals; `Forbid`/`Permit` for cooperative critical sections and
 `Disable`/`Enable` for real ones; libraries reached through a jump table below
 their base pointer.
 
-What Exec does *not* have here is an ExecBase. A real one exists so that any
-program, in any language, compiled separately, can find the kernel with
-`move.l 4.w,a6` and no linker; none of that applies to one image in one address
-space where every function can name a symbol. So the current task, the two
-nesting counts, the saved interrupt state and the counters are ordinary
-variables — two instructions to read instead of four, inspectable by name
-rather than by offset, and no longer able to be written through a null base
-pointer during the allocation that creates the base pointer, which is what
-`Disable` was quietly doing at every boot.
-
-The list headers stay in memory, because they are memory: a header overlaps two
-imaginary nodes, and nodes point back into it, which is exactly what makes
-insert and remove need no test for the ends of a list. That block is 192 bytes,
-and address 8 still says where it is.
-
 `PutMsg` costs a pointer on a list. Nothing is copied, because there is nothing
-to copy it between — which is the whole reason to have a shared address space.
+to copy it between - which is the whole reason to have a shared address space.
+
+### No ExecBase, and no raw structures
+
+A real ExecBase exists so that any program, in any language, compiled
+separately, can find the kernel with `move.l 4.w,a6` and no linker. None of
+that applies to one image in one address space where every function can name a
+symbol. So there isn't one: the current task, the two nesting counts, the saved
+interrupt state, the counters and the four lists are ordinary variables. Two
+instructions to read instead of four, inspectable by name rather than by
+offset, and no longer written through a null base pointer during the allocation
+that creates the base pointer, which is what `Disable` was quietly doing at
+every boot.
+
+Tasks, ports, messages, libraries and interrupt servers are records rather than
+blocks of pool memory. That is not for speed, though a slot read is one checked
+instruction where `peek` was four unchecked ones. It is because `rem-task` used
+to hand a task's memory back to the pool, and the pool handed it out again — so
+a task pointer somebody kept could come back pointing at a *different, live*
+task. The old defence zeroed the node type on the way out and checked it on the
+way in, and its own comment admitted the hole: *"A block reused as another task
+passes this test, and then the signal goes to the wrong task rather than to
+nobody."* Nothing frees a record. A kept reference is either a live task or a
+dead one that says it is removed and ignores its signals:
+
+```
+> (define v (add-task "victim" 0 (lambda () nil)))
+> (list (task? v) (%slot v exec::tc-state) exec::ts-removed)
+(t 6 6)
+> (signal v 1)
+nil
+```
+
+The collector stopped needing to be told anything, too. It used to walk the
+lists by hand and name each Lisp-valued field of a task in `gc-scan-task` —
+add a field, forget a line, and it is silently collected out from under a
+running task. Now one root reaches every task, port, message, library and
+interrupt server and every value in them. What is left in `gc-extra-roots` is
+the part the collector genuinely cannot reach: the raw stacks and register
+blocks that suspended tasks were sitting on.
+
+### Lists, and the trick that went
+
+Exec's list header pretends to be a node at both ends, so insert and remove
+need no test for the ends of the list — a node's predecessor is always some
+node, real or sentinel. It packs both sentinels into the header's own three
+words by treating it as a node at `l` and another at `l + 4`, sharing the word
+that is the head's predecessor and the tail's successor, neither of which is
+ever read.
+
+The sentinels are real nodes here, and the header owns two of them. Insert and
+remove are the same four unconditional writes; the walk still ends on the tail
+sentinel's nil successor, exactly as it ended on Exec's zero. What went is the
+packing, and only because it cannot be expressed: sharing that word means
+pointing four bytes into the header, and an object reference has its low three
+bits equal to four, so four bytes along reads as a cons. It saved one word per
+list, on twelve lists.
 
 The context switch comes out almost free. The trap stub already saves all 32
 registers into the block `mscratch` points at and restores from there on the
 way out, so switching tasks is one CSR write: point `mscratch` at a different
 task's context and return. Taking a trap and switching tasks turn out to be the
-same operation seen from two directions.
+same operation seen from two directions. That block stays raw pool memory —
+thirty-two untagged words is not something a record can hold.
 
 Preemption is the timer interrupt; a task that blocks asks for a reschedule
 with an `ecall`, so the switch always happens inside the handler where the

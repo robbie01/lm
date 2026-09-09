@@ -202,7 +202,7 @@
   idle? idle-start input-listen permit preemption-off task-snapshot task?
   this-task
   rem-task reschedule sigb-input sigb-vblank sigf-input sigf-vblank signal
-  spawn exec-lists *vblank-count* vblank-start wait-input wait-vblank
+  spawn *vblank-count* vblank-start wait-input wait-vblank
   task-count tasks wait
 ))
 
