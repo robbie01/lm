@@ -105,16 +105,16 @@
 (define stub-frame-size 72)
 
 ;; ---------------------------------------------------------------- mark bits
-(define (gc-bit-index p) (%lsh (%- p gc-heap-lo) -3))
+(defsubst (gc-bit-index p) (%lsh (%- p gc-heap-lo) -3))
 
 ;; These were four shifts, a mask and a byte load apiece, and every one of the
 ;; shifts was the general run-time kind that branches on the sign of its
 ;; count. `bext` and `bset` do the bit in one instruction, and the compiler
 ;; now folds a constant shift, so what is left is the address arithmetic.
-(define (gc-marked? p) (%bit-ref gc-bitmap (gc-bit-index p)))
-(define (gc-mark! p) (%bit-set! gc-bitmap (gc-bit-index p)))
-(define (gc-pinned? p) (%bit-ref gc-pinmap (gc-bit-index p)))
-(define (gc-pin! p) (%bit-set! gc-pinmap (gc-bit-index p)))
+(defsubst (gc-marked? p) (%bit-ref gc-bitmap (gc-bit-index p)))
+(defsubst (gc-mark! p) (%bit-set! gc-bitmap (gc-bit-index p)))
+(defsubst (gc-pinned? p) (%bit-ref gc-pinmap (gc-bit-index p)))
+(defsubst (gc-pin! p) (%bit-set! gc-pinmap (gc-bit-index p)))
 
 ;; Six megabytes of mark bits, cleared twice a collection. A Lisp loop stores
 ;; one word per thirty cycles and takes forty-seven million of them to do it;
@@ -167,7 +167,42 @@
 ;; thirty-bit fixnum. That used to argue for a 256-byte lookup table built at
 ;; the first collection; `cpop` is one instruction and settles it.
 
-(define (gc-bit? map i) (%bit-ref map i))
+(defsubst (gc-bit? map i) (%bit-ref map i))
+
+;; ---------------------------------------------------------------- skipping
+;; The three passes over cons space - plan, update, move - used to look at
+;; every pair between `cons-base` and the frontier, which is the high water
+;; mark and not the live set. On a machine that has been running a while that
+;; is megabytes of long-dead pairs walked eight bytes at a time, three times.
+;;
+;; A word of the mark bitmap covers thirty-two pairs, or two hundred and fifty
+;; six bytes of heap. Where that word is zero the whole run is dead and there
+;; is nothing for any of the three passes to do in it, so they step over it in
+;; one go. `cons-base` is aligned to 256, so the test is only asked at the
+;; start of a run.
+;;
+;; Each of the three walks a pointer into the bitmap alongside its pointer
+;; into the heap - four bytes of map to two hundred and fifty-six of heap - so
+;; asking whether a run is dead is two loads off a register, with no address
+;; arithmetic and nothing derived from `p` at all. The alternative, deriving
+;; the map address from `p` and testing whether `p` is on a run boundary, asks
+;; that question once per *pair* rather than once per run, and reads two
+;; globals every time it does.
+;;
+;; The two hundred and fifty-six is written out in the loops rather than named
+;; here, because a literal second argument compiles to one instruction where a
+;; global costs two loads to reach.
+;;
+;; The word is read as two halves *on purpose*. `%ld-fixnum` is a tagged load
+;; and tagging is `(w << 1) | 1`, so it drops bit 31: a map word of 0x80000000
+;; reads back as zero. That word means the last pair of the run is live and
+;; the other thirty-one are dead, which is not a rare shape at all - it
+;; happened a hundred and seventy-three times in a single collection, every
+;; one of them at offset 0xf8, and each was a live pair skipped by all three
+;; passes and then left behind by the move. `%ld-half` is `lhu`, so sixteen
+;; zero-extended bits always fit in a fixnum and neither half can lie.
+(defsubst (gc-run-dead? mp)
+  (if (%= 0 (%ld-half mp)) (%= 0 (%ld-half (%+ mp 2))) nil))
 
 (define (gc-clear-bitmap)
   (gc-clear-map gc-bitmap)
@@ -177,7 +212,7 @@
 ;; Is this word something the heap could have handed out? Used both for real
 ;; tagged values and for arbitrary words found on a stack, so it must never
 ;; say yes to something it would then dereference wrongly.
-(define (gc-heap-pointer? v)
+(defsubst (gc-heap-pointer? v)
   (cond
    ((%cons? v)
     (let ((p (%addr-of v)))
@@ -195,12 +230,16 @@
           nil)))
    (else nil)))
 
-(define (gc-block-of v)
+(defsubst (gc-block-of v)
   ;; Where the mark bit for this value lives: a pair marks at the pair, an
   ;; object marks at its header.
   (if (%cons? v) (%addr-of v) (%- (%addr-of v) 4)))
 
-(define (gc-push v)
+;; Open-coded: the mark phase asks this twice for every live pair, three
+;; hundred thousand times in a collection, and the call protocol around it
+;; costs more than the work inside it. `gc-overflow` stays a call - it happens
+;; once in the life of a machine that is about to be told it has a problem.
+(defsubst (gc-push v)
   (if (gc-heap-pointer? v)
       (let ((b (gc-block-of v)))
         (if (gc-marked? b)
@@ -256,6 +295,14 @@
           (gc-scan-object v)))))
 
 ;; ---------------------------------------------------------------- roots
+;; What `gc-slot` does when `*gc-updating*` is set, without asking. The cons
+;; walk of the update pass is the one place that knows which pass it is in
+;; without having to read a global, and it is also the place that asks most
+;; often: twice for every live pair in the heap.
+(defsubst (gc-update-slot addr)
+  (let ((v (%ld-word addr)))
+    (if (gc-heap-pointer? v) (%st-word! addr (gc-forward-value v)) nil)))
+
 (define (gc-slot addr)
   ;; One pointer-bearing word. Every traversal goes through here, so the same
   ;; walk serves both passes: marking follows the pointer, updating rewrites
@@ -416,13 +463,13 @@
     nfree))
 
 ;; ---------------------------------------------------------------- obj sweep
-(define (obj-block-size h)
+(defsubst (obj-block-size h)
   (let ((ty (%logand h 255)) (n (%lsh h -8)))
     (if (%= ty t-free)
         (%lsh n 3)
         (%logand (%+ (%+ 4 (object-payload ty n)) 7) -8))))
 
-(define (obj-bin-addr gran)
+(defsubst (obj-bin-addr gran)
   (%+ obj-bins (%lsh (if (%< gran obj-bin-count) gran 0) 2)))
 
 (define (gc-free-block start len)
@@ -500,48 +547,70 @@
 (define *gc-compacted* nil)
 
 ;; ---------------------------------------------------------------- forwarding
-(define (cons-block-of p) (%lsh (%- p cons-base) -6))
-(define (obj-block-of p) (%lsh (%- p obj-base) -10))
+(defsubst (cons-block-of p) (%lsh (%- p cons-base) -6))
+(defsubst (obj-block-of p) (%lsh (%- p obj-base) -10))
 
 (define (gc-plan-cons hi)
   ;; One walk over the pairs, recording the free pointer as it crosses each
   ;; block boundary. Answers the address the live region will end at.
-  (let ((p cons-base) (free cons-base) (blk 0))
+  (let ((p cons-base) (mp gc-bitmap) (free cons-base) (blk 0))
     (%st-fixnum! gc-cons-prefix cons-base)
     (while (%< p hi)
-      (let ((b (cons-block-of p)))
-        (while (%< blk b)
-          (set! blk (%+ blk 1))
-          (%st-fixnum! (%+ gc-cons-prefix (%lsh blk 2)) free)))
-      (if (gc-marked? p)
-          (if (gc-pinned? p)
-              (if (%> (%+ p 8) free) (set! free (%+ p 8)) nil)
-              (set! free (%+ free 8)))
-          nil)
-      (set! p (%+ p 8)))
-    ;; Every block up to the last one in use starts where the walk finished.
-    ;; Not every block in the heap: cons space is a hundred and twenty-eight
-    ;; megabytes and that is a quarter of a million entries, none of which is
-    ;; ever read, because nothing forwards a pointer that was never handed out.
-    (let ((last (cons-block-of hi)))
-      (while (%< blk last)
-        (set! blk (%+ blk 1))
-        (%st-fixnum! (%+ gc-cons-prefix (%lsh blk 2)) free)))
+      ;; A dead run leaves `free` where it was and needs no prefix entries:
+      ;; nothing in it is live, and `gc-forward-cons` is only ever asked about
+      ;; a pair that is live, so no entry inside it is ever read.
+      (if (gc-run-dead? mp)
+          nil
+          (let ((q p) (e (%+ p 256)))
+            (if (%> e hi) (set! e hi) nil)
+            (while (%< q e)
+              ;; The entry for the block this pair is in, recorded on the way
+              ;; into it. Filling in every block of the heap instead used to
+              ;; cost a store per sixty-four bytes of frontier - four hundred
+              ;; thousand of them on a heap this size, which was the whole of
+              ;; the planning pass.
+              (let ((b (cons-block-of q)))
+                (if (%< blk b)
+                    (begin (set! blk b)
+                           (%st-fixnum! (%+ gc-cons-prefix (%lsh b 2)) free))
+                    nil))
+              (if (gc-marked? q)
+                  (if (gc-pinned? q)
+                      (if (%> (%+ q 8) free) (set! free (%+ q 8)) nil)
+                      (set! free (%+ free 8)))
+                  nil)
+              (set! q (%+ q 8)))))
+      (set! p (%+ p 256))
+      (set! mp (%+ mp 4)))
     free))
 
+(defsubst (gc-block-has-pins? b)
+  ;; A block is eight pairs, which is eight bits, which is one byte of the pin
+  ;; map - and the block index is that byte's index. This used to read *eight*
+  ;; bytes, so a pin five hundred bytes away sent an untouched block down the
+  ;; slow path.
+  (%> (%ld-byte (%+ gc-pinmap b)) 0))
+
 (define (gc-forward-cons p)
-  (let* ((b (cons-block-of p))
-         (start (%+ cons-base (%lsh b 6)))
-         (free (%ld-fixnum (%+ gc-cons-prefix (%lsh b 2))))
-         (q start))
+  ;; Where a live pair is going. The block's entry says where the block's own
+  ;; live pairs start landing, and this pair lands eight bytes past that for
+  ;; every live pair ahead of it *in the block*.
+  ;;
+  ;; A block is eight pairs and one byte of the mark bitmap, so "every live
+  ;; pair ahead of it in the block" is a population count of the bits below
+  ;; this one in a single byte: three loads, a mask and a `cpop`, with no loop
+  ;; at all. It used to be a bit-at-a-time count of up to seven bits under an
+  ;; eight-byte pin scan, and this is the hottest question in the collector -
+  ;; the update pass asks it once for every pointer to a pair in the image.
+  (let ((b (cons-block-of p)))
     (if (gc-pinned? p)
         p
-        (begin
-          ;; The common case is a block with nothing pinned in it, where the
-          ;; answer is just the free pointer plus eight bytes for every live
-          ;; pair before this one.
-          (if (gc-block-has-pins? start)
-              (begin
+        (let ((free (%ld-fixnum (%+ gc-cons-prefix (%lsh b 2)))))
+          (if (if (%= *pinned* 0) nil (gc-block-has-pins? b))
+              ;; A pin stays where it is and shoves everything after it in its
+              ;; block along, so counting no longer answers and the block has
+              ;; to be replayed - the same rule `gc-plan-cons` used.
+              (let ((q (%+ cons-base (%lsh b 6))))
                 (while (%< q p)
                   (if (gc-marked? q)
                       (if (gc-pinned? q)
@@ -550,30 +619,12 @@
                       nil)
                   (set! q (%+ q 8)))
                 free)
-              (%+ free (%lsh (gc-count-marks start p) 3)))))))
-
-(define (gc-block-has-pins? start)
-  ;; Sixty-four pairs is sixty-four bits, which is eight bytes of the pin map.
-  (let ((a (%+ gc-pinmap (%lsh (%lsh (%- start gc-heap-lo) -3) -3)))
-        (i 0)
-        (any nil))
-    (while (%< i 8)
-      (if (%> (%ld-byte (%+ a i)) 0) (begin (set! any t) (set! i 8)) (set! i (%+ i 1))))
-    any))
-
-(define (gc-count-marks from to)
-  ;; Live pairs in [from, to), both inside one block. Whole bytes of the
-  ;; bitmap come from the table; the ragged tail is counted a bit at a time.
-  (let ((i (%lsh (%- from gc-heap-lo) -3))
-        (e (%lsh (%- to gc-heap-lo) -3))
-        (n 0))
-    (while (%<= (%+ i 8) e)
-      (set! n (%+ n (%popcount (%ld-byte (%+ gc-bitmap (%lsh i -3))))))
-      (set! i (%+ i 8)))
-    (while (%< i e)
-      (if (gc-bit? gc-bitmap i) (set! n (%+ n 1)) nil)
-      (set! i (%+ i 1)))
-    n))
+              (%+ free
+                  (%lsh (%popcount
+                         (%logand
+                          (%ld-byte (%+ gc-bitmap b))
+                          (%- (%lsh 1 (%logand (%lsh (%- p gc-heap-lo) -3) 7)) 1)))
+                        3)))))))
 
 (define (gc-plan-objects hi)
   (let ((p obj-base) (free obj-base) (blk 0))
@@ -616,7 +667,7 @@
             (set! q (%+ q size))))
         free)))
 
-(define (gc-forward-value v)
+(defsubst (gc-forward-value v)
   ;; Pairs move. Objects do not, and answer their own address.
   (if (%cons? v)
       (%from-addr (gc-forward-cons (%addr-of v)))
@@ -626,12 +677,19 @@
 (define (gc-update-live cons-hi obj-hi)
   ;; Every pointer inside every live object. The roots are done separately,
   ;; through the same walkers that found them in the first place.
-  (let ((p cons-base))
+  (let ((p cons-base) (mp gc-bitmap))
     (while (%< p cons-hi)
-      (if (gc-marked? p)
-          (begin (gc-slot p) (gc-slot (%+ p 4)))
-          nil)
-      (set! p (%+ p 8))))
+      (if (gc-run-dead? mp)
+          nil
+          (let ((q p) (e (%+ p 256)))
+            (if (%> e cons-hi) (set! e cons-hi) nil)
+            (while (%< q e)
+              (if (gc-marked? q)
+                  (begin (gc-update-slot q) (gc-update-slot (%+ q 4)))
+                  nil)
+              (set! q (%+ q 8)))))
+      (set! p (%+ p 256))
+      (set! mp (%+ mp 4))))
   (let ((p obj-base))
     (while (%< p obj-hi)
       (let ((size (obj-block-size (%ld-fixnum p))))
@@ -646,21 +704,30 @@
   ;; pass asks and the wrong thing to do sixty thousand times in a row. The
   ;; rule below is the same one `gc-plan-cons` used to build the table, so the
   ;; two cannot disagree.
-  (let ((p cons-base) (free cons-base) (n 0))
+  (let ((p cons-base) (mp gc-bitmap) (free cons-base) (n 0))
     (while (%< p hi)
-      (if (gc-marked? p)
-          (if (gc-pinned? p)
-              (if (%> (%+ p 8) free) (set! free (%+ p 8)) nil)
-              (begin
-                (if (%= free p)
-                    nil
-                    (begin
-                      (%st-word! free (%ld-word p))
-                      (%st-word! (%+ free 4) (%ld-word (%+ p 4)))
-                      (set! n (%+ n 1))))
-                (set! free (%+ free 8))))
-          nil)
-      (set! p (%+ p 8)))
+      ;; `free` only moves for a live pair, so a dead run leaves it where it
+      ;; was - the same rule `gc-plan-cons` followed.
+      (if (gc-run-dead? mp)
+          nil
+          (let ((q p) (e (%+ p 256)))
+            (if (%> e hi) (set! e hi) nil)
+            (while (%< q e)
+              (if (gc-marked? q)
+                  (if (gc-pinned? q)
+                      (if (%> (%+ q 8) free) (set! free (%+ q 8)) nil)
+                      (begin
+                        (if (%= free q)
+                            nil
+                            (begin
+                              (%st-word! free (%ld-word q))
+                              (%st-word! (%+ free 4) (%ld-word (%+ q 4)))
+                              (set! n (%+ n 1))))
+                        (set! free (%+ free 8))))
+                  nil)
+              (set! q (%+ q 8)))))
+      (set! p (%+ p 256))
+      (set! mp (%+ mp 4)))
     n))
 
 (define (gc-move-objects hi)
@@ -681,10 +748,19 @@
         (set! p (%+ p size))))
     n))
 
+;; The highest cons space has ever reached. Everything between the allocation
+;; pointer and this is dead and dirty, and blanking it is what lets an image be
+;; the size of what is in it rather than the size of the high water mark.
+;;
+;; That blanking used to happen at the end of every compaction, where it was
+;; the single most expensive thing the collector did - seventy million cycles
+;; of a twenty-five megabyte heap's hundred and fifty-five, nearly half the
+;; collection, to tidy memory nobody was going to look at. Object space and
+;; code space were already blanked only for an image; cons space was the odd
+;; one out. It is now the third.
+(define *cons-dirty-top* 0)
+
 (define (gc-blank lo hi)
-  ;; Whatever is above the live data is not merely free, it is blanked. That
-  ;; costs one pass and makes the pages empty, which is what lets an image be
-  ;; the size of what is in it rather than the size of the high water mark.
   (let ((p lo))
     (while (%< p hi)
       (%st-fixnum! p 0)
@@ -749,9 +825,7 @@
     (set! *gc-moved* (gc-move-cons cons-hi))
     (set! *t-mv* (%- (%cycles) *t-mv*))
     (if *gc-check* (gc-verify cons-top) nil)
-    (set! *t-blank* (%cycles))
-    (gc-blank cons-top cons-hi)
-    (set! *t-blank* (%- (%cycles) *t-blank*))
+    (if (%> cons-hi *cons-dirty-top*) (set! *cons-dirty-top* cons-hi) nil)
     (%set-global! lg-cons-ptr cons-top)
     ;; An empty run, for this task and for every other. Nobody is holding a
     ;; pointer into the heap that just slid out from under them: the next cons
@@ -1067,6 +1141,11 @@
 
 (define (gc-for-image)
   (gc-collect)
+  ;; The one place the dead part of cons space is worth blanking - see
+  ;; `*cons-dirty-top*`. `gc-collect` has just moved the allocation pointer
+  ;; down to the top of the live data, so this is everything the machine has
+  ;; dirtied since it booted and no longer needs.
+  (gc-blank (%global lg-cons-ptr) *cons-dirty-top*)
   (gc-blank-free-objects)
   (gc-blank-free-code))
 

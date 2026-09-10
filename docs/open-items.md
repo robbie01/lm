@@ -217,10 +217,26 @@ adding it moved the fault.
 
 ## Window management is a farce
 
-There is more of it than it looks - `wb-button-down` raises the window under
-the pointer, closes it if the click was in the close box, and starts a drag if
-it was anywhere else in the title bar, and `wb-event` wires all of that to the
-mouse. What there is not:
+**The mouse path does not work.** Raising, closing and dragging a window are
+all reported not to work in practice on macOS, which is where this gets used
+by a person rather than by a script.
+
+That is worth saying plainly because the previous version of this item said
+the opposite: it said there was "more of it than it looks", on the grounds
+that `wb-button-down` contains a raise, a close and a drag, and `wb-event`
+wires them to the mouse. All of that is in the source and none of it is
+evidence that it works. Read the code to find out what was *meant*; the only
+thing that says what happens is running it.
+
+So there are two items here, and the first one has to be found before the
+second is worth starting:
+
+- **Why the mouse does nothing.** Unknown. Somewhere between the host's mouse
+  events, the input task, the event decode and `wb-button-down`. Reproduce it
+  on macOS first - the Windows build is where this is being developed, which
+  is circumstance and not a statement about which one matters.
+
+And then, what was never written at all:
 
 - **The zoom box is drawn and does nothing.** `pt-title-box` draws it with a
   bar in it and `in-close-box?` has no counterpart for it. Neither has the
@@ -237,6 +253,68 @@ mouse. What there is not:
 
 Worth doing as one pass rather than piecemeal: the boxes, a resize corner, and
 some way to cycle the front window from the keyboard.
+
+## The collector is fifteen times faster, and still stops the world
+
+A collection on a machine with a twenty-five megabyte frontier was 856 million
+cycles - four or five seconds with interrupts off, which reads as a hung
+machine. It is now 56 million. A bare prompt is 79 -> 41 million, and a desktop
+with five windows open 107 -> 42 million.
+
+What did it, in order of size:
+
+- **Blanking moved to image time.** The dead part of cons space was blanked at
+  the end of every compaction, a word at a time, which on that heap was seventy
+  million cycles - nearly half the collection - to tidy memory nobody would
+  look at. Object space and code space were already blanked only for an image;
+  cons space is now the third. `*cons-dirty-top*` remembers the high water mark
+  so `gc-for-image` still knows what to blank, and images are the same size.
+- **The three cons passes skip dead runs.** A word of the mark bitmap covers
+  two hundred and fifty-six bytes of heap, and on a mostly-dead heap almost
+  every one of them is zero. Each pass now walks a pointer into the bitmap
+  alongside its pointer into the heap.
+- **The forwarding table is sparse.** `gc-plan-cons` filled an entry for every
+  sixty-four bytes of frontier - four hundred thousand stores - when only
+  blocks that contain a live pair are ever asked about.
+- **`gc-forward-cons` is a popcount.** A block is eight pairs, which is exactly
+  one byte of the mark bitmap, and the block index is that byte's index: the
+  answer is three loads, a mask and a `cpop`. It was a bit-at-a-time count
+  under an eight-byte pin scan, and it is the hottest question in the
+  collector.
+- **`defsubst`.** The collector's small helpers are open-coded now; a
+  collection used to be a million and a half calls to functions two
+  instructions long.
+- **Type tests fuse into the branch** (`fusable-type-test?` in the compiler).
+  `(if (%cons? v) ...)` was mask, two set-if-zeros, an and, a literal load and
+  a conditional move, then a branch on the result - eight instructions to ask
+  about three bits, where branching on the tag is three. That one speeds up
+  everything, not just the collector, and the image got *smaller*.
+
+What is left is proportional to the live set rather than to the heap, which is
+the right shape: on a machine with two hundred thousand live pairs, marking
+and pointer-updating are two thirds of the collection and each visits every
+live pointer once. Getting past that means not visiting them - a generational
+collector, with a write barrier and a remembered set - which is a real project
+and not a tuning pass.
+
+**It still stops the world.** Interrupts are off for the whole collection, so a
+quarter of a second is a quarter of a second in which the mouse does not move.
+That is no longer a hang but it is still a hitch, and it is the reason to care
+about the paragraph above.
+
+### One trap worth remembering
+
+The first version of the run-skipping read the bitmap word with `%ld-fixnum`,
+and a tagged load is `(w << 1) | 1` - it drops bit 31. A map word of
+`0x80000000` therefore read back as *zero*, so a run whose only live pair was
+its last one was skipped by all three passes and left behind by the move. It
+happened a hundred and seventy-three times in one collection, every one at
+offset `0xf8`, and it corrupted the image at build time - which is also why the
+check loop that would have caught it appeared to report nothing: it was
+printing on the build's output and the run's was being read.
+
+`%ld-fixnum` cannot represent a full machine word. Use `%ld-word` for a raw
+one, or two `%ld-half` loads when the value has to be a fixnum.
 
 ## Closing a window frees a bitmap the compositor may still be reading
 

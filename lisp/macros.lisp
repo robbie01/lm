@@ -387,6 +387,39 @@
         (set! k (%+ k 1))))
     out))
 
+;; ---------------------------------------------------------------- defsubst
+;; A function whose calls are open-coded. The definition stays - it is still a
+;; function, and `(map gc-marked? ps)` means what it looks like - and a macro
+;; goes beside it that expands a call into the body with the arguments bound.
+;;
+;; This is the same bargain the prelude already makes for `car` and that a
+;; record's accessors make: a call that costs more in frame protocol than it
+;; does in work should not be a call. The collector is where it pays: a
+;; collection was one and a half million calls to a dozen functions of two
+;; instructions each, and the returns alone were a fifth of everything the
+;; machine executed.
+;;
+;; The arguments are bound with `let`, not substituted, so each is evaluated
+;; once and in the caller's scope - `(gc-marked? p)` becoming `(let ((p p)) ...)`
+;; is the outer `p` on the right of the binding and the parameter on the left,
+;; which is what `let` means.
+;;
+;; Not for anything recursive, and not for anything large: the body is copied
+;; to every call site.
+(defmacro defsubst (spec . body)
+  (let ((name (%car spec))
+        (params (%cdr spec)))
+    (list 'begin
+          (%cons 'define (%cons spec body))
+          (list 'defmacro name params
+                (%cons 'list
+                       (%cons (list 'quote 'let)
+                              (%cons (%cons 'list
+                                            (map (lambda (v)
+                                                   (list 'list (list 'quote v) v))
+                                                 params))
+                                     (map (lambda (f) (list 'quote f)) body))))))))
+
 (defmacro defrecord spec
   (%cons 'begin (record-forms (%cons 'defrecord spec))))
 

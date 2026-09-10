@@ -78,7 +78,7 @@
   char-numeric? char-upcase char-whitespace? char<? char=? char>? char?
   code-object? comment compose cond cons console-stream constantly
   current-package current-stream cycles decf defconstant define
-  define-values defmacro fluid-let bind-fluid! unbind-fluid! task-binds
+  define-values defmacro defsubst fluid-let bind-fluid! unbind-fluid! task-binds
   set-task-binds! swap-binds-in! swap-binds-out! place-value set-place-value!
   unwind-binds-to!
   *binds-get* *binds-set* *boot-binds* defpackage defparameter defun defvar delq

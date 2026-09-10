@@ -1351,6 +1351,23 @@
   '((%< . lt) (%> . gt) (%<= . le) (%>= . ge)
     (%= . eq) (%eq? . eq) (%null? . null) (%cons? . nil)))
 
+;; A type test asks about the tag bits, and in a test position the answer
+;; only has to steer a branch. Building the answer first costs seven or eight
+;; instructions - mask, two set-if-zeros, an and, a literal load and a
+;; conditional move - and then throws it away on a `beqz`. Branching on the
+;; tag directly is two or three.
+;;
+;; These three are the ones that matter: `%cons?` and `%object?` are how every
+;; walk over the heap decides what it is looking at, and `%fixnum?` is the
+;; first question most of the arithmetic asks. The collector asks them a
+;; million times in a collection, and `car` asks one every time it is called.
+(define (fusable-type-test? form)
+  (if (%cons? form)
+      (if (%= 1 (length (%cdr form)))
+          (memq (%car form) '(%cons? %object? %fixnum?))
+          nil)
+      nil))
+
 (define (fusable-test? form)
   (if (%cons? form)
       (let ((h (%car form)))
@@ -1364,23 +1381,42 @@
 ;; Emit code that jumps to `label` when the test is FALSE.
 (define (emit-test-jump-false c form label)
   (let ((a (cx-asm c)))
-    (if (fusable-test? form)
-        (let ((op (%car form)) (args (%cdr form)))
-          (if (%eq? op '%null?)
-              (begin
-                (compile-expr c (%car args) nil)
-                (i-bnez a $a0 label))
-              (begin
-                (compile-args c args 2)
-                (cond
-                 ((%eq? op '%<) (i-bge a $a0 $a1 label))
-                 ((%eq? op '%>) (i-bge a $a1 $a0 label))
-                 ((%eq? op '%<=) (i-blt a $a1 $a0 label))
-                 ((%eq? op '%>=) (i-blt a $a0 $a1 label))
-                 (else (i-bne a $a0 $a1 label))))))
-        (begin
-          (compile-expr c form nil)
-          (i-beqz a $a0 label)))))
+    (cond
+     ((fusable-type-test? form)
+      (compile-expr c (cadr form) nil)
+      (let ((op (%car form)))
+        (cond
+         ;; odd
+         ((%eq? op '%fixnum?)
+          (i-andi a $t2 $a0 1)
+          (i-beqz a $t2 label))
+         ;; low three bits clear, and not nil
+         ((%eq? op '%cons?)
+          (i-andi a $t2 $a0 7)
+          (i-bnez a $t2 label)
+          (i-beqz a $a0 label))
+         ;; low three bits are four
+         (else
+          (i-andi a $t2 $a0 7)
+          (i-addi a $t2 $t2 -4)
+          (i-bnez a $t2 label)))))
+     ((fusable-test? form)
+      (let ((op (%car form)) (args (%cdr form)))
+        (if (%eq? op '%null?)
+            (begin
+              (compile-expr c (%car args) nil)
+              (i-bnez a $a0 label))
+            (begin
+              (compile-args c args 2)
+              (cond
+               ((%eq? op '%<) (i-bge a $a0 $a1 label))
+               ((%eq? op '%>) (i-bge a $a1 $a0 label))
+               ((%eq? op '%<=) (i-blt a $a1 $a0 label))
+               ((%eq? op '%>=) (i-blt a $a0 $a1 label))
+               (else (i-bne a $a0 $a1 label)))))))
+     (else
+      (compile-expr c form nil)
+      (i-beqz a $a0 label)))))
 
 ;; ---------------------------------------------------------------- arguments
 ;; Simple arguments go straight to their register. Anything that can run code
