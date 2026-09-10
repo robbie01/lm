@@ -989,7 +989,11 @@ A window owns the part of the bitmap it may draw on, and nothing else. Its
 it, recomputed whenever a window opens, closes, moves or comes forward. All
 drawing goes through a **rastport** — a bitmap, an origin and a region — and
 every drawing call takes one, the way `RectFill(rp, ...)` does: a rastport
-belongs to a window, so anybody holding the window is clipped to it.
+belongs to a window, so anybody holding the window is clipped to it. A
+**bitmap** is one value too — the memory and both its dimensions — because
+three arguments that have to agree are three that can disagree, and a stride
+that does not match its memory is not a drawing that looks wrong: the clipping
+passes and the write lands past the end, where the stacks are.
 
 That is the difference between an ordering and a guarantee. Before it, z-order
 held only until the next repaint: a task at the back would paint over the

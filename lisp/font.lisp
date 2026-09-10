@@ -194,7 +194,7 @@
 ;; compositor started drawing the desktop through a rastport clipped to the
 ;; damage, where the menu bar's text was written whether or not the damage
 ;; reached it.
-(define (glyph-rows i ox py ink fg bm bw bh x0 y0 x1 y1)
+(define (glyph-rows i ox py ink fg bmp x0 y0 x1 y1)
   (let ((row 0))
     (while (%< row font-height)
       (let ((gy (%+ py row)))
@@ -204,7 +204,7 @@
                 (let ((gx (%+ ox col)))
                   (if (if (%>= gx x0) (%< gx x1) nil)
                       (if (%= 1 (%logand (%lsh bits (%- col 15)) 1))
-                          (bm-plot bm bw bh gx gy fg)
+                          (bm-plot bmp gx gy fg)
                           nil)
                       nil))
                 (set! col (%+ col 1))))
@@ -219,16 +219,14 @@
   (let ((i (font-index ch)))
     (if (%< i 0)
         0
-        (let ((bm (rp-bitmap rp))
-              (bw (rp-bitmap-w rp))
-              (bh (rp-bitmap-h rp))
+        (let ((bmp (rp-bitmap rp))
               (px (%+ x (rp-origin-x rp)))
               (py (%+ y (rp-origin-y rp))))
           (if bg (fill-rect rp x y (font-adv-of i) font-height bg) nil)
           (let ((ink (font-ink-of i))
                 (ox (%+ px (font-left-of i))))
             (dolist (cr (rp-region rp))
-              (glyph-rows i ox py ink fg bm bw bh
+              (glyph-rows i ox py ink fg bmp
                           (rect-x cr) (rect-y cr) (rect-x2 cr) (rect-y2 cr))))
           (font-adv-of i)))))
 

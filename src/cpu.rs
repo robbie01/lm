@@ -396,6 +396,53 @@ fn watch_hi() -> Option<u32> {
 
 /// The name of the function the machine is standing in, read out of the code
 /// object every frame keeps in s1 - the same word a backtrace uses.
+pub fn watch_backtrace(m: &Machine) -> String {
+    // Every prologue saves its caller's frame base at s0-8 and its caller's
+    // code object at s0-16, which is what a Lisp backtrace walks.
+    let mut out = String::new();
+    let mut s0 = m.x[8];
+    let mut code = m.x[9];
+    for _ in 0..12 {
+        out.push_str(&name_of(m, code));
+        out.push_str(" <- ");
+        if s0 < 0x2000 || s0 >= 0x0100_0000 {
+            break;
+        }
+        code = m.peek32(s0.wrapping_sub(16));
+        s0 = m.peek32(s0.wrapping_sub(8));
+    }
+    out
+}
+
+fn name_of(m: &Machine, code: u32) -> String {
+    if code & 7 != 4 {
+        return String::from("?");
+    }
+    let name = m.peek32(code.wrapping_add(4 * crate::heap::CODE_NAME));
+    if name & 7 != 4 {
+        return String::from("?");
+    }
+    let mut name = name;
+    let mut hdr = m.peek32(name.wrapping_sub(4));
+    // A code object's name may be a symbol; follow it to the string.
+    if hdr & 0xff == crate::heap::T_SYMBOL {
+        name = m.peek32(name.wrapping_add(4 * crate::heap::SYM_NAME));
+        if name & 7 != 4 {
+            return String::from("?sym");
+        }
+        hdr = m.peek32(name.wrapping_sub(4));
+    }
+    if hdr & 0xff != crate::heap::T_STRING {
+        return format!("?type{}", hdr & 0xff);
+    }
+    let n = (hdr >> 8).min(48);
+    let mut out = String::new();
+    for i in 0..n {
+        out.push(m.peek32(name + i) as u8 as char);
+    }
+    out
+}
+
 fn watch_where(m: &Machine) -> String {
     let s1 = m.x[9];
     if s1 & 7 != 4 {
@@ -1336,6 +1383,75 @@ fn prof_hook(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 }
 
 pub static PROF_TABLE: [Handler; 64] = [prof_hook; 64];
+
+/// `s2` holds the running task and nothing but `%set-this-task!` writes it, so
+/// it is either nil or a record in object space - always. This checks that
+/// before every instruction and reports the first one that finds it otherwise,
+/// naming the instruction *before* it, which is the one that did it.
+///
+/// It costs no cycles and no fuel, the way the profiler's hook does not, so
+/// installing it does not move a fault that depends on timing.
+fn watch_hook(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
+    if !m.watch_fired {
+        // s2 holds the running task: nil, or a record in object space.
+        let s2 = m.x[18];
+        let s2_ok = s2 == 0
+            || (s2 & 7 == 4 && s2 >= crate::map::OBJ_BASE && s2 < crate::map::OBJ_END);
+        // And every indirect jump lands in code space. Catching it here rather
+        // than at the fetch means the registers that chose the target are
+        // still the ones this instruction is looking at.
+        let jump = if w & 0x7f == 0x67 {
+            let rs1 = ((w >> 15) & 31) as usize;
+            let imm = ((w as i32) >> 20) as u32;
+            Some((rs1, m.x[rs1].wrapping_add(imm) & !1))
+        } else if w & 3 == 2 && (w >> 13) & 7 == 4 && (w >> 2) & 31 == 0 {
+            let rs1 = ((w >> 7) & 31) as usize;
+            Some((rs1, m.x[rs1] & !1))
+        } else {
+            None
+        };
+        // mret returns to whatever the trap stub put in mepc, which for a task
+        // resuming is word 0 of its context. A wrong one is a jump with no
+        // jump instruction in it.
+        let mret = if w == 0x3020_0073 { Some(m.mepc) } else { None };
+        let jump_bad = match jump.map(|(_, t)| t).or(mret) {
+            Some(t) => t < crate::map::CODE_BASE || t >= crate::map::CODE_END,
+            None => false,
+        };
+        if !s2_ok || jump_bad {
+            m.watch_fired = true;
+            if !s2_ok {
+                eprintln!("s2 watch: s2 = {s2:#x} at pc {pc:#x}");
+            }
+            if let Some((rs1, t)) = jump {
+                eprintln!("jump watch: pc {pc:#x} insn {w:#010x} through x{rs1} to {t:#x}");
+            }
+            if let Some(t) = mret {
+                eprintln!(
+                    "mret watch: pc {pc:#x} returns to {t:#x}; context at {:#x}",
+                    m.mscratch
+                );
+            }
+            eprintln!("  before: {:#010x} at pc {:#x}", m.watch_prev_w, m.watch_prev);
+            for i in 0..32 {
+                eprint!("  x{i}={:#x}", m.x[i]);
+                if i % 4 == 3 {
+                    eprintln!();
+                }
+            }
+        }
+    }
+    m.watch_prev = pc;
+    m.watch_prev_w = w;
+    let tok = if w & 3 == 3 {
+        32 + ((w >> 2) & 31)
+    } else {
+        ((w & 3) << 3) | ((w >> 13) & 7)
+    } as usize;
+    become (unsafe { *TABLE.get_unchecked(tok) })(m, w, pc, fuel)
+}
+
+pub static WATCH_TABLE: [Handler; 64] = [watch_hook; 64];
 
 pub static TABLE: [Handler; 64] = [
     // ---- quadrant 0 (tok 0..7) ----

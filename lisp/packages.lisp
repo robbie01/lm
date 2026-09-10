@@ -143,10 +143,11 @@
 (in-package hw)
 ;; 83 public, out of 165 definitions.
 (export '(
-  *blit-list* blit-block blit-go blt-list
-  *screen* *screen-h* *screen-w* alloc-pool bm-blit-rect bm-clip bm-fill-rect
-  bm-plot bm-point make-bitmap-rastport make-rastport-on rp-bitmap
-  rp-bitmap-h rp-bitmap-w rp-retarget! blit-rect clear-screen disk-write
+  *blit-list* *int-blit-list* *in-interrupt* blit-block blit-go blt-list
+  *screen* alloc-pool bm-blit-rect bm-clip bm-fill-rect
+  bm-plot bm-point bm-at bm-addr bm-w bm-h bitmap? make-bitmap alloc-bitmap
+  make-bitmap-rastport make-rastport-on rp-bitmap
+  blit-rect clear-screen disk-write
   draw-circle draw-line ev-buttondown ev-buttonup ev-keydown ev-mousemove
   *screen-rp* screen-rastport make-rastport rastport?
   rp-origin-x rp-origin-y rp-region

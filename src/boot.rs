@@ -77,6 +77,9 @@ pub fn boot(o: &Options) -> i32 {
         m.prof_on = true;
         m.table = &crate::cpu::PROF_TABLE;
     }
+    if std::env::var("LM_WATCH_S2").is_ok() {
+        m.table = &crate::cpu::WATCH_TABLE;
+    }
 
     let t = std::time::Instant::now();
     let stop = run::run(&mut m, o.budget);

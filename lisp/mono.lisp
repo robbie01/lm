@@ -153,18 +153,16 @@
 ;; `bg` is a colour, or nil to leave what is already there.
 (define (draw-mono-char rp x y ch fg bg)
   (check-colour fg)
-  (let ((bm (rp-bitmap rp))
-        (bw (rp-bitmap-w rp))
-        (bh (rp-bitmap-h rp))
+  (let ((bmp (rp-bitmap rp))
         (px (%+ x (rp-origin-x rp)))
         (py (%+ y (rp-origin-y rp))))
     (if bg (fill-rect rp x y mono-advance mono-height bg) nil)
     (dolist (cr (rp-region rp))
-      (mono-rows ch px py fg bm bw bh
+      (mono-rows ch px py fg bmp
                  (rect-x cr) (rect-y cr) (rect-x2 cr) (rect-y2 cr)))
     nil))
 
-(define (mono-rows ch px py fg bm bw bh x0 y0 x1 y1)
+(define (mono-rows ch px py fg bmp x0 y0 x1 y1)
   (let ((row 0))
     (while (%< row mono-cell)
       (let ((gy (%+ py row)))
@@ -174,7 +172,7 @@
                 (let ((gx (%+ px col)))
                   (if (if (%>= gx x0) (%< gx x1) nil)
                       (if (%= 1 (%logand (%lsh bits (%- col 4)) 1))
-                          (bm-plot bm bw bh gx gy fg)
+                          (bm-plot bmp gx gy fg)
                           nil)
                       nil))
                 (set! col (%+ col 1))))

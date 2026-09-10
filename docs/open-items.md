@@ -132,7 +132,9 @@ an address to `blt-list`, twelve words read by the chip, no lock. Programming
 it is atomic because the store is, and the *fill* is safe because the block
 belongs to whoever is filling it: every task has one, handed round by the
 scheduler with `*out*` and the current package, and interrupt servers have one
-more. Two contexts are never half way through the same block.
+more - which `blit-block` chooses by asking, not by the handler assigning. It
+was assignment once, and *Fixed: two tasks could share one blitter command
+block* below is what that cost.
 
 A shadow bank alone was not enough and it is worth writing down why, because it
 looks like it should be. It makes the chip never *run* a half-programmed
@@ -147,23 +149,6 @@ instruction, so the only fix is a state machine the outer loop advances — whic
 means every caller waits for completion, and a spinning waiter and the blit
 would charge the same cycles. A change to what a blit *means*, not a tuning.
 
-## Window chrome bleeds onto the desktop
-
-A few rows of a window's frame appear on the bare desktop, well to the right of
-any window, at the height of one window's title bar. Twelve rows, a couple of
-hundred pixels, in the same place every run. It predates the records and fluids
-work - a build from before them has it too - and it survives with only the
-workbench and two shells open, so it is the chrome and not a demo.
-
-It should not be possible: a window draws through a rastport clipped to its own
-bitmap, and `bm-fill-rect` clips again to the bitmap's edges. Quite possibly
-the same fault as *Something writes two pixels over the current-task register*
-below - a blit that leaves its bitmap lands on the desktop when the bitmap is
-the screen's, and on a task's saved state when it is a window's. So either
-something draws window chrome through a rastport that is not the window's, or
-the compositor blits a source rectangle it should have refused. Worth an hour
-with a small repro - one window, one repaint - rather than a guess.
-
 ## Records cost about nine percent of code space
 
 `defrecord` emits a getter and a setter function per field, so that an accessor
@@ -174,62 +159,61 @@ asked for by name would get most of it back, and would cost a declaration
 nobody wants to write. Worth revisiting when code space starts to matter, which
 is the same day compacting it does.
 
-## Something writes two pixels over the current-task register
+## Fixed: two tasks could share one blitter command block
 
-There is a memory corruption that nothing reaches on the code as it stands,
-and that a single extra call anywhere in `fill-rect` is enough to reach. It
-has a reproduction, which is the useful part:
+Kept because it took three sessions to find and the shape of it is worth
+remembering.
 
-- Add any call at the head of `hw:fill-rect` - `(define (layout-nudge c) c)`
-  and `(layout-nudge c)` will do; it need not compute anything.
-- Run `(workbench) (new-shell) (eyes) (balls 4) (mandelbrot) (life 40)`.
-- Within a few seconds it dies, the same way every run.
+**The symptom** was a machine that died a few seconds after four or five
+windows were open, in a different place every time: a jump to `0xf7f7f7f6`,
+`switch-tasks` reading a slot of a fixnum, `car: expected a pair, got 271` on
+a damage rectangle. All of them were a word of *colour bytes* where a pointer
+should be. It moved whenever anything else moved: one extra call in
+`fill-rect` was enough to bring it on or make it go away, so every instrument
+written in Lisp made it vanish.
 
-**What it is.** `s2` holds the running task, and it acquires a value like
-`0xa09f7f7`: the task pointer with its low *two bytes* replaced by `f7f7`,
-which is a colour. So two pixels are written over half a pointer. Then
-`switch-tasks` reads a slot of what is now a fixnum, or a `ret` goes to an
-address made of pixels - which is what `instruction access fault at pc
-37f7f7f6` was, two sessions running.
+**The fault.** The blitter takes its whole command from a block of memory, and
+that is only safe because the block belongs to whoever is filling it - every
+task has one. An interrupt server needs one too, and the trap handler gave it
+one by *assignment*:
 
-**What has been ruled out**, with the tools below:
+    (set! *in-interrupt* t)
+    (let ((saved *blit-list*))
+      (set! *blit-list* *int-blit-list*)
+      (handle-interrupt-1 n ctx)      ; <- calls switch-tasks
+      (set! *blit-list* saved))
 
-- **Not the blitter leaving its bitmap for somewhere else.** `LM_BLIT_GUARD=1`
-  checks every blit's source and destination against an exact invariant - a
-  blit may only ever write to the pool or the collector's scratch above
-  `fast-base` - and it never fires.
-- **Not the ordinary store path.** `LM_WATCH_HI=f7f7` reports every word store
-  whose top half is a colour pattern, and the only ones are the trap stub
-  saving registers that were *already* wrong.
-- **Not object reuse.** Stubbing `gc-free-block` so swept blocks are never
-  handed out again does not help.
-- **Not argument passing.** `compile-args` writes `a0+i` with no bound on `i`,
-  and `a0+8` is `s2` - but `compile-call` sends anything over eight arguments
-  to `compile-call-many` instead, so it is never reached with `i` past seven.
-- **Nothing else writes `s2`.** The only two instructions that do are
-  `%this-task` and `%set-this-task!`, and the latter runs once, in `exec-init`.
+`*blit-list*` is per task, and the scheduler swaps it with the rest of a
+task's state - from inside that handler. So: task A is interrupted, the
+variable becomes the interrupt's block, `switch-tasks` swaps A's state out
+*and records the interrupt's block as A's*, swaps B's in, and then the handler
+puts A's block back - into B's live value. B then programs the blitter through
+A's block, and what the chip runs is half of each. In the case that finally
+named itself: a destination address from one window with the row stride of
+another, writing 131 rows of pixels across whatever followed the bitmap it
+thought it had - a task's context block, so the next `mret` returned into a
+word of colour.
 
-**Where to look next.** The gap the guard leaves is a blit that overruns
-*within* the pool - past the end of its own bitmap and into the context block
-or stack that follows it, which is exactly the arrangement `bm-clip`'s comment
-warns about. Catching that needs the guard to know the destination bitmap's
-own bounds, and the command block has four words (`bl-x0`..`bl-y1`) that fill
-and copy do not use: Lisp could put the bitmap's base and length there for the
-guard to check, at the cost of two stores a blit.
+It predates fluid bindings. The per-task environment vector they replaced did
+exactly the same thing in `save-task-env`.
 
-**Every instrument written in Lisp moves it.** Adding the check to `bm-plot`,
-or to `fill-rect`, or a watchdog task, each made it stop happening. That is
-why both tools below are on the Rust side, where they add nothing to the
-image.
+**The fix** is that choosing a block is a question rather than an assignment.
+`blit-block` asks `*in-interrupt*` which block this context should fill;
+nothing writes a per-task variable inside the handler, so there is nothing for
+a task switch to capture. `*in-interrupt*` is safe to set the same way only
+because it is cleared before the handler returns, and no other task runs until
+it does.
 
-## Two debugging tools, both off by default
+**What it also fixed:** window chrome appearing on the bare desktop - the same
+wild blits, landing on the screen bitmap rather than on a stack - and the
+compositor losing a damage rectangle, which was this all along rather than the
+cons-run refill race it was blamed on two sessions ago. That race was real and
+is also fixed; it was not this.
 
-- `LM_BLIT_GUARD=1` - every blit's source and destination range is checked
-  against where a bitmap can possibly be. Costs a few comparisons per blit.
-- `LM_WATCH_HI=f7f7` - report every word store whose top sixteen bits are
-  that, with the pc and the function it happened in. `LM_WATCH_ADDR=<hex>`
-  with `LM_WATCH_LEN=<n>` reports every store into that range instead, which
-  is how the corrupt register was traced back to the stub that saved it.
+**What found it,** after three sessions of not: `LM_BLIT_GUARD=1`, which walks
+the pool's block chain and checks that every blit stays inside the block it
+named. The Lisp-side version of that check could never have worked, because
+adding it moved the fault.
 
 ## Window management is a farce
 
@@ -253,22 +237,6 @@ mouse. What there is not:
 
 Worth doing as one pass rather than piecemeal: the boxes, a resize corner, and
 some way to cycle the front window from the keyboard.
-
-## `bm-blit-rect` still takes twelve positional arguments
-
-`(bm-blit-rect sbm sbw sbh dbm dbw dbh sx sy dx dy w h)`, with the source and
-destination triples adjacent and interchangeable. The fix is a `bitmap` record
-holding the address and the two dimensions, which would make it eight
-arguments and two single values that cannot be transposed a triple at a time -
-and would collapse `rp-bitmap`/`rp-bitmap-w`/`rp-bitmap-h` to one accessor, and
-`*screen*`/`*screen-w*`/`*screen-h*` to one variable.
-
-Written and then held back. The change works - the suite passes and every
-demo runs on its own - but putting it in shifts the image's code layout enough
-that the corruption above happens in the *default* build, with no nudge at
-all. It is a better reproduction than the nudge and it is the first thing to
-try again once that is understood; the diff is small enough to redo from this
-description.
 
 ## Closing a window frees a bitmap the compositor may still be reading
 

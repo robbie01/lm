@@ -264,8 +264,107 @@ fn guard_on() -> bool {
     *ON.get_or_init(|| std::env::var("LM_BLIT_GUARD").is_ok())
 }
 
+/// Report any blit whose destination covers this address. Set LM_BLIT_WATCH to
+/// a hex address - a context block, say - and the blit that scribbles it names
+/// itself, with the pc that programmed it.
+fn watch_addr() -> Option<u32> {
+    use std::sync::OnceLock;
+    static A: OnceLock<Option<u32>> = OnceLock::new();
+    *A.get_or_init(|| {
+        std::env::var("LM_BLIT_WATCH")
+            .ok()
+            .and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+    })
+}
+
+/// The pool is a run of blocks, each `[size][tag-or-link][payload...]`, but it
+/// starts with blocks the forge handed out before the machine ran that carry
+/// no header at all. So the chain cannot be walked from `pool-base`: find
+/// where it starts by trying each eight-byte offset until walking sizes from
+/// there lands exactly on the bump pointer.
+fn pool_chain_start(m: &Machine) -> Option<u32> {
+    use crate::map::{LG_POOLPTR, POOL_BASE};
+    let top = m.peek32(LG_POOLPTR);
+    let mut s = POOL_BASE;
+    while s < top && s < POOL_BASE + (1 << 20) {
+        let mut b = s;
+        let mut ok = true;
+        while b < top {
+            let size = m.peek32(b);
+            if size < 24 || size & 7 != 0 || b.wrapping_add(size) > top {
+                ok = false;
+                break;
+            }
+            b += size;
+        }
+        if ok && b == top {
+            return Some(s);
+        }
+        s += 8;
+    }
+    None
+}
+
+/// The block holding `addr`, as (payload start, block end).
+pub fn pool_block(m: &Machine, addr: u32) -> Option<(u32, u32)> {
+    use crate::map::LG_POOLPTR;
+    let top = m.peek32(LG_POOLPTR);
+    let mut b = pool_chain_start(m)?;
+    while b < top {
+        let size = m.peek32(b);
+        if size < 24 {
+            return None;
+        }
+        if addr >= b && addr < b + size {
+            return Some((b + 8, b + size));
+        }
+        b += size;
+    }
+    None
+}
+
 fn guard_range(m: &Machine, lo: u32, hi: u32, what: &str, op: u32) {
-    use crate::map::{CODE_BASE, FAST_BASE, POOL_END};
+    use crate::map::POOL_END;
+    // Inside the pool, a blit must stay inside the one block it named.
+    if lo < POOL_END {
+        if let Some((start, end)) = pool_block(m, lo) {
+            if hi > end {
+                eprintln!(
+                    "blit guard: {what} {lo:#x}..{hi:#x} leaves its block {start:#x}..{end:#x} \
+                     by {} bytes (op {op}, pc {:#x})",
+                    hi - end,
+                    m.pc
+                );
+                eprintln!("  {}", crate::cpu::watch_backtrace(m));
+                let b = &m.blit.live;
+                eprintln!(
+                    "  src {:#x} dst {:#x} w {} h {} smod {} dmod {} val {:#x}",
+                    b.src, b.dst, b.w, b.h, b.smod, b.dmod, b.val
+                );
+            }
+        }
+    }
+    if let Some(a) = watch_addr() {
+        if a >= lo && a < hi {
+            eprintln!(
+                "blit watch: {what} {lo:#x}..{hi:#x} covers {a:#x} (op {op}, pc {:#x})",
+                m.pc
+            );
+            let b = &m.blit.live;
+            eprintln!(
+                "  src {:#x} dst {:#x} w {} h {} smod {} dmod {} val {:#x}",
+                b.src, b.dst, b.w, b.h, b.smod, b.dmod, b.val
+            );
+            eprintln!("  {}", crate::cpu::watch_backtrace(m));
+            for i in 0..32 {
+                eprint!("  x{i}={}", m.x[i] as i32);
+                if i % 8 == 7 {
+                    eprintln!();
+                }
+            }
+        }
+    }
+    use crate::map::{CODE_BASE, FAST_BASE};
     let bad = |a: u32| a >= CODE_BASE && a < FAST_BASE;
     if bad(lo) || bad(hi.saturating_sub(1)) {
         eprintln!(

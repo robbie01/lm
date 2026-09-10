@@ -103,6 +103,11 @@ pub struct Machine {
     /// Which dispatch table the core is using: the plain one, or the one that
     /// counts on the way past.
     pub table: &'static [crate::cpu::Handler; 64],
+    /// Where the machine was one instruction ago, and what it was about to
+    /// run. Filled only when the s2 watch is installed; see `cpu::watch_hook`.
+    pub watch_prev: u32,
+    pub watch_prev_w: u32,
+    pub watch_fired: bool,
 
     // --- custom chips ---
     pub intreq: u32,
@@ -152,6 +157,9 @@ impl Machine {
             watch: Box::default(),
             prof_on: false,
             table: &crate::cpu::TABLE,
+            watch_prev: 0,
+            watch_prev_w: 0,
+            watch_fired: false,
             intreq: 0,
             intena: 0,
             uart: Uart::new(),

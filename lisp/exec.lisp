@@ -871,19 +871,18 @@
 ;; ---------------------------------------------------------------- dispatch
 ;; Everything that interrupts the machine arrives here, on the trap stack,
 ;; with the interrupted task's registers already in its context block.
-(define *in-interrupt* nil)
-(define *int-blit-list* 0)
-
 (define (handle-interrupt n ctx)
-  ;; A server draws with the blitter too, and the task it interrupted may be
-  ;; half way through filling its own command block. So servers get one of
-  ;; their own for the duration. They do not nest - interrupts are off inside
-  ;; the handler - so one is enough.
+  ;; Saying which context this is, and nothing else. A server draws with the
+  ;; blitter too and needs a command block that is not the interrupted task's,
+  ;; but `blit-block` works that out from this flag rather than being handed it
+  ;; - see the comment there for what happens when the handler assigns instead,
+  ;; which is that a task switch in the middle of the assignment gives two
+  ;; tasks one block.
+  ;;
+  ;; This flag is safe to set the same way only because it is cleared before
+  ;; the handler returns, and no other task runs until it does.
   (set! *in-interrupt* t)
-  (let ((saved *blit-list*))
-    (set! *blit-list* *int-blit-list*)
-    (handle-interrupt-1 n ctx)
-    (set! *blit-list* saved))
+  (handle-interrupt-1 n ctx)
   (set! *in-interrupt* nil)
   nil)
 
@@ -936,7 +935,6 @@
       (%vector-set! *int-vectors* i (new-list))
       (set! i (%+ i 1))))
   (set! *quantum* default-quantum)
-  (set! *int-blit-list* (alloc-pool blit-list-size))
   (begin
     ;; The code that is already running becomes task zero. Its context is the
     ;; block the trap stub has been using all along, so it is already correct.

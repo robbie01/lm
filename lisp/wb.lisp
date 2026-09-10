@@ -57,8 +57,8 @@
     (set-win-w! v w)
     (set-win-h! v h)
     (set-win-title! v title)
-    (set-win-bm! v (alloc-pool (%* w h)))
-    (set-win-rp! v (make-bitmap-rastport (win-bm v) w h))
+    (set-win-bm! v (alloc-bitmap w h))
+    (set-win-rp! v (make-bitmap-rastport (win-bm v)))
     v))
 
 (define (window-rastport w) (win-rp w))
@@ -237,10 +237,10 @@
     nil))
 
 (define (draw-desktop rp)
-  (fill-rect rp 0 0 *screen-w* *screen-h* pt-desktop)
+  (fill-rect rp 0 0 (bm-w *screen*) (bm-h *screen*) pt-desktop)
   ;; A menu bar with nothing in the menus yet, which is honest enough.
-  (fill-rect rp 0 0 *screen-w* pt-menubar-h pt-g2)
-  (pt-hline rp 0 (%- pt-menubar-h 1) *screen-w* pt-g6)
+  (fill-rect rp 0 0 (bm-w *screen*) pt-menubar-h pt-g2)
+  (pt-hline rp 0 (%- pt-menubar-h 1) (bm-w *screen*) pt-g6)
   (draw-text rp pt-menubar-first-x 3 "Workbench" pt-black nil)
   nil)
 
@@ -262,38 +262,33 @@
       nil
       ;; The desktop, through a rastport clipped to this rectangle and nothing
       ;; else - which is what keeps a repaint from painting over the windows.
-      (draw-desktop (make-rastport-on *screen* *screen-w* *screen-h*
-                                      0 0 (list r))))
+      (draw-desktop (make-rastport-on *screen* 0 0 (list r))))
   (dolist (w (reverse *windows*))
     (let* ((wr (window-rect w))
            (i (rect-intersect wr r)))
       (if i
           (let ((bm (window-bitmap w))
-                (bw (win-w w))
-                (bh (win-h w))
                 (sx (%- (rect-x i) (rect-x wr)))
                 (sy (%- (rect-y i) (rect-y wr)))
                 (dx (rect-x i))
                 (dy (rect-y i))
                 (cw (rect-w i))
                 (ch (rect-h i)))
-            (bm-blit-rect bm bw bh *screen* *screen-w* *screen-h*
-                          sx sy dx dy cw ch))
+            (bm-blit-rect bm *screen* sx sy dx dy cw ch))
           nil)
       ;; And its shadow, clipped to the damage like everything else.
       (dolist (sr (shadow-rects w))
         (let ((si (rect-intersect sr r)))
           (if si
-              (bm-fill-rect *screen* *screen-w* *screen-h*
-                            (rect-x si) (rect-y si) (rect-w si) (rect-h si)
-                            pt-black)
+              (bm-fill-rect *screen* (rect-x si) (rect-y si)
+                            (rect-w si) (rect-h si) pt-black)
               nil)))))
   nil)
 
 ;; One pass of the compositor: take whatever damage has accumulated and pay it.
 (define (wb-composite)
   (let ((ds (without-preemption (let ((d *damage*)) (set! *damage* nil) d)))
-        (screen (rect 0 0 *screen-w* *screen-h*)))
+        (screen (rect 0 0 (bm-w *screen*) (bm-h *screen*))))
     (dolist (d ds)
       (let ((i (rect-intersect d screen)))
         (if i (composite i) nil)))
@@ -311,7 +306,7 @@
 (define (wb-repaint)
   (dolist (w *windows*)
     (window-draw w))
-  (damage (rect 0 0 *screen-w* *screen-h*))
+  (damage (rect 0 0 (bm-w *screen*) (bm-h *screen*)))
   nil)
 
 ;; What actually happens when a window opens, closes, moves or comes forward.
@@ -349,21 +344,20 @@
     win))
 
 (define (win-plot win x y c)
-  (bm-plot (window-bitmap win) (win-w win) (win-h win)
+  (bm-plot (window-bitmap win)
            (%+ x (win-inner-x win)) (%+ y (win-inner-y win)) c))
 
 (define (win-point win x y)
-  (bm-point (window-bitmap win) (win-w win) (win-h win)
+  (bm-point (window-bitmap win)
             (%+ x (win-inner-x win)) (%+ y (win-inner-y win))))
 
 (define (win-fill win x y w h c)
-  (bm-fill-rect (window-bitmap win) (win-w win) (win-h win)
+  (bm-fill-rect (window-bitmap win)
                 (%+ x (win-inner-x win)) (%+ y (win-inner-y win)) w h c))
 
 ;; Where a row of the interior starts, for the things that walk memory.
 (define (win-row win y)
-  (%+ (window-bitmap win)
-      (%+ (%* (%+ y (win-inner-y win)) (win-w win)) (win-inner-x win))))
+  (bm-at (window-bitmap win) (win-inner-x win) (%+ y (win-inner-y win))))
 
 ;; The window list is read by the compositor and written by whoever opens,
 ;; closes or raises a window - all tasks, so Forbid is the lock. Only the
@@ -381,7 +375,7 @@
     (if task (begin (rem-task task) (set-win-task! win nil)) nil))
   ;; The hole it leaves has to be repainted before its bitmap goes back.
   (damage (window-rect win))
-  (if (win-bm win) (free-pool (win-bm win)) nil)
+  (if (win-bm win) (free-pool (bm-addr (win-bm win))) nil)
   (set-win-bm! win nil)
   (wb-update)
   nil)
@@ -614,9 +608,9 @@
 (define (wb-drag x y)
   (if *drag-win*
       (let ((nx (clamp (%- x *drag-dx*) 0
-                       (%- *screen-w* (win-w *drag-win*))))
+                       (%- (bm-w *screen*) (win-w *drag-win*))))
             (ny (clamp (%- y *drag-dy*) 20
-                       (%- *screen-h* (win-h *drag-win*))))
+                       (%- (bm-h *screen*) (win-h *drag-win*))))
             (was (window-rect *drag-win*)))
         (if (if (%= nx (win-x *drag-win*))
                 (%= ny (win-y *drag-win*))

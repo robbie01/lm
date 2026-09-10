@@ -86,18 +86,34 @@
 (define screen-width 1024)
 (define screen-height 768)
 
-(define *screen* nil)      ; the bitmap address currently being displayed
-(define *screen-w* 0)
-(define *screen-h* 0)
+;; ---------------------------------------------------------------- bitmaps
+;; Where pixels live: the memory, and how wide and tall it is. The memory is
+;; raw pool rather than a Lisp object, because the display reads it directly
+;; and it must never move or be scanned - but the three numbers that describe
+;; it are one value.
+;;
+;; They used to be three arguments. `bm-blit-rect` took twelve of them with
+;; the source and destination triples adjacent and interchangeable, and every
+;; caller had a base, a width and a height that had to be kept in step by
+;; hand. A width that does not match the memory it describes is not a drawing
+;; that looks wrong: the clipping passes and the write lands past the end,
+;; where the stacks are.
+(defrecord (bitmap bm) addr w h)
 
-;; A bitmap is raw memory out of the Exec pool rather than a Lisp object: the
-;; display reads it directly, so it must never move and must not be scanned.
+(define (make-bitmap addr w h)
+  (let ((b (bm-alloc)))
+    (set-bm-addr! b addr)
+    (set-bm-w! b w)
+    (set-bm-h! b h)
+    b))
+
+(define (alloc-bitmap w h) (make-bitmap (alloc-pool (%* w h)) w h))
+
+(define *screen* nil)      ; the bitmap currently being displayed
+
 (define (open-screen w h)
-  (let ((bm (alloc-pool (%* w h))))
-    (set! *screen* bm)
-    (set! *screen-w* w)
-    (set! *screen-h* h)
-    (attach-screen)))
+  (set! *screen* (alloc-bitmap w h))
+  (attach-screen))
 
 ;; Point the display at the bitmap we already have.
 ;;
@@ -110,17 +126,17 @@
   (if (%null? *screen*)
       nil
       (begin
-        (poke gfx-base *screen*)
-        (poke gfx-width *screen-w*)
-        (poke gfx-height *screen-h*)
-        (poke gfx-pitch *screen-w*)
+        (poke gfx-base (bm-addr *screen*))
+        (poke gfx-width (bm-w *screen*))
+        (poke gfx-height (bm-h *screen*))
+        (poke gfx-pitch (bm-w *screen*))
         (poke gfx-mode 8)
         ;; The vblank interrupt goes on with the display. Exec has a server on
         ;; it before this runs, and writing the control register without the
         ;; bit would quietly turn the frame clock off again.
         (poke gfx-ctrl (%logior gfx-on gfx-vbirq))
         (default-palette)
-        (set! *screen-rp* (make-bitmap-rastport *screen* *screen-w* *screen-h*))
+        (set! *screen-rp* (make-bitmap-rastport *screen*))
         *screen*)))
 
 (define (set-colour i rgb)
@@ -160,18 +176,21 @@
 (define (vblank-count) (peek gfx-vcount))
 (define (screen-sync) (poke gfx-sync 1))
 
-(define (bm-plot bm bw bh x y c)
-  (if (if (%>= x 0) (if (%< x bw) (if (%>= y 0) (%< y bh) nil) nil) nil)
-      (poke8 (%+ bm (%+ (%* y bw) x)) c)
+(define (bm-at b x y) (%+ (bm-addr b) (%+ (%* y (bm-w b)) x)))
+
+(define (bm-inside? b x y)
+  (if (%>= x 0)
+      (if (%< x (bm-w b)) (if (%>= y 0) (%< y (bm-h b)) nil) nil)
       nil))
 
-(define (bm-point bm bw bh x y)
-  (if (if (%>= x 0) (if (%< x bw) (if (%>= y 0) (%< y bh) nil) nil) nil)
-      (peek8 (%+ bm (%+ (%* y bw) x)))
-      0))
+(define (bm-plot b x y c)
+  (if (bm-inside? b x y) (poke8 (bm-at b x y) c) nil))
 
-(define (screen-plot x y c) (bm-plot *screen* *screen-w* *screen-h* x y c))
-(define (point x y) (bm-point *screen* *screen-w* *screen-h* x y))
+(define (bm-point b x y)
+  (if (bm-inside? b x y) (peek8 (bm-at b x y)) 0))
+
+(define (screen-plot x y c) (bm-plot *screen* x y c))
+(define (point x y) (bm-point *screen* x y))
 
 ;; ---------------------------------------------------------------- blitter
 ;; The one register worth naming: the address of a command block. The chip
@@ -191,14 +210,40 @@
 ;; So every task has a block of its own, swapped in by the scheduler the way
 ;; `*out*` and the current package are, and interrupt servers have one more.
 ;; Two contexts are never half way through the same block.
-(define *blit-list* 0)
+(define *blit-list* 0)      ; the running task's, swapped in with its bindings
+(define *int-blit-list* 0)  ; and one more for interrupt servers
+(define *in-interrupt* nil) ; set by the trap handler, cleared before it returns
 
+;; Which block this context fills. A *question*, deliberately: the obvious
+;; thing is for the trap handler to swap the interrupt's block into
+;; `*blit-list*` and put the task's back afterwards, and that is wrong in a way
+;; that took three sessions to find.
+;;
+;; `*blit-list*` is per task, and the scheduler swaps it with the rest of a
+;; task's bindings - from inside the trap handler. So the handler would save
+;; task A's block, install the interrupt's, switch to task B (which captures
+;; the *interrupt's* block as A's, because that is what the variable holds by
+;; then), and finally put A's block back - into B's live value. Two tasks then
+;; program one block, and what the chip runs is half of each: a destination
+;; from one window with the stride of another, writing pixels across whatever
+;; follows the bitmap it thinks it has.
+;;
+;; Asking instead of assigning cannot go wrong that way, because nothing is
+;; written and there is nothing for a task switch to capture.
+;;
 ;; The collector clears its bit maps with the blitter, and that can happen
-;; before there is an Exec to have handed out a block, so the first caller
-;; makes one.
+;; before there is an Exec to have handed anybody a block, so the first caller
+;; on either path makes one.
 (define (blit-block)
-  (if (%= *blit-list* 0) (set! *blit-list* (alloc-pool blit-list-size)) nil)
-  *blit-list*)
+  (if *in-interrupt*
+      (begin
+        (if (%= *int-blit-list* 0)
+            (set! *int-blit-list* (alloc-pool blit-list-size))
+            nil)
+        *int-blit-list*)
+      (begin
+        (if (%= *blit-list* 0) (set! *blit-list* (alloc-pool blit-list-size)) nil)
+        *blit-list*)))
 
 (define (blit-go b op)
   (poke (%+ b bl-op) op)
@@ -211,13 +256,15 @@
 ;; pool memory with task structures and stacks immediately after it, so a
 ;; rectangle that runs off the right edge does not merely look wrong - it
 ;; writes over the scheduler.
-(define (bm-clip bw bh x y w h)
+(define (bm-clip b x y w h)
   ;; Returns (x y w h) trimmed to a bitmap that size, or nil if nothing is
   ;; left. Every write to a bitmap goes through here first: bitmaps are raw
   ;; pool memory with task structures and stacks immediately after them, so a
   ;; rectangle that runs off the right edge does not merely look wrong - it
   ;; writes over the scheduler.
-  (let* ((x0 (if (%< x 0) 0 x))
+  (let* ((bw (bm-w b))
+         (bh (bm-h b))
+         (x0 (if (%< x 0) 0 x))
          (y0 (if (%< y 0) 0 y))
          (x1 (let ((e (%+ x w))) (if (%> e bw) bw e)))
          (y1 (let ((e (%+ y h))) (if (%> e bh) bh e))))
@@ -225,7 +272,7 @@
         (list x0 y0 (%- x1 x0) (%- y1 y0))
         nil)))
 
-(define (clip-rect x y w h) (bm-clip *screen-w* *screen-h* x y w h))
+(define (clip-rect x y w h) (bm-clip *screen* x y w h))
 
 ;; A device command is several register writes and then the one that starts
 ;; it. Those writes are a single act: two tasks interleaved in here would each
@@ -234,45 +281,43 @@
 ;;
 ;; The clipping is computed first, outside, because it is the expensive half
 ;; and it touches nothing shared.
-(define (bm-fill-rect bm bw bh x y w h c)
-  (let ((r (bm-clip bw bh x y w h)))
+(define (bm-fill-rect bmp x y w h c)
+  (let ((r (bm-clip bmp x y w h)))
     (if r
         (let ((b (blit-block)))
-          (poke (%+ b bl-dst) (%+ bm (%+ (%* (cadr r) bw) (%car r))))
+          (poke (%+ b bl-dst) (bm-at bmp (%car r) (cadr r)))
           (poke (%+ b bl-w) (caddr r))
           (poke (%+ b bl-h) (cadddr r))
-          (poke (%+ b bl-dmod) bw)
+          (poke (%+ b bl-dmod) (bm-w bmp))
           (poke (%+ b bl-val) c)
           (blit-go b op-fill))
         nil)))
 
-(define (screen-fill-rect x y w h c)
-  (bm-fill-rect *screen* *screen-w* *screen-h* x y w h c))
+(define (screen-fill-rect x y w h c) (bm-fill-rect *screen* x y w h c))
 
 (define (clear-screen c)
-  (fill-rect (screen-rastport) 0 0 *screen-w* *screen-h* c))
+  (fill-rect (screen-rastport) 0 0 (bm-w *screen*) (bm-h *screen*) c))
 
-(define (bm-blit-rect sbm sbw sbh dbm dbw dbh sx sy dx dy w h)
+(define (bm-blit-rect src dst sx sy dx dy w h)
   ;; Clipped against both ends: the source rectangle and the destination have
   ;; to fit, and the smaller of the two wins. Source and destination may be
   ;; the same bitmap, which is what a scroll inside a window is, or different
   ;; ones, which is what compositing is.
-  (let* ((sr (bm-clip sbw sbh sx sy w h))
-         (dr (if sr (bm-clip dbw dbh dx dy (caddr sr) (cadddr sr)) nil)))
+  (let* ((sr (bm-clip src sx sy w h))
+         (dr (if sr (bm-clip dst dx dy (caddr sr) (cadddr sr)) nil)))
     (if dr
         (let ((b (blit-block)))
-          (poke (%+ b bl-src) (%+ sbm (%+ (%* (cadr sr) sbw) (%car sr))))
-          (poke (%+ b bl-dst) (%+ dbm (%+ (%* (cadr dr) dbw) (%car dr))))
+          (poke (%+ b bl-src) (bm-at src (%car sr) (cadr sr)))
+          (poke (%+ b bl-dst) (bm-at dst (%car dr) (cadr dr)))
           (poke (%+ b bl-w) (caddr dr))
           (poke (%+ b bl-h) (cadddr dr))
-          (poke (%+ b bl-smod) sbw)
-          (poke (%+ b bl-dmod) dbw)
+          (poke (%+ b bl-smod) (bm-w src))
+          (poke (%+ b bl-dmod) (bm-w dst))
           (blit-go b op-copy))
         nil)))
 
 (define (screen-blit-rect sx sy dx dy w h)
-  (bm-blit-rect *screen* *screen-w* *screen-h*
-                *screen* *screen-w* *screen-h* sx sy dx dy w h))
+  (bm-blit-rect *screen* *screen* sx sy dx dy w h))
 
 ;; ---------------------------------------------------------------- regions
 ;; A region is a list of rectangles that do not overlap. Rectangles are lists
@@ -380,15 +425,13 @@
 ;; about clipping. Two tasks drawing into two bitmaps cannot reach each other
 ;; however wrong their arithmetic is; two tasks drawing into one screen behind
 ;; two clipping regions can, and did.
-(defrecord (rastport rp) bitmap bitmap-w bitmap-h origin-x origin-y region)
+(defrecord (rastport rp) bitmap origin-x origin-y region)
 
 (define *screen-rp* nil)
 
-(define (make-rastport-on bm bw bh ox oy clip)
+(define (make-rastport-on bmp ox oy clip)
   (let ((r (rp-alloc)))
-    (set-rp-bitmap! r bm)
-    (set-rp-bitmap-w! r bw)
-    (set-rp-bitmap-h! r bh)
+    (set-rp-bitmap! r bmp)
     (set-rp-origin-x! r ox)
     (set-rp-origin-y! r oy)
     (set-rp-region! r clip)
@@ -397,12 +440,12 @@
 ;; The screen is the default target, so the old three-argument form still
 ;; means what it always did.
 (define (make-rastport ox oy clip)
-  (make-rastport-on *screen* *screen-w* *screen-h* ox oy clip))
+  (make-rastport-on *screen* ox oy clip))
 
 ;; A whole bitmap of one's own: no origin to shift by and nothing to clip
 ;; against but its own edges.
-(define (make-bitmap-rastport bm w h)
-  (make-rastport-on bm w h 0 0 (list (rect 0 0 w h))))
+(define (make-bitmap-rastport bmp)
+  (make-rastport-on bmp 0 0 (list (rect 0 0 (bm-w bmp) (bm-h bmp)))))
 
 ;; The screen as a rastport, which is what the boot messages and the desktop
 ;; draw into. Having one means no primitive below needs a second path for the
@@ -411,15 +454,8 @@
 (define (screen-rastport)
   (if *screen-rp*
       *screen-rp*
-      (begin (set! *screen-rp* (make-bitmap-rastport *screen* *screen-w* *screen-h*))
+      (begin (set! *screen-rp* (make-bitmap-rastport *screen*))
              *screen-rp*)))
-
-;; Point one at a different bitmap: three fields that only ever change
-;; together, which is the one thing the generated setters cannot say.
-(define (rp-retarget! r bm w h)
-  (set-rp-bitmap! r bm)
-  (set-rp-bitmap-w! r w)
-  (set-rp-bitmap-h! r h))
 
 (define (set-rp-origin! r x y)
   (set-rp-origin-x! r x)
@@ -443,10 +479,10 @@
 ;; line above them inherits that for nothing.
 (define (fill-rect rp x y w h c)
   (let ((r (rect (%+ x (rp-origin-x rp)) (%+ y (rp-origin-y rp)) w h))
-        (bm (rp-bitmap rp)) (bw (rp-bitmap-w rp)) (bh (rp-bitmap-h rp)))
+        (bmp (rp-bitmap rp)))
     (dolist (cr (rp-region rp))
       (let ((i (rect-intersect r cr)))
-        (if i (bm-fill-rect bm bw bh (rect-x i) (rect-y i) (rect-w i) (rect-h i) c)
+        (if i (bm-fill-rect bmp (rect-x i) (rect-y i) (rect-w i) (rect-h i) c)
             nil))))
   nil)
 
@@ -456,7 +492,7 @@
         (go t))
     (dolist (cr (rp-region rp))
       (if (if go (rect-contains? cr px py) nil)
-          (begin (bm-plot (rp-bitmap rp) (rp-bitmap-w rp) (rp-bitmap-h rp) px py c)
+          (begin (bm-plot (rp-bitmap rp) px py c)
                  (set! go nil))
           nil)))
   nil)
@@ -471,10 +507,8 @@
     (dolist (cr (rp-region rp))
       (let ((i (rect-intersect d cr)))
         (if i
-            (let ((bm (rp-bitmap rp))
-                  (bw (rp-bitmap-w rp))
-                  (bh (rp-bitmap-h rp)))
-              (bm-blit-rect bm bw bh bm bw bh
+            (let ((bmp (rp-bitmap rp)))
+              (bm-blit-rect bmp bmp
                             (%+ (%+ sx ox) (%- (rect-x i) (rect-x d)))
                             (%+ (%+ sy oy) (%- (rect-y i) (rect-y d)))
                             (rect-x i) (rect-y i)
@@ -486,17 +520,17 @@
   ;; Endpoints are clamped rather than properly clipped, so a line that leaves
   ;; the bitmap changes slope at the edge instead of being cut off. That keeps
   ;; it inside, which is the part that matters.
-  (let ((bm (rp-bitmap rp))
-        (bw (rp-bitmap-w rp))
-        (bh (rp-bitmap-h rp))
-        (ox (rp-origin-x rp))
-        (oy (rp-origin-y rp)))
+  (let* ((bmp (rp-bitmap rp))
+         (bw (bm-w bmp))
+         (bh (bm-h bmp))
+         (ox (rp-origin-x rp))
+         (oy (rp-origin-y rp)))
   (set! x0 (clamp (%+ x0 ox) 0 (%- bw 1)))
   (set! x1 (clamp (%+ x1 ox) 0 (%- bw 1)))
   (set! y0 (clamp (%+ y0 oy) 0 (%- bh 1)))
   (set! y1 (clamp (%+ y1 oy) 0 (%- bh 1)))
   (let ((b (blit-block)))
-    (poke (%+ b bl-dst) bm)
+    (poke (%+ b bl-dst) (bm-addr bmp))
     (poke (%+ b bl-dmod) bw)
     (poke (%+ b bl-x0) x0)
     (poke (%+ b bl-y0) y0)
