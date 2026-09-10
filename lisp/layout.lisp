@@ -74,6 +74,9 @@
 (define lg-pool-free #x1c8)
 (define lg-packages #x1cc)
 (define lg-package #x1d0)
+(define lg-trapdepth #x1d4)
+(define lg-traptmp #x1d8)
+(define lg-traptmp2 #x1dc)
 
 ;; ---- object representation ----
 (define obj-bins #x200)
@@ -86,6 +89,7 @@
 (define t-closure #x5)
 (define t-record #x6)
 (define t-float #x7)
+(define t-bignum #x9)
 (define t-port #x8)
 (define t-code #xa)
 (define code-entry #x0)

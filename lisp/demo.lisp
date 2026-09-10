@@ -222,3 +222,127 @@
   (emit-str "  (save-image)           write this machine to the disk\n")
   (emit-str "  bye                    stop the machine\n")
   nil)
+
+
+;; ---------------------------------------------------------------- numbers
+;; What `(numbers)` checks is that arithmetic is one thing rather than two.
+;; A fixnum that outgrows thirty-one bits becomes a bignum, a bignum that
+;; shrinks back becomes a fixnum again, and nothing in between has to be asked
+;; which it is holding - so the interesting cases here are the boundaries, and
+;; the one number whose magnitude is not a number.
+(define (num-check name got want)
+  (if (equal? got want)
+      nil
+      (begin (princ "FAIL ") (princ name) (princ ": got ") (princ got)
+             (princ ", wanted ") (princ want) (newline))))
+
+(define (fact n) (if (= n 0) 1 (* n (fact (- n 1)))))
+
+(define (numbers)
+  (num-check 'small (+ 2 3) 5)
+  (num-check 'promote (+ 1073741823 1) 1073741824)
+  (num-check 'demote (- (+ 1073741823 1) 1) 1073741823)
+  ;; and it really is a fixnum again, not a bignum that prints small
+  (num-check 'demoted-is-fixnum (%fixnum? (- (+ 1073741823 1) 1)) t)
+  (num-check 'most-negative (- 0 -1073741824) 1073741824)
+  (num-check 'most-negative-print (number->string -1073741824) "-1073741824")
+  (num-check 'literal 12345678901234567890 (* 1234567890123456789 10))
+  (num-check 'fact-20 (fact 20) 2432902008176640000)
+  (num-check 'fact-25 (fact 25) 15511210043330985984000000)
+  (num-check 'quotient (quotient 100000000000000 7) 14285714285714)
+  (num-check 'remainder (remainder 100000000000000 7) 2)
+  (num-check 'negative-quotient (quotient -100000000000000 7) -14285714285714)
+  (num-check 'negative-remainder (remainder -100000000000000 7) -2)
+  (num-check 'compare (list (< (fact 20) (fact 21))
+                            (> (fact 20) (fact 21))
+                            (= (fact 20) (fact 20)))
+             (list t nil t))
+  (num-check 'mixed (+ (fact 25) 1) 15511210043330985984000001)
+  (num-check 'cancel (- (fact 25) (fact 25)) 0)
+  (num-check 'abs (abs (- 0 (fact 25))) (fact 25))
+  (num-check 'min-max (list (min 3 (fact 25)) (max 3 (fact 25)))
+             (list 3 (fact 25)))
+  (num-check 'parity (list (even? (fact 25)) (odd? (fact 25))) (list t nil))
+  (num-check 'shift-left (ash 1 100) 1267650600228229401496703205376)
+  (num-check 'shift-right (ash (ash 1 100) -99) 2)
+  (num-check 'shift-floors (ash -1025 -5) -33)
+  (num-check 'eqv (eqv? (fact 25) (fact 25)) t)
+  (num-check 'not-eq (eq? (fact 25) (fact 25)) nil)
+  (num-check 'sort (sort (list (fact 21) 5 (fact 20)) num-lt)
+             (list 5 (fact 20) (fact 21)))
+  (num-check 'wrapping (wrap+ 1073741823 1) -1073741824)
+  (num-check 'saturating (sat* 1000000 1000000) most-positive-fixnum)
+  (princ "numbers: done (nothing above = all correct)")
+  (newline))
+
+
+;; ---------------------------------------------------------------- words
+;; `(words)` checks the other half of the number question: a location holds
+;; thirty-two bits and a fixnum has thirty-one, so reading one has to say
+;; which number it means. `peek` reads a word unsigned, `peek-signed` reads
+;; the same word signed, and `poke` takes either and stores the low
+;; thirty-two bits - so a word read one way goes back unchanged.
+(define (words)
+  (let ((p (alloc-pool 32)))
+    ;; a word with its top bit set, built out of halves so nothing has to
+    ;; represent it on the way in
+    (%st-half! p 0)
+    (%st-half! (%+ p 2) 32768)
+    (num-check 'top-bit (peek p) 2147483648)
+    (num-check 'top-bit-signed (peek-signed p) -2147483648)
+    (poke p 4294967295)
+    (num-check 'all-ones (peek p) 4294967295)
+    (num-check 'all-ones-signed (peek-signed p) -1)
+    (poke p -1)
+    (num-check 'poke-negative (peek p) 4294967295)
+    (poke p 12345)
+    (num-check 'small (peek p) 12345)
+    (num-check 'small-is-fixnum (%fixnum? (peek p)) t)
+    (poke p 1073741824)
+    (num-check 'one-past-fixnum (peek p) 1073741824)
+    (num-check 'one-past-signed (peek-signed p) 1073741824)
+    (poke p 2147483648)
+    (num-check 'round-trip (peek p) 2147483648)
+    ;; and the raw forms still say what they always said: the low thirty-one
+    ;; bits, sign extended, in one instruction
+    (poke p 12345)
+    (num-check 'raw-load (%ld-fixnum p) 12345)
+    (free-pool p))
+  (princ "words: done (nothing above = all correct)")
+  (newline))
+
+
+;; ---------------------------------------------------------------- nesting
+;; A trap taken while the trap handler is already running.
+;;
+;; The server below runs from the vertical blank, which means it runs inside
+;; the handler, and its arithmetic outgrows a fixnum - which widens through
+;; the trap handler, so it is itself a trap. That is a trap inside a trap, and
+;; until the stub kept a stack of save areas it overwrote the registers of the
+;; one already in progress and the machine died somewhere else entirely a
+;; second later.
+(define *nest-hits* 0)
+(define *nest-last* 0)
+(define *nest-int* nil)
+
+(define (nesting . opts)
+  (let ((n (if (%cons? opts) (%car opts) 300)))
+    (set! *nest-hits* 0)
+    (set! *nest-last* 0)
+    (set! *nest-int*
+          (exec::make-interrupt "nesting" 0
+            (lambda (d)
+              (set! *nest-hits* (+ *nest-hits* 1))
+              ;; both of these widen, so both of them trap
+              (set! *nest-last* (* 1000000 (+ 1000000 *nest-hits*)))
+              nil)
+            0))
+    (exec::add-int-server int-vblank *nest-int*)
+    (while (%< *nest-hits* n) (wait-vblank))
+    (exec::rem-int-server int-vblank *nest-int*)
+    (num-check 'nested-result *nest-last*
+               (* 1000000 (+ 1000000 *nest-hits*)))
+    (num-check 'depth-unwound (peek lg-trapdepth) 0)
+    (princ "nesting: ") (princ *nest-hits*)
+    (princ " traps taken inside the trap handler, all of them survived")
+    (newline)))

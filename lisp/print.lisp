@@ -73,6 +73,7 @@
    ((%object? x)
     (let ((ty (%obj-type x)))
       (cond
+       ((%= ty t-bignum) (emit-str (bignum->string x)))
        ((%= ty t-symbol) (print-symbol x))
        ((%= ty t-string) (if quoted (write-string-quoted x) (emit-str x)))
        ((%= ty t-vector) (print-vector x quoted depth))

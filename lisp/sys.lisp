@@ -65,9 +65,11 @@
   (if (interrupt? cause)
       (handle-interrupt (interrupt-number cause) ctx)
       (cond ((%= cause 11) (handle-ecall epc ctx))
-            ((%= cause cause-wrong-type) (check-trap cause epc tval ctx))
+            ((%= cause cause-wrong-type)
+             (if (try-widen epc ctx) nil (check-trap cause epc tval ctx)))
             ((%= cause cause-range) (check-trap cause epc tval ctx))
-            ((%= cause cause-overflow) (check-trap cause epc tval ctx))
+            ((%= cause cause-overflow)
+             (if (try-widen epc ctx) nil (check-trap cause epc tval ctx)))
             ((%= cause cause-divzero) (check-trap cause epc tval ctx))
             (else (fatal-trap cause epc tval ctx)))))
 
@@ -82,6 +84,7 @@
 (define (insn-rs1 w) (%logand (%lsh w -15) 31))
 (define (insn-rs2 w) (%logand (%lsh w -20) 31))
 (define (insn-op w)  (%logand w 127))
+(define (insn-rd w)  (%logand (%lsh w -7) 31))
 
 ;; The stub narrows mtval to thirty bits so it survives as a fixnum. Every
 ;; address in this machine fits, and so does any fixnum small enough to be
@@ -130,6 +133,7 @@
         ((%= ty t-closure) (emit-str "a function"))
         ((%= ty t-record) (emit-str "a record"))
         ((%= ty t-code) (emit-str "a code object"))
+        ((%= ty t-bignum) (emit-str "a bignum"))
         (else (emit-str "an object"))))
 
 ;; custom-0 is one load and one store now, so which operation it was is the
@@ -233,7 +237,70 @@
    ((%= cause cause-divzero) (emit-str ": division by zero"))
    ((%= cause cause-overflow)
     (emit-str ": the result does not fit in a fixnum"))
+   ;; `try-widen` has already had its chance, so a bignum reaching here means
+   ;; this operator has no bignum form yet rather than that the operand was
+   ;; the wrong kind of thing. Saying "expected a number" about a number is
+   ;; the sort of message that costs somebody an hour.
+   ((%bignum? (%from-addr tval))
+    (emit-str ": no bignum form yet, given ") (emit-value tval))
    (else (emit-str ": expected a number, got ") (emit-value tval))))
+
+;; ---------------------------------------------------------------- widening
+;; Overflow and mixed-mode arithmetic both arrive as traps, and neither is an
+;; error. `+`, `-` and `*` emit the trapping forms of the fixnum instructions,
+;; and every fixnum instruction refuses an operand that is not one - so a sum
+;; that outgrows thirty-one bits and a sum with a bignum in it both stop here,
+;; and both are simply the same operation done in a width that fits.
+;;
+;; Only the one instruction is emulated. A comparison writes a raw zero or one
+;; and the instructions after it turn that into `t` or `nil`; an arithmetic
+;; instruction writes a tagged value. Either way the trap returns to the
+;; instruction after this one and the rest of the sequence runs as compiled.
+;;
+;; The cost of this is a trap, which is around ten times what the allocation
+;; inside it costs - so the thing to avoid is arriving here at all, which is
+;; why the fast path is one instruction that asks nothing.
+(defsubst (widenable? v) (if (%fixnum? v) t (%bignum? v)))
+
+(define (widen-arith w epc ctx x y)
+  (let ((rd (insn-rd w))
+        (f3 (insn-f3 w))
+        (f7 (insn-f7 w))
+        (ok t))
+    (if (%= f7 1)
+        ;; the compare group: `flt` and `feq` leave a raw flag behind
+        (cond ((%= f3 3) (%st-fixnum! (ctx-reg ctx rd)
+                                      (if (%< (generic-cmp x y) 0) 1 0)))
+              ((%= f3 5) (%st-fixnum! (ctx-reg ctx rd)
+                                      (if (%= (generic-cmp x y) 0) 1 0)))
+              (else (set! ok nil)))
+        (cond ((%= f3 0) (%st-word! (ctx-reg ctx rd) (generic-add x y)))
+              ((%= f3 1) (%st-word! (ctx-reg ctx rd) (generic-sub x y)))
+              ((%= f3 2) (%st-word! (ctx-reg ctx rd) (generic-mul x y)))
+              ((%= f3 3) (%st-word! (ctx-reg ctx rd) (generic-quotient x y)))
+              ((%= f3 4) (%st-word! (ctx-reg ctx rd) (generic-remainder x y)))
+              (else (set! ok nil))))
+    ;; Stepping the saved pc is what makes the trap resume after the
+    ;; instruction rather than run it again and trap forever.
+    (if ok (%st-fixnum! ctx (%+ epc 4)) nil)
+    ok))
+
+(define (try-widen epc ctx)
+  (let ((w (%ld-fixnum epc)))
+    (if (%= (insn-op w) op-fixnum)
+        (let ((rd (insn-rd w))
+              (x (trap-raw ctx (insn-rs1 w)))
+              (y (trap-raw ctx (insn-rs2 w))))
+          ;; Slot zero of the context is the saved pc, not register x0, so an
+          ;; instruction that writes to x0 has nowhere to put an answer. The
+          ;; compiler emits none, and this is here so that a corrupt word read
+          ;; as an instruction cannot scribble on the return address.
+          (if (%= rd 0)
+              nil
+              (if (if (widenable? x) (widenable? y) nil)
+                  (widen-arith w epc ctx x y)
+                  nil)))
+        nil)))
 
 (define (check-trap cause epc tval ctx)
   (let ((w (%ld-fixnum epc)))

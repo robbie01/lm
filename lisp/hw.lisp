@@ -9,8 +9,82 @@
 (in-package hw)
 
 (define (dev-addr dev reg) (%+ mmio-base (%+ (%lsh dev 12) reg)))
-(define (peek a) (%ld-fixnum a))
-(define (poke a v) (%st-fixnum! a v))
+;; A whole machine word, all thirty-two bits of it, promoting when it does
+;; not fit a fixnum.
+;;
+;; These used to be `%ld-fixnum` and `%st-fixnum!` outright - one instruction
+;; each. But a tagged load *tags*, and a fixnum is thirty-one bits, so bit 31
+;; came off the top: `(peek a)` of a word holding 0x80000000 answered 0, and
+;; said nothing. That is not a hypothetical - it cost a session of chasing
+;; heap corruption in the collector, where a mark-bitmap word read this way
+;; compared equal to zero and a live pair was left behind.
+;;
+;; Unsigned, like `%ld-byte` and `%ld-half`, which are both zero-extending
+;; loads: a word is a bit pattern, and the neutral reading of one is the
+;; number it spells. `poke` takes either sign and stores the low thirty-two
+;; bits, so a value read out of one address goes back into another unchanged.
+;;
+;; The raw forms are still there and still one instruction. Use them where the
+;; value is known to be an address or a small number - the collector and the
+;; device registers do, and they are the reason the fast path matters.
+;; A word is thirty-two bits and a fixnum is thirty-one, so reading one into
+;; a value has to say which number it means. Three names, three answers:
+;;
+;;   peek / poke               the word as an *unsigned* integer, 0..2^32-1
+;;   peek-signed               the same word as -2^31..2^31-1
+;;   %ld-fixnum / %st-fixnum!  the raw instruction: the low thirty-one bits,
+;;                             sign extended, in one instruction. The right
+;;                             thing for an address or a count, neither of
+;;                             which can have the top bit set on this machine.
+;;
+;; `poke` takes anything from -2^31 to 2^32-1 and stores the low thirty-two
+;; bits, so a word read either way goes back unchanged.
+;;
+;; Unsigned is the default because a location is a bit pattern and the neutral
+;; reading of one is the number it spells. It costs something: a word with its
+;; top bit set becomes a bignum, where the signed reading would have kept it a
+;; fixnum. That is the *only* case where the two differ in cost - a word with
+;; bit 30 set and not bit 31 is 2^30, which is one past the largest fixnum and
+;; promotes under either reading.
+;;
+;; These used to be `%ld-fixnum` and `%st-fixnum!` outright. But a tagged load
+;; *tags*, and tagging drops bit 31: `(peek a)` of a word holding 0x80000000
+;; answered 0, and said nothing about it. That is not hypothetical - it cost a
+;; session of chasing heap corruption, where a mark-bitmap word read this way
+;; compared equal to zero and a live pair was left behind by the collector.
+;;
+;; **The location is read once.** Taking a word apart with two half-word loads
+;; reads it twice, which is fine for memory and wrong for a device register:
+;; the timer's counter moves between the two reads, the random register rolls
+;; again, and a half-word *write* to a device only writes the low lane. So the
+;; word is moved whole, with one access, and taken apart in a scratch cell.
+;; `lg-scratch3` on purpose: the collector scans `lg-scratch0` as a root, and
+;; what sits here is a raw word rather than a value.
+(define peek-scratch lg-scratch3)
+
+;; Neither of these widens by trapping - see `halves->unsigned`. Both are
+;; reachable from an interrupt server, and a trap cannot nest.
+(define (peek a)
+  (without-interrupts
+    (%st-word! peek-scratch (%ld-word a))
+    (halves->unsigned (%ld-half peek-scratch)
+                      (%ld-half (%+ peek-scratch 2)))))
+
+(define (peek-signed a)
+  (without-interrupts
+    (%st-word! peek-scratch (%ld-word a))
+    (halves->signed (%ld-half peek-scratch)
+                    (%ld-half (%+ peek-scratch 2)))))
+
+(define (poke a v)
+  (if (%fixnum? v)
+      ;; One instruction, and exact: the store untags, which sign-extends a
+      ;; fixnum across the whole word.
+      (%st-fixnum! a v)
+      (without-interrupts
+        (bignum-poke-word peek-scratch v)
+        (%st-word! a (%ld-word peek-scratch))
+        v)))
 (define (peek8 a) (%ld-byte a))
 (define (poke8 a v) (%st-byte! a v))
 
@@ -28,12 +102,20 @@
 (define sys-intset (dev-addr dev-sys #x28))
 
 (define (halt code) (%halt code))
-(define (random) (peek sys-random))
+;; Thirty bits and never negative, so it stays a fixnum and `(mod (random) n)`
+;; is fixnum arithmetic. The register is a full word; taking all of it would
+;; hand back a bignum half the time.
+(define (random) (%logand (%ld-fixnum sys-random) 1073741823))
 (define (int-enable line) (poke sys-intena (%logior (peek sys-intena) (%lsh 1 line))))
 (define (int-disable line) (poke sys-intena (%logand (peek sys-intena) (%lognot (%lsh 1 line)))))
 (define (int-ack line) (poke sys-intreq (%lsh 1 line)))
 (define (int-raise line) (poke sys-intset (%lsh 1 line)))
-(define (int-pending) (peek sys-intnum))
+;; The line number, or -1 when nothing is pending - which the chip spells as
+;; a word of all ones. The raw load rather than `peek-signed`: a line number
+;; is five bits and the sentinel is the one value where the two readings
+;; differ, so the one-instruction form says exactly what is meant and cannot
+;; allocate. This runs inside the trap handler.
+(define (int-pending) (%ld-fixnum sys-intnum))
 
 ;; ---------------------------------------------------------------- timer
 (define tmr-lo (dev-addr dev-timer #x00))
@@ -54,12 +136,26 @@
   ;; second so a wrap cannot leave a compare in the past - and both halves go
   ;; out together, or the interrupt that arrives in between reads half of one
   ;; deadline and half of another.
+  ;;
+  ;; Sixteen bits at a time, and every operation here is a fixnum one. Traps
+  ;; nest now, so the promoting `+` would work - but this is called from the
+  ;; timer interrupt every quantum, and the promoting version would take a
+  ;; second trap and allocate a bignum each time, on the one path where that
+  ;; is least welcome. So it is a choice rather than a requirement.
+  ;;
+  ;; It used to carry at 2^30 and mask the low half back together by hand,
+  ;; which was the same problem answered by giving up on the top two bits.
   (without-interrupts
-    (let* ((lo (peek tmr-lo))
-           (hi (peek tmr-hi))
-           (sum (%+ (%logand lo 1073741823) n)))
-      (poke tmr-cmphi (if (%> sum 1073741823) (%+ hi 1) hi))
-      (poke tmr-cmplo (%logior (%logand lo -1073741824) (%logand sum 1073741823))))))
+    (%st-word! peek-scratch (%ld-word tmr-lo))
+    (let* ((l0 (%ld-half peek-scratch))
+           (l1 (%ld-half (%+ peek-scratch 2)))
+           (s0 (%+ l0 (%logand n 65535)))
+           (s1 (%+ (%+ l1 (%lsh n -16)) (%lsh s0 -16))))
+      ;; the high half first, so a wrap cannot leave a compare in the past
+      (%st-fixnum! tmr-cmphi (%+ (%ld-fixnum tmr-hi) (%lsh s1 -16)))
+      (%st-half! peek-scratch (%logand s0 65535))
+      (%st-half! (%+ peek-scratch 2) (%logand s1 65535))
+      (%st-word! tmr-cmplo (%ld-word peek-scratch)))))
 
 (define (timer-never)
   (without-interrupts

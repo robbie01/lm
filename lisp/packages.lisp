@@ -40,7 +40,7 @@
 (export '(
   alloc-object *object-allocator* *collector*
   ;; the memory map and object layout, generated from the Rust side
-  clo-code clo-entry clo-free code-base code-lits code-name cons-base cons-limit dev-blit dev-disk dev-gfx dev-input dev-sys dev-timer dev-uart fast-base imm-unbound int-input int-soft int-vblank lg-bootlist lg-code-end lg-code-free lg-code-free-n lg-code-ptr lg-code-reg lg-code-reg-n lg-cons-free lg-cons-free-n lg-cons-ptr lg-cons-run lg-cons-run-end lg-errhandler lg-gccount lg-gchook lg-imgentry lg-obarray lg-obj-end lg-obj-free-n lg-obj-ptr lg-package lg-packages lg-pool-free lg-poolend lg-poolptr lg-refill lg-roots lg-scratch0 lg-scratch1 lg-stackbot lg-stacktop lg-startup lg-stub-hi lg-stub-lo lg-symcount lg-symlist lg-toplevel lg-traphook lg-trapsave mmio-base obj-base obj-bins obj-bin-count obj-limit pkg-name pkg-slots pkg-tag pkg-use pool-base pool-limit sym-exported sym-flags sym-function sym-macro sym-name sym-package sym-plist sym-slots sym-value t-bytes t-closure t-code t-float t-free t-record t-string t-symbol t-vector
+  clo-code clo-entry clo-free code-base code-lits code-name cons-base cons-limit dev-blit dev-disk dev-gfx dev-input dev-sys dev-timer dev-uart fast-base imm-unbound int-input int-soft int-vblank lg-bootlist lg-code-end lg-code-free lg-code-free-n lg-code-ptr lg-code-reg lg-code-reg-n lg-cons-free lg-cons-free-n lg-cons-ptr lg-cons-run lg-cons-run-end lg-errhandler lg-gccount lg-gchook lg-imgentry lg-obarray lg-obj-end lg-obj-free-n lg-obj-ptr lg-package lg-packages lg-pool-free lg-poolend lg-poolptr lg-refill lg-roots lg-scratch0 lg-scratch1 lg-scratch2 lg-scratch3 lg-stackbot lg-stacktop lg-startup lg-stub-hi lg-stub-lo lg-symcount lg-symlist lg-toplevel lg-trapdepth lg-traphook lg-trapsave lg-traptmp lg-traptmp2 mmio-base obj-base obj-bins obj-bin-count obj-limit pkg-name pkg-slots pkg-tag pkg-use pool-base pool-limit sym-exported sym-flags sym-function sym-macro sym-name sym-package sym-plist sym-slots sym-value t-bignum t-bytes t-closure t-code t-float t-free t-record t-string t-symbol t-vector
   ;; the blitter's command block and the ecall codes, generated with the rest
   ctx-words ctx-bytes
   reg-zero reg-ra reg-sp reg-gp reg-tp reg-t0 reg-t1 reg-t2
@@ -55,11 +55,12 @@
   %bit-ref %bit-set! %min %max %popcount
   %bytes-length %bytes-ref %bytes-set! %bytes? %car %cdr %char->int %char?
   %closure? %cons %cons? %ctest-entry %cycles %disable %display %dv %ecall
-  %enable %enable-timer %eq? %error %eval %fixnum? %float? %flush
+  %bignum? %enable %enable-timer %eq? %error %eval %fixnum? %float? %flush
   %fluid-value %set-fluid-value!
   %frame-pointer %from-addr %funcall %gensym %global %halt %this-task %set-this-task! %int->char
   %intern %ld-half %ld-fixnum %ld-byte %logand %logior %lognot %logxor %lsh %macro?
-  %macroexpand-1 %make-bytes %make-string %make-vector %mod %newline %null?
+  %*o %+o %-o
+  %macroexpand-1 %make-bytes %make-string %make-vector %mod %mulhi16 %newline %null?
   %obj-len %obj-type %object? %ld-word %st-word! %read-file
   %enable-after-trap %record? %record-ref %record-set!
   %reload-cons-run %rem %restore-interrupts %set-car! %set-cdr!
@@ -98,7 +99,7 @@
   make-package make-record make-stream make-string make-string-n make-table
   make-vector make-vector-n map map2 mapcar max max2 member memq merge2 min
   min2 mod modulo mul2 neg negative? newline not nth nthcdr null? num-eq
-  num-ge num-gt num-le num-lt number->hex number->string number?
+  num-ge num-gt num-le num-lt number->hex number->string number->string-fix number?
   object-payload odd? or out-char out-of-memory package package-name
   package-use package? pair? pop position positive? princ print print-list
   print-obj print-record print-symbol print-vector push put qualified-hash
@@ -123,9 +124,18 @@
   undefined-globals unless unquote unquote-splicing use-stream! vector
   vector->list vector-equal? vector-fill! vector-grow vector-length
   vector-map vector-ref vector-set! vector? warn when when-let while
+  wrap+ wrap- wrap* strict+ strict- strict* sat+ sat- sat*
+  saturate fixnum-only most-positive-fixnum most-negative-fixnum
   without-interrupts
   with-output-to-string write write-char-name write-string-quoted
   write-to-string zero?
+  ;; ---- bignums ----
+  bignum? bignum-even? bignum->string bignum-poke-word halves->unsigned halves->signed bn-two-to generic-ash bn-alloc bn-alloc-halves bn-finish bn-halves
+  bn-limbs bn-mag bn-most-negative bn-of bn-shrink bn-sign
+  generic-add generic-cmp generic-divmod generic-mul generic-neg
+  generic-quotient generic-remainder generic-sub generic-zero?
+  mag-add! mag-cmp mag-div-small! mag-divmod! mag-half mag-mul! mag-set!
+  mag-shl1! mag-sig mag-sub! num-mag-cmp num-sig num-sign
 ))
 
 (in-package gc)
@@ -143,6 +153,7 @@
 (in-package hw)
 ;; 83 public, out of 165 definitions.
 (export '(
+  peek-signed peek-scratch
   *blit-list* *int-blit-list* *in-interrupt* blit-block blit-go blt-list
   *screen* alloc-pool bm-blit-rect bm-clip bm-fill-rect
   bm-plot bm-point bm-at bm-addr bm-w bm-h bitmap? make-bitmap alloc-bitmap

@@ -145,4 +145,7 @@ globals! {
     LG_POOLFREE   = 0xc8, "pool-free";   // free list head, exec pool
     LG_PACKAGES   = 0xcc, "packages";    // every package, as a list
     LG_PACKAGE    = 0xd0, "package";     // the one a bare name is read in
+    LG_TRAPDEPTH  = 0xd4, "trapdepth";   // traps in progress; 0 outside one
+    LG_TRAPTMP    = 0xd8, "traptmp";     // the stub has no free register at
+    LG_TRAPTMP2   = 0xdc, "traptmp2";    // entry, so two go here for a moment
 }

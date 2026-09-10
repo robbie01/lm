@@ -4,31 +4,185 @@ Things deliberately left undone, with enough detail to pick them up cold.
 
 ## Safety
 
-**Overflow should make a bignum. Decided, not built.**
-`faddo`, `fsubo` and `fmulo` trap when a result will not fit in 31 bits; they
-are tested and nothing emits them yet. The plan:
+**Overflow makes a bignum. Built.**
+`+`, `-` and `*` are mixed fixnum and bignum arithmetic: a result that outgrows
+thirty-one bits promotes, one that fits again demotes, and no program has to
+ask which kind it is holding. `(fact 50)` is exact; `(ash 1 100)` is 2^100.
 
-- `+`, `-`, `*` and friends emit the trapping form and the handler promotes.
-  `C_OVER` carries the wrapped result in `mtval`, which is not enough to
-  reconstruct the true value for a multiply, so the handler decodes the
-  instruction, reads the two operands out of the saved context, redoes the
-  arithmetic in wider form and writes a bignum into `rd`. Then it steps `mepc`
-  past the instruction and returns, exactly as `handle-ecall` already does.
-- A bignum is an object: `t-bignum`, sign plus a vector of 30-bit limbs, with
-  the invariant that anything that fits a fixnum *is* a fixnum, so `eq?` on
-  small numbers keeps working and every existing type test stays right.
-- The arithmetic instructions stay fixnum-only. A bignum operand is a `C_TYPE`
-  trap, and the same handler catches it and dispatches to the Lisp routines.
-  So one trap handler covers both promotion and mixed-mode arithmetic, and the
-  fast path is untouched.
-- Two explicit forms for the places that want the old behaviour. `wrap+`,
-  `wrap*` and so on emit the wrapping instructions - `hash-string-into` needs
-  `(wrap* h 33)`, and the fixed-point Mandelbrot needs wrapping multiplies.
-  And a strict family that traps rather than promoting, for code that means
-  to stay in fixnums and wants to hear about it.
+The fast path is unchanged and still one instruction. `+` emits `faddo` rather
+than `fadd` - the trapping form, which had been sitting in the instruction set
+unused since it was built - and `try-widen` in sys.lisp catches the trap,
+redoes that one instruction in whatever width the answer needs, writes the
+result into the saved context and steps the saved pc past it. Every fixnum
+instruction already refused an operand that was not a fixnum, so mixed-mode
+arithmetic arrives at the same place by the same route: a wrong-type trap on a
+bignum operand is not an error, it is the same operation asked in a wider
+form. Comparisons come through too, and `flt` and `feq` leave a raw flag
+behind, so the handler writes a raw flag and lets the instructions after it
+build the `t` or `nil`.
 
-The ordering matters: the wrapping forms have to exist and those two callers
-have to move to them *before* the default changes, or interning breaks.
+**Representation.** `t-bignum` is sign-magnitude: slot 0 is the sign, and the
+slots after it are the magnitude as raw 32-bit limbs, least significant first.
+That is the machine's own word, so a one-limb bignum is a machine word with a
+sign on it. The collector does not trace the slots - a limb is very often a
+word that would look like a pointer.
+
+*The arithmetic works sixteen bits at a time, and that is the part worth
+knowing.* A fixnum has thirty-one bits and a limb has thirty-two, so no Lisp
+variable can hold a limb: the moment one is loaded into a value it has to be
+narrower than the storage it came from. Sixteen is the width that works. A sum
+of two halves and a carry is eighteen bits; a product of two halves is
+thirty-two, one bit too wide, so it is taken in two pieces - `%mulhi16` for the
+top half and a wrapping `%*` for the bottom. `%mulhi16` is not a new
+instruction; it is the base `mul`, which the machine has always had and which
+nothing else emits, because every other multiply in the system is a fixnum one.
+
+**Should the one-limb case be special?** No, and the reason is that the cost is
+not where it looks. A promoted operation costs a trap - ninety-odd instructions
+of stub, sixty-two of them memory, before the handler runs - against forty to
+sixty for the allocation inside it. Special-casing the allocation would save
+perhaps a tenth of the operation, and it would cost a second numeric type in
+every dispatch in the arithmetic, which is the code that most has to stay
+simple to stay right. If promoted arithmetic ever needs to be faster, the thing
+to attack is the trap, not the allocation.
+
+**Three explicit families**, for code with a reason not to promote:
+
+    wrap+   wrap-   wrap*     modulo 2^31, silently
+    strict+ strict- strict*   an error if the answer is not a fixnum
+    sat+    sat-    sat*      clamped to the ends of the fixnum range
+
+The ordering worry in the old version of this item turned out not to exist:
+`hash-string-into` was already written with `%*`, the raw wrapping primitive,
+so interning never depended on `*`.
+
+**What is not done:**
+
+- **Bitwise operations on bignums.** `logand`, `logior`, `logxor` and `lognot`
+  take fixnums only; a bignum gets a clear error rather than a wrong answer.
+  Doing them properly means treating a bignum as an infinite two's complement
+  string, which is a real piece of design and not an afternoon.
+- **Division is a bit at a time.** Long division by shift-and-subtract, because
+  the estimate step of a digit-at-a-time method needs to divide a thirty-two
+  bit value by a sixteen bit one, and thirty-two bits is exactly the width this
+  machine cannot hold in a value. Correct, and O(bits x limbs). Printing does
+  not go that way - it divides by ten thousand at a time, which is the largest
+  round number small enough to keep `r * 2^16 + half` inside a fixnum.
+- **Floats and bignums do not mix.** They did not before either.
+- **No `expt`, `gcd` or `isqrt`.**
+- **`(%/ -1073741824 -1)` still wraps**, in the raw primitive. The answer is
+  2^30, which is not a fixnum, and the wrapping form does not check. `quotient`
+  goes through the checking instruction and is right.
+
+**A machine word is not a fixnum, and `peek` now says which number it means.**
+Thirty-two bits into thirty-one does not go, so reading a location has to pick
+a reading. Three names, three answers:
+
+    peek / poke               the word as an unsigned integer, 0 .. 2^32-1
+    peek-signed               the same word as -2^31 .. 2^31-1
+    %ld-fixnum / %st-fixnum!  the raw instruction: the low thirty-one bits,
+                              sign extended, in one instruction
+
+`poke` takes anything from -2^31 to 2^32-1 and stores the low thirty-two bits,
+so a word read either way goes back unchanged. The raw pair is still the right
+thing for an address or a count - neither can have the top bit set on a machine
+with 256 MiB of RAM - and it is what the collector and the device registers
+use.
+
+Unsigned is the default because a location is a bit pattern and the neutral
+reading of one is the number it spells. It costs something, and it is worth
+being clear about what: a word with its *top* bit set becomes a bignum where
+the signed reading would have kept it a fixnum. That is the only case where the
+two differ. A word with bit 30 set and not bit 31 is 2^30, one past the largest
+fixnum, and promotes under either reading - so the choice is not between "some
+words allocate" and "none do", it is only about the top quarter.
+
+`peek` and `poke` used to *be* `%ld-fixnum` and `%st-fixnum!`, and a tagged
+load tags: `(peek a)` of a word holding 0x80000000 answered 0 and said nothing
+about it. That is the fault that cost a session of chasing heap corruption in
+the collector.
+
+**The location is read once.** Taking a word apart with two half-word loads
+reads it twice, which is fine for memory and wrong for a device register: the
+timer's counter moves between the two reads, the random register rolls again,
+and a half-word *write* to a device only writes the low lane. So the word is
+moved whole and taken apart in a scratch cell (`lg-scratch3`, chosen because
+the collector scans `lg-scratch0` as a root and what sits here is a raw word).
+
+`(words)` at the prompt checks all of it.
+
+## Fixed: traps nest now
+
+The trap stub used to swap `mscratch` into a register and save the whole
+register file into the one block it named. There was one block per task and no
+notion of depth, so a trap taken *inside* the handler overwrote the registers
+of the trap already in progress, and the `mret` at the end returned into
+whatever was left - a fault that surfaces somewhere else entirely, a second
+later.
+
+That was always true and never mattered, because nothing the handler ran could
+fault. Widening changed it: `+` is a trapping instruction now, so an interrupt
+server that adds two large numbers takes a second trap while the first is still
+in progress. That is a legitimate thing to do, so the stub was made to handle
+it rather than the code being told to avoid it.
+
+**How it works.** `mscratch` names the frame the next trap saves into:
+
+- `lg-trapdepth` counts traps in progress. The stub bumps it on the way in and
+  drops it on the way out.
+- At depth 1 the frame is the running task's own context block, which is what
+  makes a task switch a matter of editing it and pointing `mscratch` somewhere
+  else.
+- Deeper than that, the frame comes from `trap-nest`, an array of eight. Each
+  entry is a frame plus a link word holding the frame it interrupted, so the
+  way out can put `mscratch` back.
+- The trap stack is only reset at the outermost level. A nested trap is
+  already running on it and pushes below what is there.
+- Nine deep is a handler faulting on every attempt rather than a program doing
+  anything reasonable, so the stub stops the machine with exit code 9 instead
+  of writing over a frame that is still in use.
+
+The awkward part is the entry sequence: at the moment a trap arrives there are
+no free registers at all. Swapping `mscratch` frees one, and working out
+*which* frame needs a second, so `t1` is parked in a fixed low-memory cell
+(`lg-traptmp`) for the dozen instructions it takes. Nothing in between can
+fault, so that cell cannot be re-entered.
+
+`(nesting)` at the prompt is the regression test: it installs a vertical-blank
+server whose arithmetic widens - a trap inside the handler, several hundred
+times - and checks that the answers are right and the depth unwound.
+
+**What still must not be done on the interrupt path,** even though it now
+works: `timer-set-in` sets the next quantum from the timer interrupt, and it
+does its thirty-two bit arithmetic sixteen bits at a time with fixnum
+operations. The promoting `+` would be correct, and would take a second trap
+and allocate a bignum every quantum. That is a choice about the hottest path
+in the system rather than a rule.
+
+**A trap worth remembering.** `%ash` takes its shift count modulo thirty-two,
+which is the machine's rule and the right one for a primitive - and it made
+`(ash 1 100)` answer 16. That was there before bignums and could not be seen,
+because there was no answer to give instead. `ash` is no longer an inline alias
+for it.
+
+**Two readers, one answer.** A literal wider than a fixnum is a bignum on both
+sides of the bootstrap. That took more than it looks: the forge reads its own
+later sources with the *machine's* reader running on host primitives, and the
+machine's reader builds a number by multiplying by ten - so `%*o` on the host
+had to be arbitrary precision too. It was i64 for one build, and a twenty-six
+digit constant in a source file quietly became its bottom sixty-four bits while
+the same constant typed at the prompt was correct.
+
+The host's arithmetic is `num_bigint`'s. It runs at build time on a machine
+with a real allocator and a crate registry, and the only thing it has to be is
+right; there is nothing to learn from a second hand-rolled kernel. `rug` would
+be faster and is GMP behind a C build - this way the build stays a plain
+`cargo build`. The interesting implementation is the machine's own, which has
+to work in sixteen-bit pieces because a Lisp value there cannot hold a limb.
+
+`(numbers)` at the prompt checks all of this - the boundaries, the one number
+whose magnitude is not a number, promotion, demotion, division with negatives,
+sorting a mixed list, and the three explicit families.
 
 **The fused comparison is not checked.**
 `(< i n)` as the test of an `if` compiles to a bare `blt`. Making it checked
@@ -45,6 +199,38 @@ got.
 
 **`%eq?` is unchecked and should stay that way.** It compares identity on
 values of any kind. It is not a numeric comparison and should not become one.
+
+## The forge got twice as fast, and the rest of it is known
+
+A build was 15.7 seconds and is now 7.2, with a byte-identical image.
+
+All of it was one thing: the build's global and macro tables were
+`HashMap<String, V>`, so **every global reference in the build allocated a
+String out of the machine's heap and hashed it**, and a macro check did it
+twice - once to ask whether the head was a macro and once to fetch it. The
+build is the compiler interpreted, and the compiler is mostly calls to named
+functions, so that was most of the time.
+
+They are now `Vec`s indexed by a dense *name* id. Name rather than symbol on
+purpose: the sources read before packages.lisp go through a flat reader with
+one namespace and call things that are defined later inside a package -
+hostio.lisp calls `compile-top`, which is `compiler:compile-top`. Keyed by
+symbol those get separate cells and the build stops with "undefined function".
+`Heap::name_id` hands out one id per spelling, which is exactly what the old
+map did.
+
+The ids are filled at intern time and *also* on demand, because there are two
+interners: `Heap::intern_in` in Rust and `intern-in` in runtime.lisp, and the
+second one runs interpreted during the build and makes symbols the first has
+never seen.
+
+Also: the environment walk cloned an `Rc` per frame per variable reference,
+which is now a borrow.
+
+**What is left, unmeasured but obvious:** `call_prim` dispatches on the
+primitive's *name* - a match over two hundred string literals on every
+primitive call. It should switch on the index it is already handed. That is a
+large mechanical edit and nobody has needed it yet.
 
 ## Compiler
 

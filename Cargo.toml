@@ -27,6 +27,8 @@ path = "src/bin/lmdev.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 minifb = { version = "0.27", default-features = false, features = ["x11"] }
+num-bigint = "0.5.1"
+num-traits = "0.2.19"
 
 [profile.release]
 opt-level = 3

@@ -624,13 +624,17 @@
   ;; A quoted literal rather than a call to `list`: it is data, and building
   ;; it with a call would need more arguments than the calling convention
   ;; passes in registers.
-  '((+ 2 %+) (- 2 %-) (* 2 %*) (/ 2 %/) (mod 2 %mod) (rem 2 %rem)
+  ;; `+`, `-` and `*` are the trapping forms, so two-argument arithmetic
+  ;; promotes exactly the way the variadic ones do. `number?` is *not* here
+  ;; any more: it used to mean `%fixnum?`, which stopped being the same
+  ;; question the moment a number could also be a bignum.
+  '((+ 2 %+o) (- 2 %-o) (* 2 %*o) (/ 2 %/) (mod 2 %mod) (rem 2 %rem)
     (= 2 %=) (< 2 %<) (> 2 %>) (<= 2 %<=) (>= 2 %>=)
     (eq? 2 %eq?) (null? 1 %null?)
     (car 1 %car) (cdr 1 %cdr) (cons 2 %cons)
     (set-car! 2 %set-car!) (set-cdr! 2 %set-cdr!)
     (pair? 1 %cons?) (symbol? 1 %symbol?) (string? 1 %string?)
-    (vector? 1 %vector?) (number? 1 %fixnum?) (fixnum? 1 %fixnum?)
+    (vector? 1 %vector?) (fixnum? 1 %fixnum?)
     (char? 1 %char?)
     (vector-ref 2 %vector-ref) (vector-set! 3 %vector-set!)
     (vector-length 1 %vector-length)
@@ -640,8 +644,17 @@
     (bytes-length 1 %bytes-length)
     (char->integer 1 %char->int) (integer->char 1 %int->char)
     (logand 2 %logand) (logior 2 %logior) (logxor 2 %logxor)
-    (lognot 1 %lognot) (ash 2 %ash) (lsh 2 %lsh)
-    (peek 1 %ld-fixnum) (poke 2 %st-fixnum!) (peek8 1 %ld-byte) (poke8 2 %st-byte!)
+    ;; `ash` is not an alias any more. `%ash` is one instruction and takes the
+    ;; shift count modulo thirty-two, which is the machine's rule and the
+    ;; right one for a primitive - but it made `(ash 1 100)` answer 16, and a
+    ;; quietly wrong answer is worse than a slow one. `lsh` keeps the alias:
+    ;; it is the raw logical shift, and nothing about a bignum is raw.
+    (lognot 1 %lognot) (lsh 2 %lsh)
+    ;; `peek` and `poke` are not aliases any more - a tagged load tags, and
+    ;; tagging drops bit 31, so `(peek a)` of a word with its top bit set was
+    ;; a silent wrong answer. `%ld-fixnum` and `%st-fixnum!` are still the raw
+    ;; one-instruction forms, and still the right thing for an address.
+    (peek8 1 %ld-byte) (poke8 2 %st-byte!)
     (min 2 %min) (max 2 %max) (min2 2 %min) (max2 2 %max)))
 
 
@@ -796,6 +809,14 @@
   (definline '%+ 2 (lambda (c) (i-fadd (cx-asm c) $a0 $a0 $a1)))
   (definline '%- 2 (lambda (c) (i-fsub (cx-asm c) $a0 $a0 $a1)))
   (definline '%* 2 (lambda (c) (i-fmul (cx-asm c) $a0 $a0 $a1)))
+  ;; The same three, but they trap rather than wrap when the answer does not
+  ;; fit. This is what `+`, `-` and `*` are made of, and the trap handler
+  ;; widens the operation into a bignum and resumes - so the cost of an
+  ;; integer that fits is still one instruction, and nothing on the fast path
+  ;; asks any questions.
+  (definline '%+o 2 (lambda (c) (i-faddo (cx-asm c) $a0 $a0 $a1)))
+  (definline '%-o 2 (lambda (c) (i-fsubo (cx-asm c) $a0 $a0 $a1)))
+  (definline '%*o 2 (lambda (c) (i-fmulo (cx-asm c) $a0 $a0 $a1)))
   (definline '%/ 2 (lambda (c) (i-fdiv (cx-asm c) $a0 $a0 $a1)))
   (definline '%rem 2 (lambda (c) (i-frem (cx-asm c) $a0 $a0 $a1)))
   (definline '%mod 2
@@ -933,6 +954,7 @@
   (definline '%symbol? 1 (lambda (c) (emit-type-test c t-symbol)))
   (definline '%closure? 1 (lambda (c) (emit-type-test c t-closure)))
   (definline '%float? 1 (lambda (c) (emit-type-test c t-float)))
+  (definline '%bignum? 1 (lambda (c) (emit-type-test c t-bignum)))
   (definline '%record? 1 (lambda (c) (emit-type-test c t-record)))
 
   ;; ---- object access ----
@@ -1104,8 +1126,46 @@
   ;; ---- min and max ----
   ;; A fixnum is 2n+1, which preserves signed order, so these are right on
   ;; tagged values without untagging either side and retagging the answer.
-  (definline '%min 2 (lambda (c) (i-min (cx-asm c) $a0 $a0 $a1)))
-  (definline '%max 2 (lambda (c) (i-max (cx-asm c) $a0 $a0 $a1)))
+  ;; A tagged fixnum keeps its order under a plain signed compare, so these
+  ;; used to be the bare `min` and `max` - one instruction, and no check. A
+  ;; bignum is a pointer, and comparing one of those as a number compares
+  ;; where it happens to live. So the comparison is `flt`, which checks its
+  ;; operands and widens through the trap handler when it has to, and the
+  ;; choice is made with two conditional zeroes and an or - still branchless,
+  ;; and now right for both kinds of number.
+  (definline '%min 2
+    (lambda (c)
+      (let ((a (cx-asm c)))
+        (i-flt a $t2 $a0 $a1)
+        (i-czero-eqz a $t3 $a0 $t2)
+        (i-czero-nez a $a0 $a1 $t2)
+        (i-or a $a0 $a0 $t3))))
+  (definline '%max 2
+    (lambda (c)
+      (let ((a (cx-asm c)))
+        (i-flt a $t2 $a1 $a0)
+        (i-czero-eqz a $t3 $a0 $t2)
+        (i-czero-nez a $a0 $a1 $t2)
+        (i-or a $a0 $a0 $t3))))
+
+  ;; The top sixteen bits of the product of two sixteen-bit numbers. The
+  ;; bignum kernel works in halves because a fixnum has thirty-one bits, and a
+  ;; product of two halves has thirty-two - one too many - so it is taken in
+  ;; two pieces: the bottom half comes out of an ordinary wrapping `%*`, which
+  ;; keeps its low bits exactly, and the top half comes from here.
+  ;;
+  ;; No new instruction: this is the base `mul`, which the machine has had all
+  ;; along and which nothing else emits, because every other multiply in the
+  ;; system is a fixnum one.
+  (definline '%mulhi16 2
+    (lambda (c)
+      (let ((a (cx-asm c)))
+        (i-srai a $t2 $a0 1)
+        (i-srai a $t3 $a1 1)
+        (i-mul a $t2 $t2 $t3)
+        (i-srli a $t2 $t2 16)
+        (i-slli a $a0 $t2 1)
+        (i-ori a $a0 $a0 1))))
 
   ;; ---- bits ----
   (definline '%popcount 1

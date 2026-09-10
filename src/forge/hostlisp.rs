@@ -94,12 +94,18 @@ pub struct Lisp<'a> {
     /// are divided into packages, so the same function is `hw:dev-addr` to the
     /// compiler and plain `dev-addr` here. The interpreter has to find it
     /// under the name the compiler asks for.
-    pub globals: std::collections::HashMap<String, V>,
+    // Indexed by the symbol's own identity - see `Heap::sym_index`. These
+    // were maps keyed by the symbol's *name*, which meant that every global
+    // reference in the build allocated a String out of the machine's heap and
+    // then hashed it, and a macro check did it twice. It is the hottest thing
+    // the forge does: the build is the compiler interpreted, and the compiler
+    // is mostly calls to named functions.
+    pub globals: Vec<Option<V>>,
     /// Build-time macros, kept out of the symbols' function cells for the same
     /// reason as `globals`: the function cell is where `compile-top` puts the
     /// compiled expander the machine's own compiler will use.
     /// Keyed by name, for the same reason `globals` is.
-    pub macros: std::collections::HashMap<String, V>,
+    pub macros: Vec<Option<V>>,
     /// Environments captured by interpreted closures. A heap slot cannot hold
     /// an Rc, so the closure stores an index into this table instead.
     pub envs: Vec<Env>,
@@ -150,11 +156,12 @@ impl<'a> Lisp<'a> {
             depth: 0,
             load_path: vec!["lisp".into()],
             trace_calls: false,
-            globals: std::collections::HashMap::new(),
-            macros: std::collections::HashMap::new(),
+            globals: Vec::new(),
+            macros: Vec::new(),
             envs: Vec::new(),
         };
-        l.globals.insert("t".to_string(), tt);
+        let ts = l.h.intern("t");
+        l.set_global(ts, tt);
         l.install_primitives();
         l
     }
@@ -167,21 +174,25 @@ impl<'a> Lisp<'a> {
     // built a frame that died the moment the call returned, and the heap has
     // no collector during the build. Reference-counted frames cost the
     // emulated machine nothing and go away on their own.
+    // By reference down the chain rather than by clone: every variable
+    // reference in the build walks this, and cloning bumped a refcount per
+    // frame on the way for no reason - the frames are alive because `env`
+    // holds them.
     fn lookup(&self, sym: V, env: &Env) -> Option<V> {
-        let mut e = env.clone();
+        let mut e = env.as_ref();
         while let Some(f) = e {
             for (s, v) in f.vars.borrow().iter().rev() {
                 if *s == sym {
                     return Some(*v);
                 }
             }
-            e = f.parent.clone();
+            e = f.parent.as_ref();
         }
         None
     }
 
     fn set_var(&self, sym: V, env: &Env, val: V) -> bool {
-        let mut e = env.clone();
+        let mut e = env.as_ref();
         while let Some(f) = e {
             {
                 let mut vars = f.vars.borrow_mut();
@@ -192,7 +203,7 @@ impl<'a> Lisp<'a> {
                     }
                 }
             }
-            e = f.parent.clone();
+            e = f.parent.as_ref();
         }
         false
     }
@@ -223,9 +234,8 @@ impl<'a> Lisp<'a> {
                     if let Some(v) = self.lookup(form, &env) {
                         break Ok(v);
                     }
-                    let n = self.h.sym_name(form);
-                    match self.globals.get(&n) {
-                        Some(v) => break Ok(*v),
+                    match self.get_global(form) {
+                        Some(v) => break Ok(v),
                         None => {
                             // A constant the compiler has just worked out
                             // lives in the symbol's own cell in the heap.
@@ -233,7 +243,10 @@ impl<'a> Lisp<'a> {
                             if cell != UNBOUND {
                                 break Ok(cell);
                             }
-                            break Err(LErr::new(format!("unbound variable {n}")));
+                            break Err(LErr::new(format!(
+                                "unbound variable {}",
+                                self.h.sym_name(form)
+                            )));
                         }
                     }
                 }
@@ -301,8 +314,7 @@ impl<'a> Lisp<'a> {
                         Err(e) => break Err(e),
                     };
                     if !self.set_var(name, &env, val) {
-                        let key = self.h.sym_name(name);
-                        self.globals.insert(key, val);
+                        self.set_global(name, val);
                     }
                     break Ok(val);
                 }
@@ -360,8 +372,7 @@ impl<'a> Lisp<'a> {
                 }
 
                 // ---- macro ----
-                if self.is_macro(head) {
-                    let mac = self.macros[&self.h.sym_name(head)];
+                if let Some(mac) = self.get_macro(head) {
                     let margs = self.h.list_vec(args);
                     let expansion = match self.apply(mac, &margs) {
                         Ok(v) => v,
@@ -438,22 +449,51 @@ impl<'a> Lisp<'a> {
             if let Some(v) = self.lookup(head, env) {
                 return Ok(v);
             }
-            let n = self.h.sym_name(head);
-            match self.globals.get(&n) {
-                Some(v) => return Ok(*v),
-                None => bail!("undefined function {n}"),
+            if let Some(g) = self.get_global(head) {
+                return Ok(g);
             }
+            bail!("undefined function {}", self.h.sym_name(head))
         }
         self.eval(head, env)
     }
 
-    fn is_macro(&self, sym: V) -> bool {
-        self.macros.contains_key(&self.h.sym_name(sym))
+    fn is_macro(&mut self, sym: V) -> bool {
+        self.get_macro(sym).is_some()
+    }
+
+    // `Option`, not a reserved value: `*unbound*` is a variable whose value is
+    // the unbound marker, so "no entry" and "holds UNBOUND" are different
+    // answers and the table has to be able to tell them apart.
+    fn get_global(&mut self, sym: V) -> Option<V> {
+        let i = self.h.name_id(sym);
+        *self.globals.get(i)?
+    }
+
+    fn set_global(&mut self, sym: V, v: V) {
+        let i = self.h.name_id(sym);
+        if i >= self.globals.len() {
+            self.globals.resize(i + 1, None);
+        }
+        self.globals[i] = Some(v);
+    }
+
+    fn get_macro(&mut self, sym: V) -> Option<V> {
+        let i = self.h.name_id(sym);
+        *self.macros.get(i)?
+    }
+
+    fn set_macro(&mut self, sym: V, v: V) {
+        let i = self.h.name_id(sym);
+        if i >= self.macros.len() {
+            self.macros.resize(i + 1, None);
+        }
+        self.macros[i] = Some(v);
     }
 
     /// Look up a build-time global by name.
     pub fn global(&mut self, name: &str) -> V {
-        self.globals.get(name).copied().unwrap_or(UNBOUND)
+        let s = self.h.intern(name);
+        self.get_global(s).unwrap_or(UNBOUND)
     }
 
     /// An interpreted closure. Slot 0 is zero, which is what marks it as
@@ -479,8 +519,7 @@ impl<'a> Lisp<'a> {
             let params = self.h.cdr(target);
             let body = self.h.cdr(args);
             let c = self.make_closure(params, body, env, name);
-            let key = self.h.sym_name(name);
-            self.globals.insert(key, c);
+            self.set_global(name, c);
             return Ok(name);
         }
         let val = if self.h.cdr(args) == NIL {
@@ -491,10 +530,7 @@ impl<'a> Lisp<'a> {
         match env {
             // An internal define adds to the innermost frame.
             Some(f) => f.vars.borrow_mut().push((target, val)),
-            None => {
-                let key = self.h.sym_name(target);
-                self.globals.insert(key, val);
-            }
+            None => self.set_global(target, val),
         }
         Ok(target)
     }
@@ -504,8 +540,7 @@ impl<'a> Lisp<'a> {
         let params = self.h.cadr(args);
         let body = self.h.cddr(args);
         let c = self.make_closure(params, body, env, name);
-        let key = self.h.sym_name(name);
-        self.macros.insert(key, c);
+        self.set_macro(name, c);
         Ok(name)
     }
 
@@ -713,7 +748,8 @@ impl<'a> Lisp<'a> {
         let p = self.h.alloc_obj(T_PRIM, 2);
         self.h.set_slot(p, 0, idx);
         self.h.set_slot(p, 1, sym);
-        self.globals.insert(name.to_string(), p);
+        let s = self.h.intern(name);
+        self.set_global(s, p);
     }
 
     fn install_primitives(&mut self) {
@@ -740,6 +776,18 @@ impl<'a> Lisp<'a> {
                 "{who} wants a number, got {}",
                 self.h.write(v)
             )))
+        }
+    }
+
+    /// Compare two numbers of either kind: -1, 0 or 1.
+    fn cmp2(&self, a: &[V], who: &str) -> Result<i32, LErr> {
+        match self.h.num_cmp(a[0], a[1]) {
+            Some(c) => Ok(c),
+            None => Err(LErr::new(format!(
+                "{who} wants numbers, got {} and {}",
+                self.h.write(a[0]),
+                self.h.write(a[1])
+            ))),
         }
     }
 
@@ -791,6 +839,36 @@ impl<'a> Lisp<'a> {
                 need!(2);
                 fix(n!(0).wrapping_add(n!(1)))
             }
+            // The trapping forms. On the machine these fault and the handler
+            // widens them; here there is no trap to take, so they widen
+            // directly. Same answers either way, which is what matters: the
+            // build evaluates constant arithmetic and the image has to agree
+            // with it.
+            "%+o" => {
+                need!(2);
+                match self.h.num_add(a[0], a[1]) {
+                    Some(v) => v,
+                    None => return Err(LErr::new(format!("{name} wants numbers"))),
+                }
+            }
+            "%-o" => {
+                need!(2);
+                match self.h.num_sub(a[0], a[1]) {
+                    Some(v) => v,
+                    None => return Err(LErr::new(format!("{name} wants numbers"))),
+                }
+            }
+            "%*o" => {
+                need!(2);
+                match self.h.num_mul(a[0], a[1]) {
+                    Some(v) => v,
+                    None => return Err(LErr::new(format!("{name} wants numbers"))),
+                }
+            }
+            "%mulhi16" => {
+                need!(2);
+                fix((((n!(0) as u32) * (n!(1) as u32)) >> 16) as i32)
+            }
             "%-" => {
                 need!(2);
                 fix(n!(0).wrapping_sub(n!(1)))
@@ -823,25 +901,34 @@ impl<'a> Lisp<'a> {
                 }
                 fix(n!(0).wrapping_rem(d))
             }
+            // The comparisons take a bignum on either side, the way the
+            // machine's do once the trap handler has widened them. `eqv?` on
+            // two bignums is spelled `%=` for exactly this reason: each side
+            // of the bootstrap answers it with its own arithmetic.
             "%=" => {
                 need!(2);
-                self.bool(n!(0) == n!(1))
+                let c = self.cmp2(a, name)?;
+                self.bool(c == 0)
             }
             "%<" => {
                 need!(2);
-                self.bool(n!(0) < n!(1))
+                let c = self.cmp2(a, name)?;
+                self.bool(c < 0)
             }
             "%>" => {
                 need!(2);
-                self.bool(n!(0) > n!(1))
+                let c = self.cmp2(a, name)?;
+                self.bool(c > 0)
             }
             "%<=" => {
                 need!(2);
-                self.bool(n!(0) <= n!(1))
+                let c = self.cmp2(a, name)?;
+                self.bool(c <= 0)
             }
             "%>=" => {
                 need!(2);
-                self.bool(n!(0) >= n!(1))
+                let c = self.cmp2(a, name)?;
+                self.bool(c >= 0)
             }
             "%logand" => {
                 need!(2);
@@ -924,6 +1011,10 @@ impl<'a> Lisp<'a> {
             "%float?" => {
                 need!(1);
                 self.bool(self.h.is_type(a[0], T_FLOAT))
+            }
+            "%bignum?" => {
+                need!(1);
+                self.bool(self.h.is_type(a[0], T_BIGNUM))
             }
             "%object?" => {
                 need!(1);
@@ -1157,17 +1248,15 @@ impl<'a> Lisp<'a> {
             // the pair above.
             "%fluid-value" => {
                 need!(1);
-                let n = self.h.sym_name(a[0]);
-                match self.globals.get(&n) {
-                    Some(v) => *v,
+                match self.get_global(a[0]) {
+                    Some(v) => v,
                     None => self.h.slot(a[0], SYM_VALUE),
                 }
             }
             "%set-fluid-value!" => {
                 need!(2);
-                let n = self.h.sym_name(a[0]);
-                if self.globals.contains_key(&n) {
-                    self.globals.insert(n, a[1]);
+                if self.get_global(a[0]).is_some() {
+                    self.set_global(a[0], a[1]);
                 } else {
                     self.h.set_slot(a[0], SYM_VALUE, a[1]);
                 }
@@ -1289,8 +1378,7 @@ impl<'a> Lisp<'a> {
                 let form = a[0];
                 if is_cons(form) {
                     let head = self.h.car(form);
-                    if self.is_macro(head) {
-                        let mac = self.macros[&self.h.sym_name(head)];
+                    if let Some(mac) = self.get_macro(head) {
                         let args = self.h.list_vec(self.h.cdr(form));
                         return self.apply(mac, &args);
                     }
@@ -1299,7 +1387,8 @@ impl<'a> Lisp<'a> {
             }
             "%macro?" => {
                 need!(1);
-                self.bool(self.is_macro(a[0]))
+                let m = self.is_macro(a[0]);
+                self.bool(m)
             }
             "%gensym" => {
                 let n = self.h.g(LG_GCCOUNT);
@@ -1341,6 +1430,10 @@ pub static PRIMS: &[(&str, u32)] = &[
     ("%*", 2),
     ("%/", 2),
     ("%mod", 2),
+    ("%+o", 2),
+    ("%-o", 2),
+    ("%*o", 2),
+    ("%mulhi16", 2),
     ("%rem", 2),
     ("%=", 2),
     ("%<", 2),
@@ -1364,6 +1457,7 @@ pub static PRIMS: &[(&str, u32)] = &[
     ("%closure?", 1),
     ("%char?", 1),
     ("%float?", 1),
+    ("%bignum?", 1),
     ("%object?", 1),
     ("%alloc-obj", 2),
     ("%obj-type", 1),

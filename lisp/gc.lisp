@@ -277,6 +277,9 @@
      ((%= ty t-string) nil)
      ((%= ty t-bytes) nil)
      ((%= ty t-float) nil)
+     ;; slot 0 is the sign and the rest are raw 32-bit limbs: no pointers, and
+     ;; a limb is very often a word that would look like one
+     ((%= ty t-bignum) nil)
      ;; slots 0 and 1 are the raw entry address and byte length; from the
      ;; name on it is all tagged
      ((%= ty t-code) (gc-slots base code-name n))

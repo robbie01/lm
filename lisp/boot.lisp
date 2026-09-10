@@ -27,6 +27,13 @@
 (define trap-stack 0)
 (define boot-stack 0)
 
+;; Frames for traps taken inside the trap handler - see `emit-trap-stub`. The
+;; stride is a frame plus its link word, rounded up to a power of two so that
+;; indexing is a shift; the stub has no register to spare for a multiply.
+(define trap-nest-stride 256)
+(define trap-nest-max 8)
+(define trap-nest 0)
+
 (define (boot-alloc-pool n) (%alloc-pool n))
 
 ;; ---------------------------------------------------------------- reset
@@ -118,23 +125,76 @@
 ;; context is in one contiguous block, the scheduler can switch tasks simply
 ;; by pointing mscratch at a different one.
 (define (emit-trap-stub)
-  (let ((a (make-assembler)))
-    ;; mscratch holds the save area. Swap it into t0 so there is a register to
-    ;; work with without having destroyed anything yet.
+  ;; `mscratch` names the frame this trap saves its registers into: the
+  ;; running task's context block when nothing is in progress, and one out of
+  ;; `trap-nest` when a trap is taken inside the handler. `lg-trapdepth`
+  ;; counts them.
+  ;;
+  ;; There used to be one save area and no depth. That was fine while nothing
+  ;; the handler ran could fault, and stopped being fine when `+` became a
+  ;; trapping instruction: arithmetic that outgrows a fixnum widens *through
+  ;; the handler*, so a server adding two large numbers takes a second trap
+  ;; while the first is still in progress. With one area the second trap wrote
+  ;; over the first one's registers and the `mret` at the end returned into
+  ;; whatever was left - which is the kind of fault that surfaces somewhere
+  ;; else entirely, minutes later.
+  (let ((a (make-assembler))
+        (outer (asm-gensym-label "trap-outer"))
+        (keepsp (asm-gensym-label "trap-keepsp"))
+        (nolink (asm-gensym-label "trap-nolink"))
+        (over (asm-gensym-label "trap-over")))
+    ;; Swap the frame pointer into t0, which gives one register to work with
+    ;; without having destroyed anything: t0's own value is in mscratch now.
     (i-csrrw a $t0 csr-mscratch $t0)
+    ;; Working out *which* frame needs a second register, and there is nowhere
+    ;; to put one yet. It goes in a fixed cell for the dozen instructions it
+    ;; takes; nothing in between can fault, so the cell cannot be re-entered.
+    (i-sw a $t1 $zero lg-traptmp)
+    (i-lw a $t1 $zero lg-trapdepth)
+    (i-addi a $t1 $t1 1)
+    (i-sw a $t1 $zero lg-trapdepth)
+    (i-addi a $t1 $t1 -1)                  ; the depth before this trap
+    (i-beqz a $t1 outer)                   ; nothing in progress: the task's block
+
+    ;; Nested. Take a frame out of the array and record the one we came from,
+    ;; so the way out can put it back.
+    (i-addi a $t1 $t1 -1)                  ; index from zero
+    (i-addi a $t1 $t1 (%- 0 trap-nest-max))
+    (i-bge a $t1 $zero over)
+    (i-addi a $t1 $t1 trap-nest-max)
+    (i-slli a $t1 $t1 8)                   ; times trap-nest-stride
+    (i-sw a $t0 $zero lg-traptmp2)         ; the frame we came from
+    (i-li a $t0 trap-nest)
+    (i-add a $t0 $t0 $t1)
+    (i-lw a $t1 $zero lg-traptmp2)
+    (i-sw a $t1 $t0 ctx-bytes)             ; the link, just past the registers
+
+    (asm-label a outer)
+    ;; t0 is the frame. Everything except t0 and t1, both of which are parked.
     (let ((r 1))
       (while (%< r 32)
-        (if (%= r reg-t0) nil (i-sw a r $t0 (ctx-off r)))
+        (if (if (%= r reg-t0) t (%= r reg-t1))
+            nil
+            (i-sw a r $t0 (ctx-off r)))
         (set! r (%+ r 1))))
-    ;; Recover the original t0 from mscratch, and put the save area back.
-    (i-csrrw a $ra csr-mscratch $t0)
-    (i-sw a $ra $t0 (ctx-off reg-t0))
-    (i-csrrs a $ra csr-mepc $zero)
-    (i-sw a $ra $t0 (ctx-off reg-zero))
+    (i-lw a $t1 $zero lg-traptmp)
+    (i-sw a $t1 $t0 (ctx-off reg-t1))
+    ;; and t0's own value, which has been sitting in mscratch since the swap
+    (i-csrrw a $t1 csr-mscratch $t0)
+    (i-sw a $t1 $t0 (ctx-off reg-t0))
+    (i-csrrs a $t1 csr-mepc $zero)
+    (i-sw a $t1 $t0 (ctx-off reg-zero))
 
     ;; A stack of its own, so a fault caused by a broken stack pointer can
-    ;; still be reported.
+    ;; still be reported - but only at the outermost level. A nested trap is
+    ;; already on the trap stack, and resetting it would cut the handler it
+    ;; interrupted off from its own frames.
+    (i-lw a $t1 $zero lg-trapdepth)
+    (i-addi a $t1 $t1 -1)
+    (i-bnez a $t1 keepsp)
     (i-li a $sp (%+ trap-stack trap-stack-size))
+    (asm-label a keepsp)
+
     ;; mcause has the interrupt flag in bit 31, and a fixnum has no bit 31 to
     ;; put it in: tagging the register directly would shift the flag off the
     ;; end and make every interrupt look like a store fault. So the flag is
@@ -159,9 +219,9 @@
     (i-srli a $a2 $a2 2)
     (i-slli a $a2 $a2 1)
     (i-ori a $a2 $a2 1)
-    ;; The context the handler is given is whatever mscratch names right now,
-    ;; not the block this stub was built against: after a task switch they are
-    ;; different, and the handler edits the one that is about to be restored.
+    ;; The context the handler is given is this trap's frame, which mscratch
+    ;; now names. Reading it back rather than keeping t0 costs nothing and
+    ;; makes it obvious that the two are the same thing.
     (i-csrrs a $a3 csr-mscratch $zero)
     (i-slli a $a3 $a3 1)
     (i-ori a $a3 $a3 1)
@@ -170,9 +230,21 @@
     (i-lw a $t2 $t0 0)
     (i-call-reg a $t2)
 
-    ;; Restore. The handler may have edited the context - that is how a task
-    ;; switch and how resuming past an ecall both work.
+    ;; ---- and back ----
+    ;; The handler may have edited the frame - that is how a task switch and
+    ;; how resuming past an ecall both work - and may have pointed mscratch at
+    ;; a different task's block entirely.
     (i-csrrs a $t0 csr-mscratch $zero)
+    (i-lw a $t1 $zero lg-trapdepth)
+    (i-addi a $t1 $t1 -1)
+    (i-sw a $t1 $zero lg-trapdepth)
+    (i-beqz a $t1 nolink)
+    ;; Returning into a handler that is still in progress: give it its frame
+    ;; back, so that its own way out finds what it expects.
+    (i-lw a $t2 $t0 ctx-bytes)
+    (i-csrrw a $zero csr-mscratch $t2)
+    (asm-label a nolink)
+
     (i-lw a $ra $t0 (ctx-off reg-zero))
     (i-csrrw a $zero csr-mepc $ra)
     ;; gp and tp go back with everything else. They are this task's cons run,
@@ -190,6 +262,15 @@
         (set! r (%+ r 1))))
     (i-lw a $t0 $t0 (ctx-off reg-t0))
     (i-mret a)
+
+    ;; Traps all the way down. Something in the handler is faulting on every
+    ;; attempt, and eight frames deep is far enough to be sure of it; stop the
+    ;; machine rather than start writing over frames that are still in use.
+    (asm-label a over)
+    (i-li a $t0 mmio-base)
+    (i-li a $t1 9)
+    (i-sw a $t1 $t0 0)
+
     (asm-place a)
     a))
 
@@ -209,6 +290,7 @@
 (define (reserve-reset)
   (set! *reset-addr* (%alloc-code reset-reserve))
   (set! trap-save (boot-alloc-pool ctx-bytes))
+  (set! trap-nest (boot-alloc-pool (%* trap-nest-stride trap-nest-max)))
   (set! trap-stack (boot-alloc-pool trap-stack-size))
   (set! boot-stack (boot-alloc-pool boot-stack-size))
   (%set-global! lg-trapsave trap-save)

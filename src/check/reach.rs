@@ -42,7 +42,7 @@ fn edges(h: &Heap, v: V, out: &mut Vec<V>) {
     let len = hdr_len(hdr);
     let (from, to) = match hdr_type(hdr) {
         T_SYMBOL => (0, SYM_SLOTS),
-        T_STRING | T_BYTES | T_FLOAT => (0, 0),
+        T_STRING | T_BYTES | T_FLOAT | T_BIGNUM => (0, 0),
         // Slots 0 and 1 are a raw address and a raw length.
         T_CODE => (CODE_NAME, len),
         // Slot 0 is a raw entry address; following it would be a bug.

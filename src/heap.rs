@@ -23,6 +23,8 @@
 
 use crate::mach::Machine;
 use crate::map::*;
+use num_bigint::{BigInt, Sign};
+use num_traits::ToPrimitive;
 
 pub type V = u32; // a tagged Lisp value
 
@@ -103,6 +105,12 @@ pub const T_CLOSURE: u32 = 5; // word0 raw entry address, rest tagged
 pub const T_RECORD: u32 = 6; // len tagged words, word0 is a type tag
 pub const T_FLOAT: u32 = 7; // one raw word
 pub const T_PORT: u32 = 8; // len tagged words
+// Slot 0 is the sign - 0 for positive, 1 for negative - and the rest are the
+// magnitude as raw 32-bit limbs, least significant first. Normalised: the top
+// limb is never zero, the magnitude is never zero (zero is the fixnum), and
+// the value never fits a fixnum (anything that does IS a fixnum, which is what
+// keeps `eq?` working on small numbers).
+pub const T_BIGNUM: u32 = 9;
 pub const T_CODE: u32 = 10; // word0 raw entry, word1 raw length, word2 name,
                             // then the literal vector - all tagged from 2 on
 
@@ -424,6 +432,129 @@ impl<'a> Heap<'a> {
         f32::from_bits(self.ld(v))
     }
 
+    // ---- bignums ----
+    //
+    // The magnitude arithmetic here is `num_bigint`'s, not ours. This is the
+    // *host* side: it runs at build time, on a machine with a real allocator
+    // and a crate registry, and the only thing it has to be is right - a
+    // number read out of a source file has to be the same number the machine
+    // would read. The interesting implementation is the machine's own, in
+    // lisp/bignum.lisp, which has to work in sixteen-bit pieces because a
+    // Lisp value there cannot hold a limb.
+    //
+    // `rug` would be the other choice and is faster, but it is GMP behind a
+    // C build; this is pure Rust and the build stays a `cargo build`.
+
+    /// A number of either kind as a `BigInt`.
+    pub fn to_big(&self, v: V) -> Option<BigInt> {
+        if is_fixnum(v) {
+            return Some(BigInt::from(unfix(v)));
+        }
+        if self.is_type(v, T_BIGNUM) {
+            let sign = if self.slot(v, 0) != 0 { Sign::Minus } else { Sign::Plus };
+            return Some(BigInt::from_slice(sign, &self.bignum_limbs(v)));
+        }
+        None
+    }
+
+    /// And back, demoting when it fits - the same invariant the machine's own
+    /// `bn-finish` keeps, and it has to be the same one or a number read at
+    /// build time and the same number read at run time would not be `eqv`.
+    pub fn from_big(&mut self, n: &BigInt) -> V {
+        if let Some(i) = n.to_i64() {
+            if (-(1 << 30)..(1 << 30)).contains(&i) {
+                return fix(i as i32);
+            }
+        }
+        let (sign, mag) = (n.sign(), n.magnitude().to_u32_digits());
+        self.make_bignum(sign == Sign::Minus, &mag)
+    }
+
+    /// A value from a magnitude and a sign. The one place that knows the
+    /// layout: slot 0 the sign, then the limbs.
+    pub fn make_bignum(&mut self, neg: bool, mag: &[u32]) -> V {
+        let mut n = mag.len();
+        while n > 0 && mag[n - 1] == 0 {
+            n -= 1;
+        }
+        if n == 0 {
+            return fix(0);
+        }
+        if n == 1 {
+            let m = mag[0] as i64;
+            let v = if neg { -m } else { m };
+            if (-(1 << 30)..(1 << 30)).contains(&v) {
+                return fix(v as i32);
+            }
+        }
+        let b = self.alloc_obj(T_BIGNUM, n as u32 + 1);
+        self.st(b, if neg { 1 } else { 0 });
+        for (i, &l) in mag[..n].iter().enumerate() {
+            self.st(b + 4 + i as u32 * 4, l);
+        }
+        b
+    }
+
+    /// The same, from a value that already fits in 64 bits.
+    pub fn bignum_of_i64(&mut self, v: i64) -> V {
+        let m = v.unsigned_abs();
+        self.make_bignum(v < 0, &[m as u32, (m >> 32) as u32])
+    }
+
+    /// The three widening operations, host side. The forge reads its own
+    /// sources with the machine's reader running on these, and that reader
+    /// builds a number by multiplying by ten - so a literal is only as wide as
+    /// these are. They were i64 for one build, and a twenty-six digit constant
+    /// in a source file quietly became its bottom sixty-four bits.
+    pub fn num_add(&mut self, a: V, b: V) -> Option<V> {
+        // Two fixnums is the overwhelming case - once per digit of every
+        // number in every source file - and both are thirty-one bits, so i64
+        // holds the answer exactly and nothing is allocated.
+        if is_fixnum(a) && is_fixnum(b) {
+            return Some(self.bignum_of_i64(unfix(a) as i64 + unfix(b) as i64));
+        }
+        let r = self.to_big(a)? + self.to_big(b)?;
+        Some(self.from_big(&r))
+    }
+
+    pub fn num_sub(&mut self, a: V, b: V) -> Option<V> {
+        if is_fixnum(a) && is_fixnum(b) {
+            return Some(self.bignum_of_i64(unfix(a) as i64 - unfix(b) as i64));
+        }
+        let r = self.to_big(a)? - self.to_big(b)?;
+        Some(self.from_big(&r))
+    }
+
+    pub fn num_mul(&mut self, a: V, b: V) -> Option<V> {
+        if is_fixnum(a) && is_fixnum(b) {
+            return Some(self.bignum_of_i64(unfix(a) as i64 * unfix(b) as i64));
+        }
+        let r = self.to_big(a)? * self.to_big(b)?;
+        Some(self.from_big(&r))
+    }
+
+    /// -1, 0 or 1.
+    pub fn num_cmp(&self, a: V, b: V) -> Option<i32> {
+        if is_fixnum(a) && is_fixnum(b) {
+            return Some(unfix(a).cmp(&unfix(b)) as i32);
+        }
+        Some(self.to_big(a)?.cmp(&self.to_big(b)?) as i32)
+    }
+
+    pub fn bignum_string(&self, v: V) -> String {
+        match self.to_big(v) {
+            Some(n) => n.to_string(),
+            None => "#<not a number>".to_string(),
+        }
+    }
+
+    /// The limbs, least significant first.
+    pub fn bignum_limbs(&self, v: V) -> Vec<u32> {
+        (1..self.olen(v)).map(|i| self.slot(v, i)).collect()
+    }
+
+
+
     // ---- symbols ----
     /// Symbols are chained through the obarray, a vector of buckets, and also
     /// threaded onto a flat list so the collector can walk every one of them.
@@ -544,6 +675,14 @@ impl<'a> Heap<'a> {
         let idx = self.g(LG_SYMCOUNT);
         self.set_g(LG_SYMCOUNT, idx + 1);
         self.set_slot(s, SYM_FLAGS, fix((idx << 8) as i32));
+        // And the index for the name on its own, which the build's tables use.
+        let next = self.m.name_ids.len() as u32;
+        let nid = *self.m.name_ids.entry(name.to_string()).or_insert(next);
+        let i = idx as usize;
+        if i >= self.m.sym_name_id.len() {
+            self.m.sym_name_id.resize(i + 1, u32::MAX);
+        }
+        self.m.sym_name_id[i] = nid;
         self.set_slot(s, SYM_PACKAGE, pkg);
         let head = self.slot(ob, b);
         let cell = self.cons(s, head);
@@ -581,6 +720,46 @@ impl<'a> Heap<'a> {
     }
     pub fn sym_value(&self, s: V) -> V {
         self.slot(s, SYM_VALUE)
+    }
+    /// A symbol's identity: a dense index handed out by `intern_in`, above the
+    /// eight flag bits. Interning is the only place a symbol is made, so these
+    /// run 0, 1, 2, ... with no gaps.
+    pub fn sym_index(&self, s: V) -> usize {
+        (unfix(self.slot(s, SYM_FLAGS)) as u32 >> 8) as usize
+    }
+
+    /// A dense index for a symbol's *name*, ignoring its package - so every
+    /// symbol spelled `car` shares one, whichever package it belongs to.
+    ///
+    /// This is what the build's global and macro tables are indexed by, and it
+    /// has to be the name rather than the symbol: the sources read before
+    /// packages.lisp go through a flat reader with one namespace, and they
+    /// call things that are defined later inside a package. Those two spell
+    /// the same name and mean the same function, and a table keyed by symbol
+    /// would give them separate cells.
+    ///
+    /// The tables used to be `HashMap<String, V>`, which got the same answer
+    /// by hashing the name every time - and building that String out of the
+    /// machine's heap on every global reference in the build.
+    /// Filled on demand: `intern_in` here records it, but the machine's own
+    /// `intern-in` in runtime.lisp makes symbols too - it runs interpreted
+    /// during the build - and those arrive without one.
+    pub fn name_id(&mut self, s: V) -> usize {
+        let i = self.sym_index(s);
+        if i < self.m.sym_name_id.len() {
+            let id = self.m.sym_name_id[i];
+            if id != u32::MAX {
+                return id as usize;
+            }
+        }
+        let name = self.str_of(self.slot(s, SYM_NAME));
+        let next = self.m.name_ids.len() as u32;
+        let nid = *self.m.name_ids.entry(name).or_insert(next);
+        if i >= self.m.sym_name_id.len() {
+            self.m.sym_name_id.resize(i + 1, u32::MAX);
+        }
+        self.m.sym_name_id[i] = nid;
+        nid as usize
     }
     pub fn set_sym_value(&mut self, s: V, v: V) {
         self.set_slot(s, SYM_VALUE, v)
@@ -798,6 +977,7 @@ impl<'a> Heap<'a> {
                     }
                 }
                 T_FLOAT => out.push_str(&format!("{}", self.float_of(v))),
+                T_BIGNUM => out.push_str(&self.bignum_string(v)),
                 T_RECORD => {
                     let tag = self.slot(v, 0);
                     out.push_str("#[");

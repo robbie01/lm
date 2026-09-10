@@ -120,6 +120,14 @@ pub struct Machine {
     pub mtimecmp: u64,
     pub halted: bool,
     pub exit_code: u32,
+    /// Name indices for the build: `sym_name_id` maps a symbol's identity to a
+    /// dense index for its *name*, and `name_ids` hands those out. Only the
+    /// forge fills these - the machine itself never looks at them - and they
+    /// are what the build's global and macro tables are indexed by. See
+    /// `Heap::name_id`.
+    pub sym_name_id: Vec<u32>,
+    pub name_ids: std::collections::HashMap<String, u32>,
+
     /// Fuel left when the core handed back; the outer loop turns the
     /// difference into retired cycles.
     pub fuel_left: u32,
@@ -156,6 +164,8 @@ impl Machine {
             prof: Box::new([0; crate::prof::SLOTS]),
             watch: Box::default(),
             prof_on: false,
+            sym_name_id: Vec::new(),
+            name_ids: std::collections::HashMap::new(),
             table: &crate::cpu::TABLE,
             watch_prev: 0,
             watch_prev_w: 0,

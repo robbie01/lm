@@ -20,7 +20,7 @@
 (define (bytes? x) (%bytes? x))
 (define (char? x) (%char? x))
 (define (fixnum? x) (%fixnum? x))
-(define (number? x) (%fixnum? x))
+(define (number? x) (if (%fixnum? x) t (%bignum? x)))
 (define (function? x) (%closure? x))
 (define (boolean? x) (if (%null? x) t (%eq? x t)))
 
@@ -49,14 +49,48 @@
 (define (sub2 a b) (%- a b))
 (define (mul2 a b) (%* a b))
 
+;; `+`, `-` and `*` are mixed fixnum and bignum arithmetic: they promote when
+;; an answer outgrows a fixnum and demote when one fits again, so a program
+;; never sees a wrapped result and never has to ask which kind it has.
+;;
+;; The promotion costs nothing when it does not happen. These are the trapping
+;; forms of the fixnum instructions - one instruction each, no check - and the
+;; widening happens in the trap handler, in `try-widen`.
+;;
+;; `wrap+`, `wrap-` and `wrap*` are the old behaviour for the code that wants
+;; it: hashing, fixed-point arithmetic, anything working modulo 2^31 on
+;; purpose.
 (define (+ . xs)
+  (let ((acc 0))
+    (while (%cons? xs)
+      (set! acc (%+o acc (%car xs)))
+      (set! xs (%cdr xs)))
+    acc))
+
+(define (- x . xs)
+  (if (%null? xs)
+      (%-o 0 x)
+      (let ((acc x))
+        (while (%cons? xs)
+          (set! acc (%-o acc (%car xs)))
+          (set! xs (%cdr xs)))
+        acc)))
+
+(define (* . xs)
+  (let ((acc 1))
+    (while (%cons? xs)
+      (set! acc (%*o acc (%car xs)))
+      (set! xs (%cdr xs)))
+    acc))
+
+(define (wrap+ . xs)
   (let ((acc 0))
     (while (%cons? xs)
       (set! acc (%+ acc (%car xs)))
       (set! xs (%cdr xs)))
     acc))
 
-(define (- x . xs)
+(define (wrap- x . xs)
   (if (%null? xs)
       (%- 0 x)
       (let ((acc x))
@@ -65,12 +99,47 @@
           (set! xs (%cdr xs)))
         acc)))
 
-(define (* . xs)
+(define (wrap* . xs)
   (let ((acc 1))
     (while (%cons? xs)
       (set! acc (%* acc (%car xs)))
       (set! xs (%cdr xs)))
     acc))
+
+;; ---- when promotion is not what is wanted ----
+;; Three families, for code that has a reason to stay in fixnums:
+;;
+;;   wrap+   wrap-   wrap*     modulo 2^31, silently. Hashing and fixed-point
+;;                             arithmetic mean this, and `hash-string-into`
+;;                             has to have it or interning changes.
+;;   strict+ strict- strict*   an error if the answer is not a fixnum, for
+;;                             code that means to stay small and wants to be
+;;                             told when it does not.
+;;   sat+    sat-    sat*      clamped to the ends of the fixnum range, for
+;;                             coordinates and counters where a wrong-signed
+;;                             answer is worse than a stuck one.
+;;
+;; The strict and saturating pairs are built on the promoting instruction
+;; rather than on a check before it, so the case that fits costs one
+;; instruction and a type test, and only the case that does not allocates.
+(define most-positive-fixnum 1073741823)
+(define most-negative-fixnum -1073741824)
+
+(define (fixnum-only op r)
+  (if (%fixnum? r) r (error "fixnum overflow in" op)))
+
+(define (strict+ a b) (fixnum-only '+ (%+o a b)))
+(define (strict- a b) (fixnum-only '- (%-o a b)))
+(define (strict* a b) (fixnum-only '* (%*o a b)))
+
+(define (saturate r)
+  (if (%fixnum? r)
+      r
+      (if (negative? r) most-negative-fixnum most-positive-fixnum)))
+
+(define (sat+ a b) (saturate (%+o a b)))
+(define (sat- a b) (saturate (%-o a b)))
+(define (sat* a b) (saturate (%*o a b)))
 
 (define (/ x . xs)
   (let ((acc x))
@@ -106,15 +175,22 @@
 (define (>= . xs) (chain2 num-ge xs))
 (define (/= a b) (if (%= a b) nil t))
 
-(define (1+ n) (%+ n 1))
-(define (1- n) (%- n 1))
+(define (1+ n) (%+o n 1))
+(define (1- n) (%-o n 1))
+;; These are all written with the primitive in *value* position on purpose.
+;; A comparison there is the checking instruction, which widens through the
+;; trap handler when it meets a bignum; the same comparison as the test of an
+;; `if` compiles to a bare branch on the tagged words, which is right for two
+;; fixnums and compares two addresses for anything else.
 (define (zero? n) (%= n 0))
 (define (positive? n) (%> n 0))
 (define (negative? n) (%< n 0))
-(define (even? n) (%= 0 (%logand n 1)))
-(define (odd? n) (%= 1 (%logand n 1)))
-(define (abs n) (if (%< n 0) (%- 0 n) n))
-(define (clamp v lo hi) (if (%< v lo) lo (if (%> v hi) hi v)))
+;; Parity is the bottom bit of the bottom limb either way.
+(define (even? n) (if (%bignum? n) (bignum-even? n) (%= 0 (%logand n 1))))
+(define (odd? n) (if (even? n) nil t))
+(define (abs n) (if (negative? n) (- 0 n) n))
+(define (clamp v lo hi) (if (num-lt v lo) lo (if (num-gt v hi) hi v)))
+
 
 ;; Integer square root, by Newton. Wanted by anything that has to turn a
 ;; distance into a length, which on a machine with no floats is more things
@@ -128,8 +204,8 @@
           (set! y (%lsh (%+ x (%/ n x)) -1)))
         x)))
 (define (neg n) (%- 0 n))
-(define (min2 a b) (if (%< a b) a b))
-(define (max2 a b) (if (%> a b) a b))
+(define (min2 a b) (if (num-lt a b) a b))
+(define (max2 a b) (if (num-gt a b) a b))
 (define (min x . xs)
   (while (%cons? xs)
     (if (%< (%car xs) x) (set! x (%car xs)) nil)
@@ -158,7 +234,27 @@
     (while (%cons? xs) (set! acc (%logxor acc (%car xs))) (set! xs (%cdr xs)))
     acc))
 (define (lognot n) (%lognot n))
-(define (ash n k) (%ash n k))
+;; Shifting is multiplying and dividing by a power of two, so it promotes and
+;; demotes like the rest of the arithmetic. `%ash` is still the fast path,
+;; taken when the value is small and the shift cannot carry anything off the
+;; end of it - the primitive takes its count modulo thirty-two, which is the
+;; machine's rule and quietly wrong for `(ash 1 100)`.
+;;
+;; `lsh` stays raw. It is the logical shift, and a bignum has no top for bits
+;; to fall off.
+(define (ash n k)
+  (if (%fixnum? n)
+      (if (if (%> k -31) (%< k 15) nil)
+          (let ((r (%ash n k)))
+            ;; A left shift can drop bits off the top, and the way to find out
+            ;; is to shift it back: one more instruction, against a call and a
+            ;; multiply.
+            (if (%<= k 0)
+                r
+                (if (%= (%ash r (%- 0 k)) n) r (generic-ash n k))))
+          (generic-ash n k))
+      (generic-ash n k)))
+
 (define (lsh n k) (%lsh n k))
 (define (bit-set? n k) (%= 1 (%logand 1 (%ash n (%- 0 k)))))
 
@@ -434,16 +530,23 @@
     (reverse acc)))
 
 ;; ---------------------------------------------------------------- equality
+;; `eq?` is identity, and two bignums of the same value are two objects, so
+;; this is where "the same number" has to be answered for them. Fixnums are
+;; still `eq?` to each other, which is the point of demoting every result that
+;; fits: only numbers too big for a fixnum need this path at all.
 (define (eqv? a b)
-  (if (%eq? a b)
-      t
-      (if (%float? a)
-          (if (%float? b) (%= (%ld-fixnum (%addr-of a)) (%ld-fixnum (%addr-of b))) nil)
-          nil)))
+  (cond
+   ((%eq? a b) t)
+   ((%bignum? a) (if (%bignum? b) (%= a b) nil))
+   ((%float? a)
+    (if (%float? b) (%= (%ld-fixnum (%addr-of a)) (%ld-fixnum (%addr-of b))) nil))
+   (else nil)))
 
 (define (equal? a b)
   (if (%eq? a b)
       t
+      (if (%bignum? a)
+          (if (%bignum? b) (%= a b) nil)
       (if (%cons? a)
           (if (%cons? b)
               (if (equal? (%car a) (%car b)) (equal? (%cdr a) (%cdr b)) nil)
@@ -452,7 +555,7 @@
               (if (%string? b) (string=? a b) nil)
               (if (%vector? a)
                   (if (%vector? b) (vector-equal? a b) nil)
-                  nil)))))
+                  nil))))))
 
 (define (vector-equal? a b)
   (if (%= (%vector-length a) (%vector-length b))
@@ -578,15 +681,24 @@
 (define (gensym) (gensym-1))
 
 (define (number->string n)
-  (if (%= n 0)
-      "0"
+  (if (%bignum? n)
+      (bignum->string n)
+      (number->string-fix n)))
+
+(define (number->string-fix n)
+  (cond
+   ((%= n 0) "0")
+   ;; Negating this one wraps it straight back to itself - its magnitude is
+   ;; one more than the largest fixnum - so the digits are written out.
+   ((%= n -1073741824) "-1073741824")
+   (else
       (let ((neg (%< n 0)) (acc nil))
         (if neg (set! n (%- 0 n)) nil)
         (while (%> n 0)
           (set! acc (%cons (%int->char (%+ 48 (%mod n 10))) acc))
           (set! n (%/ n 10)))
         (if neg (set! acc (%cons (%int->char 45) acc)) nil)
-        (list->string acc))))
+        (list->string acc)))))
 
 (define (number->hex n)
   (if (%= n 0)
@@ -605,14 +717,17 @@
             (begin (set! neg t) (set! cs (%cdr cs)))
             (if (%eq? (%car cs) #\+) (set! cs (%cdr cs)) nil))
         nil)
+    ;; `*` and `+` here rather than `%*` and `%+`: a literal wider than a
+    ;; fixnum used to wrap round silently, so a program that wrote out a
+    ;; twenty-digit number got a small negative one and no complaint.
     (while (%cons? cs)
       (if (char-numeric? (%car cs))
           (begin
             (set! ok t)
-            (set! acc (%+ (%* acc 10) (digit->int (%car cs))))
+            (set! acc (+ (* acc 10) (digit->int (%car cs))))
             (set! cs (%cdr cs)))
           (begin (set! ok nil) (set! cs nil))))
-    (if ok (if neg (%- 0 acc) acc) nil)))
+    (if ok (if neg (- 0 acc) acc) nil)))
 
 ;; ---------------------------------------------------------------- vectors
 (define (make-vector n . fill)

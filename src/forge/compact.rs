@@ -97,7 +97,7 @@ fn tagged_slots(h: &Heap, block: u32) -> std::ops::Range<u32> {
     let len = hdr_len(hdr);
     match hdr_type(hdr) {
         T_SYMBOL => 0..SYM_SLOTS,
-        T_STRING | T_BYTES | T_FLOAT => 0..0,
+        T_STRING | T_BYTES | T_FLOAT | T_BIGNUM => 0..0,
         // Slots 0 and 1 are a raw entry address and a raw byte length.
         T_CODE => CODE_NAME..len,
         // Slot 0 is a raw entry address; following it would be a bug.

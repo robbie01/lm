@@ -10,6 +10,7 @@
 //! intrinsics, `t` - are the same objects either way.
 
 use crate::heap::*;
+use num_bigint::BigInt;
 
 pub struct Reader<'a, 'b> {
     pub h: &'a mut Heap<'b>,
@@ -351,12 +352,11 @@ impl<'a, 'b> Reader<'a, 'b> {
         }
         if let Some(v) = parse_number(&tok) {
             return Ok(match v {
-                Num::Int(n) => {
-                    if !(-(1 << 30)..(1 << 30)).contains(&n) {
-                        return self.err(format!("integer {n} does not fit a fixnum"));
-                    }
-                    fix(n as i32)
-                }
+                // Both of these demote to a fixnum when the value fits, so a
+                // number read here and the same number read by the machine
+                // are the same kind of object and `eqv?` on the two agrees.
+                Num::Int(n) => self.h.bignum_of_i64(n),
+                Num::Big(n) => self.h.from_big(&n),
                 Num::Float(f) => self.h.float(f),
             });
         }
@@ -378,6 +378,8 @@ impl<'a, 'b> Reader<'a, 'b> {
 
 pub enum Num {
     Int(i64),
+    /// A decimal literal too wide for i64.
+    Big(BigInt),
     Float(f32),
 }
 
@@ -393,6 +395,10 @@ pub fn parse_number(tok: &str) -> Option<Num> {
     }
     if let Ok(n) = tok.parse::<i64>() {
         return Some(Num::Int(n));
+    }
+    // Wider than i64, but still a plain decimal integer: a bignum literal.
+    if let Ok(n) = tok.parse::<BigInt>() {
+        return Some(Num::Big(n));
     }
     if tok.contains('.') || tok.contains('e') || tok.contains('E') {
         if let Ok(f) = tok.parse::<f32>() {

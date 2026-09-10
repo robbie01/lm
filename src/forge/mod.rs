@@ -169,6 +169,7 @@ pub fn write_layout() {
     def!("t-closure", T_CLOSURE);
     def!("t-record", T_RECORD);
     def!("t-float", T_FLOAT);
+    def!("t-bignum", T_BIGNUM);
     def!("t-port", T_PORT);
     def!("t-code", T_CODE);
     def!("code-entry", CODE_ENTRY);
@@ -305,6 +306,7 @@ pub const SYSTEM: &[&str] = &[
     "lisp/stream.lisp",
     "lisp/print.lisp",
     "lisp/read.lisp",
+    "lisp/bignum.lisp",
     "lisp/gc.lisp",
     "lisp/hw.lisp",
     "lisp/asm.lisp",
