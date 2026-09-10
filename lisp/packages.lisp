@@ -46,7 +46,8 @@
   %bytes-length %bytes-ref %bytes-set! %bytes? %car %cdr %char->int %char?
   %closure? %cons %cons? %ctest-entry %cycles %disable %display %dv %ecall
   %enable %enable-timer %eq? %error %eval %fixnum? %float? %flush
-  %frame-pointer %from-addr %funcall %gensym %global %halt %instance %set-instance! %int->char
+  %fluid-value %set-fluid-value!
+  %frame-pointer %from-addr %funcall %gensym %global %halt %this-task %set-this-task! %int->char
   %intern %ld16 %ld32 %ld8 %logand %logior %lognot %logxor %lsh %macro?
   %macroexpand-1 %make-bytes %make-string %make-vector %mod %newline %null?
   %obj-len %obj-type %object? %raw-ld %raw-st! %read-file
@@ -67,8 +68,13 @@
   char-numeric? char-upcase char-whitespace? char<? char=? char>? char?
   code-object? comment compose cond cons console-stream constantly
   current-package current-stream cycles decf defconstant define
-  define-values definstance defmacro defpackage defparameter defun defvar delq
-  with-instance
+  define-values defmacro fluid-let bind-fluid! unbind-fluid! task-binds
+  set-task-binds! swap-binds-in! swap-binds-out! place-value set-place-value!
+  unwind-binds-to!
+  *binds-get* *binds-set* *boot-binds* defpackage defparameter defun defvar delq
+  defrecord record-shape record-shape! record-forms record-field record-tag
+  set-record-field! record-fault shape-prefix shape-open? shape-fields word?
+  *record-shapes* *record-inline-hook*
   digit->int display display-to-string do dolist dotimes else emit-ch
   emit-code-label emit-name emit-str eq-hash eq? equal? eqv? error even?
   every export export-symbol! expt filter find-package find-symbol-in
@@ -129,11 +135,12 @@
   *blit-list* blit-list-size
   *screen* *screen-h* *screen-w* alloc-pool bm-blit-rect bm-clip bm-fill-rect
   bm-plot bm-point make-bitmap-rastport make-rastport-on rp-bitmap
-  rp-bitmap-h rp-bitmap-w set-rp-bitmap! blit-rect blt-dmod blt-dst blt-val op-fill
+  rp-bitmap-h rp-bitmap-w rp-retarget! blit-rect blt-dmod blt-dst blt-val op-fill
   blt-h blt-op blt-smod blt-src blt-w clamp clear-screen disk-write
   draw-circle draw-line ev-buttondown ev-buttonup ev-keydown ev-mousemove
-  *rp* make-rastport rastport? rp-origin-x rp-origin-y rp-region
-  set-rp-origin! set-rp-region! use-rastport screen-fill-rect screen-plot
+  *screen-rp* screen-rastport make-rastport rastport?
+  rp-origin-x rp-origin-y rp-region
+  set-rp-origin! set-rp-region! screen-fill-rect screen-plot
   screen-blit-rect rect rect-x rect-y rect-w rect-h rect-x2 rect-y2 rect-ok?
   rect-intersect rect-contains? rect-subtract region-subtract-rect region-area
   region-intersect-rect region-subtract
@@ -185,7 +192,7 @@
 ;; 11 public, out of 100 definitions.
 (export '(
   *boot-thunks* add-boot-thunk compile-file-forms compile-function
-  compile-top register-instance-layout-in! setup-intrinsics trap-arity
+  compile-top setup-intrinsics trap-arity
   trap-error trap-oom trap-type
 ))
 
@@ -204,16 +211,20 @@
 (in-package exec)
 ;; 19 public, out of 183 definitions.
 (export '(
-  add-task cause ctx-bytes exec-init exec-start forbid
+  ;; Forbid and Permit are not exported. `without-preemption` is the way in,
+  ;; and there is no section yet that cannot be lexical - which is the only
+  ;; thing that would earn a raw pair its place, the way `wait` earns one for
+  ;; the interrupt state.
+  add-task cause ctx-bytes exec-init exec-start
   ;; handle-interrupt and switch-tasks are the trap handler's, and the trap
   ;; handler is in sys: exported to one caller, not to applications.
   handle-interrupt switch-tasks
-  idle? idle-start input-listen permit permit-deferred without-preemption
+  idle? idle-start input-listen without-preemption
   preemption-off preemption-on
   task-snapshot task?
   this-task
   rem-task reschedule sigb-input sigb-vblank sigf-input sigf-vblank signal
-  spawn *vblank-count* vblank-start wait-input wait-vblank
+  *vblank-count* vblank-start wait-input wait-vblank
   task-count tasks wait
 ))
 
@@ -227,12 +238,12 @@
 ;; 33 public, out of 88 definitions.
 (export '(
   *windows* front-window make-window new-shell title-height wb-back
-  window-rastport wb-update damage draw-in present window-bitmap
+  window-rastport wb-update damage present window-bitmap
   window-damage window-rect wb-composite
   wb-button-down wb-drag wb-face wb-repaint wb-shadow wb-text win-data
-  win-inner-h win-inner-w win-inner-x win-inner-y win-refresh win-set!
-  win-task window-close window-open
-  win-get win-h win-w win-x win-y window-push-key workbench win-bm wb-resume
+  win-inner-h win-inner-w win-inner-x win-inner-y win-refresh
+  win-task window-close window-open set-win-data! set-win-refresh! set-win-task!
+  win-h win-w win-x win-y window-push-key workbench win-bm wb-resume
   pt-black pt-white pt-g1 pt-g2 pt-g3 pt-g6 pt-g7 pt-g8 pt-g10 pt-g13
   pt-lav pt-lav-dark pt-lav-light pt-desktop pt-grey pt-band pt-title-h
   pt-hline pt-vline pt-frame pt-raised pt-sunken pt-title-box pt-grow-box
@@ -244,8 +255,9 @@
 (in-package eyes)
 ;; 13 public, out of 16 definitions.
 (export '(
-  *eyes-instances* close-eyes eyes eyes? look-at look-x-of look-y-of
-  make-eyes rad-of set-look-x-of! set-look-y-of! set-rad-of! window-of
+  eyes eyes? eyes-make look-at
+  eyes-window eyes-rad eyes-look-x eyes-look-y
+  set-eyes-look-x! set-eyes-look-y! set-eyes-rad!
 ))
 
 ;; A prompt starts here.

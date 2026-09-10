@@ -241,6 +241,248 @@
        (newline)
        %v)))
 
+;; ---------------------------------------------------------------- records
+;; Slot 0 of a record is a symbol saying what it is; the rest are named
+;; fields, and this is where those names are written down. Once:
+;;
+;;   (defrecord stream put get wait)
+;;     -> stream-slots, stream-make, stream?, stream-put, set-stream-put!, ...
+;;   (defrecord (rastport rp) bm bw bh org-x org-y clip)
+;;     -> rp-bm and friends, for a type name longer than its fields
+;;   (defrecord (node ln open) succ pred pri name)
+;;   (defrecord (task tc) (include node) state sigalloc ...)
+;;
+;; `(include base)` puts another record's fields first, so a task is a node
+;; and their slots line up - which is what Exec's lists are made of. `open`
+;; says other records are built on this one, so its accessors check that they
+;; have a record rather than which record: something has to be able to walk a
+;; list holding tasks and ports and interrupts at the same time.
+;;
+;; The accessors are ordinary functions, so `(map win-x ws)` means what it
+;; looks like. The compiler open-codes every call to one - tag check included
+;; - the same bargain it already makes for `car`, and one that comes out ahead
+;; here because the hand-numbered `(win-get w win-x)` this replaces was a call.
+
+(define *record-shapes* nil)      ; (type prefix open . fields)
+
+;; The compiler sets this once it is loaded, and from then on a record's
+;; accessors are open-coded as they are declared. The shapes declared before
+;; that - the collector's, the chips', the assembler's - are caught up in one
+;; pass at the bottom of compile.lisp.
+(define *record-inline-hook* nil)
+
+(define (record-shape type) (assq type *record-shapes*))
+(define (shape-prefix s) (cadr s))
+(define (shape-open? s) (caddr s))
+(define (shape-fields s) (cdddr s))
+
+;; Whatever a record is, slot 0 says so. Safe on anything: a fixnum is not a
+;; record and has no tag rather than a wrong one.
+(define (record-tag r) (if (%record? r) (%slot r 0) nil))
+
+;; `open` and `include` are read in whichever package the declaration is in,
+;; so they are matched by name. Nothing else in a defrecord is a keyword, and
+;; making these two into exported symbols would put two more names into every
+;; package that ever declares a record.
+(define (word? x name)
+  (if (%symbol? x) (string=? (symbol-name x) name) nil))
+
+;; The options after the type name are `open` and, at most once, the prefix
+;; the accessors wear. Neither has to be there.
+(define (record-prefix-of opts type)
+  (let ((r nil))
+    (dolist (o opts)
+      (if (word? o "open") nil (if r nil (set! r o))))
+    (string-append (symbol-name (if r r type)) "-")))
+
+(define (record-shape! type prefix open fields)
+  (set! *record-shapes*
+        (%cons (%cons type (%cons prefix (%cons open fields)))
+               (filter (lambda (e) (not (%eq? (%car e) type))) *record-shapes*)))
+  (let ((s (record-shape type)))
+    (if *record-inline-hook* (%funcall *record-inline-hook* s) nil)
+    s))
+
+;; What an accessor does when it is handed the wrong kind of record. The
+;; open-coded form traps instead, and says the same thing.
+(define (record-fault type r)
+  (error (string-append "expected a " (symbol-name type)) r))
+
+(define (record-field r i type)
+  (if (%eq? (%record-ref r 0) type) (%record-ref r i) (record-fault type r)))
+
+(define (set-record-field! r i type v)
+  (if (%eq? (%record-ref r 0) type) (%record-set! r i v) (record-fault type r)))
+
+;; The declaration, turned into ordinary definitions. Both evaluators use this
+;; one function: the interpreter expands the macro below, and the compiler
+;; calls it directly so that it can register the shape first and open-code the
+;; accessors afterwards.
+(define (record-forms form)
+  (let* ((head (cadr form))
+         (type (if (%cons? head) (%car head) head))
+         (opts (if (%cons? head) (%cdr head) nil))
+         (prefix (record-prefix-of opts type))
+         (open (let ((r nil))
+                 (dolist (o opts) (if (word? o "open") (set! r t) nil))
+                 r))
+         (pkg (symbol-package type))
+         (fields nil)
+         (inits nil)
+         (out nil))
+    (dolist (spec (cddr form))
+      (if (if (%cons? spec) (word? (%car spec) "include") nil)
+          (let ((base (record-shape (cadr spec))))
+            (if base nil (error "defrecord: no record to include" (cadr spec)))
+            (dolist (f (shape-fields base))
+              (set! fields (append fields (list f)))
+              (set! inits (append inits (list nil)))))
+          (begin
+            (set! fields (append fields (list (if (%cons? spec) (%car spec) spec))))
+            (set! inits (append inits (list (if (%cons? spec) (cadr spec) nil)))))))
+    (record-shape! type prefix open fields)
+    (let ((n (%+ 1 (length fields)))
+          (k 1)
+          (body nil))
+      ;; Only the fields that start as something other than nil are written:
+      ;; a fresh record is zeroed, and a zero reads as nil.
+      (dolist (v inits)
+        (if v (set! body (append body (list (list '%set-slot! 'r k v)))) nil)
+        (set! k (%+ k 1)))
+      (set! out
+            (list
+             (list 'define (intern-in pkg (string-append prefix "slots")) n)
+             (list 'define (list (intern-in pkg (string-append (symbol-name type) "?"))
+                                 'x)
+                   (list 'if (list '%record? 'x)
+                         (list '%eq? (list '%slot 'x 0) (list 'quote type))
+                         nil))
+             (list 'define (list (intern-in pkg (string-append prefix "make")))
+                   (append (list 'let (list (list 'r (list 'make-record n
+                                                           (list 'quote type)))))
+                           (append body (list 'r)))))))
+    (let ((k 1))
+      (dolist (f fields)
+        (let ((n (symbol-name f)))
+          (set! out
+                (append
+                 out
+                 (list
+                  (list 'define (list (intern-in pkg (string-append prefix n)) 'r)
+                        (if open
+                            (list '%record-ref 'r k)
+                            (list 'record-field 'r k (list 'quote type))))
+                  (list 'define (list (intern-in pkg
+                                                 (string-append "set-" prefix n "!"))
+                                      'r 'v)
+                        (if open
+                            (list '%record-set! 'r k 'v)
+                            (list 'set-record-field! 'r k (list 'quote type) 'v)))))))
+        (set! k (%+ k 1))))
+    out))
+
+(defmacro defrecord spec
+  (%cons 'begin (record-forms (%cons 'defrecord spec))))
+
+;; ---------------------------------------------------------------- fluids
+;; A place given a value for as long as a body runs, and put back after. What
+;; makes it per task is where the record of it is kept: the scheduler swaps a
+;; task's bindings in and out with its registers, so two tasks inside the same
+;; `fluid-let` see their own values and neither has to know about the other.
+;;
+;; Swapping is the whole trick, and it is symmetrical. Each entry holds the
+;; value that was current when the binding was made; exchanging the entry with
+;; the place leaves the task's own value in the entry and the outer value in
+;; the place, which is what "this task is not running" means, and exchanging
+;; again puts it back. Nothing has to know which of the two states it is in.
+;;
+;; Two consequences worth stating. A task that never binds anything shares the
+;; globals, which is right: it has not asked for anything of its own. And a
+;; task that binds and then assigns keeps the assignment, because what is
+;; exchanged is the current value rather than the one it started with.
+
+;; Where the bindings live. Exec installs these once there are tasks to hang
+;; them on; before that, and inside a trap where there is no task to speak of,
+;; there is one stack and nothing competing for it.
+(define *binds-get* nil)
+(define *binds-set* nil)
+(define *boot-binds* nil)
+
+(define (task-binds) (if *binds-get* (%funcall *binds-get*) *boot-binds*))
+(define (set-task-binds! v)
+  (if *binds-set* (%funcall *binds-set* v) (set! *boot-binds* v)))
+
+;; A place is a symbol, whose value cell is the obvious thing to exchange - or
+;; `package`, because the current package lives in a machine slot rather than
+;; in a variable, and is per task for exactly the same reasons a stream is.
+(define (place-value p)
+  (if (%eq? p 'package) (current-package) (%fluid-value p)))
+
+(define (set-place-value! p v)
+  (if (%eq? p 'package) (set-current-package! v) (%set-fluid-value! p v)))
+
+(define (bind-fluid! place value)
+  (without-interrupts
+    (set-task-binds! (%cons (%cons place (place-value place)) (task-binds)))
+    (set-place-value! place value))
+  nil)
+
+(define (unbind-fluid!)
+  (without-interrupts
+    (let ((b (%car (task-binds))))
+      (set-place-value! (%car b) (%cdr b))
+      (set-task-binds! (%cdr (task-binds)))))
+  nil)
+
+;; Back to where the stack stood at some earlier point, putting every place
+;; bound since then back the way it was. An error abandons the stack it
+;; happened on, so nothing on it gets to unbind what it bound; this is how the
+;; prompt it lands in is not left talking to somebody else's window.
+(define (unwind-binds-to! mark)
+  (while (if (%cons? (task-binds)) (if (%eq? (task-binds) mark) nil t) nil)
+    (unbind-fluid!))
+  nil)
+
+(define (swap-one! e)
+  (let ((p (%car e)) (v (%cdr e)))
+    (%set-cdr! e (place-value p))
+    (set-place-value! p v)))
+
+;; Out: innermost first, so that a place bound twice ends up holding what it
+;; held before the outermost of them.
+(define (swap-binds-out! p)
+  (while (%cons? p)
+    (swap-one! (%car p))
+    (set! p (%cdr p))))
+
+;; And back, outermost first, which is the same walk in reverse. The recursion
+;; goes as deep as the bindings are nested, which is single digits.
+(define (swap-binds-in! p)
+  (if (%cons? p)
+      (begin (swap-binds-in! (%cdr p)) (swap-one! (%car p)))
+      nil))
+
+;; Give these places these values for the extent of the body, and put back
+;; whatever was there. The binding belongs to the task that made it: the
+;; scheduler swaps a task's bindings with its registers, so two tasks inside
+;; the same `fluid-let` see their own values.
+;;
+;; Like `without-interrupts`, this does not unwind. An error inside the body
+;; does not come back through here; it resets to a prompt, and `restart-stack`
+;; is what puts the bindings back on that path.
+(defmacro fluid-let args
+  (let ((binds (%car args))
+        (body (%cdr args))
+        (result (gensym))
+        (out nil))
+    (dolist (b binds)
+      (set! out (append out (list (list 'bind-fluid! (list 'quote (%car b))
+                                        (cadr b))))))
+    (append (%cons 'begin out)
+            (list (list 'let (list (list result (%cons 'begin body)))
+                        (%cons 'begin (map (lambda (b) (list 'unbind-fluid!)) binds))
+                        result)))))
+
 ;; ---------------------------------------------------------------- atomicity
 ;; Run the body with interrupts off, and put them back the way they were.
 ;;

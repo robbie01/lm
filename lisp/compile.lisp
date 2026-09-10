@@ -75,80 +75,41 @@
 (define trap-type 2)
 (define trap-oom 3)
 (define trap-error 4)
-(define trap-instance 6)
+(define trap-record 6)
 
 ;; ---------------------------------------------------------------- context
 ;; What the compiler knows while it is compiling one function. This was a
 ;; vector of thirteen numbered slots and a comment block to say which was
 ;; which, which is fine until you add a fourteenth and have to count.
-(define cxi-tag 0)
-(define cxi-asm 1)
-(define cxi-env 2)
-(define cxi-nlocals 3)
-(define cxi-maxlocals 4)
-(define cxi-free 5)
-(define cxi-boxed 6)
-(define cxi-name 7)
-(define cxi-framefix 8)
-(define cxi-outer 9)
-(define cxi-nparams 10)
-(define cxi-selflabel 11)
-(define cxi-selfarity 12)
-(define cxi-leaf 13)
-(define cx-slots 14)
+(defrecord (context cx)
+  asm env nlocals maxlocals free boxed name framefix outer nparams
+  self-label self-arity leaf)
 
 (define (cx-new asm name outer-env)
-  (let ((c (make-record cx-slots 'context)))
-    (%record-set! c cxi-asm asm)
-    (%record-set! c cxi-nlocals 0)
-    (%record-set! c cxi-maxlocals 0)
-    (%record-set! c cxi-name name)
-    (%record-set! c cxi-framefix 0)
-    (%record-set! c cxi-outer outer-env)
-    (%record-set! c cxi-nparams 0)
+  (let ((c (cx-make)))
+    (set-cx-asm! c asm)
+    (set-cx-nlocals! c 0)
+    (set-cx-maxlocals! c 0)
+    (set-cx-name! c name)
+    (set-cx-framefix! c 0)
+    (set-cx-outer! c outer-env)
+    (set-cx-nparams! c 0)
     c))
-
-(define (cx-asm c) (%record-ref c cxi-asm))
-(define (cx-set-asm! c v) (%record-set! c cxi-asm v))
-(define (cx-env c) (%record-ref c cxi-env))
-(define (cx-set-env! c v) (%record-set! c cxi-env v))
-(define (cx-nlocals c) (%record-ref c cxi-nlocals))
-(define (cx-set-nlocals! c v) (%record-set! c cxi-nlocals v))
-(define (cx-maxlocals c) (%record-ref c cxi-maxlocals))
-(define (cx-set-maxlocals! c v) (%record-set! c cxi-maxlocals v))
-(define (cx-free c) (%record-ref c cxi-free))
-(define (cx-set-free! c v) (%record-set! c cxi-free v))
-(define (cx-boxed c) (%record-ref c cxi-boxed))
-(define (cx-set-boxed! c v) (%record-set! c cxi-boxed v))
-(define (cx-name c) (%record-ref c cxi-name))
-(define (cx-set-name! c v) (%record-set! c cxi-name v))
-(define (cx-framefix c) (%record-ref c cxi-framefix))
-(define (cx-set-framefix! c v) (%record-set! c cxi-framefix v))
-(define (cx-outer c) (%record-ref c cxi-outer))
-(define (cx-set-outer! c v) (%record-set! c cxi-outer v))
-(define (cx-nparams c) (%record-ref c cxi-nparams))
-(define (cx-set-nparams! c v) (%record-set! c cxi-nparams v))
-(define (cx-self-label c) (%record-ref c cxi-selflabel))
-(define (cx-set-self-label! c v) (%record-set! c cxi-selflabel v))
-(define (cx-self-arity c) (%record-ref c cxi-selfarity))
-(define (cx-set-self-arity! c v) (%record-set! c cxi-selfarity v))
-(define (cx-leaf? c) (%record-ref c cxi-leaf))
-(define (cx-set-leaf! c v) (%record-set! c cxi-leaf v))
 
 (define (cx-alloc-local c)
   (let ((n (cx-nlocals c)))
     ;; The pre-pass bounds this before deciding a function is a leaf, so
     ;; reaching here means the bound was wrong rather than that the function
     ;; is unusual.
-    (if (cx-leaf? c)
+    (if (cx-leaf c)
         (if (%>= n leaf-locals) (error "compile: leaf out of registers" (cx-name c)) nil)
         nil)
-    (cx-set-nlocals! c (%+ n 1))
-    (if (%> (%+ n 1) (cx-maxlocals c)) (cx-set-maxlocals! c (%+ n 1)) nil)
+    (set-cx-nlocals! c (%+ n 1))
+    (if (%> (%+ n 1) (cx-maxlocals c)) (set-cx-maxlocals! c (%+ n 1)) nil)
     n))
 
 (define (cx-bind c sym loc)
-  (cx-set-env! c (%cons (%cons sym loc) (cx-env c))))
+  (set-cx-env! c (%cons (%cons sym loc) (cx-env c))))
 
 (define (cx-lookup c sym) (assq sym (cx-env c)))
 
@@ -310,85 +271,74 @@
         nil)
     (i-lw a reg $s1 off)))
 
+;; ---------------------------------------------------------------- records
+;; The shape of a record and the functions that go with it are in macros.lisp,
+;; because the interpreter needs them too. What is here is the open-coding: a
+;; call to one of those accessors becomes four instructions and no call, with
+;; the tag check the function does written out inline.
+;;
+;; The check is three of the four: load slot 0, compare it with the type this
+;; code was compiled against, branch. The tag it wanted is left in t3 and the
+;; value it did not like is still in a0, so the trap can name both ends rather
+;; than give an address.
+;;
+;; An `open` record - one others are built on - has no check to make. The
+;; indexed load still refuses anything that is not a record, which is exactly
+;; what the hand-numbered `%record-ref` did and all a list walker can ask for.
+(define (emit-record-check c type open)
+  (let ((a (cx-asm c)))
+    (if open
+        nil
+        (let ((ok (asm-gensym-label "rec")))
+          (i-ldxi a $t2 $a0 0 t-record)
+          (emit-literal c type $t3)
+          (i-beq a $t2 $t3 ok)
+          (i-li a $a7 trap-record)
+          (i-ecall a)
+          (asm-label a ok)))))
+
+(define (record-getter type open k)
+  (lambda (c)
+    (emit-record-check c type open)
+    (i-ldxi (cx-asm c) $a0 $a0 k t-record)))
+
+(define (record-setter type open k)
+  (lambda (c)
+    (emit-record-check c type open)
+    (i-stxi (cx-asm c) $a1 $a0 k t-record)
+    (i-mv (cx-asm c) $a0 $a1)))
+
+(define (install-record-inlines! s)
+  (let ((type (%car s))
+        (prefix (shape-prefix s))
+        (open (shape-open? s))
+        (pkg (symbol-package (%car s)))
+        (k 1))
+    (dolist (f (shape-fields s))
+      (let ((n (symbol-name f)))
+        (definline (intern-in pkg (string-append prefix n))
+                   1 (record-getter type open k))
+        (definline (intern-in pkg (string-append "set-" prefix n "!"))
+                   2 (record-setter type open k)))
+      (set! k (%+ k 1)))
+    s))
+
 ;; ---------------------------------------------------------------- variables
 ;; A location is (local n), (boxed-local n), (free n), (boxed-free n) or
 ;; (global sym).
-;; ---------------------------------------------------------------- instances
-;; An instance is the state of one running application, and s2 says which one
-;; is running. A package declares at most one shape - a package is the code,
-;; an instance is its state - so a bare name inside that package can be a slot
-;; of the instance rather than a global, and costs one instruction to read
-;; where a global costs two.
-;;
-;;   slot 0   the type, so an instance can say what it is
-;;   slot 1   the layout version, so code compiled against an old shape is
-;;            caught at the boundary rather than reading the wrong field
-;;   slot 2+  the fields, in declaration order
-(define inst-tag 0)
-(define inst-version 1)
-(define inst-fields 2)
-
-(define *instance-layouts* nil)   ; (package . [type version fields])
-(define *instance-version* 0)
-
-(define (instance-layout . opt)
-  (let ((p (assq (if (%cons? opt) (%car opt) (current-package))
-                 *instance-layouts*)))
-    (if p (%cdr p) nil)))
-
-(define (layout-type l) (%vector-ref l 0))
-(define (layout-version l) (%vector-ref l 1))
-(define (layout-fields l) (%vector-ref l 2))
-
-;; A shape is needed twice, the way a macro is: by the compiler running now,
-;; and by the machine's own compiler once the image boots. So the declaration
-;; leaves a call behind in the boot list, and the machine registers it again
-;; from the same numbers.
-(define (register-instance-layout-in! pkg-name type version fields)
-  (let ((pkg (find-package pkg-name))
-        (v (make-vector-n 3 nil)))
-    (%vector-set! v 0 type)
-    (%vector-set! v 1 version)
-    (%vector-set! v 2 fields)
-    (if (%> version *instance-version*) (set! *instance-version* version) nil)
-    (set! *instance-layouts*
-          (%cons (%cons pkg v)
-                 (filter (lambda (e) (not (%eq? (%car e) pkg))) *instance-layouts*)))
-    v))
-
-(define (register-instance-layout! type fields)
-  (set! *instance-version* (%+ *instance-version* 1))
-  (register-instance-layout-in! (package-name (current-package))
-                                type *instance-version* fields))
-
-;; Which slot, if any, this name is in the instance the current package runs as.
-(define (instance-slot sym)
-  (let ((l (instance-layout)))
-    (if l
-        (let ((fs (layout-fields l)) (i inst-fields) (found nil))
-          (while (%cons? fs)
-            (if (%eq? (%car fs) sym)
-                (begin (set! found i) (set! fs nil))
-                (begin (set! i (%+ i 1)) (set! fs (%cdr fs)))))
-          found)
-        nil)))
-
 (define (resolve c sym)
   (let ((p (cx-lookup c sym)))
-    (if p
-        (%cdr p)
-        (let ((k (instance-slot sym)))
-          (if k (list 'instance k) (list 'global sym))))))
+    (if p (%cdr p) (list 'global sym))))
 
 ;; A local is a frame slot, or - in a leaf - a register, and these three are
 ;; the only places that know which.
 (define (load-local c n reg)
-  (if (cx-leaf? c)
+  (if (cx-leaf c)
       (i-mv (cx-asm c) reg (local-reg n))
       (i-lw (cx-asm c) reg $s0 (local-off n))))
 
 (define (store-local c n reg)
-  (if (cx-leaf? c)
+  (if (cx-leaf c)
       (i-mv (cx-asm c) (local-reg n) reg)
       (i-sw (cx-asm c) reg $s0 (local-off n))))
 
@@ -398,7 +348,7 @@
 ;; one instruction rather than two - and, more to the point, a function that
 ;; captures can be a leaf at all.
 (define (closure-reg c scratch)
-  (if (cx-leaf? c)
+  (if (cx-leaf c)
       $t0
       (begin (i-lw (cx-asm c) scratch $s0 clo-slot) scratch)))
 
@@ -415,7 +365,6 @@
       (i-lobj a reg (closure-reg c $t6) (%* 4 (%+ clo-free (cadr loc))))
       (i-lref a reg reg 0))
      ;; One instruction, off the register that says which instance is running.
-     ((%eq? kind 'instance) (i-lw a reg $s2 (%* 4 (cadr loc))))
      (else
       (let ((sym (cadr loc)))
         (note-global-ref sym)
@@ -465,7 +414,6 @@
       (let ((cr (closure-reg c $t6)))
         (i-lobj a $t6 cr (%* 4 (%+ clo-free (cadr loc)))))
       (i-sref a reg $t6 0))
-     ((%eq? kind 'instance) (i-sw a reg $s2 (%* 4 (cadr loc))))
      (else
       (let ((sym (cadr loc)))
         (emit-literal c sym $t6)
@@ -537,7 +485,7 @@
     ;; does not move, s0 still names the caller's frame, ra is in no danger
     ;; because nothing here will overwrite it, and its locals are registers
     ;; nothing else in the machine uses.
-    (if (cx-leaf? c)
+    (if (cx-leaf c)
         (begin
           (i-mv a $lit-save $s1)
           (i-lobj a $s1 $t0 (%* 4 clo-code)))
@@ -551,9 +499,9 @@
           ;; downstream reads the count out of t1.
           (if variadic
               nil
-              (begin (cx-set-self-label! c ok) (cx-set-self-arity! c nreq)))
+              (begin (set-cx-self-label! c ok) (set-cx-self-arity! c nreq)))
           (i-mv a $t3 $sp)
-          (cx-set-framefix! c (asm-len a))  ; the one word that knows the frame size
+          (set-cx-framefix! c (asm-len a))  ; the one word that knows the frame size
           (i-addi-w a $sp $sp 0)          ; patched by size-frame, so it stays wide
           (i-sw a $ra $t3 -4)
           (i-sw a $s0 $t3 -8)
@@ -567,7 +515,7 @@
 
 (define (emit-epilogue c)
   (let ((a (cx-asm c)))
-    (if (cx-leaf? c)
+    (if (cx-leaf c)
         (i-mv a $s1 $lit-save)
         (begin
           (i-lw a $ra $s0 -4)
@@ -580,7 +528,7 @@
   ;; Now that every local is known, size the frame and patch the single
   ;; instruction in the prologue that mentions it. A leaf has no frame and
   ;; nothing to patch - but it does have an assumption to check.
-  (if (cx-leaf? c) (check-leaf c) (size-frame c)))
+  (if (cx-leaf c) (check-leaf c) (size-frame c)))
 
 ;; The pre-pass decides leaf-ness from the source, and a source pre-pass can
 ;; be wrong. This looks at what actually came out: if anything in a leaf's own
@@ -786,7 +734,7 @@
 
 ;; ---------------------------------------------------------------- constant index
 ;; An index that is written down rather than computed - which is every record
-;; field, every closure slot, the instance tag and version - does not need a
+;; field and every closure slot - does not need a
 ;; register to hold it or an instruction to put it there. The immediate form
 ;; of the custom-1 opcode carries indices 0 to 31 in the instruction itself.
 ;;
@@ -1209,6 +1157,18 @@
     (lambda (c) (i-lobj (cx-asm c) $a0 $a0 (%* 4 sym-name))))
   (definline '%symbol-value 1
     (lambda (c) (i-lobj (cx-asm c) $a0 $a0 (%* 4 sym-value))))
+  ;; What a reference to this name would see, and how to change it. On the
+  ;; machine that is the symbol's value cell and nothing else, so these two
+  ;; are `%symbol-value` again. They are spelled apart because the bootstrap
+  ;; interpreter keeps its globals in a map of its own and its symbols' cells
+  ;; hold the compiled definitions bound for the image - two worlds in one
+  ;; heap, and a fluid binding has to land in the one doing the reading.
+  (definline '%fluid-value 1
+    (lambda (c) (i-lobj (cx-asm c) $a0 $a0 (%* 4 sym-value))))
+  (definline '%set-fluid-value! 2
+    (lambda (c)
+      (i-sobj (cx-asm c) $a1 $a0 (%* 4 sym-value))
+      (i-mv (cx-asm c) $a0 $a1)))
   (definline '%set-symbol-value! 2
     (lambda (c)
       (i-sobj (cx-asm c) $a1 $a0 (%* 4 sym-value))
@@ -1235,11 +1195,13 @@
   ;; ---- machine ----
   ;; The collector needs to know where the stack currently is, so it can scan
   ;; from there upwards for anything that looks like a pointer.
-  ;; Which instance is running. Dedicated for the life of the machine, like
-  ;; the cons pointers, and swapped by the context switch for nothing, because
-  ;; the trap stub was already saving all thirty two registers.
-  (definline '%instance 0 (lambda (c) (i-mv (cx-asm c) $a0 $s2)))
-  (definline '%set-instance! 1
+  ;; Which task is running. Dedicated for the life of the machine, like the
+  ;; cons pointers, and swapped by the context switch for nothing, because the
+  ;; trap stub was already saving all thirty two registers - so Exec needs no
+  ;; variable for it, and a task's own state is one instruction away wherever
+  ;; it is standing. It is nil before there is an Exec to have tasks.
+  (definline '%this-task 0 (lambda (c) (i-mv (cx-asm c) $a0 $s2)))
+  (definline '%set-this-task! 1
     (lambda (c) (i-mv (cx-asm c) $s2 $a0)))
 
   (definline '%stack-pointer 0
@@ -1611,7 +1573,6 @@
          ((%eq? h 'while) (compile-while c form tail))
          ((%eq? h 'set!) (compile-set c form tail))
          ((%eq? h 'define) (compile-inner-define c form tail))
-         ((%eq? h 'with-instance) (compile-with-instance c form tail))
 
          ((%eq? h 'lambda)
           ;; An anonymous function still belongs somewhere, and a backtrace
@@ -1658,54 +1619,6 @@
   (emit-epilogue c)
   (i-ret (cx-asm c)))
 
-;; (with-instance expr body...) runs the body as that instance. The old one
-;; goes on the stack rather than into a register, because everything between
-;; sp and the frame link is a tagged value the collector already walks - so an
-;; instance held across a collection is held by the same machinery that holds
-;; a local.
-;;
-;; The shape is checked here rather than at every slot access: this is the
-;; boundary, and ten instructions once beats one instruction never.
-(define (compile-with-instance c form tail)
-  ;; A package with no shape of its own can still enter somebody else's -
-  ;; that is how a prompt gets inside a running application - it just has no
-  ;; bare names for the slots, because they are not its names.
-  (let ((a (cx-asm c))
-        (l (instance-layout)))
-    (compile-expr c (cadr form) nil)
-    (emit-instance-check c l)
-    (i-addi a $sp $sp -4)
-    (i-sw a $s2 $sp 0)
-    (i-mv a $s2 $a0)
-    (compile-body c (cddr form) nil)
-    (i-lw a $s2 $sp 0)
-    (i-addi a $sp $sp 4)
-    (if tail (emit-return c) nil)))
-
-;; The type and the version, both, and a trap if either is wrong. The indexed
-;; loads do the rest: they refuse anything that is not a record and anything
-;; whose index is past the end, so a nil or a fixnum never gets this far.
-(define (emit-instance-check c l)
-  (let ((a (cx-asm c)))
-    ;; The indexed load does the rest of the work: it refuses anything that is
-    ;; not a record, so nil and fixnums never reach the comparisons.
-    (i-ldxi a $t2 $a0 inst-tag t-record)
-    (if l
-        (let ((ok (asm-gensym-label "inst"))
-              (ok2 (asm-gensym-label "instv")))
-          (emit-literal c (layout-type l) $t3)
-          (i-beq a $t2 $t3 ok)
-          (i-li a $a7 trap-instance)
-          (i-ecall a)
-          (asm-label a ok)
-          (i-ldxi a $t2 $a0 inst-version t-record)
-          (i-li a $t3 (%+ (%* 2 (layout-version l)) 1))
-          (i-beq a $t2 $t3 ok2)
-          (i-li a $a7 trap-instance)
-          (i-ecall a)
-          (asm-label a ok2))
-        nil)))
-
 (define (compile-if c form tail)
   (let* ((a (cx-asm c))
          (test (cadr form))
@@ -1746,8 +1659,8 @@
     (dolist (s (reverse slots))
       (cx-bind c (%car s) (box-or-plain c (%car s) (%cdr s))))
     (compile-body c body tail)
-    (cx-set-env! c saved-env)
-    (cx-set-nlocals! c saved-n)))
+    (set-cx-env! c saved-env)
+    (set-cx-nlocals! c saved-n)))
 
 (define (box-or-plain c sym slot)
   ;; A variable that an inner lambda captures and that something assigns has
@@ -1864,7 +1777,6 @@
          ((%eq? h 'begin) (leaf-body? (%cdr form) bound))
          ((%eq? h 'while) (leaf-body? (%cdr form) bound))
          ((%eq? h 'set!) (leaf-body? (cddr form) bound))
-         ((%eq? h 'with-instance) (leaf-body? (%cdr form) bound))
          ((%eq? h 'let)
           (if (leaf-binds? (cadr form) bound) (leaf-body? (cddr form) bound) nil))
          ((%symbol? h)
@@ -1929,11 +1841,11 @@
          (captured (captured-vars (%cons 'begin expanded) nil))
          (i 0))
     ;; Decide up front which variables need boxes.
-    (cx-set-boxed! c (filter (lambda (s) (memq s captured)) (dedup assigned)))
+    (set-cx-boxed! c (filter (lambda (s) (memq s captured)) (dedup assigned)))
     ;; And whether this is a leaf, which decides the whole shape of the frame
     ;; and where its locals live, so it has to be known before a word is
     ;; emitted.
-    (cx-set-leaf! c (leaf-function? c expanded names rest free))
+    (set-cx-leaf! c (leaf-function? c expanded names rest free))
     (emit-prologue c nreq (if rest t nil))
     ;; Parameters land in the first local slots.
     (set! i 0)
@@ -1963,7 +1875,7 @@
       (if (memq p (cx-boxed c))
           (let ((loc (%cdr (cx-lookup c p))))
             (emit-make-box c (cadr loc))
-            (cx-set-env! c (%cons (%cons p (list 'boxed-local (cadr loc)))
+            (set-cx-env! c (%cons (%cons p (list 'boxed-local (cadr loc)))
                                   (cx-env c))))
           nil))
     ;; Free variables are read out of the closure, through the box when the
@@ -2053,7 +1965,16 @@
             nil)
         (%cons 'let* (%cons binds body)))))
 
+;; `defrecord` is a macro, so that the interpreter has one to expand. Here it
+;; has to be caught before expansion: the compiler wants the shape registered
+;; before the rest of the file is read and the accessors open-coded, not just
+;; the definitions the expansion would give it.
 (define (compile-top form)
+  (if (if (%cons? form) (%eq? (%car form) 'defrecord) nil)
+      (compile-defrecord form)
+      (compile-top-1 form)))
+
+(define (compile-top-1 form)
   (set! form (macroexpand form))
   (if (%cons? form)
       (let ((h (%car form)))
@@ -2100,11 +2021,6 @@
             (%set-symbol-function! name clo)
             (%set-symbol-flags! name (%logior (%symbol-flags name) sym-macro))
             name))
-         ;; An instance shape has to be known to the compiler before the rest
-         ;; of the file is compiled, because it decides what a bare name means
-         ;; from here on. So it is registered now and its constructor and
-         ;; accessors are compiled as ordinary definitions.
-         ((%eq? h 'definstance) (compile-definstance form))
          ((%eq? h 'begin)
           (let ((last nil))
             (dolist (f (%cdr form)) (set! last (compile-top f)))
@@ -2115,6 +2031,19 @@
 (define (field-name spec) (if (%cons? spec) (%car spec) spec))
 (define (field-init spec) (if (%cons? spec) (cadr spec) nil))
 
+;; The same expansion the interpreter's macro uses, compiled rather than
+;; evaluated - and the shape registered on the way past, both here and, by the
+;; form left in the boot list, in the machine that boots from this.
+(define (compile-defrecord form)
+  (let* ((forms (record-forms form))
+         (head (cadr form))
+         (type (if (%cons? head) (%car head) head))
+         (s (record-shape type)))
+    (top-level-form (list 'record-shape! (list 'quote type) (shape-prefix s)
+                          (shape-open? s) (list 'quote (shape-fields s))))
+    (dolist (f forms) (compile-top f))
+    type))
+
 (define (derived-name base suffix)
   (intern-in (current-package)
              (string-append (%symbol-name base) suffix)))
@@ -2123,72 +2052,14 @@
   (intern-in (current-package)
              (string-append prefix (string-append (%symbol-name base) suffix))))
 
-;; (definstance type (field init) field ...) declares the shape of an instance
-;; of this package's application, and gives out:
-;;
-;;   (make-<type>)          a fresh one, fields set to their initial values
-;;   (<field>-of i)         reaching in from outside, where the names are not
-;;   (set-<field>-of! i v)  slots because the code is somewhere else
-;;   (<type>? x)            is this one of ours
-;;   (instances-of '<type>) the ones that are open
-;;
-;; Inside the package the fields are simply names, which is the whole point.
-(define (compile-definstance form)
-  (let* ((type (cadr form))
-         (specs (cddr form))
-         (fields (map field-name specs))
-         (reg (derived-name2 "*" type "-instances*"))
-         (l (register-instance-layout! type fields)))
-    ;; A field may not also be a global here: after packages, a name that
-    ;; silently means two things is exactly what we stopped putting up with.
-    (dolist (f fields)
-      (if (%eq? (%symbol-value f) *unbound*)
-          nil
-          (error "definstance: this name is already a global" f)))
-    ;; The same registration, left in the boot list for the machine.
-    (top-level-form (list 'register-instance-layout-in!
-                          (package-name (current-package))
-                          (list 'quote type)
-                          (layout-version l)
-                          (list 'quote fields)))
-    (compile-top (list 'define reg nil))
-    (compile-top
-     (list 'define (list (derived-name type "?") 'x)
-           (list 'if (list '%record? 'x)
-                 (list '%eq? (list '%slot 'x inst-tag) (list 'quote type))
-                 nil)))
-    ;; The constructor fills the tag and the version first, so that the shape
-    ;; check at every with-instance has something to look at.
-    (let ((body (list (list '%set-slot! 'i inst-tag (list 'quote type))
-                      (list '%set-slot! 'i inst-version (layout-version l))))
-          (k inst-fields))
-      (dolist (spec specs)
-        (set! body (append body (list (list '%set-slot! 'i k (field-init spec)))))
-        (set! k (%+ k 1)))
-      (compile-top
-       (list 'define (list (derived-name2 "make-" type ""))
-             (append (list 'let (list (list 'i (list 'make-record
-                                                     (%+ inst-fields (length fields))
-                                                     (list 'quote type)))))
-                     (append body
-                             (list (list 'set! reg (list '%cons 'i reg)) 'i))))))
-    ;; Closing one takes it off the list, which is the only reason the list
-    ;; exists: an instance is opened and closed, the way a library is.
-    (compile-top
-     (list 'define (list (derived-name2 "close-" type "") 'i)
-           (list 'set! reg (list 'remove-eq 'i reg))))
-    (let ((k inst-fields))
-      (dolist (f fields)
-        (compile-top (list 'define (list (derived-name f "-of") 'i)
-                           (list '%slot 'i k)))
-        (compile-top (list 'define (list (derived-name2 "set-" f "-of!") 'i 'v)
-                           (list '%set-slot! 'i k 'v)))
-        (set! k (%+ k 1))))
-    type))
-
 (define (compile-file-forms forms)
   (dolist (f forms) (compile-top f))
   (length forms))
 
 (setup-intrinsics)
 
+;; From here on a record's accessors are open-coded as they are declared. The
+;; shapes that were declared before this line - the collector's, the chips',
+;; the assembler's, and this file's own - get done in one pass now.
+(set! *record-inline-hook* (lambda (s) (install-record-inlines! s)))
+(dolist (s *record-shapes*) (install-record-inlines! s))

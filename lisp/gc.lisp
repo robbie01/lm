@@ -356,11 +356,11 @@
   (gc-slot lg-refill)
   (gc-slot lg-startup)
   (gc-slot lg-scratch0)
-  ;; The instance this task is running as lives in a register, so there is no
-  ;; slot to rewrite - but it still has to be marked, or the application would
-  ;; be collected out from under itself. Instances are records, and records do
-  ;; not move, so marking is the whole of the job.
-  (if *gc-updating* nil (gc-push (%instance)))
+  ;; The running task lives in a register, so there is no slot to rewrite -
+  ;; but it still has to be marked. It is on the ready list too, and so would
+  ;; be found anyway; saying so here does not depend on that being true.
+  ;; A task is a record and records do not move, so marking is the whole job.
+  (if *gc-updating* nil (gc-push (%this-task)))
   ;; This task's own stack, walked precisely from where it stands.
   (gc-scan-frames (%stack-pointer) (%frame-pointer))
   ;; Every other task, and every Exec structure holding a Lisp value.
@@ -857,6 +857,13 @@
         (%set-global! lg-cons-ptr top)
         (%set-global! lg-cons-run p)
         (%set-global! lg-cons-run-end top)
+        ;; Taken here, with interrupts still off, rather than by the stub after
+        ;; this has returned. Those two globals are one pair for the whole
+        ;; machine: a task preempted between storing them and picking them up
+        ;; comes back to whatever the task that ran in the gap left there, and
+        ;; the two of them then bump the same run - handing the same cell to
+        ;; both, which is the one thing a private chunk exists to prevent.
+        (%reload-cons-run)
         p))))
 
 ;; ---------------------------------------------------------------- allocation

@@ -150,18 +150,16 @@
 
 ;; Straight into the bitmap, and clipped to the rastport's region as well as
 ;; to the bitmap, for the same reason `draw-char` is.
-(define (draw-mono-char x y ch fg bg)
-  (let ((bm (if *rp* (rp-bitmap *rp*) *screen*))
-        (bw (if *rp* (rp-bitmap-w *rp*) *screen-w*))
-        (bh (if *rp* (rp-bitmap-h *rp*) *screen-h*))
-        (px (%+ x (if *rp* (rp-origin-x *rp*) 0)))
-        (py (%+ y (if *rp* (rp-origin-y *rp*) 0))))
-    (if (%>= bg 0) (fill-rect x y mono-advance mono-height bg) nil)
-    (if *rp*
-        (dolist (cr (rp-region *rp*))
-          (mono-rows ch px py fg bm bw bh
-                     (rect-x cr) (rect-y cr) (rect-x2 cr) (rect-y2 cr)))
-        (mono-rows ch px py fg bm bw bh 0 0 bw bh))
+(define (draw-mono-char rp x y ch fg bg)
+  (let ((bm (rp-bitmap rp))
+        (bw (rp-bitmap-w rp))
+        (bh (rp-bitmap-h rp))
+        (px (%+ x (rp-origin-x rp)))
+        (py (%+ y (rp-origin-y rp))))
+    (if (%>= bg 0) (fill-rect rp x y mono-advance mono-height bg) nil)
+    (dolist (cr (rp-region rp))
+      (mono-rows ch px py fg bm bw bh
+                 (rect-x cr) (rect-y cr) (rect-x2 cr) (rect-y2 cr)))
     nil))
 
 (define (mono-rows ch px py fg bm bw bh x0 y0 x1 y1)
@@ -182,10 +180,10 @@
       (set! row (%+ row 1)))
     nil))
 
-(define (draw-mono x y s fg bg)
+(define (draw-mono rp x y s fg bg)
   (let ((i 0) (n (string-length s)))
     (while (%< i n)
-      (draw-mono-char (%+ x (%* i mono-advance)) y (string-ref s i) fg bg)
+      (draw-mono-char rp (%+ x (%* i mono-advance)) y (string-ref s i) fg bg)
       (set! i (%+ i 1)))
     nil))
 

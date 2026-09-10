@@ -1149,6 +1149,30 @@ impl<'a> Lisp<'a> {
                 need!(1);
                 self.h.slot(a[0], SYM_VALUE)
             }
+            // Where a *variable reference* looks, which here is the globals
+            // map: a symbol's own cell holds the closure `compile-top` bound
+            // for the image, and running that is what "cannot run compiled
+            // code at build time" is about. A fluid binding has to land in
+            // the world doing the reading, so it uses these two rather than
+            // the pair above.
+            "%fluid-value" => {
+                need!(1);
+                let n = self.h.sym_name(a[0]);
+                match self.globals.get(&n) {
+                    Some(v) => *v,
+                    None => self.h.slot(a[0], SYM_VALUE),
+                }
+            }
+            "%set-fluid-value!" => {
+                need!(2);
+                let n = self.h.sym_name(a[0]);
+                if self.globals.contains_key(&n) {
+                    self.globals.insert(n, a[1]);
+                } else {
+                    self.h.set_slot(a[0], SYM_VALUE, a[1]);
+                }
+                a[1]
+            }
             "%set-symbol-value!" => {
                 need!(2);
                 self.h.set_slot(a[0], SYM_VALUE, a[1]);
@@ -1392,6 +1416,8 @@ pub static PRIMS: &[(&str, u32)] = &[
     ("%intern", 1),
     ("%symbol-name", 1),
     ("%symbol-value", 1),
+    ("%fluid-value", 1),
+    ("%set-fluid-value!", 2),
     ("%set-symbol-value!", 2),
     ("%symbol-function", 1),
     ("%set-symbol-function!", 2),

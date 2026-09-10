@@ -237,18 +237,15 @@
      (lambda () nil))))
 
 (define (with-input-from-string s thunk)
-  (let ((old (current-stream))
-        (peeked *peeked*)
-        (eof *eof-ok*)
-        (r nil))
-    (use-stream! (string-stream s))
-    (set! *peeked* nil)
-    (set! *eof-ok* t)
-    (set! r (%funcall thunk))
-    (use-stream! old)
-    (set! *peeked* peeked)
-    (set! *eof-ok* eof)
-    r))
+  ;; Three places given other values for as long as the thunk runs, which is
+  ;; what a fluid binding is for. This used to save and restore them by hand.
+  (let ((in (string-stream s)))
+    (fluid-let ((*out* (stream-put in))
+                (*in* (stream-get in))
+                (*wait* (stream-wait in))
+                (*peeked* nil)
+                (*eof-ok* t))
+      (%funcall thunk))))
 
 ;; A file says which package it is in, and everything after that line has to be
 ;; read in it - so the reader has to act on these two as it goes rather than

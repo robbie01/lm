@@ -136,7 +136,7 @@
   (let ((y 1)
         (w *life-w*)
         (h *life-h*)
-        (stride (win-get *life-win* win-w)))
+        (stride (win-w *life-win*)))
     (while (%< y (%- h 1))
       (let ((x 1) (row (win-row *life-win* y)))
         (while (%< x (%- w 1))

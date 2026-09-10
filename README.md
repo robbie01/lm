@@ -59,7 +59,7 @@ tests.
 | `lisp/hw.lisp` | the custom chips |
 | `lisp/platinum.lisp` | the Mac OS 8/9 appearance, ported from ~/platinum |
 | `lisp/font.lisp` `lisp/mono.lisp` | Charcoal for the interface, a 5x7 face for shells |
-| `lisp/eyes.lisp` | xeyes, and the demonstration that instances work |
+| `lisp/eyes.lisp` | xeyes, and the demonstration that an application can have more than one of itself |
 | `lisp/read.lisp` | the reader, and the only one |
 | `lisp/sys.lisp` | the kickstart: traps, REPL, rebuild |
 
@@ -171,7 +171,7 @@ header, so the bound costs a comparison the processor makes in parallel with
 the address. Out of range traps with cause 25 and the index in `mtval`.
 
 The immediate form is there because most indices are written down rather than
-computed: every record field, every closure slot, the instance tag and version.
+computed: every record field, every record's tag, every closure slot.
 Putting the index in the `rs2` field follows `slli`, which has always kept its
 shift amount there, so the encoding stays R-type and nothing that walks
 instructions needs a new case.
@@ -268,15 +268,14 @@ operands nearly always come from an operation that already checked them.
 
 A window was eleven numbered slots, the compiler's context was thirteen with a
 comment block to say which was which, the assembler was seven, and a stream was
-three. They are records now, with named accessors and a tag that says what they
-are — so `(win-get "abc" 1)` stops reading a string's bytes back as a window's
-y coordinate:
+three. They are records now, declared with `defrecord` (below), and an accessor
+checks *which* record it has:
 
 ```
-> (win-get "abc" 1)
+> (win-x "abc")
 *** slot: expected a record, got "abc"
-> (win-get 5 1)
-*** slot: expected a record, got 5
+> (win-x (screen-rastport))
+*** expected a window, got #[hw::rastport ...]
 ```
 
 That needed a second indexed instruction. `%slot` takes any object, which is
@@ -458,89 +457,122 @@ package for something it does not export is an error rather than a quietly
 interned second symbol, and that the same new name read in two packages is two
 symbols.
 
-## Instances
+## Records
 
-A package is the code; an **instance** is its state. `s2` is dedicated for the
-life of the machine to "the instance I am currently running as", and inside a
-package that has declared a shape, a bare name that matches a field is a slot
-of that instance — `lw a0, off(s2)`, **one instruction, where a global costs
-two**.
+A record is an object whose slot 0 is a symbol saying what it is and whose
+remaining slots are named fields. `defrecord` is where the names are written
+down, and the only place they are written down:
 
 ```lisp
-(in-package eyes)
+(defrecord (window win)
+  x y w h title refresh keys task data rp bm)
 
-(definstance eyes
-  (window nil) (rad 20) (pr 7)
-  (look-x -1) (look-y -1))
-
-(define (draw-eye cx cy)          ; rad is a slot, not a global
-  (fill-circle cx cy rad wb-text)
-  (draw-circle cx cy rad wb-back))
+;; win-slots  win-make  window?
+;; win-x      set-win-x!      ... one pair per field
 ```
 
-Nothing in `lisp/eyes.lisp` knows how many pairs of eyes there are, and nothing
-was written differently to allow more than one. `(eyes)` twice is two windows,
-two tasks, two sets of pupils, one copy of the machine code.
+The slot numbers, the allocator, the predicate and the accessors all come out
+of that one line, so adding a field in the middle is a matter of typing it
+there. Before this, every one of them was a hand-kept constant beside a
+hand-written pair of functions, and adding a field in the middle meant
+renumbering by eye.
 
-It is nearly free here for three reasons. The **scheduler already swaps it** —
-the trap stub was saving all thirty-two registers anyway, so an instance per
-task costs nothing per switch, where the per-task streams cost a save and
-restore loop. `gp` and `tp` set the **precedent** for a dedicated register.
-And the compiler already had a resolve pass with local, free and global cases,
-so this is one more case in it.
-
-This is the Amiga's library base in `a6`, except the compiler knows about it,
-so instance variables look like globals instead of like `(app-canvas self)`.
-Traditional Lisp keeps its ergonomics, Smalltalk gets its instancing, and
-`self` never appears in a signature.
-
-`definstance` also gives out what the outside needs, because from another
-package these are not names, they are somebody else's fields:
+An **accessor is a function, and the compiler open-codes calls to it** — the
+same bargain it already makes for `car`. So `(map win-x ws)` means what it
+looks like, and `(win-x w)` in a body is four instructions and no call:
 
 ```
-(make-eyes)            a fresh one
-(eyes? x)              is this one of ours
-(rad-of i)             reaching in
-(set-rad-of! i v)
-(close-eyes i)         off the list; an instance is opened and closed
-*eyes-instances*       the ones that are open
+ldxi t2, a0, 0, t-record     ; the tag
+lw   t3, off(s1)             ; the type this code was compiled against
+beq  t2, t3, ok              ; ...and it had better be that one
+ldxi a0, a0, 1, t-record     ; the field
 ```
 
-`(with-instance expr body...)` runs a body as some instance — that is how a
-prompt gets inside a running application, and how a callback from somebody
-else's code gets its bearings again. The old instance goes on the **stack**,
-not into a register, because everything between `sp` and the frame link is
-already a tagged value the collector walks.
+Three of those four are the check, and the check is the point: a rastport
+handed to `win-x` is a trap naming both ends rather than a plausible-looking
+number out of the middle of somebody else. It comes out even anyway, because
+what it replaces — `(win-get w win-x)` — was a function call.
 
-The shape is checked there rather than at every access: **the boundary is the
-place, and ten instructions once beats one instruction never.** An instance
-carries its type and its layout version, so code compiled against an old shape
-is caught rather than reading the wrong field:
+Two declarations that are not just a list of fields:
 
-```
-> (definstance thing (a 1) (b 2))
-> (define x (make-thing))
-> (with-instance x (list a b))
-(1 2)
-> (definstance thing (a 1) (b 2) (c 3))
-> (with-instance x (list a b))
-not an instance of the shape this code was compiled for, at 105b22c
+```lisp
+(defrecord (node open) succ pred pri name)
+(defrecord (task tc) (include node) state sigalloc sigwait ...)
 ```
 
-A field may not also be a global in the same package — after packages, a name
-that silently means two things is not something to put up with:
+`include` puts another record's fields first, so a task **is** a node and their
+slots line up — which is what Exec's lists are made of, and what lets one list
+hold tasks, ports and interrupt servers at once. `open` says others are built
+on this one, so a node's own accessors check that they have a record and stop
+there; something has to be able to walk that list.
 
+The shape is needed twice, the way a macro is: by the compiler running now and
+by the machine's own compiler once the image boots. So `defrecord` is a macro
+that expands into ordinary definitions — which is what the bootstrap
+interpreter gets — and the compiler catches it before expansion, registers the
+shape, and open-codes the accessors as well.
+
+## Which task is running is a register
+
+`s2` is dedicated for the life of the machine to the running task. Exec has no
+variable for it and the scheduler does not set one: the trap stub was saving
+all thirty-two registers anyway, so a task's context already carries it, and
+`(this-task)` is `mv a0, s2`.
+
+It used to hold an **instance** — a per-package record the compiler resolved
+bare names into, so that `rad` inside `eyes` meant a slot rather than a global.
+That read beautifully and it was a second mechanism for per-task state, with
+its own register, its own trap and its own rule about what a name means inside
+a package, serving one application. `eyes.lisp` passes a record now:
+
+```lisp
+(defrecord eyes window (rad 20) (pr 7) (look-x -1) (look-y -1))
+
+(define (draw-eye e rp cx cy)
+  (fill-circle rp cx cy (eyes-rad e) pt-white)
+  (draw-circle rp cx cy (eyes-rad e) pt-black))
 ```
-> (definstance thing (car 0))
-error: definstance: this name is already a global car
+
+Nothing in `lisp/eyes.lisp` knows how many pairs of eyes there are. `(eyes)`
+twice is still two windows, two tasks, two sets of pupils, one copy of the
+machine code — it just says which pair it means.
+
+## Fluid bindings
+
+Some variables are per task in truth: where output goes, where input comes
+from, the character the reader put back, which package a prompt reads in, the
+block of memory this task programs the blitter through. They stay ordinary
+globals, because everything reads them constantly and the common case has to
+be one load. What makes them local is a **binding**:
+
+```lisp
+(fluid-let ((*out* (window-stream w)))
+  (report))
 ```
 
-The instance a task is running as is a **root**: it lives in a register, so
-there is no slot to rewrite, but it still has to be marked or the application
-would be collected out from under itself.
+A binding is a `(place . value)` pair on a stack the running task owns, and the
+scheduler swaps that stack in and out along with the registers. The swap is
+symmetrical, which is the whole trick: each entry holds the value that was
+current when the binding was made, so exchanging the entry with the place
+leaves the task's value in the entry and the outer value in the place — which
+is exactly what "this task is not running" means. Exchanging again puts it
+back, and nothing has to know which of the two states it is in.
 
-Measured: `(fib 24)` is 5,551,834 cycles with all of this in, which is what it
-was before. It costs the running machine nothing.
+Two consequences worth stating. A task that binds nothing shares the globals,
+which is right: it has not asked for anything of its own. And a task that binds
+and then *assigns* keeps the assignment, because what is exchanged is the
+current value and not the one it started with.
+
+This replaces a fixed seven-slot environment vector that the context switch
+saved and loaded field by field, and whose contents were listed in three
+places. A new task starts out holding whatever its creator held, which is how
+a shell's children talk to the shell's window; `read.lisp` uses the same form
+for the three places it used to save and restore by hand.
+
+An error does not unwind — the stack it happened on is abandoned where it
+stands — so the prompt it lands in unwinds the bindings itself, back to where
+they stood when it started. Its own streams and package survive; whatever the
+form that failed had bound on top of them does not.
 
 ## Symbols have identities
 
@@ -955,9 +987,9 @@ interface, is in [docs/presenting.md](docs/presenting.md).
 A window owns the part of the bitmap it may draw on, and nothing else. Its
 **region** is its own rectangle less the rectangle of every window in front of
 it, recomputed whenever a window opens, closes, moves or comes forward. All
-drawing goes through a **rastport** — an origin and a region — and the current
-one travels with the task the way its streams do, so a task that draws is
-clipped to its own window without being told.
+drawing goes through a **rastport** — a bitmap, an origin and a region — and
+every drawing call takes one, the way `RectFill(rp, ...)` does: a rastport
+belongs to a window, so anybody holding the window is clipped to it.
 
 That is the difference between an ordering and a guarantee. Before it, z-order
 held only until the next repaint: a task at the back would paint over the

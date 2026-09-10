@@ -207,21 +207,21 @@ fn cases() -> Vec<Case> {
             "239600",
         ),
 
-        // ---- instances: one application, several of it ----
-        // Two instances of the same shape, with the initial values the
-        // declaration gave them, and no way for one to see the other's.
+        // ---- records ----
+        // Two of the same shape, with the initial values the declaration gave
+        // them, and no way for one to see the other's.
         Case(
-            "(let ((a (eyes:make-eyes)) (b (eyes:make-eyes)))              (eyes:set-rad-of! a 5) (list (eyes:rad-of a) (eyes:rad-of b)))",
+            "(let ((a (eyes:eyes-make)) (b (eyes:eyes-make)))              (eyes:set-eyes-rad! a 5) (list (eyes:eyes-rad a) (eyes:eyes-rad b)))",
             "(5 20)",
         ),
-        Case("(eyes:eyes? (eyes:make-eyes))", "t"),
+        Case("(eyes:eyes? (eyes:eyes-make))", "t"),
         Case("(eyes:eyes? (vector 1 2))", "nil"),
-        // Entering one from a package that has no shape of its own is
-        // allowed - that is how a prompt gets inside a running application -
-        // but it still has to be an instance.
-        Case("(let ((a (eyes:make-eyes))) (with-instance a 7))", "7"),
-        Case("(with-instance 5 1)", "TRAP: wrong type: 0xb"),
-        Case("(with-instance nil 1)", "TRAP: wrong type: 0x0"),
+        // An accessor checks which record it has, not merely that it has one:
+        // a rastport where a pair of eyes was wanted is a trap and not a
+        // plausible-looking number out of the middle of somebody else.
+        Case("(eyes:eyes-rad (current-stream))", "TRAP: wrong record"),
+        Case("(eyes:eyes-rad 7)", "TRAP: wrong type: 0xf"),
+        Case("(eyes:eyes-rad nil)", "TRAP: wrong type: 0x0"),
 
         // ---- functions know their own names ----
         // The name lives in the code object, which is also what every frame
@@ -390,9 +390,12 @@ pub fn run_one(l: &mut Lisp, src: &str) -> String {
         if cause == C_RANGE {
             return format!("TRAP: out of range: {tval:#x}");
         }
-        let what = match (cause, a7 >> 1) {
+        // a7 carries the ecall code as a plain word, the way the compiler
+        // loads it and the way sys.lisp reads it back.
+        let what = match (cause, a7) {
             (11, 1) => "arity error".to_string(),
             (11, 3) => "out of memory".to_string(),
+            (11, 6) => "wrong record".to_string(),
             (11, n) => format!("ecall {n}"),
             _ => format!("{} (mtval {tval:#x})", run::cause_name(cause)),
         };

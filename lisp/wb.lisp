@@ -31,24 +31,17 @@
 ;; ---------------------------------------------------------------- windows
 ;; Slot 0 is the record's tag, so a window says what it is and asking a
 ;; number for its title is a trap rather than a wrong answer.
-(define win-slots 12)
-(define win-x 1)
-(define win-y 2)
-(define win-w 3)
-(define win-h 4)
-(define win-title 5)
-(define win-refresh 6)    ; (lambda (w)) draws the interior
-(define win-keys 7)       ; characters waiting, oldest first
-(define win-task 8)
-(define win-data 9)       ; whatever the window is for
-(define win-rp 10)        ; where this window draws: its own bitmap
-(define win-bm 11)        ; and the pool memory that bitmap lives in
+(defrecord (window win)
+  x y w h title
+  refresh                 ; (lambda (w)) draws the interior
+  keys                    ; characters waiting, oldest first
+  task
+  data                    ; whatever the window is for
+  rp                      ; where this window draws: its own bitmap
+  bm)                     ; and the pool memory that bitmap lives in
 
 (define *windows* nil)    ; front to back
 (define *wb-running* nil)
-
-(define (win-get w i) (%record-ref w i))
-(define (win-set! w i v) (%record-set! w i v))
 
 (define title-height pt-title-h)
 
@@ -58,21 +51,21 @@
   ;; wrong their arithmetic is, drawing does not have to be clipped to a
   ;; region that somebody has to keep correct, and the order things appear in
   ;; is decided once, by the compositor, instead of every time anybody paints.
-  (let ((v (make-record win-slots 'window)))
-    (win-set! v win-x x)
-    (win-set! v win-y y)
-    (win-set! v win-w w)
-    (win-set! v win-h h)
-    (win-set! v win-title title)
-    (win-set! v win-bm (alloc-pool (%* w h)))
-    (win-set! v win-rp (make-bitmap-rastport (win-get v win-bm) w h))
+  (let ((v (win-make)))
+    (set-win-x! v x)
+    (set-win-y! v y)
+    (set-win-w! v w)
+    (set-win-h! v h)
+    (set-win-title! v title)
+    (set-win-bm! v (alloc-pool (%* w h)))
+    (set-win-rp! v (make-bitmap-rastport (win-bm v) w h))
     v))
 
-(define (window-rastport w) (win-get w win-rp))
-(define (window-bitmap w) (win-get w win-bm))
+(define (window-rastport w) (win-rp w))
+(define (window-bitmap w) (win-bm w))
 
 (define (window-rect w)
-  (rect (win-get w win-x) (win-get w win-y) (win-get w win-w) (win-get w win-h)))
+  (rect (win-x w) (win-y w) (win-w w) (win-h w)))
 
 ;; What the window costs the screen, which is one pixel more than the window:
 ;; Platinum draws a hard black shadow down the right edge and along the
@@ -80,12 +73,12 @@
 ;; so the compositor draws it rather than the window, and damage has to
 ;; cover it or a moved window leaves its shadow behind.
 (define (window-footprint w)
-  (rect (win-get w win-x) (win-get w win-y)
-        (%+ (win-get w win-w) 1) (%+ (win-get w win-h) 1)))
+  (rect (win-x w) (win-y w)
+        (%+ (win-w w) 1) (%+ (win-h w) 1)))
 
 (define (shadow-rects w)
-  (let ((x (win-get w win-x)) (y (win-get w win-y))
-        (ww (win-get w win-w)) (wh (win-get w win-h)))
+  (let ((x (win-x w)) (y (win-y w))
+        (ww (win-w w)) (wh (win-h w)))
     (list (rect (%+ x ww) (%+ y 2) 1 (%- wh 1))
           (rect (%+ x 2) (%+ y wh) (%- ww 1) 1))))
 
@@ -93,8 +86,8 @@
 ;; cares where on the screen it ends up.
 (define (win-inner-x w) pt-band)
 (define (win-inner-y w) title-height)
-(define (win-inner-w w) (%- (win-get w win-w) (%* 2 pt-band)))
-(define (win-inner-h w) (%- (win-get w win-h) (%+ title-height pt-band)))
+(define (win-inner-w w) (%- (win-w w) (%* 2 pt-band)))
+(define (win-inner-h w) (%- (win-h w) (%+ title-height pt-band)))
 
 (define (front-window) (if (%cons? *windows*) (%car *windows*) nil))
 
@@ -162,36 +155,29 @@
 
 (define (window-damage w) (damage (window-footprint w)))
 
-(define (draw-frame x y w h)
+(define (draw-frame rp x y w h)
   ;; Two lines and two colours, which is all a raised edge ever was.
-  (draw-line x y (%+ x (%- w 1)) y wb-light)
-  (draw-line x y x (%+ y (%- h 1)) wb-light)
-  (draw-line (%+ x (%- w 1)) y (%+ x (%- w 1)) (%+ y (%- h 1)) wb-shadow)
-  (draw-line x (%+ y (%- h 1)) (%+ x (%- w 1)) (%+ y (%- h 1)) wb-shadow))
+  (draw-line rp x y (%+ x (%- w 1)) y wb-light)
+  (draw-line rp x y x (%+ y (%- h 1)) wb-light)
+  (draw-line rp (%+ x (%- w 1)) y (%+ x (%- w 1)) (%+ y (%- h 1)) wb-shadow)
+  (draw-line rp x (%+ y (%- h 1)) (%+ x (%- w 1)) (%+ y (%- h 1)) wb-shadow))
 
-;; Draw into a window's bitmap without disturbing the rastport the window's
-;; own task is using: a repaint borrows the pixels, it does not take the
-;; window over.
-(define (draw-in win thunk)
-  (let ((saved *rp*))
-    (use-rastport (window-rastport win))
-    (%funcall thunk)
-    (use-rastport saved)
-    nil))
-
+;; A window draws through its own rastport - the one it was made with, which
+;; is clipped to its own bitmap. Anybody holding the window can ask for it.
 (define (window-draw win)
-  (let ((w (win-get win win-w))
-        (h (win-get win win-h))
-        (front (%eq? win (front-window)))
-        (saved *rp*))
-    (use-rastport (window-rastport win))
-    (window-frame win w h front)
-    (fill-rect (win-inner-x win) (win-inner-y win)
+  (let ((rp (window-rastport win))
+        (w (win-w win))
+        (h (win-h win))
+        (front (%eq? win (front-window))))
+    (window-frame rp win w h front)
+    (fill-rect rp (win-inner-x win) (win-inner-y win)
                (win-inner-w win) (win-inner-h win) wb-back)
-    (if (win-get win win-refresh)
-        (%funcall (win-get win win-refresh) win)
+    ;; The refresh closure is given the window, not the rastport: it may want
+    ;; to know where it is, how big it is, and what it is showing, and the
+    ;; rastport is one call away.
+    (if (win-refresh win)
+        (%funcall (win-refresh win) win)
         nil)
-    (use-rastport saved)
     (window-damage win)
     nil))
 
@@ -200,11 +186,9 @@
 ;; contents took a minute to compute would rather not be asked for them again
 ;; because somebody clicked on something else.
 (define (window-draw-frame win)
-  (let ((saved *rp*))
-    (use-rastport (window-rastport win))
-    (window-frame win (win-get win win-w) (win-get win win-h)
-                  (%eq? win (front-window)))
-    (use-rastport saved))
+  (window-frame (window-rastport win) win
+                (win-w win) (win-h win)
+                (%eq? win (front-window)))
   (window-damage win)
   nil)
 
@@ -215,49 +199,49 @@
 ;; An inactive window keeps the face and loses everything else - no stripes,
 ;; no boxes, grey text, a #55 outline. That is the whole of how Mac OS said
 ;; "this one is not listening".
-(define (window-frame win w h front)
+(define (window-frame rp win w h front)
   (let* ((outline (if front pt-black pt-g10))
          (close-x pt-box-x)
          (zoom-x (%- w (%+ pt-box-x pt-box)))
-         (title (text-truncate (win-get win win-title)
+         (title (text-truncate (win-title win)
                                (%- (%- zoom-x close-x) 40)))
          (tw (text-width title))
          (tx (let ((c (%/ (%- w tw) 2)))
                (if (%< c (%+ close-x 20)) (%+ close-x 20) c))))
     ;; The bands, not the whole rectangle: the interior belongs to whoever
     ;; owns the window, and coming forward must not cost them their picture.
-    (fill-rect 0 0 w pt-title-h pt-g3)
-    (fill-rect 0 pt-title-h pt-band (%- h pt-title-h) pt-g3)
-    (fill-rect (%- w pt-band) pt-title-h pt-band (%- h pt-title-h) pt-g3)
-    (fill-rect 0 (%- h pt-band) w pt-band pt-g3)
-    (pt-frame 0 0 w h outline)
+    (fill-rect rp 0 0 w pt-title-h pt-g3)
+    (fill-rect rp 0 pt-title-h pt-band (%- h pt-title-h) pt-g3)
+    (fill-rect rp (%- w pt-band) pt-title-h pt-band (%- h pt-title-h) pt-g3)
+    (fill-rect rp 0 (%- h pt-band) w pt-band pt-g3)
+    (pt-frame rp 0 0 w h outline)
     (if front
         (begin
           ;; The raised bands: white outside, #99 inside.
-          (pt-hline 1 1 (%- w 2) pt-white)
-          (pt-vline 1 1 (%- h 2) pt-white)
-          (pt-vline (%- w 2) 2 (%- h 3) pt-g6)
-          (pt-hline 2 (%- h 2) (%- w 3) pt-g6)
-          (pt-hline 4 (%- pt-title-h 2) (%- w 8) pt-g6)
-          (pt-vline 4 (%- pt-title-h 2) (%- h (%+ pt-title-h 2)) pt-g6)
-          (pt-stripes (%+ close-x (%+ pt-box 5)) 4
+          (pt-hline rp 1 1 (%- w 2) pt-white)
+          (pt-vline rp 1 1 (%- h 2) pt-white)
+          (pt-vline rp (%- w 2) 2 (%- h 3) pt-g6)
+          (pt-hline rp 2 (%- h 2) (%- w 3) pt-g6)
+          (pt-hline rp 4 (%- pt-title-h 2) (%- w 8) pt-g6)
+          (pt-vline rp 4 (%- pt-title-h 2) (%- h (%+ pt-title-h 2)) pt-g6)
+          (pt-stripes rp (%+ close-x (%+ pt-box 5)) 4
                       (%- (%- zoom-x 4) (%+ close-x (%+ pt-box 5)))
                       (list (list (%- tx 7) (%+ (%+ tx tw) 7))))
-          (pt-title-box close-x pt-box-y 0)
-          (pt-title-box zoom-x pt-box-y 1)
-          (draw-text tx 4 title pt-black -1))
-        (draw-text tx 4 title pt-g7 -1))
+          (pt-title-box rp close-x pt-box-y 0)
+          (pt-title-box rp zoom-x pt-box-y 1)
+          (draw-text rp tx 4 title pt-black -1))
+        (draw-text rp tx 4 title pt-g7 -1))
     ;; The content border, one pixel of outline round the interior.
-    (pt-frame (%- (win-inner-x win) 1) (%- (win-inner-y win) 1)
+    (pt-frame rp (%- (win-inner-x win) 1) (%- (win-inner-y win) 1)
               (%+ (win-inner-w win) 2) (%+ (win-inner-h win) 2) outline)
     nil))
 
-(define (draw-desktop)
-  (fill-rect 0 0 *screen-w* *screen-h* pt-desktop)
+(define (draw-desktop rp)
+  (fill-rect rp 0 0 *screen-w* *screen-h* pt-desktop)
   ;; A menu bar with nothing in the menus yet, which is honest enough.
-  (fill-rect 0 0 *screen-w* pt-menubar-h pt-g2)
-  (pt-hline 0 (%- pt-menubar-h 1) *screen-w* pt-g6)
-  (draw-text pt-menubar-first-x 3 "Workbench" pt-black -1)
+  (fill-rect rp 0 0 *screen-w* pt-menubar-h pt-g2)
+  (pt-hline rp 0 (%- pt-menubar-h 1) *screen-w* pt-g6)
+  (draw-text rp pt-menubar-first-x 3 "Workbench" pt-black -1)
   nil)
 
 ;; ---------------------------------------------------------------- composite
@@ -266,32 +250,27 @@
 ;; wins.
 
 
+;; No critical section. There was one here for a long time, held across the
+;; whole body, and it was covering for a race in the allocator rather than for
+;; anything in this loop: two tasks could come back from a refill holding the
+;; same run of cons space, and the compositor - which allocates a rectangle per
+;; window per frame - was where the wreckage showed up.
 (define (composite r)
   ;; Filling 1024 by 768 costs 786,432 cycles and a frame is 333,333, so the
   ;; desktop is painted only where it will actually show.
-  ;;
-  ;; The critical section is a workaround, not a design, and it is here rather
-  ;; than around the blitter because that is where it was doing its work: the
-  ;; blit paths used to hold it and something in this loop needs it. Taking it
-  ;; off kills the compositor with `car: expected a pair` on a damage
-  ;; rectangle, once three or four windows are open. See docs/open-items.md.
-  (without-interrupts (composite-1 r)))
-
-(define (composite-1 r)
   (if (covered? r)
       nil
-      (let ((saved *rp*))
-        (use-rastport (make-rastport-on *screen* *screen-w* *screen-h*
-                                        0 0 (list r)))
-        (draw-desktop)
-        (use-rastport saved)))
+      ;; The desktop, through a rastport clipped to this rectangle and nothing
+      ;; else - which is what keeps a repaint from painting over the windows.
+      (draw-desktop (make-rastport-on *screen* *screen-w* *screen-h*
+                                      0 0 (list r))))
   (dolist (w (reverse *windows*))
     (let* ((wr (window-rect w))
            (i (rect-intersect wr r)))
       (if i
           (let ((bm (window-bitmap w))
-                (bw (win-get w win-w))
-                (bh (win-get w win-h))
+                (bw (win-w w))
+                (bh (win-h w))
                 (sx (%- (rect-x i) (rect-x wr)))
                 (sy (%- (rect-y i) (rect-y wr)))
                 (dx (rect-x i))
@@ -370,21 +349,21 @@
     win))
 
 (define (win-plot win x y c)
-  (bm-plot (window-bitmap win) (win-get win win-w) (win-get win win-h)
+  (bm-plot (window-bitmap win) (win-w win) (win-h win)
            (%+ x (win-inner-x win)) (%+ y (win-inner-y win)) c))
 
 (define (win-point win x y)
-  (bm-point (window-bitmap win) (win-get win win-w) (win-get win win-h)
+  (bm-point (window-bitmap win) (win-w win) (win-h win)
             (%+ x (win-inner-x win)) (%+ y (win-inner-y win))))
 
 (define (win-fill win x y w h c)
-  (bm-fill-rect (window-bitmap win) (win-get win win-w) (win-get win win-h)
+  (bm-fill-rect (window-bitmap win) (win-w win) (win-h win)
                 (%+ x (win-inner-x win)) (%+ y (win-inner-y win)) w h c))
 
 ;; Where a row of the interior starts, for the things that walk memory.
 (define (win-row win y)
   (%+ (window-bitmap win)
-      (%+ (%* (%+ y (win-inner-y win)) (win-get win win-w)) (win-inner-x win))))
+      (%+ (%* (%+ y (win-inner-y win)) (win-w win)) (win-inner-x win))))
 
 ;; The window list is read by the compositor and written by whoever opens,
 ;; closes or raises a window - all tasks, so Forbid is the lock. Only the
@@ -398,12 +377,12 @@
 
 (define (window-close win)
   (without-preemption (set! *windows* (remove-eq win *windows*)))
-  (let ((task (win-get win win-task)))
-    (if task (begin (rem-task task) (win-set! win win-task nil)) nil))
+  (let ((task (win-task win)))
+    (if task (begin (rem-task task) (set-win-task! win nil)) nil))
   ;; The hole it leaves has to be repainted before its bitmap goes back.
   (damage (window-rect win))
-  (if (win-get win win-bm) (free-pool (win-get win win-bm)) nil)
-  (win-set! win win-bm nil)
+  (if (win-bm win) (free-pool (win-bm win)) nil)
+  (set-win-bm! win nil)
   (wb-update)
   nil)
 
@@ -420,10 +399,10 @@
     (dolist (w *windows*)
       (if found
           nil
-          (if (if (%>= x (win-get w win-x))
-                  (if (%< x (%+ (win-get w win-x) (win-get w win-w)))
-                      (if (%>= y (win-get w win-y))
-                          (%< y (%+ (win-get w win-y) (win-get w win-h)))
+          (if (if (%>= x (win-x w))
+                  (if (%< x (%+ (win-x w) (win-w w)))
+                      (if (%>= y (win-y w))
+                          (%< y (%+ (win-y w) (win-h w)))
                           nil)
                       nil)
                   nil)
@@ -432,74 +411,69 @@
     found))
 
 (define (in-title? win x y)
-  (if (%< y (%+ (win-get win win-y) (%+ title-height 1)))
-      (%>= y (win-get win win-y))
+  (if (%< y (%+ (win-y win) (%+ title-height 1)))
+      (%>= y (win-y win))
       nil))
 
 (define (in-close-box? win x y)
   (if (in-title? win x y)
-      (%>= x (%- (%+ (win-get win win-x) (win-get win win-w)) 10))
+      (%>= x (%- (%+ (win-x win) (win-w win)) 10))
       nil))
 
 ;; ---------------------------------------------------------------- keys
 ;; One queue per window, oldest first. The input server writes to it and the
 ;; shell's stream reads from it, which is the whole of the routing.
 (define (window-push-key win c)
-  (win-set! win win-keys (append (win-get win win-keys) (list c)))
+  (set-win-keys! win (append (win-keys win) (list c)))
   ;; And wake whoever is reading that window. A shell blocked on its keyboard
   ;; should be woken by a keystroke, not by a clock it asks sixty times a
   ;; second whether one has arrived.
   ;; The task may have ended - a shell's prompt is a task and `bye` ends it -
   ;; and a window that outlives its task must not go on signalling it.
-  (let ((task (win-get win win-task)))
+  (let ((task (win-task win)))
     (if (if task (task? task) nil)
         (signal task sigf-input)
-        (win-set! win win-task nil)))
+        (set-win-task! win nil)))
   nil)
 
 (define (window-pop-key win)
-  (let ((q (win-get win win-keys)))
+  (let ((q (win-keys win)))
     (if (%cons? q)
-        (begin (win-set! win win-keys (%cdr q)) (%car q))
+        (begin (set-win-keys! win (%cdr q)) (%car q))
         nil)))
 
 ;; ---------------------------------------------------------------- shells
 ;; A shell keeps characters, not pixels: a grid it can redraw from, which is
 ;; what lets it live on the shared bitmap with no backing store of its own.
-(define shell-slots 6)
-(define sh-cols 1)
-(define sh-rows 2)
-(define sh-grid 3)
-(define sh-col 4)
-(define sh-row 5)
+(defrecord (shell sh) cols rows grid col row)
 
 (define (shell-clear sh)
-  (let ((g (%record-ref sh sh-grid)) (i 0))
+  (let ((g (sh-grid sh)) (i 0))
     (while (%< i (bytes-length g))
       (bytes-set! g i 32)
       (set! i (%+ i 1)))
-    (%record-set! sh sh-col 0)
-    (%record-set! sh sh-row 0)
+    (set-sh-col! sh 0)
+    (set-sh-row! sh 0)
     nil))
 
 (define (make-shell cols rows)
-  (let ((v (make-record shell-slots 'shell)))
-    (%record-set! v sh-cols cols)
-    (%record-set! v sh-rows rows)
-    (%record-set! v sh-grid (make-bytes (%* cols rows)))
+  (let ((v (sh-make)))
+    (set-sh-cols! v cols)
+    (set-sh-rows! v rows)
+    (set-sh-grid! v (make-bytes (%* cols rows)))
     (shell-clear v)
     v))
 
 (define (shell-cell-x win col) (%+ (win-inner-x win) (%* col mono-advance)))
 (define (shell-cell-y win row) (%+ (win-inner-y win) (%* row mono-height)))
 
-(define (shell-scroll win sh)
+(define (shell-scroll rp win sh)
   ;; The grid moves up a line and so does the picture: the blitter copies the
   ;; interior over itself, which it is allowed to do because it knows which
   ;; way to walk when source and destination overlap.
-  (let* ((g (%record-ref sh sh-grid))
-         (cols (%record-ref sh sh-cols))
-         (rows (%record-ref sh sh-rows))
+  (let* ((g (sh-grid sh))
+         (cols (sh-cols sh))
+         (rows (sh-rows sh))
          (n (%* cols (%- rows 1)))
          (i 0))
     (while (%< i n)
@@ -508,70 +482,68 @@
     (while (%< i (%* cols rows))
       (bytes-set! g i 32)
       (set! i (%+ i 1)))
-    (blit-rect (win-inner-x win) (%+ (win-inner-y win) mono-height)
+    (blit-rect rp (win-inner-x win) (%+ (win-inner-y win) mono-height)
                (win-inner-x win) (win-inner-y win)
                (win-inner-w win) (%- (win-inner-h win) mono-height))
-    (fill-rect (win-inner-x win)
+    (fill-rect rp (win-inner-x win)
                (%+ (win-inner-y win) (%* (%- rows 1) mono-height))
                (win-inner-w win) mono-height wb-back)
-    (%record-set! sh sh-row (%- rows 1))
+    (set-sh-row! sh (%- rows 1))
     nil))
 
-(define (shell-newline win sh)
-  (%record-set! sh sh-col 0)
-  (%record-set! sh sh-row (%+ (%record-ref sh sh-row) 1))
-  (if (%>= (%record-ref sh sh-row) (%record-ref sh sh-rows))
-      (shell-scroll win sh)
+(define (shell-newline rp win sh)
+  (set-sh-col! sh 0)
+  (set-sh-row! sh (%+ (sh-row sh) 1))
+  (if (%>= (sh-row sh) (sh-rows sh))
+      (shell-scroll rp win sh)
       nil))
 
 (define (shell-poke sh c)
-  (bytes-set! (%record-ref sh sh-grid)
-              (%+ (%* (%record-ref sh sh-row) (%record-ref sh sh-cols))
-                  (%record-ref sh sh-col))
+  (bytes-set! (sh-grid sh)
+              (%+ (%* (sh-row sh) (sh-cols sh))
+                  (sh-col sh))
               c))
 
 (define (shell-putc win sh c)
-  ;; Aimed at the window rather than wherever the task happened to be
-  ;; pointing, and no closure to do it: this runs once per character.
-  (let ((saved *rp*))
-    (use-rastport (window-rastport win))
-    (shell-putc-1 win sh c)
-    (use-rastport saved))
+  ;; Aimed at the window, because the window is what it was given: a shell
+  ;; stream writes into the window it belongs to whatever task is holding it.
+  (shell-putc-1 (window-rastport win) win sh c)
   (window-damage win)
   nil)
 
-(define (shell-putc-1 win sh c)
+(define (shell-putc-1 rp win sh c)
   (cond
-   ((%= c 10) (shell-newline win sh))
+   ((%= c 10) (shell-newline rp win sh))
    ((%= c 13) nil)
    ((%= c 8)
     ;; Backspace erases, because a prompt you cannot correct is a toy.
-    (if (%> (%record-ref sh sh-col) 0)
+    (if (%> (sh-col sh) 0)
         (begin
-          (%record-set! sh sh-col (%- (%record-ref sh sh-col) 1))
+          (set-sh-col! sh (%- (sh-col sh) 1))
           (shell-poke sh 32)
-          (fill-rect (shell-cell-x win (%record-ref sh sh-col))
-                     (shell-cell-y win (%record-ref sh sh-row))
+          (fill-rect rp (shell-cell-x win (sh-col sh))
+                     (shell-cell-y win (sh-row sh))
                      mono-advance mono-height wb-back))
         nil))
    (else
-    (if (%>= (%record-ref sh sh-col) (%record-ref sh sh-cols))
-        (shell-newline win sh)
+    (if (%>= (sh-col sh) (sh-cols sh))
+        (shell-newline rp win sh)
         nil)
     (shell-poke sh c)
-    (draw-mono-char (shell-cell-x win (%record-ref sh sh-col))
-               (shell-cell-y win (%record-ref sh sh-row))
+    (draw-mono-char rp (shell-cell-x win (sh-col sh))
+               (shell-cell-y win (sh-row sh))
                (%int->char c) wb-text wb-back)
-    (%record-set! sh sh-col (%+ (%record-ref sh sh-col) 1))))
+    (set-sh-col! sh (%+ (sh-col sh) 1))))
   nil)
 
 (define (shell-refresh win)
   ;; Everything the window knows, drawn again. This is what buys the absence
   ;; of a backing store.
-  (let* ((sh (win-get win win-data))
-         (g (%record-ref sh sh-grid))
-         (cols (%record-ref sh sh-cols))
-         (rows (%record-ref sh sh-rows))
+  (let* ((sh (win-data win))
+         (rp (window-rastport win))
+         (g (sh-grid sh))
+         (cols (sh-cols sh))
+         (rows (sh-rows sh))
          (r 0))
     (while (%< r rows)
       (let ((c 0))
@@ -579,7 +551,7 @@
           (let ((ch (bytes-ref g (%+ (%* r cols) c))))
             (if (%= ch 32)
                 nil
-                (draw-mono-char (shell-cell-x win c) (shell-cell-y win r)
+                (draw-mono-char rp (shell-cell-x win c) (shell-cell-y win r)
                            (%int->char ch) wb-text -1)))
           (set! c (%+ c 1))))
       (set! r (%+ r 1)))
@@ -610,10 +582,10 @@
          (cols (%/ (%- w 4) mono-advance))
          (rows (%/ (%- h (%+ title-height 3)) mono-height))
          (sh (make-shell cols rows)))
-    (win-set! win win-data sh)
-    (win-set! win win-refresh (lambda (v) (shell-refresh v)))
+    (set-win-data! win sh)
+    (set-win-refresh! win (lambda (v) (shell-refresh v)))
     (window-open win)
-    (win-set! win win-task (start-repl "shell" (shell-stream win sh)))
+    (set-win-task! win (start-repl "shell" (shell-stream win sh)))
     win))
 
 ;; ---------------------------------------------------------------- input
@@ -635,24 +607,24 @@
               (if (in-title? w x y)
                   (begin
                     (set! *drag-win* w)
-                    (set! *drag-dx* (%- x (win-get w win-x)))
-                    (set! *drag-dy* (%- y (win-get w win-y))))
+                    (set! *drag-dx* (%- x (win-x w)))
+                    (set! *drag-dy* (%- y (win-y w))))
                   nil))))))
 
 (define (wb-drag x y)
   (if *drag-win*
       (let ((nx (clamp (%- x *drag-dx*) 0
-                       (%- *screen-w* (win-get *drag-win* win-w))))
+                       (%- *screen-w* (win-w *drag-win*))))
             (ny (clamp (%- y *drag-dy*) 20
-                       (%- *screen-h* (win-get *drag-win* win-h))))
+                       (%- *screen-h* (win-h *drag-win*))))
             (was (window-rect *drag-win*)))
-        (if (if (%= nx (win-get *drag-win* win-x))
-                (%= ny (win-get *drag-win* win-y))
+        (if (if (%= nx (win-x *drag-win*))
+                (%= ny (win-y *drag-win*))
                 nil)
             nil
             (begin
-              (win-set! *drag-win* win-x nx)
-              (win-set! *drag-win* win-y ny)
+              (set-win-x! *drag-win* nx)
+              (set-win-y! *drag-win* ny)
               ;; The pixels have not changed - only where they go. Damage
               ;; both ends: what the window has uncovered and where it is now.
               (damage was)

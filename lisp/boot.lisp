@@ -88,14 +88,13 @@
     (dolist (r raw-regs)
       (i-sw a r $sp (%+ stub-raw-off (%* 4 i)))
       (set! i (%+ i 1)))
-    ;; refill-cons takes a run off the free list, collecting first if it has to.
+    ;; refill-cons takes a run off the free list, collecting first if it has
+    ;; to, and installs it in gp and tp itself before it lets interrupts back
+    ;; in. Picking it up here instead would be picking it up after the gap.
     (i-lw a $t0 $zero lg-refill)
     (i-li a $t1 0)
     (i-lw a $t2 $t0 0)
     (i-call-reg a $t2)
-    ;; Pick up whatever run it decided on.
-    (i-lw a $gp $zero lg-cons-run)
-    (i-lw a $tp $zero lg-cons-run-end)
     (set! i 0)
     (dolist (r arg-regs)
       (i-lw a r $sp (%+ stub-args-off (%* 4 i)))

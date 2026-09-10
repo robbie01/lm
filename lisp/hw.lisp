@@ -120,6 +120,7 @@
         ;; bit would quietly turn the frame clock off again.
         (poke gfx-ctrl (%logior gfx-on gfx-vbirq))
         (default-palette)
+        (set! *screen-rp* (make-bitmap-rastport *screen* *screen-w* *screen-h*))
         *screen*)))
 
 (define (set-colour i rgb)
@@ -196,8 +197,8 @@
 ;; that blits inside a task's setup would overwrite the half the task had
 ;; written, and the task would then commit a coherent command made of both.
 ;; So every task has a block of its own, swapped in by the scheduler the way
-;; `*out*` and `*rp*` are, and interrupt servers have one more. Two contexts
-;; are never half way through the same block.
+;; `*out*` and the current package are, and interrupt servers have one more.
+;; Two contexts are never half way through the same block.
 (define bl-src 0)
 (define bl-dst 4)
 (define bl-w 8)
@@ -278,7 +279,8 @@
 (define (screen-fill-rect x y w h c)
   (bm-fill-rect *screen* *screen-w* *screen-h* x y w h c))
 
-(define (clear-screen c) (fill-rect 0 0 *screen-w* *screen-h* c))
+(define (clear-screen c)
+  (fill-rect (screen-rastport) 0 0 *screen-w* *screen-h* c))
 
 (define (bm-blit-rect sbm sbw sbh dbm dbw dbh sx sy dx dy w h)
   ;; Clipped against both ends: the source rectangle and the destination have
@@ -387,35 +389,34 @@
 
 ;; ---------------------------------------------------------------- rastports
 ;; Where drawing goes: a bitmap, an origin to shift by, and the region of that
-;; bitmap it is allowed to touch. Everything below draws through the current
-;; one, and the current one travels with the task the way its streams do - so
-;; a task that draws is aimed at its own window without being told.
+;; bitmap it is allowed to touch. Every drawing call takes one, the way the
+;; graphics library this is copied from does - `RectFill(rp, ...)`, rather
+;; than a mode set earlier and somewhere else.
 ;;
-;; Nothing set means the bare screen, which is what the boot messages want and
-;; what the machine did before any of this existed.
+;; It used to be a current one, in `*rp*`, saved and restored by the scheduler
+;; along with a task's streams - because an implicit target has to be per task
+;; or two tasks drawing at once draw into each other's windows. That worked,
+;; and it made the target of a drawing call a fact about the calling task's
+;; history rather than about the call. A rastport belongs to a window, a
+;; window belongs to whoever opened it, and anybody holding the window can
+;; draw into it without borrowing anything or putting anything back.
 ;;
 ;; The bitmap is the part that makes a window a window rather than a promise
 ;; about clipping. Two tasks drawing into two bitmaps cannot reach each other
 ;; however wrong their arithmetic is; two tasks drawing into one screen behind
 ;; two clipping regions can, and did.
-(define rp-slots 7)
-(define rp-bm 1)
-(define rp-bw 2)
-(define rp-bh 3)
-(define rp-org-x 4)
-(define rp-org-y 5)
-(define rp-clip 6)
+(defrecord (rastport rp) bitmap bitmap-w bitmap-h origin-x origin-y region)
 
-(define *rp* nil)
+(define *screen-rp* nil)
 
 (define (make-rastport-on bm bw bh ox oy clip)
-  (let ((r (make-record rp-slots 'rastport)))
-    (%record-set! r rp-bm bm)
-    (%record-set! r rp-bw bw)
-    (%record-set! r rp-bh bh)
-    (%record-set! r rp-org-x ox)
-    (%record-set! r rp-org-y oy)
-    (%record-set! r rp-clip clip)
+  (let ((r (rp-make)))
+    (set-rp-bitmap! r bm)
+    (set-rp-bitmap-w! r bw)
+    (set-rp-bitmap-h! r bh)
+    (set-rp-origin-x! r ox)
+    (set-rp-origin-y! r oy)
+    (set-rp-region! r clip)
     r))
 
 ;; The screen is the default target, so the old three-argument form still
@@ -428,86 +429,83 @@
 (define (make-bitmap-rastport bm w h)
   (make-rastport-on bm w h 0 0 (list (rect 0 0 w h))))
 
-(define (rastport? x)
-  (if (%record? x) (%eq? (%record-ref x 0) 'rastport) nil))
+;; The screen as a rastport, which is what the boot messages and the desktop
+;; draw into. Having one means no primitive below needs a second path for the
+;; case where there is no rastport at all. It carries the screen's size, so
+;; `attach-screen` builds a fresh one rather than keep this across a resize.
+(define (screen-rastport)
+  (if *screen-rp*
+      *screen-rp*
+      (begin (set! *screen-rp* (make-bitmap-rastport *screen* *screen-w* *screen-h*))
+             *screen-rp*)))
 
-(define (rp-bitmap r) (%record-ref r rp-bm))
-(define (rp-bitmap-w r) (%record-ref r rp-bw))
-(define (rp-bitmap-h r) (%record-ref r rp-bh))
-(define (set-rp-bitmap! r bm w h)
-  (%record-set! r rp-bm bm) (%record-set! r rp-bw w) (%record-set! r rp-bh h))
-(define (rp-origin-x r) (%record-ref r rp-org-x))
-(define (rp-origin-y r) (%record-ref r rp-org-y))
-(define (rp-region r) (%record-ref r rp-clip))
-(define (set-rp-origin! r x y) (%record-set! r rp-org-x x) (%record-set! r rp-org-y y))
-(define (set-rp-region! r rgn) (%record-set! r rp-clip rgn))
+;; Point one at a different bitmap: three fields that only ever change
+;; together, which is the one thing the generated setters cannot say.
+(define (rp-retarget! r bm w h)
+  (set-rp-bitmap! r bm)
+  (set-rp-bitmap-w! r w)
+  (set-rp-bitmap-h! r h))
 
-(define (use-rastport rp) (set! *rp* rp) rp)
+(define (set-rp-origin! r x y)
+  (set-rp-origin-x! r x)
+  (set-rp-origin-y! r y))
 
 (define (clamp v lo hi) (if (%< v lo) lo (if (%> v hi) hi v)))
 
 ;; ---------------------------------------------- drawing, through a rastport
-;; The three primitives everything else is built out of. With no rastport they
-;; are what they always were; with one they shift by its origin and are cut to
-;; its region, and every circle, glyph and line above them inherits that for
-;; nothing.
-(define (fill-rect x y w h c)
-  (if *rp*
-      (let ((r (rect (%+ x (rp-origin-x *rp*)) (%+ y (rp-origin-y *rp*)) w h))
-            (bm (rp-bitmap *rp*)) (bw (rp-bitmap-w *rp*)) (bh (rp-bitmap-h *rp*)))
-        (dolist (cr (rp-region *rp*))
-          (let ((i (rect-intersect r cr)))
-            (if i (bm-fill-rect bm bw bh (rect-x i) (rect-y i) (rect-w i) (rect-h i) c)
-                nil))))
-      (screen-fill-rect x y w h c))
+;; The three primitives everything else is built out of. Each shifts by the
+;; rastport's origin and is cut to its region, and every circle, glyph and
+;; line above them inherits that for nothing.
+(define (fill-rect rp x y w h c)
+  (let ((r (rect (%+ x (rp-origin-x rp)) (%+ y (rp-origin-y rp)) w h))
+        (bm (rp-bitmap rp)) (bw (rp-bitmap-w rp)) (bh (rp-bitmap-h rp)))
+    (dolist (cr (rp-region rp))
+      (let ((i (rect-intersect r cr)))
+        (if i (bm-fill-rect bm bw bh (rect-x i) (rect-y i) (rect-w i) (rect-h i) c)
+            nil))))
   nil)
 
-(define (plot x y c)
-  (if *rp*
-      (let ((px (%+ x (rp-origin-x *rp*)))
-            (py (%+ y (rp-origin-y *rp*)))
-            (go t))
-        (dolist (cr (rp-region *rp*))
-          (if (if go (rect-contains? cr px py) nil)
-              (begin (bm-plot (rp-bitmap *rp*) (rp-bitmap-w *rp*) (rp-bitmap-h *rp*)
-                              px py c)
-                     (set! go nil))
-              nil)))
-      (screen-plot x y c))
+(define (plot rp x y c)
+  (let ((px (%+ x (rp-origin-x rp)))
+        (py (%+ y (rp-origin-y rp)))
+        (go t))
+    (dolist (cr (rp-region rp))
+      (if (if go (rect-contains? cr px py) nil)
+          (begin (bm-plot (rp-bitmap rp) (rp-bitmap-w rp) (rp-bitmap-h rp) px py c)
+                 (set! go nil))
+          nil)))
   nil)
 
-;; A copy inside one window: both ends shift, and the destination is cut to
+;; A copy inside one bitmap: both ends shift, and the destination is cut to
 ;; the region. The source is not - it is the same bitmap, and whatever is on
 ;; top of it there is what a scroll should carry along.
-(define (blit-rect sx sy dx dy w h)
-  (if *rp*
-      (let* ((ox (rp-origin-x *rp*))
-             (oy (rp-origin-y *rp*))
-             (d (rect (%+ dx ox) (%+ dy oy) w h)))
-        (dolist (cr (rp-region *rp*))
-          (let ((i (rect-intersect d cr)))
-            (if i
-                (let ((bm (rp-bitmap *rp*))
-                      (bw (rp-bitmap-w *rp*))
-                      (bh (rp-bitmap-h *rp*)))
-                  (bm-blit-rect bm bw bh bm bw bh
-                                (%+ (%+ sx ox) (%- (rect-x i) (rect-x d)))
-                                (%+ (%+ sy oy) (%- (rect-y i) (rect-y d)))
-                                (rect-x i) (rect-y i)
-                                (rect-w i) (rect-h i)))
-                nil))))
-      (screen-blit-rect sx sy dx dy w h))
+(define (blit-rect rp sx sy dx dy w h)
+  (let* ((ox (rp-origin-x rp))
+         (oy (rp-origin-y rp))
+         (d (rect (%+ dx ox) (%+ dy oy) w h)))
+    (dolist (cr (rp-region rp))
+      (let ((i (rect-intersect d cr)))
+        (if i
+            (let ((bm (rp-bitmap rp))
+                  (bw (rp-bitmap-w rp))
+                  (bh (rp-bitmap-h rp)))
+              (bm-blit-rect bm bw bh bm bw bh
+                            (%+ (%+ sx ox) (%- (rect-x i) (rect-x d)))
+                            (%+ (%+ sy oy) (%- (rect-y i) (rect-y d)))
+                            (rect-x i) (rect-y i)
+                            (rect-w i) (rect-h i)))
+            nil))))
   nil)
 
-(define (draw-line x0 y0 x1 y1 c)
+(define (draw-line rp x0 y0 x1 y1 c)
   ;; Endpoints are clamped rather than properly clipped, so a line that leaves
-  ;; the screen changes slope at the edge instead of being cut off. That keeps
-  ;; it inside the bitmap, which is the part that matters.
-  (let ((bm (if *rp* (rp-bitmap *rp*) *screen*))
-        (bw (if *rp* (rp-bitmap-w *rp*) *screen-w*))
-        (bh (if *rp* (rp-bitmap-h *rp*) *screen-h*))
-        (ox (if *rp* (rp-origin-x *rp*) 0))
-        (oy (if *rp* (rp-origin-y *rp*) 0)))
+  ;; the bitmap changes slope at the edge instead of being cut off. That keeps
+  ;; it inside, which is the part that matters.
+  (let ((bm (rp-bitmap rp))
+        (bw (rp-bitmap-w rp))
+        (bh (rp-bitmap-h rp))
+        (ox (rp-origin-x rp))
+        (oy (rp-origin-y rp)))
   (set! x0 (clamp (%+ x0 ox) 0 (%- bw 1)))
   (set! x1 (clamp (%+ x1 ox) 0 (%- bw 1)))
   (set! y0 (clamp (%+ y0 oy) 0 (%- bh 1)))
@@ -537,37 +535,37 @@
 ;; A filled circle, one scanline at a time. fill-rect goes through the
 ;; blitter, so a circle costs two device pokes a row rather than a poke a
 ;; pixel, and the clipping is the blitter's problem.
-(define (fill-circle cx cy r c)
+(define (fill-circle rp cx cy r c)
   (let ((dy (%- 0 r)))
     (while (%<= dy r)
       (let ((w (isqrt (%- (%* r r) (%* dy dy)))))
-        (fill-rect (%- cx w) (%+ cy dy) (%+ (%* 2 w) 1) 1 c))
+        (fill-rect rp (%- cx w) (%+ cy dy) (%+ (%* 2 w) 1) 1 c))
       (set! dy (%+ dy 1)))
     nil))
 
-(define (draw-circle cx cy r c)
+(define (draw-circle rp cx cy r c)
   ;; The outline, by the same measure: the leftmost and rightmost pixel of
   ;; each row, plus the top and bottom caps where the rows run out.
   (let ((dy (%- 0 r)) (prev -1))
     (while (%<= dy r)
       (let ((w (isqrt (%- (%* r r) (%* dy dy)))))
         (if (%< prev 0)
-            (fill-rect (%- cx w) (%+ cy dy) (%+ (%* 2 w) 1) 1 c)
+            (fill-rect rp (%- cx w) (%+ cy dy) (%+ (%* 2 w) 1) 1 c)
             (if (%> w prev)
                 (begin
-                  (fill-rect (%- cx w) (%+ cy dy) (%- w (%- prev 1)) 1 c)
-                  (fill-rect (%+ (%+ cx prev) 1) (%+ cy dy) (%- w prev) 1 c))
-                (begin (plot (%- cx w) (%+ cy dy) c)
-                       (plot (%+ cx w) (%+ cy dy) c))))
+                  (fill-rect rp (%- cx w) (%+ cy dy) (%- w (%- prev 1)) 1 c)
+                  (fill-rect rp (%+ (%+ cx prev) 1) (%+ cy dy) (%- w prev) 1 c))
+                (begin (plot rp (%- cx w) (%+ cy dy) c)
+                       (plot rp (%+ cx w) (%+ cy dy) c))))
         (set! prev w))
       (set! dy (%+ dy 1)))
     nil))
 
-(define (draw-box x y w h c)
-  (draw-line x y (%+ x w) y c)
-  (draw-line x (%+ y h) (%+ x w) (%+ y h) c)
-  (draw-line x y x (%+ y h) c)
-  (draw-line (%+ x w) y (%+ x w) (%+ y h) c))
+(define (draw-box rp x y w h c)
+  (draw-line rp x y (%+ x w) y c)
+  (draw-line rp x (%+ y h) (%+ x w) (%+ y h) c)
+  (draw-line rp x y x (%+ y h) c)
+  (draw-line rp (%+ x w) y (%+ x w) (%+ y h) c))
 
 ;; ---------------------------------------------------------------- input
 (define inp-event (dev-addr dev-input #x00))

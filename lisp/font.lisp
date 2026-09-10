@@ -212,31 +212,29 @@
       (set! row (%+ row 1)))
     nil))
 
-(define (draw-char x y ch fg bg)
+(define (draw-char rp x y ch fg bg)
   (let ((i (font-index ch)))
     (if (%< i 0)
         0
-        (let ((bm (if *rp* (rp-bitmap *rp*) *screen*))
-              (bw (if *rp* (rp-bitmap-w *rp*) *screen-w*))
-              (bh (if *rp* (rp-bitmap-h *rp*) *screen-h*))
-              (px (%+ x (if *rp* (rp-origin-x *rp*) 0)))
-              (py (%+ y (if *rp* (rp-origin-y *rp*) 0))))
+        (let ((bm (rp-bitmap rp))
+              (bw (rp-bitmap-w rp))
+              (bh (rp-bitmap-h rp))
+              (px (%+ x (rp-origin-x rp)))
+              (py (%+ y (rp-origin-y rp))))
           (if (%>= bg 0)
-              (fill-rect x y (font-adv-of i) font-height bg)
+              (fill-rect rp x y (font-adv-of i) font-height bg)
               nil)
           (let ((ink (font-ink-of i))
                 (ox (%+ px (font-left-of i))))
-            (if *rp*
-                (dolist (cr (rp-region *rp*))
-                  (glyph-rows i ox py ink fg bm bw bh
-                              (rect-x cr) (rect-y cr) (rect-x2 cr) (rect-y2 cr)))
-                (glyph-rows i ox py ink fg bm bw bh 0 0 bw bh)))
+            (dolist (cr (rp-region rp))
+              (glyph-rows i ox py ink fg bm bw bh
+                          (rect-x cr) (rect-y cr) (rect-x2 cr) (rect-y2 cr))))
           (font-adv-of i)))))
 
-(define (draw-text x y s fg bg)
+(define (draw-text rp x y s fg bg)
   (let ((i 0) (n (string-length s)) (px x))
     (while (%< i n)
-      (set! px (%+ px (draw-char px y (string-ref s i) fg bg)))
+      (set! px (%+ px (draw-char rp px y (string-ref s i) fg bg)))
       (set! i (%+ i 1)))
     px))
 

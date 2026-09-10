@@ -131,8 +131,8 @@ or the register allocator would remove those loads instead.
 an address to `blt-list`, twelve words read by the chip, no lock. Programming
 it is atomic because the store is, and the *fill* is safe because the block
 belongs to whoever is filling it: every task has one, handed round by the
-scheduler with `*out*` and `*rp*`, and interrupt servers have one more. Two
-contexts are never half way through the same block.
+scheduler with `*out*` and the current package, and interrupt servers have one
+more. Two contexts are never half way through the same block.
 
 A shadow bank alone was not enough and it is worth writing down why, because it
 looks like it should be. It makes the chip never *run* a half-programmed
@@ -147,35 +147,43 @@ instruction, so the only fix is a state machine the outer loop advances — whic
 means every caller waits for completion, and a spinning waiter and the blit
 would charge the same cycles. A change to what a blit *means*, not a tuning.
 
-## The compositor loses a damage rectangle
+## Window chrome bleeds onto the desktop
 
-`composite` holds `without-interrupts` across its whole body, and it is a
-workaround rather than a design. Taking it off kills the compositor within
-seconds of three or four windows being open:
+A few rows of a window's frame appear on the bare desktop, well to the right of
+any window, at the height of one window's title bar. Twelve rows, a couple of
+hundred pixels, in the same place every run. It predates the records and fluids
+work - a build from before them has it too - and it survives with only the
+workbench and two shells open, so it is the chrome and not a demo.
 
-    *** car: expected a pair, got 90
-    backtrace:
-      rect-x
-      wb-composite
-      wb-compositor-task
+It should not be possible: a window draws through a rastport clipped to its own
+bitmap, and `bm-fill-rect` clips again to the bitmap's edges. So either
+something draws window chrome through a rastport that is not the window's, or
+the compositor blits a source rectangle it should have refused. Worth an hour
+with a small repro - one window, one repaint - rather than a guess.
 
-— a fixnum where a rectangle should be. What is known:
+## Records cost about eight percent of code space
 
-- It is **not** the blitter. The blitter's own race is gone (per-context
-  command blocks) and this survives it unchanged. The blit paths used to hold
-  the critical section, which is the only reason it looked like the blitter.
-- It is **not** `*damage*` being torn: `damage` and the steal in `wb-composite`
-  are both under `without-preemption`, and only tasks add damage.
-- It is **not** the `damage-max` collapse path: raising the limit so it never
-  runs does not help.
-- It is **not** `*windows*`: `remove-eq` builds a fresh list, so a walker sees
-  the old one or the new one, both well formed. (It is locked now anyway.)
-- It **is** inside `composite`, because putting the section there and nowhere
-  else makes it go away.
+`defrecord` emits a getter and a setter function per field, so that an accessor
+is a value as well as something the compiler open-codes. That is roughly two
+hundred small functions almost nobody calls: code went from 314 to 339 KiB when
+the records landed. Emitting them only for records that are asked for by name
+would get most of it back, and would cost a declaration nobody wants to write.
+Worth revisiting when code space starts to matter, which is the same day
+compacting it does.
 
-Next thing to try: `composite` reads `*rp*` and swaps it with `use-rastport`
-around `draw-desktop`, and `*rp*` is per-task. Reversed by the context switch,
-in principle. That is the remaining shared thing in the loop.
+## Closing a window frees a bitmap the compositor may still be reading
+
+`window-close` takes the window off `*windows*` under Forbid, then frees its
+bitmap. The compositor reads `*windows*` outside any section, so it can be
+holding the old list - the one that still has this window on it - and blit from
+pool memory that has just gone back. Nothing has hit it, because nothing in the
+demos closes a window while the compositor is running.
+
+The Amiga answer is a deferred free: put the block on a list and let the
+compositor release it after a pass in which the window was already gone. A
+Forbid around the compositor's walk would also do it, but the walk is the
+expensive part of the frame and that is exactly the lock that was just taken
+off.
 
 ## Images the machine writes itself
 
@@ -199,25 +207,37 @@ Three mechanisms, and the rule for choosing between them:
 - **`without-interrupts`** — for anything an interrupt server touches. It saves
   and restores the hardware state, works before Exec exists, and stops the
   clock, the keyboard and the frame for its duration. The scheduler's lists,
-  the signal bits and the pool free list need this.
-- **`without-tasks`** (Forbid) — for anything only tasks touch. Interrupts keep
-  running; only the scheduler is held off. Costs one increment, needs nothing
-  declared, and cannot deadlock. `*windows*` and `*damage*` in the workbench
-  are the obvious customers and still use `without-interrupts` today.
+  the signal bits, the pool free list and object allocation need this.
+- **`without-preemption`** (Forbid) — for anything only tasks touch. Interrupts
+  keep running; only the scheduler is held off. It costs one increment, needs
+  nothing declared, and cannot deadlock. `*windows*` and `*damage*` in the
+  workbench are what it is for, and what it holds.
 - **A semaphore** — not built. For sections that are long, or that block, or
   that only a few tasks contend for. Forbid stops *every* task in the system,
   which is fine for a few instructions and wrong for anything that waits.
 
-`disable`/`enable` and `forbid`/`permit` stay as raw pairs, for the sections
-that are not lexical. `wait` is the one that cannot be a macro: it releases
-around a `reschedule` inside a loop and takes the section again on the way
-back, which no lexical form expresses.
+Both are lexical. `Disable`/`Enable` and `Forbid`/`Permit` are no longer public
+at all; the one section in the machine that cannot be lexical is in `wait`,
+which releases the interrupt state around a `reschedule` inside a loop and
+takes it again on the way back, and that one works the state by hand.
 
-**Semaphores are the missing piece.** An Exec semaphore is a node with a
-nesting count, an owner, and a queue of waiters, with Obtain/Release/Attempt
-built on Wait and Signal. Perhaps sixty lines. Left open deliberately: the
-only thing that wants one today is the blitter, and a parameter-block
-interface would remove that need entirely.
+**Fixed: two tasks could be handed the same run of cons space.** Worth keeping
+on the record, because it wore a disguise for a long time. Cons allocation is
+four inline instructions bumping a pointer in `gp` against a limit in `tp`, and
+what makes that safe without a lock is that the run those two registers describe
+belongs to one task. When a run was used up the stub called `refill-cons`, which
+carved a new one under `without-interrupts` and left it in two globals - and
+then the stub picked it up from those globals *after* interrupts were back on.
+A task preempted in that window came back to whatever the task that ran in the
+gap had left there, and the two of them bumped the same run: the same cell handed
+out twice, one owner's list node overwritten by the other's data. It surfaced as
+`car: expected a pair, got 271` in the compositor, which allocates a rectangle
+per window per frame and so lost the coin toss most often. `refill-cons` now
+takes the run into `gp` and `tp` itself, before it lets interrupts back in, and
+the stub does not touch the globals at all.
+
+That is what the critical section around `composite` was covering for. It is
+gone.
 
 ## A clean self-hosted rebuild
 

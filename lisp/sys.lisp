@@ -34,7 +34,7 @@
 (define trap-oom 3)
 (define trap-error 4)
 (define trap-reschedule 5)
-(define trap-instance 6)
+(define trap-record 6)
 
 (define cause-wrong-type 24)
 (define cause-range 25)
@@ -112,6 +112,18 @@
   (if (%object? v)
       (if (%>= (%addr-of v) obj-base) (%< (%addr-of v) obj-limit) nil)
       nil))
+
+;; "a window", "an interrupt": the report reads as a sentence either way.
+(define (emit-a-or-an sym)
+  (if (%symbol? sym)
+      (begin
+        (emit-str (if (if (%> (%string-length (%symbol-name sym)) 0)
+                          (string-index "aeiou" (%string-ref (%symbol-name sym) 0))
+                          nil)
+                      "an "
+                      "a "))
+        (emit-str (%symbol-name sym)))
+      (emit-object sym)))
 
 (define (emit-object v)
   (if (safe-object? v) (write v) (emit-value (%addr-of v))))
@@ -275,8 +287,15 @@
             (emit-str "\n"))
            ((%= code trap-type)
             (emit-str "\ntype error at ") (emit-str (number->hex epc)) (emit-str "\n"))
-           ((%= code trap-instance)
-            (emit-str "\nnot an instance of the shape this code was compiled for, at ")
+           ((%= code trap-record)
+            ;; A record accessor was handed the wrong kind of record. It left
+            ;; the tag it wanted in t3 and never touched what it was given, so
+            ;; both ends can be named.
+            (emit-str "\nexpected ")
+            (emit-a-or-an (%raw-ld (%+ ctx (ctx-word 28))))
+            (emit-str ", got ")
+            (emit-object (%raw-ld (%+ ctx (ctx-word 10))))
+            (emit-str ", at ")
             (emit-str (number->hex epc))
             (emit-str "\n"))
            ((%= code trap-oom)
@@ -500,7 +519,11 @@
 (define *repl-depth* 0)
 
 (define (repl)
-  (set! *repl-restart* (lambda () (repl-loop)))
+  ;; Where the bindings stand here is what an error unwinds to: the prompt's
+  ;; own streams and package survive it, and whatever the form that failed had
+  ;; bound on top of them does not.
+  (let ((mark (task-binds)))
+    (set! *repl-restart* (lambda () (unwind-binds-to! mark) (repl-loop))))
   (repl-loop))
 
 ;; Swallow the newline the reader stopped just short of, so that what the form

@@ -29,19 +29,15 @@
 ;; a task pointer somebody kept could come back pointing at a different, live
 ;; task. Nothing frees a record; a kept reference holds a dead task, which
 ;; says it is removed and ignores its signals.
-(define ln-tag 0)
-(define ln-succ 1)
-(define ln-pred 2)
-(define ln-pri 3)
-(define ln-name 4)
-(define node-slots 5)
+;; `open`, because everything below is built on this one and a list has to be
+;; walkable without knowing which: a node's accessors check that they have a
+;; record and stop there.
+(defrecord (node open) succ pred pri name)
 
+;; A node's tag is given rather than fixed - it says what kind of thing is on
+;; the list, and a list holds tasks, ports, interrupts and its own sentinels.
 (define (make-node tag) (make-record node-slots tag))
-(define (node-succ n) (%record-ref n ln-succ))
-(define (node-pred n) (%record-ref n ln-pred))
-(define (node-pri n) (%record-ref n ln-pri))
-(define (node-name n) (%record-ref n ln-name))
-(define (node-tag n) (if (%record? n) (%record-ref n ln-tag) nil))
+(define (node-tag n) (record-tag n))
 
 ;; ---------------------------------------------------------------- List
 ;; A list is a header owning two sentinel nodes: one before the first real
@@ -57,25 +53,20 @@
 ;; its low three bits equal to four, so four bytes along reads as a cons. So
 ;; the sentinels are real nodes here. The packing is gone; the property that
 ;; made it worth having is not.
-(define lh-tag 0)
-(define lh-head 1)           ; the sentinel before the first node
-(define lh-tail 2)           ; the sentinel after the last
-(define list-slots 3)
+;; head: the sentinel before the first node. tail: the one after the last.
+(defrecord (exec-list list) head tail)
 
 (define (new-list)
-  (let ((l (make-record list-slots 'list))
+  (let ((l (list-make))
         (h (make-node 'list-head))
         (tl (make-node 'list-tail)))
-    (%record-set! l lh-head h)
-    (%record-set! l lh-tail tl)
+    (set-list-head! l h)
+    (set-list-tail! l tl)
     ;; The tail sentinel's successor is nil, and that nil is what ends a walk:
     ;; the same terminator the zero in Exec's `lh-tail` always was.
-    (%record-set! h ln-succ tl)
-    (%record-set! tl ln-pred h)
+    (set-node-succ! h tl)
+    (set-node-pred! tl h)
     l))
-
-(define (list-head l) (%record-ref l lh-head))
-(define (list-tail l) (%record-ref l lh-tail))
 
 (define (list-empty? l) (%eq? (node-succ (list-head l)) (list-tail l)))
 (define (list-first l) (if (list-empty? l) nil (node-succ (list-head l))))
@@ -91,10 +82,10 @@
 ;; may be the head sentinel; neither is a special case.
 (define (insert-before p n)
   (let ((prev (node-pred p)))
-    (%record-set! n ln-succ p)
-    (%record-set! n ln-pred prev)
-    (%record-set! prev ln-succ n)
-    (%record-set! p ln-pred n)
+    (set-node-succ! n p)
+    (set-node-pred! n prev)
+    (set-node-succ! prev n)
+    (set-node-pred! p n)
     n))
 
 (define (add-head l n) (insert-before (node-succ (list-head l)) n))
@@ -103,8 +94,8 @@
 (define (remove-node n)
   (let ((s (node-succ n))
         (p (node-pred n)))
-    (%record-set! p ln-succ s)
-    (%record-set! s ln-pred p)
+    (set-node-succ! p s)
+    (set-node-pred! s p)
     n))
 
 ;; Removal for good rather than to move it somewhere else. The links go too:
@@ -112,8 +103,8 @@
 ;; otherwise keep every node that was after it alive.
 (define (forget-node n)
   (remove-node n)
-  (%record-set! n ln-succ nil)
-  (%record-set! n ln-pred nil)
+  (set-node-succ! n nil)
+  (set-node-pred! n nil)
   n)
 
 (define (rem-head l)
@@ -157,20 +148,14 @@
 ;; and the 128-byte register context stay raw pool memory: the trap stub
 ;; writes the context as thirty-two untagged words at whatever address
 ;; mscratch holds, and a record's slots are tagged values.
-(define tc-state 5)
-(define tc-sigalloc 6)
-(define tc-sigwait 7)
-(define tc-sigrecvd 8)
-(define tc-splower 9)          ; raw addresses, held as fixnums
-(define tc-spupper 10)
-(define tc-context 11)         ; 128-byte register block, raw
-(define tc-fn 12)              ; the closure the task runs
-(define tc-result 13)
-(define tc-switches 14)
-(define tc-userdata 15)        ; the per-task environment vector
-(define tc-quantum 16)
-(define tc-elapsed 17)
-(define task-slots 18)
+(defrecord (task tc) (include node)
+  state sigalloc sigwait sigrecvd
+  splower spupper                ; raw addresses, held as fixnums
+  context                        ; 128-byte register block, raw
+  fn                             ; the closure the task runs
+  result switches
+  binds                          ; this task's fluid bindings, innermost first
+  quantum elapsed)
 
 (define ts-invalid 0)
 (define ts-added 1)
@@ -187,7 +172,6 @@
 ;; space, one image, and every function can name a symbol directly. So there
 ;; is no ExecBase at all - the lists are records held in variables, like the
 ;; counts and the nesting depths beside them.
-(define *this-task* nil)
 (define *idle-task* nil)
 (define *ready-list* nil)
 (define *wait-list* nil)
@@ -202,7 +186,12 @@
 (define *idle-count* 0)
 (define *task-count* 0)
 
-(define (this-task) *this-task*)
+;; Which task is running is a register, not a variable. s2 is dedicated to
+;; it, the trap stub was already saving and restoring all thirty two, and so
+;; the scheduler carries it for nothing: a task's own state is one instruction
+;; away wherever it is standing, and there is no second copy to keep in step.
+;; Before Exec exists s2 is zero, which reads as nil.
+(define (this-task) (%this-task))
 (define (ready-list) *ready-list*)
 (define (wait-list) *wait-list*)
 (define (int-vector n) (%vector-ref *int-vectors* n))
@@ -293,67 +282,37 @@
 
 (define (reschedule) (%ecall trap-reschedule))
 
-;; ---------------------------------------------------------------- task state
-;; Five globals are per-task in truth: where output goes, where input comes
-;; from, how to wait for it, the character the reader put back, and where an
-;; error should restart. They stay globals because everything reads them
-;; constantly and the common case has to be one load; what makes them local is
-;; the scheduler, saving them into the task leaving the processor and loading
-;; the arriving one's. That is what a context switch is for, and it is why two
-;; REPLs can read from two different windows without either knowing.
-(define env-slots 8)
-(define env-out 0)
-(define env-in 1)
-(define env-wait 2)
-(define env-peeked 3)
-(define env-restart 4)
-(define env-package 5)
-(define env-rp 6)
-(define env-blit 7)     ; this task's blitter command block
+;; ---------------------------------------------------------------- fluids
+;; The bindings themselves are in macros.lisp, because the reader and the
+;; printer want them and neither can see Exec. All that is here is where a
+;; binding goes: onto the running task's own stack, so that the scheduler can
+;; swap it out with the registers and two tasks inside the same `fluid-let`
+;; see their own values.
+;;
+;; Before this is installed, and in the trap handler where there is no task to
+;; speak of, a binding goes on the one stack there is - which is right, since
+;; nothing is competing for it.
+(define (install-task-binds!)
+  (set! *binds-get* (lambda () (let ((t (this-task))) (if t (tc-binds t) *boot-binds*))))
+  (set! *binds-set*
+        (lambda (v)
+          (let ((t (this-task)))
+            (if t (set-tc-binds! t v) (set! *boot-binds* v))))))
 
-(define (task-env task) (%record-ref task tc-userdata))
-(define (set-task-env! task e) (%record-set! task tc-userdata e))
-
-(define (new-task-env)
-  ;; A new task starts out talking to whatever its creator was talking to.
-  (let ((e (make-vector-n env-slots nil)))
-    (%vector-set! e env-out *out*)
-    (%vector-set! e env-in *in*)
-    (%vector-set! e env-wait *wait*)
-    (%vector-set! e env-package (current-package))
-    (%vector-set! e env-rp *rp*)
-    ;; A block of its own, so that programming the blitter needs no lock: two
-    ;; tasks are never half way through the same one.
-    (%vector-set! e env-blit (alloc-pool blit-list-size))
-    e))
-
-(define (save-task-env task)
-  (let ((e (task-env task)))
-    (if (%vector? e)
-        (begin
-          (%vector-set! e env-out *out*)
-          (%vector-set! e env-in *in*)
-          (%vector-set! e env-wait *wait*)
-          (%vector-set! e env-peeked *peeked*)
-          (%vector-set! e env-restart *repl-restart*)
-          (%vector-set! e env-package (current-package))
-          (%vector-set! e env-rp *rp*)
-          (%vector-set! e env-blit *blit-list*))
-        nil)))
-
-(define (load-task-env task)
-  (let ((e (task-env task)))
-    (if (%vector? e)
-        (begin
-          (set! *out* (%vector-ref e env-out))
-          (set! *in* (%vector-ref e env-in))
-          (set! *wait* (%vector-ref e env-wait))
-          (set! *peeked* (%vector-ref e env-peeked))
-          (set! *repl-restart* (%vector-ref e env-restart))
-          (set-current-package! (%vector-ref e env-package))
-          (set! *rp* (%vector-ref e env-rp))
-          (set! *blit-list* (%vector-ref e env-blit)))
-        nil)))
+;; What a new task starts out holding: whatever its creator was holding, so
+;; that a shell's children talk to the shell's window. One entry per place,
+;; carrying the value the creator has now - which is exactly the shape a
+;; suspended task's stack has, and a new task is suspended until it first runs.
+(define (initial-binds)
+  (list (%cons '*out* *out*)
+        (%cons '*in* *in*)
+        (%cons '*wait* *wait*)
+        (%cons '*peeked* nil)
+        (%cons '*repl-restart* nil)
+        (%cons 'package (current-package))
+        ;; A blitter command block of its own, so that programming the chip
+        ;; needs no lock: two tasks are never half way through the same one.
+        (%cons '*blit-list* (alloc-pool blit-list-size))))
 
 ;; Dead tasks waiting to be reclaimed. A task cannot free the stack it is
 ;; standing on, so it goes on this list instead and the next context switch
@@ -369,7 +328,7 @@
       (set! p (%cdr p)))))
 
 (define (task-ready! task)
-  (%record-set! task tc-state ts-ready)
+  (set-tc-state! task ts-ready)
   (enqueue (ready-list) task))
 
 ;; Choose the next task and point mscratch at its context. Called only from
@@ -383,17 +342,16 @@
           (if (%null? next)
               nil
               (begin
-                (save-task-env cur)
-                (if (%= (%record-ref cur tc-state) ts-run)
+                (swap-binds-out! (tc-binds cur))
+                (if (%= (tc-state cur) ts-run)
                     (task-ready! cur)
                     nil)
-                (%record-set! cur tc-elapsed (%+ (%record-ref cur tc-elapsed) 1))
-                (%record-set! next tc-state ts-run)
-                (%record-set! next tc-switches (%+ (%record-ref next tc-switches) 1))
-                (set! *this-task* next)
-                (load-task-env next)
+                (set-tc-elapsed! cur (%+ (tc-elapsed cur) 1))
+                (set-tc-state! next ts-run)
+                (set-tc-switches! next (%+ (tc-switches next) 1))
+                (swap-binds-in! (tc-binds next))
                 (set! *switch-count* (%+ *switch-count* 1))
-                (%set-context (%record-ref next tc-context))
+                (%set-context (tc-context next))
                 ;; Only now, with the context switched away from whatever was
                 ;; running, is it safe to hand a dead task's stack back.
                 (if *reaped* (reap-tasks) nil)))))
@@ -405,11 +363,11 @@
   ;; The failure is raised outside the critical section, because an error here
   ;; abandons the stack and would abandon the section with it.
   (let ((got (without-interrupts
-               (let ((alloc (%record-ref task tc-sigalloc)) (n 16) (g -1))
+               (let ((alloc (tc-sigalloc task)) (n 16) (g -1))
                  (while (if (%< n 32) (%< g 0) nil)
                    (if (%= 0 (%logand alloc (%lsh 1 n)))
                        (begin
-                         (%record-set! task tc-sigalloc (%logior alloc (%lsh 1 n)))
+                         (set-tc-sigalloc! task (%logior alloc (%lsh 1 n)))
                          (set! g n))
                        (set! n (%+ n 1))))
                  g))))
@@ -418,8 +376,8 @@
 
 (define (free-signal task n)
   (without-interrupts
-    (%record-set! task tc-sigalloc
-                  (%logand (%record-ref task tc-sigalloc) (%lognot (%lsh 1 n)))))
+    (set-tc-sigalloc! task
+                  (%logand (tc-sigalloc task) (%lognot (%lsh 1 n)))))
   nil)
 
 ;;
@@ -428,19 +386,18 @@
 ;; different live task that happens to have been given the same memory. That
 ;; used to be the hazard this file could only narrow, not close: `rem-task`
 ;; returned the block to the pool, and the pool handed it out again.
-(define (task? p) (%eq? (node-tag p) 'task))
 
 (define (signal task mask)
   (if (task? task) nil (error "signal: not a task" task))
   (without-interrupts
-    (%record-set! task tc-sigrecvd (%logior (%record-ref task tc-sigrecvd) mask))
-    (if (%= (%record-ref task tc-state) ts-wait)
-        (if (%> (%logand (%record-ref task tc-sigrecvd) (%record-ref task tc-sigwait)) 0)
+    (set-tc-sigrecvd! task (%logior (tc-sigrecvd task) mask))
+    (if (%= (tc-state task) ts-wait)
+        (if (%> (%logand (tc-sigrecvd task) (tc-sigwait task)) 0)
             (begin
               (remove-node task)
               (task-ready! task)
               ;; A woken task of higher priority should get the processor now.
-              (if (%> (%record-ref task ln-pri) (%record-ref (this-task) ln-pri))
+              (if (%> (node-pri task) (node-pri (this-task)))
                   (set! *attn-resched* 1)
                   nil))
             nil)
@@ -465,26 +422,26 @@
   (let ((saved (%disable)))
     (let ((task (this-task)) (got 0))
       (while (%= got 0)
-        (set! got (%logand (%record-ref task tc-sigrecvd) mask))
+        (set! got (%logand (tc-sigrecvd task) mask))
         (if (%= got 0)
             (begin
-              (%record-set! task tc-sigwait mask)
-              (%record-set! task tc-state ts-wait)
+              (set-tc-sigwait! task mask)
+              (set-tc-state! task ts-wait)
               (add-tail (wait-list) task)
               (%restore-interrupts saved)
               (reschedule)
               (set! saved (%disable)))
             nil))
-      (%record-set! task tc-sigrecvd
-                    (%logand (%record-ref task tc-sigrecvd) (%lognot got)))
-      (%record-set! task tc-sigwait 0)
+      (set-tc-sigrecvd! task
+                    (%logand (tc-sigrecvd task) (%lognot got)))
+      (set-tc-sigwait! task 0)
       (%restore-interrupts saved)
       got)))
 
 (define (set-signal task new mask)
   (without-interrupts
-    (let ((old (%record-ref task tc-sigrecvd)))
-      (%record-set! task tc-sigrecvd
+    (let ((old (tc-sigrecvd task)))
+      (set-tc-sigrecvd! task
                     (%logior (%logand old (%lognot mask)) (%logand new mask)))
       old)))
 
@@ -503,39 +460,42 @@
 ;; a raw zero word *is* the fixnum zero, so this is new bookkeeping that the
 ;; representation asks for.
 (define (zero-task-counters! task)
-  (%record-set! task tc-sigwait 0)
-  (%record-set! task tc-sigrecvd 0)
-  (%record-set! task tc-switches 0)
-  (%record-set! task tc-elapsed 0)
-  (%record-set! task tc-result 0)
+  (set-tc-sigwait! task 0)
+  (set-tc-sigrecvd! task 0)
+  (set-tc-switches! task 0)
+  (set-tc-elapsed! task 0)
+  (set-tc-result! task 0)
   nil)
 
 (define (add-task name pri fn . opts)
-  (let* ((env (new-task-env))
+  (let* ((binds (initial-binds))
          (stack (if (%cons? opts) (%car opts) default-stack))
-         (task (make-record task-slots 'task))
+         (task (tc-make))
          (ctx (alloc-pool ctx-bytes))
          (sp (alloc-pool stack)))
     ;; The environment is built before the task holds any Lisp value. There is
     ;; no window to worry about any more - a half-filled task record is traced
     ;; like any other object, whether or not it is on a list yet - but the
     ;; order costs nothing and says what it means.
-    (%record-set! task ln-name name)
-    (%record-set! task ln-pri pri)
+    (set-node-name! task name)
+    (set-node-pri! task pri)
     (zero-task-counters! task)
-    (%record-set! task tc-state ts-added)
-    (%record-set! task tc-splower sp)
-    (%record-set! task tc-spupper (%+ sp stack))
-    (%record-set! task tc-context ctx)
-    (%record-set! task tc-fn fn)
-    (set-task-env! task env)
-    (%record-set! task tc-quantum default-quantum)
-    (%record-set! task tc-sigalloc 65535)
+    (set-tc-state! task ts-added)
+    (set-tc-splower! task sp)
+    (set-tc-spupper! task (%+ sp stack))
+    (set-tc-context! task ctx)
+    (set-tc-fn! task fn)
+    (set-tc-binds! task binds)
+    (set-tc-quantum! task default-quantum)
+    (set-tc-sigalloc! task 65535)
     ;; The context is built to look as though the task had just been
     ;; interrupted on the first instruction of its function.
     (poke (ctx-pc ctx) (closure-entry fn))
     (poke (ctx-reg ctx reg-sp) (%+ sp stack))
     (poke (ctx-reg ctx reg-ra) *task-exit-stub*)
+    ;; s2 says which task is running, so a task's context has to carry it the
+    ;; way it carries its stack pointer. Nothing sets it again after this.
+    (%raw-st! (ctx-reg ctx reg-s2) task)
     (%raw-st! (ctx-reg ctx reg-t0) fn)
     (poke (ctx-reg ctx reg-t1) 0)
     (without-interrupts
@@ -543,9 +503,6 @@
       (set! *task-count* (%+ *task-count* 1)))
     task))
 
-;; A task that runs as an instance. Nothing else is different: s2 lives in the
-;; context block like every other register, so the scheduler was already
-;; carrying it and this costs a single word at startup.
 ;; What the forge handed out before the machine ran - the boot task's stack,
 ;; its context - has no header and was never meant to come back. Ending the
 ;; first task should not try to give it away.
@@ -554,17 +511,12 @@
       (if (%= (%ld32 (%+ p -4)) pool-tag) (free-pool p) nil)
       nil))
 
-(define (spawn inst name pri fn . opts)
-  (let ((task (apply-list add-task (%cons name (%cons pri (%cons fn opts))))))
-    (%raw-st! (ctx-reg (%record-ref task tc-context) reg-s2) inst)
-    task))
-
 (define (rem-task task)
   ;; A task that has ended stays a task and says so. Signalling it does
   ;; nothing, because it is in no state to be woken; that is the whole
   ;; difference from a handle that could come back as somebody else.
   (without-interrupts
-    (%record-set! task tc-state ts-removed)
+    (set-tc-state! task ts-removed)
     (set! *task-count* (%- *task-count* 1)))
   (if (%eq? task (this-task))
       (begin
@@ -582,10 +534,10 @@
 ;; somebody is still holding does not keep every task behind it alive.
 (define (reap-task task)
   (forget-node task)
-  (free-if-ours (%record-ref task tc-splower))
-  (free-if-ours (%record-ref task tc-context))
-  (%record-set! task tc-splower nil)
-  (%record-set! task tc-context nil)
+  (free-if-ours (tc-splower task))
+  (free-if-ours (tc-context task))
+  (set-tc-splower! task nil)
+  (set-tc-context! task nil)
   nil)
 
 (define (find-task name)
@@ -594,7 +546,7 @@
       (let ((f (find-name (ready-list) name)))
         (if f f (find-name (wait-list) name)))))
 
-(define (task-name task) (%record-ref task ln-name))
+(define (task-name task) (node-name task))
 
 (define (task-state-name s)
   (cond ((%= s ts-added) "added")
@@ -620,11 +572,11 @@
   (emit-str "  pri  state    switches  name\n")
   (let ((show (lambda (p)
                 (emit-str "  ")
-                (emit-str (number->string (%record-ref p ln-pri)))
+                (emit-str (number->string (node-pri p)))
                 (emit-str "    ")
-                (emit-str (task-state-name (%record-ref p tc-state)))
+                (emit-str (task-state-name (tc-state p)))
                 (emit-str "     ")
-                (emit-str (number->string (%record-ref p tc-switches)))
+                (emit-str (number->string (tc-switches p)))
                 (emit-str "  ")
                 (emit-str (task-name p))
                 (emit-str "\n"))))
@@ -638,7 +590,7 @@
 
 (define (task-finished)
   (let ((task (this-task)))
-    (%record-set! task tc-result 0)
+    (set-tc-result! task 0)
     ;; The last task to finish takes the machine with it: there is nothing
     ;; left to schedule, and pretending otherwise is a hang. The idle task does
     ;; not count - it is always there and it never does anything.
@@ -661,24 +613,18 @@
     *task-exit-stub*))
 
 ;; ---------------------------------------------------------------- ports
-(define mp-sigbit 5)
-(define mp-sigtask 6)
-(define mp-msglist 7)
-(define port-slots 8)
+(defrecord (msgport mp) (include node) sigbit sigtask msglist)
 
-(define mn-replyport 5)
-(define mn-length 6)
-(define mn-body 7)
-(define message-slots 8)
+(defrecord (message mn) (include node) replyport length body)
 
 (define (create-port name pri)
-  (let ((p (make-node 'msgport))
+  (let ((p (mp-make))
         (sig (alloc-signal (this-task))))
-    (%record-set! p ln-name name)
-    (%record-set! p ln-pri pri)
-    (%record-set! p mp-sigbit sig)
-    (%record-set! p mp-sigtask (this-task))
-    (%record-set! p mp-msglist (new-list))
+    (set-node-name! p name)
+    (set-node-pri! p pri)
+    (set-mp-sigbit! p sig)
+    (set-mp-sigtask! p (this-task))
+    (set-mp-msglist! p (new-list))
     (if (%null? name)
         nil
         (without-interrupts (enqueue *port-list* p)))
@@ -686,48 +632,48 @@
 
 (define (delete-port p)
   (if (%null? (node-name p)) nil (without-interrupts (forget-node p)))
-  (free-signal (%record-ref p mp-sigtask) (%record-ref p mp-sigbit))
+  (free-signal (mp-sigtask p) (mp-sigbit p))
   nil)
 
 (define (find-port name) (find-name *port-list* name))
 
 (define (create-message body reply)
-  (let ((m (make-node 'message)))
-    (%record-set! m mn-replyport reply)
-    (%record-set! m mn-length message-slots)
-    (%record-set! m mn-body body)
+  (let ((m (mn-make)))
+    (set-mn-replyport! m reply)
+    (set-mn-length! m mn-slots)
+    (set-mn-body! m body)
     m))
 
-(define (message-body m) (%record-ref m mn-body))
-(define (set-message-body! m v) (%record-set! m mn-body v))
+(define (message-body m) (mn-body m))
+(define (set-message-body! m v) (set-mn-body! m v))
 
 (define (put-msg port msg)
   ;; The signal is sent outside the section on purpose: Signal takes it again,
   ;; and holding it across a wake-up is holding it for longer than the list
   ;; needs.
   (let ((task (without-interrupts
-                (add-tail (%record-ref port mp-msglist) msg)
-                (%record-ref port mp-sigtask))))
-    (if task (signal task (%lsh 1 (%record-ref port mp-sigbit))) nil))
+                (add-tail (mp-msglist port) msg)
+                (mp-sigtask port))))
+    (if task (signal task (%lsh 1 (mp-sigbit port))) nil))
   msg)
 
 (define (get-msg port)
-  (without-interrupts (rem-head (%record-ref port mp-msglist))))
+  (without-interrupts (rem-head (mp-msglist port))))
 
 (define (wait-port port)
   (let ((m nil))
     (while (%null? m)
       (set! m (get-msg port))
-      (if (%null? m) (wait (%lsh 1 (%record-ref port mp-sigbit))) nil))
+      (if (%null? m) (wait (%lsh 1 (mp-sigbit port))) nil))
     ;; Put it back: WaitPort tells you a message is there without taking it.
-    (without-interrupts (add-head (%record-ref port mp-msglist) m))
+    (without-interrupts (add-head (mp-msglist port) m))
     m))
 
 ;; Nothing to free: a message nobody holds is collected like anything else.
 (define (delete-message m) (forget-node m))
 
 (define (reply-msg msg)
-  (let ((r (%record-ref msg mn-replyport)))
+  (let ((r (mn-replyport msg)))
     (if r (put-msg r msg) nil)))
 
 ;; ---------------------------------------------------------------- libraries
@@ -737,24 +683,23 @@
 ;; only code addresses, so hand written code can jump through it and the
 ;; collector never has to look at it. The closures themselves live in a vector
 ;; in the record, where the collector finds them without being told.
-(define lib-version 5)
-(define lib-opencnt 6)
-(define lib-entries 7)         ; a vector of closures
-(define lib-table 8)           ; raw address of the jump table, or nil
-(define library-slots 9)
+(defrecord (library lib) (include node)
+  version opencnt
+  entries                        ; a vector of closures
+  table)                         ; raw address of the jump table, or nil
 
 (define (make-library name version entries)
   (let* ((n (length entries))
          (table (alloc-pool (%* 8 (%+ n 1))))
          (base (%+ table (%* 8 (%+ n 1))))
          (v (make-vector-n n nil))
-         (lib (make-node 'library))
+         (lib (lib-make))
          (i 0))
-    (%record-set! lib ln-name name)
-    (%record-set! lib lib-version version)
-    (%record-set! lib lib-opencnt 0)
-    (%record-set! lib lib-entries v)
-    (%record-set! lib lib-table base)
+    (set-node-name! lib name)
+    (set-lib-version! lib version)
+    (set-lib-opencnt! lib 0)
+    (set-lib-entries! lib v)
+    (set-lib-table! lib base)
     (dolist (fn entries)
       (%vector-set! v i fn)
       (poke (%- base (%* 8 (%+ i 1))) (closure-entry fn))
@@ -762,35 +707,35 @@
     (without-interrupts (enqueue *lib-list* lib))
     lib))
 
-(define (lvo lib n) (%vector-ref (%record-ref lib lib-entries) (%- n 1)))
+(define (lvo lib n) (%vector-ref (lib-entries lib) (%- n 1)))
 
 (define (open-library name version)
   (let ((lib (find-name *lib-list* name)))
     (if (%null? lib)
         nil
-        (if (%< (%record-ref lib lib-version) version)
+        (if (%< (lib-version lib) version)
             nil
             (begin
-              (%record-set! lib lib-opencnt (%+ (%record-ref lib lib-opencnt) 1))
+              (set-lib-opencnt! lib (%+ (lib-opencnt lib) 1))
               lib)))))
 
 (define (close-library lib)
   (if lib
-      (%record-set! lib lib-opencnt (%- (%record-ref lib lib-opencnt) 1))
+      (set-lib-opencnt! lib (%- (lib-opencnt lib) 1))
       nil)
   nil)
 
 ;; ---------------------------------------------------------------- interrupts
-(define is-code 5)             ; a Lisp closure taking the data
-(define is-data 6)
-(define interrupt-slots 7)
+(defrecord (interrupt is) (include node)
+  code                           ; a Lisp closure taking the data
+  data)
 
 (define (make-interrupt name pri code data)
-  (let ((i (make-record interrupt-slots 'interrupt)))
-    (%record-set! i ln-name name)
-    (%record-set! i ln-pri pri)
-    (%record-set! i is-code code)
-    (%record-set! i is-data data)
+  (let ((i (is-make)))
+    (set-node-name! i name)
+    (set-node-pri! i pri)
+    (set-is-code! i code)
+    (set-is-data! i data)
     i))
 
 ;; ---------------------------------------------------------------- vblank
@@ -812,7 +757,7 @@
   (let ((p (list-first (wait-list))))
     (while p
       (let ((next (node-next p)))
-        (if (%> (%logand (%record-ref p tc-sigwait) sigf-vblank) 0)
+        (if (%> (%logand (tc-sigwait p) sigf-vblank) 0)
             (signal p sigf-vblank)
             nil)
         (set! p next))))
@@ -926,8 +871,8 @@
 (define (run-int-servers-1 line)
   (let ((p (list-first (int-vector line))))
     (while p
-      (let ((code (%record-ref p is-code))
-            (data (%record-ref p is-data)))
+      (let ((code (is-code p))
+            (data (is-data p)))
         (if code (%funcall code data) nil))
       (set! p (node-next p)))))
 
@@ -981,7 +926,7 @@
   ;; described an Exec that no longer exists. When they lived in a structure,
   ;; allocating a fresh one zeroed them all at once; now that they are
   ;; variables, saying so is the price of not having a base pointer.
-  (set! *this-task* 0)
+  (%set-this-task! nil)
   (set! *idle-task* 0)
   (set! *tdnest* 0)
   (set! *attn-resched* 0)
@@ -1003,25 +948,29 @@
   (begin
     ;; The code that is already running becomes task zero. Its context is the
     ;; block the trap stub has been using all along, so it is already correct.
-    (let ((boot (make-record task-slots 'task)))
-      (%record-set! boot ln-name "boot")
-      (%record-set! boot ln-pri 0)
+    (let ((boot (tc-make)))
+      (set-node-name! boot "boot")
+      (set-node-pri! boot 0)
       (zero-task-counters! boot)
-      (%record-set! boot tc-quantum default-quantum)
-      (%record-set! boot tc-state ts-run)
-      (%record-set! boot tc-context (%global lg-trapsave))
-      (%record-set! boot tc-splower (%global lg-stackbot))
-      (%record-set! boot tc-spupper (%global lg-stacktop))
-      (%record-set! boot tc-sigalloc 65535)
-      (set-task-env! boot (new-task-env))
-      (set! *this-task* boot)
+      (set-tc-quantum! boot default-quantum)
+      (set-tc-state! boot ts-run)
+      (set-tc-context! boot (%global lg-trapsave))
+      (set-tc-splower! boot (%global lg-stackbot))
+      (set-tc-spupper! boot (%global lg-stacktop))
+      (set-tc-sigalloc! boot 65535)
+      ;; Task zero takes whatever was bound before there were tasks, which
+      ;; is what it has been using all along.
+      (set-tc-binds! boot *boot-binds*)
+      (set! *boot-binds* nil)
+      (install-task-binds!)
+      (%set-this-task! boot)
       (set! *task-count* 1))
 
     (build-task-exit-stub)
     ;; Now the two things sys.lisp had to leave blank: a task restarts on its
     ;; own stack, and a task that faults with no prompt behind it ends rather
     ;; than halting the machine.
-    (set! *stack-top-fn* (lambda () (%record-ref (this-task) tc-spupper)))
+    (set! *stack-top-fn* (lambda () (tc-spupper (this-task))))
     (set! *return-addr-fn* (lambda () *task-exit-stub*))
     (vblank-start)
     (idle-start)
@@ -1096,7 +1045,7 @@
 ;; asks for a fresh chunk. The task that is running gets the same treatment
 ;; from `%reload-cons-run`.
 (define (drop-task-run task)
-  (let ((ctx (%record-ref task tc-context)))
+  (let ((ctx (tc-context task)))
     (if (if ctx (%> ctx 0) nil)
         (begin (poke (ctx-reg ctx reg-gp) 0)
                (poke (ctx-reg ctx reg-tp) 0))
@@ -1115,7 +1064,7 @@
   ;; name, its function and its environment on the way in. What it cannot see
   ;; is the stack the task was suspended on and the register block it was
   ;; suspended into: both are raw pool memory, and this is what walks them.
-  (let ((ctx (%record-ref task tc-context)))
+  (let ((ctx (tc-context task)))
     (if (if ctx (%> ctx 0) nil)
         (begin
           ;; Its stack, precisely, from where it was suspended.
