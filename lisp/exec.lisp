@@ -320,7 +320,7 @@
         (%cons 'package (current-package))
         ;; A blitter command block of its own, so that programming the chip
         ;; needs no lock: two tasks are never half way through the same one.
-        (%cons '*blit-list* (alloc-pool blit-list-size))
+        (%cons '*blit-list* (new-blit-block))
         ;; And one reply port, made the first time this task asks a server for
         ;; something. One per task and not one per call, because a task has
         ;; one blocker and therefore one conversation.

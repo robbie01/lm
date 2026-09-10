@@ -52,6 +52,11 @@
       ;; an image small: afterwards the live pairs are one contiguous block at
       ;; the bottom of cons space, and everything above it has been blanked.
       (gc-for-image)
+      ;; And nothing in flight on the blitter. A command block saved with its
+      ;; status word at pending comes back after resume to a chip that was
+      ;; reset and will never write it back, and whoever waits on it waits for
+      ;; ever.
+      (blit-drain)
       ;; A resumed image re-enters through here rather than through the boot
       ;; list: every global it would have set is already set.
       (%st-word! lg-toplevel top)

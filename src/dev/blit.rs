@@ -17,22 +17,31 @@ pub const B_SMOD: u32 = 0x10; // source stride in bytes
 pub const B_DMOD: u32 = 0x14; // destination stride in bytes
 pub const B_VAL: u32 = 0x18; // fill value, or the transparent key
 pub const B_OP: u32 = 0x1c; // write starts the operation
-pub const B_STATUS: u32 = 0x20;
+pub const B_STATUS: u32 = 0x20; // bit0: a transfer is running
 pub const B_X0: u32 = 0x24;
 pub const B_Y0: u32 = 0x28;
 pub const B_X1: u32 = 0x2c;
 pub const B_Y1: u32 = 0x30;
 pub const B_CTRL: u32 = 0x34; // bit0: raise INT_BLIT on completion
-/// Write the address of a twelve-word command block; the chip fetches its own
-/// parameters and runs. One store, so programming the blitter is atomic
-/// without anybody holding anything off - provided the block belongs to
-/// whoever filled it, which is the caller's business and not the chip's.
+/// Write the address of a command block; the chip fetches its own parameters
+/// and runs. One store, so programming the blitter is atomic without anybody
+/// holding anything off - provided the block belongs to whoever filled it,
+/// which is the caller's business and not the chip's.
 ///
 ///     0 src   1 dst   2 w      3 h
 ///     4 smod  5 dmod  6 val    7 op
 ///     8 x0    9 y0   10 x1    11 y1
+///    12 status        13 next
+///
+/// `status` is written back to zero by the chip when the command finishes.
+/// That is how the task that filled a block finds out its own pixels have
+/// landed, by reading its own memory - rather than by waiting for the chip to
+/// go idle, which means waiting behind everybody else's transfers too.
+///
+/// `next` is reserved for the descriptor chain and ignored for now.
 pub const B_LIST: u32 = 0x38;
-pub const LIST_WORDS: u32 = 12;
+pub const LIST_WORDS: u32 = 14;
+pub const LIST_STATUS: u32 = 12;
 
 pub const OP_COPY: u32 = 0;
 pub const OP_FILL: u32 = 1;
@@ -69,9 +78,22 @@ pub struct Regs {
 /// the machine in a critical section. A shadow bank makes the command atomic
 /// in the chip instead, which is how real hardware avoids the same problem,
 /// and every one of those critical sections goes away.
+///
+/// A transfer takes time. Committing one latches it and marks the chip busy
+/// until `busy_until`; the pixels move in one go when that moment arrives.
+/// Until then the destination holds exactly what it held before, which is
+/// what makes a missing wait visible: read too early and you see the old
+/// picture. Real hardware would show a torn one. Either is wrong in a way you
+/// notice, which an instantaneous chip - the previous model - never was.
 pub struct Blitter {
     pub live: Regs,
     pub pending: Regs,
+    pub busy: bool,
+    pub busy_until: u64,
+    pub op: u32,
+    /// The command block the running transfer came from, for write-back, or
+    /// zero if it was programmed through the registers.
+    pub block: u32,
 }
 
 impl Blitter {
@@ -79,6 +101,10 @@ impl Blitter {
         Blitter {
             live: Regs::default(),
             pending: Regs::default(),
+            busy: false,
+            busy_until: 0,
+            op: 0,
+            block: 0,
         }
     }
 
@@ -93,7 +119,7 @@ impl Blitter {
             B_SMOD => p.smod,
             B_DMOD => p.dmod,
             B_VAL => p.val,
-            B_STATUS => 0, // always idle: transfers are instantaneous
+            B_STATUS => self.busy as u32,
             B_X0 => p.x0,
             B_Y0 => p.y0,
             B_X1 => p.x1,
@@ -132,6 +158,7 @@ pub fn command(m: &mut Machine, reg: u32, v: u32) {
     // register path would have latched on the op write comes from memory
     // instead, in one go, so there is nothing for an interrupt to land in the
     // middle of.
+    let block = if reg == B_LIST { v } else { 0 };
     let v = if reg == B_LIST {
         let base = v;
         if !m.in_ram(base, LIST_WORDS * 4) {
@@ -157,10 +184,25 @@ pub fn command(m: &mut Machine, reg: u32, v: u32) {
     } else {
         v
     };
+    // One command at a time. A commit that arrives while the chip is busy
+    // waits for it, the way a store to a single-buffered DMA engine stalls on
+    // the bus: time moves on to when the running transfer finishes, and it
+    // finishes. Software is meant to wait on `B_STATUS` first so this never
+    // happens - `blit-go` does - and it is here so that forgetting is slow
+    // rather than wrong.
+    if m.blit.busy {
+        let due = m.blit.busy_until;
+        if due > m.now {
+            let d = due - m.now;
+            m.cycles = m.cycles.wrapping_add(d);
+            m.now = due;
+        }
+        finish(m);
+    }
     // The op write is the commit: everything programmed since the last one
     // takes effect together, or none of it does.
     m.blit.live = m.blit.pending;
-    let (src, dst, w, h, smod, dmod, val) = {
+    let (src, dst, w, h, smod, dmod, _val) = {
         let b = &m.blit.live;
         (b.src, b.dst, b.w, b.h, b.smod, b.dmod, b.val)
     };
@@ -194,6 +236,26 @@ pub fn command(m: &mut Machine, reg: u32, v: u32) {
         }
     }
 
+    // And start it. Nothing moves yet: see `finish`.
+    //
+    // The cost is no longer charged to the task that committed. It used to
+    // be added to the cycle counter inside this store, so a full-screen fill
+    // - 786,432 cycles, against a frame of 333,333 - held every interrupt off
+    // for more than two frames. Now time simply passes while the chip works,
+    // and whoever else is ready runs in the meantime.
+    m.blit.op = v;
+    m.blit.block = block;
+    m.blit.busy = true;
+    m.blit.busy_until = m.now + cost;
+}
+
+/// The transfer that was latched into `live`, all of it, now.
+fn perform(m: &mut Machine) {
+    let v = m.blit.op;
+    let (src, dst, w, h, smod, dmod, val) = {
+        let b = &m.blit.live;
+        (b.src, b.dst, b.w, b.h, b.smod, b.dmod, b.val)
+    };
     if v == OP_LINE {
         let (x0, y0, x1, y1) = (m.blit.live.x0, m.blit.live.y0, m.blit.live.x1, m.blit.live.y1);
         line(m, dst, dmod, x0, y0, x1, y1, val as u8);
@@ -243,9 +305,43 @@ pub fn command(m: &mut Machine, reg: u32, v: u32) {
         }
     }
 
-    m.cycles = m.cycles.wrapping_add(cost);
+}
+
+/// The running transfer's time has come: move the pixels, mark the block
+/// done, and raise the interrupt if it was asked for.
+///
+/// The copy happens here, at the end, rather than at the commit. That is the
+/// point of the whole model: between the two the destination still holds its
+/// old contents, so code that reads pixels it has only just asked the chip to
+/// write sees the wrong ones - loudly, and every time, rather than only on
+/// hardware.
+fn finish(m: &mut Machine) {
+    perform(m);
+    m.blit.busy = false;
+    let b = m.blit.block;
+    if b != 0 && m.in_ram(b, LIST_WORDS * 4) {
+        m.poke32(b + LIST_STATUS * 4, 0);
+    }
     if m.blit.live.ctrl & 1 != 0 {
         m.raise(INT_BLIT);
+    }
+}
+
+/// Finish the running transfer if its time has come. Called from everywhere
+/// that can observe the chip - a status read, and the top of each host
+/// slice - so completion is never early and never later than the next look.
+pub fn poll(m: &mut Machine, now: u64) {
+    if m.blit.busy && now >= m.blit.busy_until {
+        finish(m);
+    }
+}
+
+/// When the running transfer finishes, or never.
+pub fn due(m: &Machine) -> u64 {
+    if m.blit.busy {
+        m.blit.busy_until
+    } else {
+        u64::MAX
     }
 }
 

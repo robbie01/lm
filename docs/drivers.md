@@ -223,12 +223,41 @@ checker.** The registry was a checker.
 
 ## The blitter becomes a real asynchronous device
 
-Today it is not one. `B_STATUS` reads 0 with the comment "always idle:
-transfers are instantaneous": the whole transfer happens inside the store to
-the op register, before the next instruction retires. `B_CTRL` bit 0 arms a
-completion interrupt that would fire after the work was already done, and
-nothing in the system references `bl-ctrl`, `bl-status` or `int-blit`. The chip
-advertises an asynchronous interface that does not work and that nothing uses.
+**The asynchronous part is done.** It used to finish every transfer inside
+the store that started it: `B_STATUS` always read idle, and the completion
+interrupt would have fired after the work was over. Now:
+
+- A commit marks the chip busy until `now + cost`. Nothing moves yet.
+- The copy happens in one go at the *end* of that window. Until then the
+  destination holds its old contents, so code that reads pixels it has only
+  just asked for sees the old ones. That is deliberate: real hardware would
+  show a torn picture, and either is wrong in a way you notice.
+- When a command finishes, the chip writes a done word back into the command
+  block it came from (word 12). A task waits for *its own* pixels by reading
+  its own block, rather than waiting for the chip to go idle - which would
+  mean waiting behind the compositor, which keeps the chip busy about half the
+  time.
+- `blit-drain` waits for the chip to be free; `blit-sync` waits for this
+  task's last command. `bm-plot` and `bm-point` sync for you. Anything that
+  computes pixel addresses itself has to call `blit-sync` first - the WaitBlit
+  rule.
+
+Measured: a pixel read straight after a fill returns the old value and the
+new one after `blit-sync`; a full-screen fill's commit returns after about 750
+cycles instead of 786,432, and four other tasks got the processor while it
+ran. `(blitting)` at the prompt checks all of this.
+
+It found a bug on its first run, which is what it was for. `blit-go` marked
+the block pending before waiting for the chip, but waiting is what lets the
+task's *previous* command finish - and finishing writes that command's done
+into the same block. So the second of two back-to-back blits ran with its
+block already saying done. The collector clears its maps with four fills
+through one block, so its wait returned early and marking read bits that had
+not been cleared. It surfaced as a load from address minus four in
+`gc-object-slots`, only when enough had been allocated for the last fill to
+still be running. Pending is now set after the wait, with the chip known idle.
+
+What is left is the descriptor chain and the cost model, below.
 
 That is worth fixing for a reason beyond tidiness: the target is eventually an
 FPGA SoC, and this is the one part of the machine whose model is not
@@ -421,10 +450,12 @@ vocabulary, and takes back `inp-ctrl`. Removes the last direct
 a registry in the chip. See *a bitmap is a type, not an address*. Nothing
 downstream depends on it any more, which is why the numbering below moved up.
 
-**4. The blitter becomes asynchronous.** Descriptor chain, a state machine
-that advances with cycles, a bandwidth cost model. Software keeps calling
-`bm-blit-rect`, which now appends a descriptor and returns; the only caller
-that has to change immediately is anything that reads pixels it just wrote.
+**4. The blitter's descriptor chain and cost model.** The asynchronous part
+is done. Left: the chip walks the `next` word so commands can queue, and the
+cost becomes bandwidth rather than a flat byte per cycle. One constraint the
+chain adds: once the chip reads descriptors as it reaches them rather than all
+at commit, a task cannot refill a descriptor the chip might still be about to
+read - so each task needs a few, not one.
 
 **5. gfx.driver.** Owns the display registers, the screen and the descriptor
 chain; takes back `gfx-ctrl`. Bitmap allocation moves behind it, so a client is

@@ -321,10 +321,14 @@
       (if (%< x (bm-w b)) (if (%>= y 0) (%< y (bm-h b)) nil) nil)
       nil))
 
+;; Both wait for this task's own blits first: the processor is about to
+;; touch pixels the blitter may still be about to write.
 (define (bm-plot b x y c)
+  (blit-sync)
   (if (bm-inside? b x y) (poke8 (bm-at b x y) c) nil))
 
 (define (bm-point b x y)
+  (blit-sync)
   (if (bm-inside? b x y) (peek8 (bm-at b x y)) 0))
 
 (define (screen-plot x y c) (bm-plot *screen* x y c))
@@ -336,6 +340,7 @@
 ;; takes six stores that something has to hold off - which is what the block
 ;; exists to avoid, so nothing here reaches for them.
 (define blt-list (dev-addr dev-blit blit-list-reg))
+(define blt-status (dev-addr dev-blit blit-status-reg))
 
 ;; ---------------------------------------------------------------- commands
 ;; The blitter takes its whole command from a block in memory, in one store, so
@@ -387,20 +392,98 @@
   (if *in-interrupt*
       (error "the blitter is task context only: signal a task instead")
       nil)
-  (if (%= *blit-list* 0) (set! *blit-list* (alloc-pool blit-list-size)) nil)
+  (if (%= *blit-list* 0) (set! *blit-list* (new-blit-block)) nil)
   *blit-list*)
 
 ;; The collector's own. Not a fluid binding: a collection runs with interrupts
 ;; off from end to end, so there is never a second one to keep apart from.
 (define (gc-blit-block)
   (if (%= *gc-blit-list* 0)
-      (set! *gc-blit-list* (alloc-pool blit-list-size))
+      (set! *gc-blit-list* (new-blit-block))
       nil)
   *gc-blit-list*)
 
+;; ---------------------------------------------------------------- waiting
+;; The blitter is asynchronous: a blit takes time, and `blit-go` returns
+;; before it has happened. Two different questions follow, and they have
+;; different answers.
+;;
+;; *Is the chip free?* It has one command buffer, so a commit has to wait for
+;; the running transfer. That is `blit-drain`, and it asks the status register.
+;;
+;; *Have my pixels landed?* That is the one drawing code actually cares about,
+;; and it must not be answered by waiting for the chip to go idle, because the
+;; chip is the compositor's too: it composites continuously and the chip is
+;; busy about half the time, so a task that plotted a pixel only when the chip
+;; was idle would spend most of its life waiting for other people's windows.
+;; So the chip writes a status word back into each command block when it
+;; finishes it, and a task waits on *its own* block. That is `blit-sync`, and
+;; it is a load from the task's own memory.
+;;
+;; The rule, which is the WaitBlit rule on the Amiga: **before touching pixels
+;; with the processor, `blit-sync`.** `bm-plot` and `bm-point` do it for you.
+;; Anything that computes pixel addresses itself - the Life demo does - has to
+;; do it by hand. And forgetting is now visible: the destination holds its old
+;; contents until the transfer ends, so reading too early shows the old
+;; picture instead of quietly working.
+
+(define (blit-busy?) (%= 1 (%logand (%ld-fixnum blt-status) 1)))
+
+;; Reading the status register is what lets a finished transfer be noticed,
+;; so this spin also drives completion. It is preemptible.
+(define (blit-drain)
+  (while (blit-busy?) nil)
+  nil)
+
+(define (blit-wait-block b)
+  (if (%= b 0)
+      nil
+      ;; The status read in the loop is what lets the chip notice it has
+      ;; finished, without waiting for the next host slice to look.
+      (while (%= 1 (%ld-fixnum (%+ b bl-status))) (blit-busy?)))
+  nil)
+
+(define (blit-sync) (blit-wait-block *blit-list*))
+
+;; A command block, with its status word clear. Pool memory is not zeroed, and
+;; a block that happened to read "pending" before it was ever used would make
+;; the first `blit-sync` wait for a write-back that is never coming.
+(define (new-blit-block)
+  (let ((b (alloc-pool blit-list-size)))
+    (%st-fixnum! (%+ b bl-status) 0)
+    (%st-fixnum! (%+ b bl-next) 0)
+    b))
+
+;; Start a blit and return without waiting for it to finish.
+;;
+;; The chip has to be free to take a command, and the wait for that is a spin
+;; on the status register with interrupts on - then, with interrupts off for
+;; one status read and two stores, a check that nobody else got in first.
+;; Waiting with them off would be the old problem again: a full-screen fill
+;; holding every interrupt off for two frames.
+;;
+;; The block goes to pending inside that section, after the drain, and not
+;; before it. The drain is what lets this task's *previous* command finish,
+;; and finishing writes that command's done back into this same block - so a
+;; pending set before the drain was wiped by the previous command's
+;; write-back, and this one ran with its block already saying done. The first
+;; victim was the collector: four fills through one block to clear its maps,
+;; a wait that returned while the last one was still running, and marking that
+;; read bits the fill had not cleared yet. It showed up as a load from address
+;; minus four in `gc-object-slots`, with the compositor's frame on top of the
+;; backtrace because the compositor was the task that happened to allocate.
 (define (blit-go b op)
-  (poke (%+ b bl-op) op)
-  (poke blt-list b)
+  (%st-fixnum! (%+ b bl-op) op)
+  (let ((done nil))
+    (while (%null? done)
+      (blit-drain)
+      (without-interrupts
+        (if (blit-busy?)
+            nil
+            (begin
+              (%st-fixnum! (%+ b bl-status) 1)
+              (%st-fixnum! blt-list b)
+              (set! done t))))))
   nil)
 
 

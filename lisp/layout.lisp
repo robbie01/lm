@@ -179,7 +179,8 @@
 
 ;; ---- blitter command block ----
 (define blit-list-reg #x38)
-(define blit-list-size #x30)
+(define blit-status-reg #x20)
+(define blit-list-size #x38)
 (define bl-src #x0)
 (define bl-dst #x4)
 (define bl-w #x8)
@@ -192,6 +193,8 @@
 (define bl-y0 #x24)
 (define bl-x1 #x28)
 (define bl-y1 #x2c)
+(define bl-status #x30)
+(define bl-next #x34)
 (define op-copy #x0)
 (define op-fill #x1)
 (define op-xor #x2)

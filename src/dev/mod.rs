@@ -72,7 +72,14 @@ pub fn read(m: &mut Machine, a: u32, f: u32) -> u32 {
         },
         DEV_GFX => m.gfx.read(reg),
         DEV_INPUT => m.input.read(reg),
-        DEV_BLIT => m.blit.read(reg),
+        DEV_BLIT => {
+            // A look at the chip is a moment at which it can have finished.
+            if reg == blit::B_STATUS {
+                let now = m.now;
+                blit::poll(m, now);
+            }
+            m.blit.read(reg)
+        }
         DEV_DISK => m.disk.read(reg),
         _ => 0,
     };

@@ -47,8 +47,8 @@
   reg-s0 reg-s1 reg-a0 reg-a1 reg-a2 reg-a3 reg-a4 reg-a5
   reg-a6 reg-a7 reg-s2 reg-s3 reg-s4 reg-s5 reg-s6 reg-s7
   reg-s8 reg-s9 reg-s10 reg-s11 reg-t3 reg-t4 reg-t5 reg-t6
-  bl-src bl-dst bl-w bl-h bl-smod bl-dmod bl-val bl-op bl-x0 bl-y0 bl-x1 bl-y1
-  blit-list-reg blit-list-size
+  bl-src bl-dst bl-w bl-h bl-smod bl-dmod bl-val bl-op bl-status bl-next bl-x0 bl-y0 bl-x1 bl-y1
+  blit-list-reg blit-status-reg blit-list-size
   op-copy op-fill op-xor op-and op-or op-mask op-line op-add
   trap-arity trap-type trap-oom trap-error trap-reschedule trap-record
   %* %+ %- %/ %< %<= %= %> %>= %addr-of %alloc-code %alloc-pool %apply %ash
@@ -155,6 +155,7 @@
 (export '(
   peek-signed peek-scratch
   bm-pixels set-bm-pixels! bitmap? bm-alloc
+  blit-busy? blit-drain blit-sync blit-wait-block new-blit-block blt-status
   *blit-list* *gc-blit-list* *in-interrupt* blit-block gc-blit-block blit-go blt-list
   *screen* alloc-pool bm-blit-rect bm-clip bm-fill-rect
   bm-plot bm-point bm-at bm-addr bm-w bm-h bitmap? make-bitmap alloc-bitmap

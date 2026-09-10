@@ -208,7 +208,12 @@
 
 (define (gc-clear-bitmap)
   (gc-clear-map gc-bitmap)
-  (gc-clear-map gc-pinmap))
+  (gc-clear-map gc-pinmap)
+  ;; The maps are cleared by the blitter, and a blit is not finished when it
+  ;; returns. Marking reads them next, so it must not start until the clears
+  ;; have landed - a mark bit left over from the last collection is a dead
+  ;; object kept and, worse, a live one's forwarding computed from nonsense.
+  (blit-wait-block *gc-blit-list*))
 
 ;; ---------------------------------------------------------------- marking
 ;; Is this word something the heap could have handed out? Used both for real

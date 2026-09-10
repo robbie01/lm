@@ -239,7 +239,7 @@ pub fn write_layout() {
     def!("int-disk", INT_DISK);
     def!("int-soft", INT_SOFT);
 
-    // The blitter takes its whole command from a block of twelve words, and
+    // The blitter takes its whole command from a block of fourteen words, and
     // these are that block's layout - not the register map, which has a gap
     // the block does not. One store of `blt-list` runs it; nothing else in
     // the chip is worth naming on the Lisp side.
@@ -247,9 +247,11 @@ pub fn write_layout() {
     {
         use crate::dev::blit::*;
         def!("blit-list-reg", B_LIST);
+        def!("blit-status-reg", B_STATUS);
         def!("blit-list-size", LIST_WORDS * 4);
         for (i, name) in ["src", "dst", "w", "h", "smod", "dmod",
-                          "val", "op", "x0", "y0", "x1", "y1"]
+                          "val", "op", "x0", "y0", "x1", "y1",
+                          "status", "next"]
             .iter()
             .enumerate()
         {

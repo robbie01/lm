@@ -133,6 +133,11 @@
   ;; reading a pixel back is a load like any other. A cell is alive if it is
   ;; black; the counting is done against the back buffer so that every cell
   ;; sees the same generation.
+  ;;
+  ;; Direct loads and stores into the bitmap, so the blitter's work on it has
+  ;; to have landed first - the window was filled by a blit, and a blit is not
+  ;; done when it returns.
+  (blit-sync)
   (let ((y 1)
         (w *life-w*)
         (h *life-h*)
@@ -410,4 +415,42 @@
     (num-check 'blitter-is-task-context
                (if hw::*in-interrupt* 'in-interrupt 'task) 'task))
   (princ "talking: done (nothing above = all correct)")
+  (newline))
+
+
+;; ---------------------------------------------------------------- blitting
+;; `(blitting)` checks that the blitter is really asynchronous, and that
+;; waiting for it means what it says. The second group is the one that
+;; matters: two blits in a row through one task's command block, which is
+;; what every drawing task does and what the collector does to clear its maps.
+(define (blitting)
+  (let* ((a (alloc-bitmap 256 256))
+         (b (alloc-bitmap 256 256))
+         (pa (%addr-of (bm-pixels a)))
+         (pb (%addr-of (bm-pixels b))))
+    ;; A blit is not done when it returns: read too early and you see the
+    ;; old pixel, which is what real hardware would give you too.
+    (%st-byte! pa 7)
+    (bm-fill-rect a 0 0 256 256 42)
+    (num-check 'not-landed-yet (%ld-byte pa) 7)
+    (blit-sync)
+    (num-check 'landed-after-sync (%ld-byte pa) 42)
+    ;; Back to back through one block. The second commit waits for the
+    ;; first, and the first one's write-back must not mark the second done.
+    (%st-byte! pb 9)
+    (bm-fill-rect a 0 0 256 256 1)
+    (bm-fill-rect b 0 0 256 256 2)
+    (blit-sync)
+    (num-check 'second-of-two-landed (%ld-byte pb) 2)
+    (num-check 'first-of-two-landed (%ld-byte pa) 1)
+    ;; And a big one does not hold the machine up while it runs: the commit
+    ;; is a few hundred cycles, and the transfer happens while others run.
+    (let ((big (alloc-bitmap 1024 768)))
+      (blit-drain)
+      (let ((t0 (%cycles)))
+        (bm-fill-rect big 0 0 1024 768 5)
+        (num-check 'big-commit-is-quick (%< (%- (%cycles) t0) 10000) t))
+      (blit-sync)
+      (num-check 'big-landed (%ld-byte (%addr-of (bm-pixels big))) 5)))
+  (princ "blitting: done (nothing above = all correct)")
   (newline))

@@ -406,11 +406,12 @@ task's setup overwrites the half already written and the task then commits a
 coherent command made of both. The list fixes that by giving each context its
 own memory; a shared block would have had exactly the same race.
 
-**Still open: long blits block interrupts.** A full-screen fill is 786,432
-cycles charged inside one store, and a frame is 333,333. Nothing preempts an
-instruction, so the only fix is a state machine the outer loop advances — which
-means every caller waits for completion, and a spinning waiter and the blit
-would charge the same cycles. A change to what a blit *means*, not a tuning.
+**Fixed: long blits blocked interrupts.** A full-screen fill used to charge
+786,432 cycles inside one store, against a frame of 333,333. The blitter is
+asynchronous now: the commit returns in about 750 cycles, time passes while
+the chip works, and other tasks run meanwhile - four task switches during one
+full-screen fill, measured. See *The blitter becomes a real asynchronous
+device* in docs/drivers.md.
 
 ## Records cost about nine percent of code space
 
