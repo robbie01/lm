@@ -292,6 +292,34 @@ they write, and an extra burst at each end of a row that does not start on a
 burst boundary. The point is that the emulator should predict the FPGA rather
 than flatter it.
 
+### Considered and shelved: composing at scanout
+
+The alternative to copying is not copying: give the display chip a short list
+of where each window's pixels live and what position it occupies, and have it
+read from the right one as it walks each line. The finished image never exists
+in memory. That removes the compositor's traffic entirely - about 94 MB/s of
+the 141 - because the chip has to read every pixel once anyway and compositing
+is a second read plus a write on top.
+
+Shelved, deliberately:
+
+- It is a hardware compositor. That is a much bigger thing to build than a
+  blitter, and it is the first step onto the GPU road rather than a tweak to
+  the display.
+- It does not remove any work. Real parts support a few layers, not arbitrary
+  overlapping windows, so the blitter path has to exist anyway for everything
+  the layers cannot do. It is additive.
+- The real-time constraint is unforgiving in a way copying is not. The chip
+  reads ahead of the beam, and every time a line crosses from one window to
+  the next it has to start reading somewhere else and wait for memory. Too
+  many crossings on one line and the picture tears. A compositor that is late
+  merely drops a frame.
+
+The display stays a plain framebuffer: one block of memory, scanned out in
+order. Revisit only if memory bandwidth turns out to be the binding constraint
+on real hardware, and only after damage-rect compositing has been measured
+there - that is the cheaper answer to the same problem and it already exists.
+
 ### What this does to the software
 
 This is the change that makes a graphics driver *necessary* rather than
