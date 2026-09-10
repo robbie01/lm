@@ -273,18 +273,19 @@ nothing is hot and nothing else depends on the answer.
 vocabulary. Removes the last direct `input-pending` / `input-event` from
 clients, and gives the workbench a reason to stop being the only listener.
 
-**4. The bitmap registry.** In the chip, checked, reported only. Register the
-screen, window bitmaps and the collector's scratch. Run everything and see
-what falls outside.
+**- Bitmaps. Done**, and it took the place of a phase that was going to build
+a registry in the chip. See *a bitmap is a type, not an address*. Nothing
+downstream depends on it any more, which is why the numbering below moved up.
 
-**5. gfx.driver.** Owns the display and the registry. Bitmap allocation and
-freeing move behind it, which is what fixes `window-close`.
+**4. gfx.driver.** Owns the display registers and the screen. Bitmap
+allocation moves behind it, so that a client is handed a bitmap rather than
+taking one - which is the last step needed before the display device can be
+claimed by one task and mean it.
 
-**6. Enforcement on.** Reports become faults, for devices and for the
-registry. This is a one-line change and it is the entire point; everything
-before it is making the machine ready to survive it.
+**5. Enforcement on.** Reports become faults. One line, and the entire point;
+everything before it is making the machine ready to survive it.
 
-**7. The console split.** Raw uart for panics and the collector; a console
+**6. The console split.** Raw uart for panics and the collector; a console
 server for everything else.
 
 ## What this does not fix, and one thing it makes worse
