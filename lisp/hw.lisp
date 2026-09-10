@@ -194,16 +194,58 @@
 ;; hand. A width that does not match the memory it describes is not a drawing
 ;; that looks wrong: the clipping passes and the write lands past the end,
 ;; where the stacks are.
-(defrecord (bitmap bm) addr w h)
+;; The pixels are a byte object and the bitmap holds *the object*, not an
+;; address. That is worth more than it looks:
+;;
+;; - **They are no longer in the pool.** A bitmap used to be `alloc-pool`
+;;   memory, with task control blocks, stacks and blitter command blocks
+;;   allocated either side of it - which is why a rectangle that ran off the
+;;   end did not merely look wrong, it wrote over the scheduler. In object
+;;   space the worst an overrun reaches is another object, and the collector
+;;   notices a damaged header.
+;;
+;; - **The collector frees them.** `window-close` used to hand the pixels back
+;;   with `free-pool` while the compositor might still be reading them. Now the
+;;   bitmap stays alive exactly as long as somebody holds it, which is the
+;;   whole answer rather than a smaller window to be wrong in.
+;;
+;; - **The extent is knowable.** A byte object carries its length in its
+;;   header, so the size of a bitmap is a property of the bitmap and cannot
+;;   disagree with the `w` and `h` beside it. `make-bitmap` checks that once,
+;;   and everything downstream can trust it.
+;;
+;; - **One cannot be forged.** The constructor used to take a raw address, so
+;;   `(make-bitmap 0 9999 9999)` was a legal call that authorised writing over
+;;   the whole machine. There is no way to say that now: the only way to get a
+;;   bitmap is to allocate one.
+;;
+;; None of this would work if objects moved. They do not - this collector
+;; compacts pairs and sweeps objects in place - so an address taken out of a
+;; byte object is good for ever, which is what lets one be handed to the
+;; display register and to the blitter.
+(defrecord (bitmap bm) pixels w h)
 
-(define (make-bitmap addr w h)
+(define (make-bitmap pixels w h)
+  (if (%bytes? pixels)
+      nil
+      (error "make-bitmap: pixels must be a byte object" pixels))
+  (if (%<= (%* w h) (%bytes-length pixels))
+      nil
+      (error "make-bitmap: too small for" w h))
   (let ((b (bm-alloc)))
-    (set-bm-addr! b addr)
+    (set-bm-pixels! b pixels)
     (set-bm-w! b w)
     (set-bm-h! b h)
     b))
 
-(define (alloc-bitmap w h) (make-bitmap (alloc-pool (%* w h)) w h))
+;; Where the pixels are. Raw, and deliberately the only place that says so:
+;; below here it is an address in a command block, above here it is a value
+;; the collector keeps alive.
+(defsubst (bm-addr b) (%addr-of (bm-pixels b)))
+
+;; `make-bytes` zero-fills, so a new window starts black rather than showing
+;; whatever the pool last had in it.
+(define (alloc-bitmap w h) (make-bitmap (make-bytes (%* w h)) w h))
 
 (define *screen* nil)      ; the bitmap currently being displayed
 

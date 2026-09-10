@@ -373,10 +373,20 @@
   (without-preemption (set! *windows* (remove-eq win *windows*)))
   (let ((task (win-task win)))
     (if task (begin (rem-task task) (set-win-task! win nil)) nil))
-  ;; The hole it leaves has to be repainted before its bitmap goes back.
+  ;; The hole it leaves has to be repainted.
+  ;;
+  ;; And the bitmap is left exactly where it is. This used to hand the pixels
+  ;; back with `free-pool` and then null the field, and both halves were
+  ;; wrong: the compositor reads window bitmaps outside any critical section,
+  ;; so it can be part way through this window right now - reading pool memory
+  ;; that has been given away, or asking a null bitmap how wide it is.
+  ;;
+  ;; Now the pixels are a byte object. A compositor holding the old window
+  ;; list draws one more stale frame from a bitmap that is still perfectly
+  ;; valid, the damage above repaints over it, and the collector takes the
+  ;; pixels when the last reference to them goes - which is the whole answer
+  ;; rather than a smaller window in which to be wrong.
   (damage (window-rect win))
-  (if (win-bm win) (free-pool (bm-addr (win-bm win))) nil)
-  (set-win-bm! win nil)
   (wb-update)
   nil)
 

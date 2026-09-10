@@ -128,46 +128,74 @@ the running task, write again to release. Claiming an owned device faults.
 This is itself an MMIO operation, so the rule that governs it is the rule it
 implements.
 
-## The blitter gets a bitmap registry, in the chip
+## The blitter: a bitmap is a type, not an address
 
-Ownership of the *chip* is not enough for the blitter, because the danger is
-not that two tasks program it at once - each has its own command block - but
-that one of them names a destination that is not a bitmap. Owning the chip
-does not stop that; nothing does, today.
+**This part is done.** It replaces an earlier draft of this plan that had the
+*chip* keep a registry of bitmaps and check every command against it. That was
+convoluted and it was not hardware anybody would build. The answer was in
+software and it was smaller.
 
-**The registry.** The graphics driver registers a bitmap with the blitter:
-base, stride, width, height, owner. The chip keeps a small table - sixty-four
-entries is more windows than this machine will have - and checks every command
-against it:
+A bitmap used to be a record of three fixnums - `addr`, `w`, `h` - where
+`addr` came from `alloc-pool`. Two things followed from that, and both were
+bad:
 
-- **The destination must lie inside a registered bitmap whose owner is the
-  running task.** Writing is what corrupts, so writing is what is owned.
-- **The source may be any registered bitmap.** Reading cannot corrupt, and the
-  compositor has to read every window's bitmap to composite it. This asymmetry
-  is what makes compositing work without handing the compositor write access
-  to everybody's windows.
-- Anything else faults, naming the command and the task.
+- **The pixels lived in the pool**, interleaved with task control blocks,
+  stacks and blitter command blocks. A rectangle that ran off the end did not
+  look wrong, it wrote over the scheduler. That is not a colourful way of
+  putting it; it is what happened, for three sessions.
+- **The constructor took a raw address.** `(make-bitmap 0 9999 9999)` was a
+  legal call, and what it returned was a licence to write over the whole
+  machine. Nothing in the type system, such as it is, could tell that from a
+  real bitmap.
 
-Cost: two range checks per blit against a table entry found by the destination
-address - call it ten instructions on a 169-cycle operation, under six per
-cent, and only on the blit path.
+Now the pixels are a **byte object** and the bitmap holds the object:
 
-This is the difference between detecting a wild blit and **making one
-impossible**. `LM_BLIT_GUARD` already does approximately this check in Rust,
-after the fact, off by default, by walking the pool block chain and guessing
-where bitmaps are. The registry is the same idea with the guessing removed and
-the answer enforced.
+    (defrecord (bitmap bm) pixels w h)
+    (define (alloc-bitmap w h) (make-bitmap (make-bytes (%* w h)) w h))
 
-Two things fall out of it for free:
+`make-bitmap` checks that the pixels are a byte object and that `w * h` fits
+inside it, once, at construction. Everything downstream can then trust the
+`w` and `h` beside it, and the existing clipping - which was already correct -
+becomes an argument rather than a hope: a clipped rectangle is inside `w x h`,
+`w x h` is inside the buffer, and the buffer is an object with a header saying
+so.
 
-- The collector's scratch - the mark bitmap and pin map above `fast-base` - is
-  a registered kernel-owned region, and the collector's fills are checked like
-  everything else instead of being a documented exception.
-- **Unregistering a bitmap becomes the synchronisation point that
-  `window-close` is missing.** Today it frees a bitmap the compositor may
-  still be reading, which is an open item. Freeing has to go through the
-  driver to unregister, and the driver is the task that knows whether the
-  compositor is mid-frame.
+What it bought:
+
+- **A bitmap cannot be forged.** The only way to get one is to allocate one.
+- **An overrun is contained.** Object space, not the pool: the worst it
+  reaches is another object, and a damaged object header is something the
+  collector notices and names.
+- **The collector frees them, which fixed a real bug.** `window-close` used to
+  `free-pool` the pixels and null the field. The compositor reads window
+  bitmaps outside any critical section, so it could be part way through that
+  window - reading memory that had just been given away, or asking a null
+  bitmap how wide it was. Both are gone: closing a window now just drops it
+  from the list, a compositor holding the old list draws one more stale frame
+  from a bitmap that is still perfectly valid, and the pixels go when the last
+  reference does. Thirty open-and-close cycles reclaim 2.4 MB and report
+  nothing.
+- **New windows start black** rather than showing whatever the pool last had
+  in them, because `make-bytes` zero-fills and `alloc-pool` did not.
+
+None of this works if objects move. They do not - this collector compacts
+pairs and sweeps objects in place - so an address taken out of a byte object
+is good for ever, which is what lets one be handed to the display register and
+to the blitter. That is a real constraint on the collector now, and it is
+written down in gc.lisp for a different reason: the collector is written in
+the language it collects and cannot move the objects it is standing on.
+
+**What is left.** `bm-at` still hands a raw address to the command block, so
+inside hw.lisp it is still possible to get the arithmetic wrong; that is four
+call sites rather than an open capability. And `make-bitmap` will accept any
+byte object, so a bitmap over some *other* byte object is still expressible -
+a much smaller hole than a bitmap over an arbitrary integer, and it closes by
+making `alloc-bitmap` the only sanctioned way in if it ever matters.
+
+The general form of the lesson is worth keeping, because it applies to every
+peripheral below: **the fix for "this API lets you name something you do not
+own" is usually to make the thing a value with an extent, not to add a
+checker.** The registry was a checker.
 
 ## The uart is the honest exception
 

@@ -154,6 +154,7 @@
 ;; 83 public, out of 165 definitions.
 (export '(
   peek-signed peek-scratch
+  bm-pixels set-bm-pixels! bitmap? bm-alloc
   *blit-list* *gc-blit-list* *in-interrupt* blit-block gc-blit-block blit-go blt-list
   *screen* alloc-pool bm-blit-rect bm-clip bm-fill-rect
   bm-plot bm-point bm-at bm-addr bm-w bm-h bitmap? make-bitmap alloc-bitmap

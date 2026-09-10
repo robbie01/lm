@@ -579,19 +579,20 @@ printing on the build's output and the run's was being read.
 `%ld-fixnum` cannot represent a full machine word. Use `%ld-word` for a raw
 one, or two `%ld-half` loads when the value has to be a fixnum.
 
-## Closing a window frees a bitmap the compositor may still be reading
+## Fixed: closing a window and the compositor reading it
 
-`window-close` takes the window off `*windows*` under Forbid, then frees its
-bitmap. The compositor reads `*windows*` outside any section, so it can be
-holding the old list - the one that still has this window on it - and blit from
-pool memory that has just gone back. Nothing has hit it, because nothing in the
-demos closes a window while the compositor is running.
+`window-close` handed the pixels back with `free-pool` and nulled the field,
+while the compositor reads window bitmaps outside any critical section - so it
+could be part way through that window, reading memory that had just been given
+away, or asking a null bitmap how wide it was.
 
-The Amiga answer is a deferred free: put the block on a list and let the
-compositor release it after a pass in which the window was already gone. A
-Forbid around the compositor's walk would also do it, but the walk is the
-expensive part of the frame and that is exactly the lock that was just taken
-off.
+Both halves are gone, and not by adding a lock. A bitmap's pixels are a byte
+object now rather than a pool allocation, so closing a window drops the window
+from the list and does nothing else: a compositor holding the old list draws
+one more stale frame from a bitmap that is still perfectly valid, the damage
+repaints over it, and the collector takes the pixels when the last reference
+to them goes. See *The blitter: a bitmap is a type, not an address* in
+docs/drivers.md.
 
 ## Images the machine writes itself
 
