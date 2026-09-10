@@ -91,45 +91,66 @@ be a lock. What carries the safety is that the thing a blit names is a *value
 with an extent* rather than an address - see below, where that turned out to
 be the whole answer and is done.
 
-## Enforcement: the machine checks, using s2
+## Enforcement is scoping, not checking
 
-The strong part of this plan, and the part that is only available because of
-what this machine already is.
+An earlier draft of this section proposed a table in the *machine*: one entry
+per device page holding the owning task, checked in `do_load` and `do_store`
+against `s2`, faulting when they disagree. It was cheap - three thousandths of
+one per cent of memory traffic - and it would have worked.
 
-There is no MMU. On an ordinary machine that would end the discussion:
-ownership would be convention, checked in accessors that a determined caller
-can walk around, and unenforceable from an interrupt server or from compiled
-code that predates the rule. Here, **s2 holds the running task**, always, as a
-register - the trap stub saves and restores it with everything else, and
-`LM_WATCH_S2` exists precisely because that invariant is load bearing.
+It was also an MMU. A range check against a per-page permission, keyed on the
+current protection domain. No translation, but the same category, and it buys
+its safety by making this a machine with a supervisor instead of a machine
+where one address space is safe because of what the language will let you say.
+That is a different machine, and not the one being built.
 
-So the machine can answer "who is doing this?" on any instruction, with a
-register read.
+It also contradicted the lesson from the bitmap, written down two sections
+below and then ignored here: **the fix for "this API lets you name something
+you do not own" is to make the thing a value, not to add a checker.**
 
-**The mechanism.** A table in the machine, one entry per device page, holding
-the owning task (a tagged pointer, or zero for the kernel). `do_load` and
-`do_store` already test `is_mmio(a)` and dispatch by page. Add: if the page has
-an owner and `m.x[18]` is not that owner, take a fault naming the device and
-the task. One index and one compare on a path that is three thousandths of one
-per cent of memory traffic.
+So, the same move again, and it turns out most of it is already done.
 
-Zero means "the kernel", and before Exec exists s2 *is* zero, so the boot path
-and the collector are the kernel by construction rather than by exception.
+**A device page is reachable only by naming its address**, and those addresses
+are constants in hw.lisp. Of the seven, four - `sys`, `timer`, `uart`, `disk` -
+are not exported at all: outside that file there is no way to say where they
+are. Three leak exactly one name each:
 
-What this buys over a Lisp-side check in the accessor:
+    gfx     gfx-ctrl     exec.lisp, to turn the vblank interrupt on
+    input   inp-ctrl     exec.lisp, to enable the device
+    blit    blt-list     the store that commits a blit
 
-- It cannot be walked around. Not by `poke`, not by compiled code from an
-  older image, not by an interrupt server, not by a bug that computes a device
-  address by accident.
-- It is checked at the *hardware* boundary, so the report says which device
-  and which task, at the instruction that did it - not three seconds later
-  somewhere unrelated.
-- It costs nothing on any path that is not already talking to a device.
+That is the entire hole. Not "any code can reach any device" - that was true
+of the *idea* of the machine and false of the code, and the difference matters
+because it means there is nothing to build here, only three names to take
+back. And each of the three is taken back by the driver phase that owns that
+chip: `gfx.driver` needs `gfx-ctrl`, `input.driver` needs `inp-ctrl`, and the
+blitter's commit store is one line inside `blit-go`.
 
-**Claiming.** A device register in `sys`: write a device number to claim it for
-the running task, write again to release. Claiming an owned device faults.
-This is itself an MMIO operation, so the rule that governs it is the rule it
-implements.
+**A device becomes a value**, on the bitmap's pattern:
+
+    (defrecord (device dv) name base owner)
+    (define (dev-poke d reg v) ...)   ; checks (%eq? (dv-owner d) (this-task))
+    (define (dev-peek d reg) ...)
+
+One comparison, in the language, raising a Lisp error with a backtrace rather
+than a machine fault - and no way to reach a chip without holding the device
+it belongs to. Claiming sets the owner; `rem-task` releases, so a driver that
+dies does not lock its peripheral out of the machine.
+
+**What this does not catch, honestly.** A wild store - a computed address that
+lands in a device page by accident - goes straight through, where the machine
+check would have caught it. That is the general memory-safety problem, which
+this plan does not solve and did not solve with the table either; a wild store
+into RAM is just as fatal and far more likely. When one is being hunted, that
+is what the Rust-side watches are for.
+
+Which is the line this project keeps arriving at and should probably state
+outright: **the Rust side observes and the language enforces.** `LM_BLIT_GUARD`,
+`LM_WATCH_S2`, `LM_WATCH_ADDR` and the profiler are all off by default and cost
+nothing when off, and between them they have found every hard bug here. None of
+them is load bearing. Putting enforcement down there would make the machine
+depend on its emulator for its semantics, and this machine is supposed to be
+describable without one.
 
 ## The blitter: a bitmap is a type, not an address
 
@@ -256,43 +277,47 @@ this task or its only client.
 
 Each step lands on its own and the machine works after each one.
 
-**0. The table, reporting only.** Device ownership in the machine, claims from
-Lisp, and violations reported rather than faulted - the way `LM_BLIT_GUARD`
-works now. Claim nothing yet. Then run the workbench, the demos and the
-collector, and read the list of who touches what. This is the step that finds
-out whether the catalogue above is complete, and it is cheap.
+**0. The catalogue. Done** - it was a grep, not a runtime table. Four devices
+are already unreachable outside hw.lisp and three leak one name each, listed
+above.
 
-**1. Kernel devices.** Exec claims `sys` and `timer`. Move the few stragglers
-out of hw.lisp. Small, and it proves the mechanism on the least interesting
-device.
+**1. A device is a value.** The `device` record, `dev-peek` and `dev-poke`
+with the owner check, and Exec claiming `sys` and `timer`. Nothing else moves
+yet. Small, and it proves the shape on the two chips nobody argues about.
 
 **2. disk.driver.** The whole model, end to end, on the peripheral where
 nothing is hot and nothing else depends on the answer.
 
 **3. input.driver.** Already a port; this makes it a task with a decode
-vocabulary. Removes the last direct `input-pending` / `input-event` from
-clients, and gives the workbench a reason to stop being the only listener.
+vocabulary, and takes back `inp-ctrl`. Removes the last direct
+`input-pending` / `input-event` from clients.
 
 **- Bitmaps. Done**, and it took the place of a phase that was going to build
 a registry in the chip. See *a bitmap is a type, not an address*. Nothing
 downstream depends on it any more, which is why the numbering below moved up.
 
-**4. gfx.driver.** Owns the display registers and the screen. Bitmap
-allocation moves behind it, so that a client is handed a bitmap rather than
-taking one - which is the last step needed before the display device can be
-claimed by one task and mean it.
+**4. gfx.driver.** Owns the display registers and the screen; takes back
+`gfx-ctrl`. Bitmap allocation moves behind it, so a client is handed a bitmap
+rather than taking one.
 
-**5. Enforcement on.** Reports become faults. One line, and the entire point;
-everything before it is making the machine ready to survive it.
+**5. The blitter's commit store** goes through the device accessor, and `hw`
+stops exporting `blt-list`. One comparison on a 169-cycle operation, and the
+last name is back.
+
+There is no flag day. Each phase takes one address out of circulation and
+leaves the machine strictly harder to misuse than it was; there is no moment
+where reports become faults, because there are no reports.
 
 **6. The console split.** Raw uart for panics and the collector; a console
 server for everything else.
 
 ## What this does not fix, and one thing it makes worse
 
-- **It is not memory protection.** A task can still write anywhere with an
-  ordinary store. This plan closes the peripherals, which are the paths where a
-  small mistake becomes an arbitrary write; it does not close the language.
+- **It is not memory protection, on purpose.** A task can still write anywhere
+  with an ordinary store. Closing that means a supervisor, and the point of
+  this machine is that one address space is safe because of what the language
+  will let you say - so the peripherals are closed by making them values that
+  have to be held, and the language is left open.
 - **Priority inversion.** A driver runs at one priority. A low-priority
   client's request sits in front of a high-priority client's until the driver
   gets to it. Exec has priorities and the port has none. Worth knowing about
