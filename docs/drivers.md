@@ -1,6 +1,7 @@
 # Every peripheral owned by a process
 
-A plan. Nothing here is built yet.
+A plan. One part of it is built - *a bitmap is a type, not an address* - and
+is marked as such below; the rest is not.
 
 The goal is that a peripheral has exactly one owner, that reaching one you do
 not own is impossible rather than merely discouraged, and that the mechanism
@@ -83,10 +84,12 @@ The driver posts an edge to a client port - `notify`, no allocation, safe from
 an interrupt server - and the client wakes on its own signal mask along with
 everything else it is waiting for. Input is already half of this.
 
-**4. Capability-shared: `blit`.**
-Sixty-six times a frame from several tasks at once, into disjoint memory. The
-fast path has to stay direct. Safety comes from a bound the *chip* enforces,
-below.
+**4. Shared, and made safe by its arguments rather than by its owner: `blit`.**
+Sixty-six times a frame, from several tasks at once, into disjoint memory. The
+fast path has to stay direct, so nothing here can be a message and nothing can
+be a lock. What carries the safety is that the thing a blit names is a *value
+with an extent* rather than an address - see below, where that turned out to
+be the whole answer and is done.
 
 ## Enforcement: the machine checks, using s2
 
