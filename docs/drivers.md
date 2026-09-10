@@ -85,11 +85,11 @@ an interrupt server - and the client wakes on its own signal mask along with
 everything else it is waiting for. Input is already half of this.
 
 **4. Shared, and made safe by its arguments rather than by its owner: `blit`.**
-Sixty-six times a frame, from several tasks at once, into disjoint memory. The
-fast path has to stay direct, so nothing here can be a message and nothing can
-be a lock. What carries the safety is that the thing a blit names is a *value
-with an extent* rather than an address - see below, where that turned out to
-be the whole answer and is done.
+Sixty-six times a frame, from several tasks at once, into disjoint memory.
+Safety comes from the thing a blit names being a *value with an extent* rather
+than an address, which is done. Arbitration is a separate question and only
+arises once the chip is genuinely asynchronous, which is a phase of its own
+below.
 
 ## Enforcement is scoping, not checking
 
@@ -221,6 +221,103 @@ peripheral below: **the fix for "this API lets you name something you do not
 own" is usually to make the thing a value with an extent, not to add a
 checker.** The registry was a checker.
 
+## The blitter becomes a real asynchronous device
+
+Today it is not one. `B_STATUS` reads 0 with the comment "always idle:
+transfers are instantaneous": the whole transfer happens inside the store to
+the op register, before the next instruction retires. `B_CTRL` bit 0 arms a
+completion interrupt that would fire after the work was already done, and
+nothing in the system references `bl-ctrl`, `bl-status` or `int-blit`. The chip
+advertises an asynchronous interface that does not work and that nothing uses.
+
+That is worth fixing for a reason beyond tidiness: the target is eventually an
+FPGA SoC, and this is the one part of the machine whose model is not
+predictive of hardware.
+
+### Why keep a blitter at all
+
+Because it is what real parts in this class do. STM32's DMA2D, NXP's PXP and
+Renesas's DRW2D are all 2D blitters shipping in MCUs driving LCDs, and every
+SoC has generic memory-to-memory DMA (ARM PL330, Xilinx AXI CDMA). Large SoCs
+avoid the copy instead, by compositing at scanout with overlay planes in the
+display controller - which is worth wanting later, and does not replace a
+blitter: it does not handle arbitrary z-order over many windows, offscreen
+drawing, or scrolling inside a window.
+
+The argument that matters on this target is not parallelism, it is **bus
+efficiency**. On PSRAM a CPU copy loop pays first-word latency per access; a
+DMA engine amortises it over a burst. The blitter wins on a single-issue
+machine with no cache even when nothing overlaps.
+
+### What overlap actually needs
+
+PSRAM is a single shared port. HyperRAM at 166 MHz DDR x8 is about 332 MB/s
+peak and nearer 200-230 MB/s once latency is paid. If the CPU fetches from the
+same PSRAM, the CPU and the blitter interleave bus cycles and very little real
+overlap happens. Overlap becomes real when the CPU can run without the bus,
+which is a cache in block RAM or code in tightly coupled memory - a CPU
+decision, not a blitter one, and one to make before assuming the overlap is
+there.
+
+At 1024x768 8bpp and 60 Hz the budget is:
+
+    scanout, read                                 47 MB/s
+    full-screen composite, read and write         94 MB/s
+    graphics total                               141 MB/s
+    left for the CPU out of ~220 MB/s             ~80 MB/s
+
+So **damage-rect compositing stops being an optimisation and becomes a
+requirement**. The damage tracking already exists; on real hardware it is what
+makes the design fit.
+
+### The three changes
+
+**1. The command block becomes a descriptor with a `next` pointer.** The
+register is already called `blt-list` and already takes the address of a block
+in memory; make the chip walk the chain rather than run one block. This is
+what scatter-gather DMA does, and it turns queueing into a hardware property:
+a driver appends a descriptor and the chip picks it up without the CPU being
+involved at all.
+
+**2. The chip becomes a state machine that advances with the cycle counter.**
+`B_STATUS` reads busy while a chain is running, `INT_BLIT` fires when it drains.
+No interlock on the destination - reading a region the blitter is writing
+returns whatever is there, the same as real hardware - and keeping clients off
+that region is the driver's job, not the chip's.
+
+**3. The cost model becomes bandwidth rather than a flat byte per cycle.**
+`rows x (setup + bytes_per_row / bytes_per_cycle)`, with the read-modify-write
+operations - XOR, AND, MASK - costing about double because they read before
+they write, and an extra burst at each end of a row that does not start on a
+burst boundary. The point is that the emulator should predict the FPGA rather
+than flatter it.
+
+### What this does to the software
+
+This is the change that makes a graphics driver *necessary* rather than
+merely tidy. An asynchronous chip needs an owner to run the queue:
+
+- The driver owns the descriptor chain and appends to it.
+- Completion raises `INT_BLIT`; the server marks descriptors done and signals
+  whichever clients were waiting.
+- A client that does not need the pixels yet does not wait at all. A client
+  that does waits on its own signal, along with everything else it waits on.
+
+The cost works because clients queue rather than call. Measured now, a
+compositor blit averages 2,310,890 / 66 = about 35,000 cycles:
+
+    request per blit, blocking      9,680 cycles     28%
+    send per blit, queued           ~2,500 cycles     8%
+
+and the queued form blocks once a frame instead of sixty-six times, in
+exchange for real overlap - the task computing the next rectangle while the
+chip moves the last one.
+
+`bm-blit-rect` and friends keep their shape. What changes underneath is that
+filling a descriptor and appending it replaces filling a block and storing its
+address, and the fill is still a task's own memory, so the per-task command
+block argument is unchanged.
+
 ## The uart is the honest exception
 
 It is used by the collector, by the panic path, and by the REPL, and it has to
@@ -296,19 +393,23 @@ vocabulary, and takes back `inp-ctrl`. Removes the last direct
 a registry in the chip. See *a bitmap is a type, not an address*. Nothing
 downstream depends on it any more, which is why the numbering below moved up.
 
-**4. gfx.driver.** Owns the display registers and the screen; takes back
-`gfx-ctrl`. Bitmap allocation moves behind it, so a client is handed a bitmap
-rather than taking one.
+**4. The blitter becomes asynchronous.** Descriptor chain, a state machine
+that advances with cycles, a bandwidth cost model. Software keeps calling
+`bm-blit-rect`, which now appends a descriptor and returns; the only caller
+that has to change immediately is anything that reads pixels it just wrote.
 
-**5. The blitter's commit store** goes through the device accessor, and `hw`
-stops exporting `blt-list`. One comparison on a 169-cycle operation, and the
-last name is back.
+**5. gfx.driver.** Owns the display registers, the screen and the descriptor
+chain; takes back `gfx-ctrl`. Bitmap allocation moves behind it, so a client is
+handed a bitmap rather than taking one. This is where queued blits get their
+completion signals.
+
+**6. The blitter's chain register** goes through the device accessor, and `hw`
+stops exporting `blt-list`. The last name is back.
 
 There is no flag day. Each phase takes one address out of circulation and
-leaves the machine strictly harder to misuse than it was; there is no moment
-where reports become faults, because there are no reports.
+leaves the machine strictly harder to misuse than it was.
 
-**6. The console split.** Raw uart for panics and the collector; a console
+**7. The console split.** Raw uart for panics and the collector; a console
 server for everything else.
 
 ## What this does not fix, and one thing it makes worse
