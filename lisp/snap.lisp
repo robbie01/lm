@@ -21,7 +21,7 @@
 ;; An image built by a rebuild starts from the beginning rather than resuming:
 ;; the boot list the rebuild recorded is exactly what it has to run.
 (define (save-rebuilt)
-  (%raw-st! lg-bootlist (reverse compiler:*boot-thunks*))
+  (%st-word! lg-bootlist (reverse compiler:*boot-thunks*))
   (save-image-with (%symbol-value 'kickstart)))
 
 (define (put-region hdr i base len start)
@@ -43,7 +43,7 @@
   ;; indivisible. So the header block is claimed first and the five regions are
   ;; written out by hand rather than through a list.
   (let ((hdr (alloc-pool 512))
-        (saved-top (%raw-ld lg-toplevel))
+        (saved-top (%ld-word lg-toplevel))
         (written 0))
     (without-interrupts
       ;; Collect before saving, and blank what was reclaimed. Whatever the
@@ -54,7 +54,7 @@
       (gc-for-image)
       ;; A resumed image re-enters through here rather than through the boot
       ;; list: every global it would have set is already set.
-      (%raw-st! lg-toplevel top)
+      (%st-word! lg-toplevel top)
       ;; Five regions: low memory, the Exec pool, code, pairs, objects.
       (let* ((l0 4096)
              (l1 (%- (%global lg-poolptr) pool-base))
@@ -83,7 +83,7 @@
         ;; The header goes out last, so a run that is interrupted leaves a file
         ;; that simply does not have a valid header rather than a wrong one.
         (disk-write hdr 0 1)
-        (%raw-st! lg-toplevel saved-top)
+        (%st-word! lg-toplevel saved-top)
         nil))
     (emit-str "saved ")
     (emit-str (number->string written))
@@ -94,7 +94,7 @@
 (define (resume-kickstart)
   ;; Everything the boot list would set up is already in the image. Exec is
   ;; rebuilt, because the task that saved is not the task that resumes.
-  (%raw-st! lg-traphook (%symbol-value 'handle-trap))
+  (%st-word! lg-traphook (%symbol-value 'handle-trap))
   (exec-init)
   (exec-start)
   (if *resume-fn* (%funcall *resume-fn*) nil)

@@ -14,7 +14,7 @@ use crate::rvenc::*;
 /// the length in `*asm-len*`.
 const LISP_SIDE: &str = r#"
 (in-package asm)
-(define a (asm-new))
+(define a (make-assembler))
 (i-addi a $a0 $a1 -5)
 (i-addi a $a0 $a1 2047)
 (i-addi a $a0 $a1 -2048)

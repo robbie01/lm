@@ -188,13 +188,13 @@ fn cases() -> Vec<Case> {
         Case("(eq? (symbol-package 'car) (find-package \"lm\"))", "t"),
 
         // ---- regions: what a window is allowed to draw on ----
-        Case("(hw:rect-intersect (hw:rect 0 0 10 10) (hw:rect 5 5 10 10))", "(5 5 5 5)"),
+        Case("(hw:rect-intersect (hw:rect 0 0 10 10) (hw:rect 5 5 10 10))", "#[rect 5 5 5 5]"),
         Case("(hw:rect-intersect (hw:rect 0 0 10 10) (hw:rect 20 0 10 10))", "nil"),
         // A hole in the middle leaves four pieces; a hole that covers leaves
         // none; a hole that misses leaves the whole thing.
         Case("(length (hw:rect-subtract (hw:rect 0 0 100 100) (hw:rect 40 40 20 20)))", "4"),
         Case("(hw:rect-subtract (hw:rect 0 0 10 10) (hw:rect 0 0 10 10))", "nil"),
-        Case("(hw:rect-subtract (hw:rect 0 0 10 10) (hw:rect 50 50 1 1))", "((0 0 10 10))"),
+        Case("(hw:rect-subtract (hw:rect 0 0 10 10) (hw:rect 50 50 1 1))", "(#[rect 0 0 10 10])"),
         // The area has to add up: subtracting a rectangle removes exactly its
         // own area and no more, which is the property the whole thing rests on.
         Case(
@@ -211,10 +211,10 @@ fn cases() -> Vec<Case> {
         // Two of the same shape, with the initial values the declaration gave
         // them, and no way for one to see the other's.
         Case(
-            "(let ((a (eyes:eyes-make)) (b (eyes:eyes-make)))              (eyes:set-eyes-rad! a 5) (list (eyes:eyes-rad a) (eyes:eyes-rad b)))",
+            "(let ((a (eyes:make-eyes)) (b (eyes:make-eyes)))              (eyes:set-eyes-rad! a 5) (list (eyes:eyes-rad a) (eyes:eyes-rad b)))",
             "(5 20)",
         ),
-        Case("(eyes:eyes? (eyes:eyes-make))", "t"),
+        Case("(eyes:eyes? (eyes:make-eyes))", "t"),
         Case("(eyes:eyes? (vector 1 2))", "nil"),
         // An accessor checks which record it has, not merely that it has one:
         // a rastport where a pair of eyes was wanted is a trap and not a
@@ -392,10 +392,11 @@ pub fn run_one(l: &mut Lisp, src: &str) -> String {
         }
         // a7 carries the ecall code as a plain word, the way the compiler
         // loads it and the way sys.lisp reads it back.
+        use crate::mach::{E_ARITY, E_OOM, E_RECORD};
         let what = match (cause, a7) {
-            (11, 1) => "arity error".to_string(),
-            (11, 3) => "out of memory".to_string(),
-            (11, 6) => "wrong record".to_string(),
+            (11, E_ARITY) => "arity error".to_string(),
+            (11, E_OOM) => "out of memory".to_string(),
+            (11, E_RECORD) => "wrong record".to_string(),
             (11, n) => format!("ecall {n}"),
             _ => format!("{} (mtval {tval:#x})", run::cause_name(cause)),
         };

@@ -41,6 +41,16 @@
   alloc-object *object-allocator* *collector*
   ;; the memory map and object layout, generated from the Rust side
   clo-code clo-entry clo-free code-base code-lits code-name cons-base cons-limit dev-blit dev-disk dev-gfx dev-input dev-sys dev-timer dev-uart fast-base imm-unbound int-input int-soft int-vblank lg-bootlist lg-code-end lg-code-free lg-code-free-n lg-code-ptr lg-code-reg lg-code-reg-n lg-cons-free lg-cons-free-n lg-cons-ptr lg-cons-run lg-cons-run-end lg-errhandler lg-gccount lg-gchook lg-imgentry lg-obarray lg-obj-end lg-obj-free-n lg-obj-ptr lg-package lg-packages lg-pool-free lg-poolend lg-poolptr lg-refill lg-roots lg-scratch0 lg-scratch1 lg-stackbot lg-stacktop lg-startup lg-stub-hi lg-stub-lo lg-symcount lg-symlist lg-toplevel lg-traphook lg-trapsave mmio-base obj-base obj-bins obj-bin-count obj-limit pkg-name pkg-slots pkg-tag pkg-use pool-base pool-limit sym-exported sym-flags sym-function sym-macro sym-name sym-package sym-plist sym-slots sym-value t-bytes t-closure t-code t-float t-free t-record t-string t-symbol t-vector
+  ;; the blitter's command block and the ecall codes, generated with the rest
+  ctx-words ctx-bytes
+  reg-zero reg-ra reg-sp reg-gp reg-tp reg-t0 reg-t1 reg-t2
+  reg-s0 reg-s1 reg-a0 reg-a1 reg-a2 reg-a3 reg-a4 reg-a5
+  reg-a6 reg-a7 reg-s2 reg-s3 reg-s4 reg-s5 reg-s6 reg-s7
+  reg-s8 reg-s9 reg-s10 reg-s11 reg-t3 reg-t4 reg-t5 reg-t6
+  bl-src bl-dst bl-w bl-h bl-smod bl-dmod bl-val bl-op bl-x0 bl-y0 bl-x1 bl-y1
+  blit-list-reg blit-list-size
+  op-copy op-fill op-xor op-and op-or op-mask op-line op-add
+  trap-arity trap-type trap-oom trap-error trap-reschedule trap-record
   %* %+ %- %/ %< %<= %= %> %>= %addr-of %alloc-code %alloc-pool %apply %ash
   %bit-ref %bit-set! %min %max %popcount
   %bytes-length %bytes-ref %bytes-set! %bytes? %car %cdr %char->int %char?
@@ -48,19 +58,19 @@
   %enable %enable-timer %eq? %error %eval %fixnum? %float? %flush
   %fluid-value %set-fluid-value!
   %frame-pointer %from-addr %funcall %gensym %global %halt %this-task %set-this-task! %int->char
-  %intern %ld16 %ld32 %ld8 %logand %logior %lognot %logxor %lsh %macro?
+  %intern %ld-half %ld-fixnum %ld-byte %logand %logior %lognot %logxor %lsh %macro?
   %macroexpand-1 %make-bytes %make-string %make-vector %mod %newline %null?
-  %obj-len %obj-type %object? %raw-ld %raw-st! %read-file
+  %obj-len %obj-type %object? %ld-word %st-word! %read-file
   %enable-after-trap %record? %record-ref %record-set!
   %reload-cons-run %rem %restore-interrupts %set-car! %set-cdr!
   %set-context
   %set-global! %set-slot! %set-symbol-flags! %set-symbol-function!
-  %set-symbol-plist! %set-symbol-value! %slot %st16! %st32! %st8!
+  %set-symbol-plist! %set-symbol-value! %slot %st-half! %st-fixnum! %st-byte!
   %stack-pointer %string-length %string-ref %string-set! %string?
   %symbol-flags %symbol-function %symbol-name %symbol-plist %symbol-value
   %symbol? %sync-cons-run %t0 %v %vector-length %vector-ref %vector-set!
   %vector? %wait-for-input %write &optional &rest * *gensym-count* *in*
-  *out* *unbound* *wait* + - / /= 1+ 1- < <= = > >= abs add2 alist->table
+  *out* *unbound* *await* + - / /= 1+ 1- < <= = > >= abs add2 alist->table
   all-packages and any append append-map append2 apply apply-list ash
   assert assoc assq atom? await-char begin bit-set? boolean? bytes-length
   bytes-ref bytes-set! bytes? caadr caar cadddr caddr cadr car case cdadr
@@ -77,6 +87,7 @@
   *record-shapes* *record-inline-hook*
   digit->int display display-to-string do dolist dotimes else emit-ch
   emit-code-label emit-name emit-str eq-hash eq? equal? eqv? error even?
+  clamp isqrt
   every export export-symbol! expt filter find-package find-symbol-in
   find-visible first fixnum? fold fold-right for-each funcall function? gcd
   gensym gensym-1 get get-char identity if if-let in-package incf
@@ -99,7 +110,7 @@
   set-package-by-name define-package-by-name package-designator
   remove-eq reverse second set! set-car! set-cdr! set-current-package!
   set-package-use! set-symbol-function! set-symbol-value! setf sort space
-  stream-get stream-put stream-wait string string->list string->number
+  stream-get stream-put stream-await string string->list string->number
   string->symbol string-append string-downcase string-hash string-index
   string-length string-ref string-set! string-upcase string<? string=?
   string? sub2 substring symbol->string symbol-count symbol-exported?
@@ -132,11 +143,10 @@
 (in-package hw)
 ;; 83 public, out of 165 definitions.
 (export '(
-  *blit-list* blit-list-size
+  *blit-list* blit-block blit-go blt-list
   *screen* *screen-h* *screen-w* alloc-pool bm-blit-rect bm-clip bm-fill-rect
   bm-plot bm-point make-bitmap-rastport make-rastport-on rp-bitmap
-  rp-bitmap-h rp-bitmap-w rp-retarget! blit-rect blt-dmod blt-dst blt-val op-fill
-  blt-h blt-op blt-smod blt-src blt-w clamp clear-screen disk-write
+  rp-bitmap-h rp-bitmap-w rp-retarget! blit-rect clear-screen disk-write
   draw-circle draw-line ev-buttondown ev-buttonup ev-keydown ev-mousemove
   *screen-rp* screen-rastport make-rastport rastport?
   rp-origin-x rp-origin-y rp-region
@@ -144,13 +154,13 @@
   screen-blit-rect rect rect-x rect-y rect-w rect-h rect-x2 rect-y2 rect-ok?
   rect-intersect rect-contains? rect-subtract region-subtract-rect region-area
   region-intersect-rect region-subtract
-  event-ascii fill-circle isqrt
+  event-ascii fill-circle check-colour
   attach-screen event-kind fill-rect free-pool gfx-ctrl gfx-on gfx-vbirq
   inp-ctrl
   set-colour rgb
   input-event
   input-pending int-ack int-disable int-enable int-pending int-raise millis
-  mouse-x mouse-y op-copy open-screen peek peek8 plot poke poke8
+  mouse-x mouse-y open-screen peek peek8 plot poke poke8
   pool-free-bytes pool-tag pool-used random screen-height screen-sync
   screen-width
   timer-never timer-set-in vblank-count
@@ -164,7 +174,7 @@
   ;; s3..s11 are where a leaf function keeps its locals, and nothing else in
   ;; the machine touches them.
   $s3 $s4 $s5 $s6 $s7 $s8 $s9 $s10 $s11 asm-code-object asm-gensym-label asm-label asm-len
-  asm-literal asm-new asm-origin asm-place asm-place-at asm-buf asm-fixups
+  asm-literal make-assembler asm-origin asm-place asm-place-at asm-buf asm-fixups
   asm-labels asm-nlits asm-set-len! asm-set-origin! csr-cycle
   csr-mcause csr-mepc csr-mie csr-mscratch csr-mstatus csr-mtval csr-mtvec
   i-add i-addi i-addi-w i-and i-andi i-beq i-beqz i-bge i-blt i-bltu i-bne
@@ -192,7 +202,7 @@
 ;; 11 public, out of 100 definitions.
 (export '(
   *boot-thunks* add-boot-thunk compile-file-forms compile-function
-  compile-top setup-intrinsics trap-arity
+  compile-top setup-intrinsics
   trap-error trap-oom trap-type
 ))
 
@@ -205,7 +215,8 @@
   int-external int-software int-timer kickstart macro-form? print-backtrace
   rebuild rebuild-end record-initialiser register-macro repl
   resume-kickstart
-  start-repl system-name top-level-form trap-reschedule
+  ctx-pc ctx-reg trap-reg trap-raw
+  start-repl system-name top-level-form
 ))
 
 (in-package exec)
@@ -215,7 +226,7 @@
   ;; and there is no section yet that cannot be lexical - which is the only
   ;; thing that would earn a raw pair its place, the way `wait` earns one for
   ;; the interrupt state.
-  add-task cause ctx-bytes exec-init exec-start
+  add-task cause exec-init exec-start
   ;; handle-interrupt and switch-tasks are the trap handler's, and the trap
   ;; handler is in sys: exported to one caller, not to applications.
   handle-interrupt switch-tasks
@@ -255,7 +266,7 @@
 (in-package eyes)
 ;; 13 public, out of 16 definitions.
 (export '(
-  eyes eyes? eyes-make look-at
+  eyes eyes? make-eyes look-at
   eyes-window eyes-rad eyes-look-x eyes-look-y
   set-eyes-look-x! set-eyes-look-y! set-eyes-rad!
 ))

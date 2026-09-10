@@ -22,6 +22,10 @@
   (px2 -1) (py2 -1)            ; when nothing has moved
   (look-x -1) (look-y -1))     ; -1 -1 means follow the mouse
 
+;; One pair of eyes, not yet looking at anything and not yet in a window.
+;; `(eyes)` below is the application; this is the record it is built on.
+(define (make-eyes) (eyes-alloc))
+
 ;; ---------------------------------------------------------------- geometry
 ;; Recomputed rather than remembered, because the window moves when it is
 ;; dragged and the eyes have to go with it.
@@ -140,7 +144,7 @@
   ;; A window, a task, and the state that belongs to this pair of eyes. Both
   ;; the refresh callback and the task's own body close over the record, which
   ;; is the whole of how they know which pair they are.
-  (let* ((e (eyes-make))
+  (let* ((e (eyes-alloc))
          (n (length opts))
          (w (if (%> n 0) (%car opts) 170))
          (h (if (%> n 1) (cadr opts) 130))

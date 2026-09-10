@@ -9,10 +9,10 @@
 (in-package hw)
 
 (define (dev-addr dev reg) (%+ mmio-base (%+ (%lsh dev 12) reg)))
-(define (peek a) (%ld32 a))
-(define (poke a v) (%st32! a v))
-(define (peek8 a) (%ld8 a))
-(define (poke8 a v) (%st8! a v))
+(define (peek a) (%ld-fixnum a))
+(define (poke a v) (%st-fixnum! a v))
+(define (peek8 a) (%ld-byte a))
+(define (poke8 a v) (%st-byte! a v))
 
 ;; ---------------------------------------------------------------- system
 (define sys-halt (dev-addr dev-sys #x00))
@@ -174,19 +174,11 @@
 (define (point x y) (bm-point *screen* *screen-w* *screen-h* x y))
 
 ;; ---------------------------------------------------------------- blitter
-(define blt-src (dev-addr dev-blit #x00))
-(define blt-dst (dev-addr dev-blit #x04))
-(define blt-w (dev-addr dev-blit #x08))
-(define blt-h (dev-addr dev-blit #x0c))
-(define blt-smod (dev-addr dev-blit #x10))
-(define blt-dmod (dev-addr dev-blit #x14))
-(define blt-val (dev-addr dev-blit #x18))
-(define blt-op (dev-addr dev-blit #x1c))
-(define blt-x0 (dev-addr dev-blit #x24))
-(define blt-y0 (dev-addr dev-blit #x28))
-(define blt-x1 (dev-addr dev-blit #x2c))
-(define blt-y1 (dev-addr dev-blit #x30))
-(define blt-list (dev-addr dev-blit #x38)) ; the address of a command block
+;; The one register worth naming: the address of a command block. The chip
+;; has a full set of parameter registers too, and programming through them
+;; takes six stores that something has to hold off - which is what the block
+;; exists to avoid, so nothing here reaches for them.
+(define blt-list (dev-addr dev-blit blit-list-reg))
 
 ;; ---------------------------------------------------------------- commands
 ;; The blitter takes its whole command from a block in memory, in one store, so
@@ -199,20 +191,6 @@
 ;; So every task has a block of its own, swapped in by the scheduler the way
 ;; `*out*` and the current package are, and interrupt servers have one more.
 ;; Two contexts are never half way through the same block.
-(define bl-src 0)
-(define bl-dst 4)
-(define bl-w 8)
-(define bl-h 12)
-(define bl-smod 16)
-(define bl-dmod 20)
-(define bl-val 24)
-(define bl-op 28)
-(define bl-x0 32)
-(define bl-y0 36)
-(define bl-x1 40)
-(define bl-y1 44)
-(define blit-list-size 48)
-
 (define *blit-list* 0)
 
 ;; The collector clears its bit maps with the blitter, and that can happen
@@ -227,14 +205,6 @@
   (poke blt-list b)
   nil)
 
-(define op-copy 0)
-(define op-fill 1)
-(define op-xor 2)
-(define op-and 3)
-(define op-or 4)
-(define op-mask 5)
-(define op-line 6)
-(define op-add 7)
 
 
 ;; Everything that touches the bitmap clips to it first. The bitmap is raw
@@ -313,11 +283,16 @@
 ;; the bitmap it actually owns - its rectangle, less the rectangles of every
 ;; window in front of it - and subtracting one rectangle from another is the
 ;; only operation needed to work that out.
-(define (rect x y w h) (list x y w h))
-(define (rect-x r) (%car r))
-(define (rect-y r) (cadr r))
-(define (rect-w r) (caddr r))
-(define (rect-h r) (cadddr r))
+(defrecord rect x y w h)
+
+(define (rect x y w h)
+  (let ((r (rect-alloc)))
+    (set-rect-x! r x)
+    (set-rect-y! r y)
+    (set-rect-w! r w)
+    (set-rect-h! r h)
+    r))
+
 (define (rect-x2 r) (%+ (rect-x r) (rect-w r)))
 (define (rect-y2 r) (%+ (rect-y r) (rect-h r)))
 (define (rect-ok? r) (if (%> (rect-w r) 0) (%> (rect-h r) 0) nil))
@@ -410,7 +385,7 @@
 (define *screen-rp* nil)
 
 (define (make-rastport-on bm bw bh ox oy clip)
-  (let ((r (rp-make)))
+  (let ((r (rp-alloc)))
     (set-rp-bitmap! r bm)
     (set-rp-bitmap-w! r bw)
     (set-rp-bitmap-h! r bh)
@@ -450,7 +425,17 @@
   (set-rp-origin-x! r x)
   (set-rp-origin-y! r y))
 
-(define (clamp v lo hi) (if (%< v lo) lo (if (%> v hi) hi v)))
+;; A colour is a byte, and that is checked wherever one comes in. It used to
+;; be that a negative number meant "no background" to `draw-char`, so a colour
+;; arrived at by bad arithmetic was a picture nobody could account for rather
+;; than a complaint at the door. `nil` says that now, and a number that is not
+;; a colour says so here.
+(define (check-colour c)
+  (if (%fixnum? c)
+      (if (%>= c 0) (if (%< c 256) c (bad-colour c)) (bad-colour c))
+      (bad-colour c)))
+
+(define (bad-colour c) (error "not a colour" c))
 
 ;; ---------------------------------------------- drawing, through a rastport
 ;; The three primitives everything else is built out of. Each shifts by the
@@ -519,18 +504,6 @@
     (poke (%+ b bl-y1) y1)
     (poke (%+ b bl-val) c)
     (blit-go b op-line))))
-
-;; Integer square root, by Newton. Wanted by anything that has to turn a
-;; distance into a length, which on a machine with no floats is more things
-;; than you would think.
-(define (isqrt n)
-  (if (%< n 2)
-      (if (%< n 0) 0 n)
-      (let ((x n) (y (%lsh (%+ n 1) -1)))
-        (while (%< y x)
-          (set! x y)
-          (set! y (%lsh (%+ x (%/ n x)) -1)))
-        x)))
 
 ;; A filled circle, one scanline at a time. fill-rect goes through the
 ;; blitter, so a circle costs two device pokes a row rather than a poke a
@@ -636,15 +609,15 @@
 (define pool-tag #x1feeded)     ; not a pool address, so it cannot be a link
 (define pool-min 24)            ; a free block must hold its size and its link
 
-(define (pool-size b) (%ld32 b))
-(define (pool-next b) (%ld32 (%+ b 4)))
-(define (pool-set-size! b n) (%st32! b n))
-(define (pool-set-next! b n) (%st32! (%+ b 4) n))
+(define (pool-size b) (%ld-fixnum b))
+(define (pool-next b) (%ld-fixnum (%+ b 4)))
+(define (pool-set-size! b n) (%st-fixnum! b n))
+(define (pool-set-next! b n) (%st-fixnum! (%+ b 4) n))
 
 (define (pool-zero p n)
   (let ((i 0))
     (while (%< i n)
-      (%st32! (%+ p i) 0)
+      (%st-fixnum! (%+ p i) 0)
       (set! i (%+ i 4)))))
 
 ;; Carve a fresh block off the top, for when nothing on the free list fits.
@@ -694,14 +667,14 @@
               (if found found (let ((n (pool-extend need)))
                                 (pool-set-size! n need)
                                 n)))))
-    (%st32! (%+ b 4) pool-tag)
+    (%st-fixnum! (%+ b 4) pool-tag)
     b)))
 
 (define (free-pool p)
   ;; Insert in address order, joining up with either neighbour that touches.
   (without-interrupts
   (let ((b (%- p 8)))
-    (if (%= (%ld32 (%+ b 4)) pool-tag)
+    (if (%= (%ld-fixnum (%+ b 4)) pool-tag)
         nil
         (error "free-pool: not an allocated block" p))
     (let ((size (pool-size b))

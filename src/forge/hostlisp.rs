@@ -958,25 +958,25 @@ impl<'a> Lisp<'a> {
             }
 
             // ---- raw memory: the assembler and the kernel live here ----
-            "%ld8" => {
+            "%ld-byte" => {
                 need!(1);
                 fix(self.h.m.peek8(n!(0) as u32) as i32)
             }
-            "%ld16" => {
+            "%ld-half" => {
                 need!(1);
                 fix(self.h.m.peek16(n!(0) as u32) as i32)
             }
-            "%ld32" => {
+            "%ld-fixnum" => {
                 need!(1);
                 let w = self.h.m.peek32(n!(0) as u32);
                 fix(w as i32)
             }
-            "%st8!" => {
+            "%st-byte!" => {
                 need!(2);
                 self.h.m.poke8(n!(0) as u32, n!(1) as u8);
                 a[1]
             }
-            "%st16!" => {
+            "%st-half!" => {
                 need!(2);
                 let addr = n!(0) as u32;
                 let v = n!(1) as u32;
@@ -984,7 +984,7 @@ impl<'a> Lisp<'a> {
                 self.h.m.poke8(addr + 1, (v >> 8) as u8);
                 a[1]
             }
-            "%st32!" => {
+            "%st-fixnum!" => {
                 need!(2);
                 self.h.m.poke32(n!(0) as u32, n!(1) as u32);
                 a[1]
@@ -997,11 +997,11 @@ impl<'a> Lisp<'a> {
             }
             // Read and write a word without retagging, for moving tagged
             // values through raw addresses.
-            "%raw-ld" => {
+            "%ld-word" => {
                 need!(1);
                 self.h.m.peek32(n!(0) as u32)
             }
-            "%raw-st!" => {
+            "%st-word!" => {
                 need!(2);
                 self.h.m.poke32(n!(0) as u32, a[1]);
                 a[1]
@@ -1372,15 +1372,15 @@ pub static PRIMS: &[(&str, u32)] = &[
     ("%set-slot!", 3),
     ("%record-ref", 2),
     ("%record-set!", 3),
-    ("%ld8", 1),
-    ("%ld16", 1),
-    ("%ld32", 1),
-    ("%st8!", 2),
-    ("%st16!", 2),
-    ("%st32!", 2),
+    ("%ld-byte", 1),
+    ("%ld-half", 1),
+    ("%ld-fixnum", 1),
+    ("%st-byte!", 2),
+    ("%st-half!", 2),
+    ("%st-fixnum!", 2),
     ("%ld32u", 1),
-    ("%raw-ld", 1),
-    ("%raw-st!", 2),
+    ("%ld-word", 1),
+    ("%st-word!", 2),
     ("%stack-pointer", 0),
     ("%frame-pointer", 0),
     ("%wait-for-input", 0),

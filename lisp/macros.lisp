@@ -214,9 +214,9 @@
           ((memq head '(get)) `(put ,(car args) ,(cadr args) ,val))
           ((memq head '(symbol-value %symbol-value))
            `(%set-symbol-value! ,(car args) ,val))
-          ((memq head '(peek32 %ld32)) `(%st32! ,(car args) ,val))
-          ((memq head '(peek8 %ld8)) `(%st8! ,(car args) ,val))
-          ((memq head '(peek16 %ld16)) `(%st16! ,(car args) ,val))
+          ((memq head '(peek32 %ld-fixnum)) `(%st-fixnum! ,(car args) ,val))
+          ((memq head '(peek8 %ld-byte)) `(%st-byte! ,(car args) ,val))
+          ((memq head '(peek16 %ld-half)) `(%st-half! ,(car args) ,val))
           (else (error "setf does not know how to write to" head)))))
 
 ;; ---------------------------------------------------------------- misc sugar
@@ -245,8 +245,14 @@
 ;; Slot 0 of a record is a symbol saying what it is; the rest are named
 ;; fields, and this is where those names are written down. Once:
 ;;
-;;   (defrecord stream put get wait)
-;;     -> stream-slots, stream-make, stream?, stream-put, set-stream-put!, ...
+;;   (defrecord stream put get await)
+;;     -> stream-slots, stream-alloc, stream?, stream-put, set-stream-put!, ...
+;;
+;; `<prefix>alloc` is the allocator, not the constructor: it hands back a
+;; record of the right size with the right tag and the declared initial
+;; values, and whatever else making one of these means belongs in a
+;; `make-<type>` written by hand. There is one public spelling for that and
+;; this is not it.
 ;;   (defrecord (rastport rp) bm bw bh org-x org-y clip)
 ;;     -> rp-bm and friends, for a type name longer than its fields
 ;;   (defrecord (node ln open) succ pred pri name)
@@ -357,7 +363,7 @@
                    (list 'if (list '%record? 'x)
                          (list '%eq? (list '%slot 'x 0) (list 'quote type))
                          nil))
-             (list 'define (list (intern-in pkg (string-append prefix "make")))
+             (list 'define (list (intern-in pkg (string-append prefix "alloc")))
                    (append (list 'let (list (list 'r (list 'make-record n
                                                            (list 'quote type)))))
                            (append body (list 'r)))))))

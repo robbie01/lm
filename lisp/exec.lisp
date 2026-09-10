@@ -57,7 +57,7 @@
 (defrecord (exec-list list) head tail)
 
 (define (new-list)
-  (let ((l (list-make))
+  (let ((l (list-alloc))
         (h (make-node 'list-head))
         (tl (make-node 'list-tail)))
     (set-list-head! l h)
@@ -200,18 +200,6 @@
 ;; Word 0 is the pc, words 1..31 are x1..x31. This is the block the trap stub
 ;; saves into and restores from, so a task's context and a trap frame are the
 ;; same thing.
-(define ctx-bytes 128)
-(define (ctx-pc c) (%+ c 0))
-(define (ctx-reg c n) (%+ c (%* 4 n)))
-(define reg-ra 1)
-(define reg-sp 2)
-(define reg-gp 3)
-(define reg-tp 4)
-(define reg-t0 5)
-(define reg-t1 6)
-(define reg-s2 18)
-(define reg-a0 10)
-(define reg-a7 17)
 
 ;; ---------------------------------------------------------------- critical
 ;; Two ways to be atomic, and which one you want depends on who else touches
@@ -278,7 +266,6 @@
 ;; ---------------------------------------------------------------- scheduler
 ;; A reschedule is asked for with an ecall, so that the switch happens inside
 ;; the trap handler where the whole register set has already been saved.
-(define trap-reschedule 5)
 
 (define (reschedule) (%ecall trap-reschedule))
 
@@ -306,7 +293,7 @@
 (define (initial-binds)
   (list (%cons '*out* *out*)
         (%cons '*in* *in*)
-        (%cons '*wait* *wait*)
+        (%cons '*await* *await*)
         (%cons '*peeked* nil)
         (%cons '*repl-restart* nil)
         (%cons 'package (current-package))
@@ -360,6 +347,10 @@
 ;; ---------------------------------------------------------------- signals
 (define (alloc-signal task)
   ;; Signals 0..15 are reserved the way Exec reserves them; 16..31 are free.
+  ;; What comes back is the bit as a mask, because that is what `signal` and
+  ;; `wait` take: a bit number and a mask are both fixnums and nothing would
+  ;; catch one handed to the other.
+  ;;
   ;; The failure is raised outside the critical section, because an error here
   ;; abandons the stack and would abandon the section with it.
   (let ((got (without-interrupts
@@ -372,12 +363,11 @@
                        (set! n (%+ n 1))))
                  g))))
     (if (%< got 0) (error "alloc-signal: none left") nil)
-    got))
+    (%lsh 1 got)))
 
-(define (free-signal task n)
+(define (free-signal task mask)
   (without-interrupts
-    (set-tc-sigalloc! task
-                  (%logand (tc-sigalloc task) (%lognot (%lsh 1 n)))))
+    (set-tc-sigalloc! task (%logand (tc-sigalloc task) (%lognot mask))))
   nil)
 
 ;;
@@ -449,7 +439,7 @@
 ;; Slot 0 of a closure holds a raw code address rather than a tagged value, so
 ;; reading it back as a number takes %addr-of, not %from-addr: the word is
 ;; already an address and must not be shifted.
-(define (closure-entry fn) (%addr-of (%raw-ld (%addr-of fn))))
+(define (closure-entry fn) (%addr-of (%ld-word (%addr-of fn))))
 
 (define default-stack 65536)
 (define default-quantum 200000)
@@ -470,7 +460,7 @@
 (define (add-task name pri fn . opts)
   (let* ((binds (initial-binds))
          (stack (if (%cons? opts) (%car opts) default-stack))
-         (task (tc-make))
+         (task (tc-alloc))
          (ctx (alloc-pool ctx-bytes))
          (sp (alloc-pool stack)))
     ;; The environment is built before the task holds any Lisp value. There is
@@ -495,8 +485,8 @@
     (poke (ctx-reg ctx reg-ra) *task-exit-stub*)
     ;; s2 says which task is running, so a task's context has to carry it the
     ;; way it carries its stack pointer. Nothing sets it again after this.
-    (%raw-st! (ctx-reg ctx reg-s2) task)
-    (%raw-st! (ctx-reg ctx reg-t0) fn)
+    (%st-word! (ctx-reg ctx reg-s2) task)
+    (%st-word! (ctx-reg ctx reg-t0) fn)
     (poke (ctx-reg ctx reg-t1) 0)
     (without-interrupts
       (task-ready! task)
@@ -508,7 +498,7 @@
 ;; first task should not try to give it away.
 (define (free-if-ours p)
   (if (if p (%> p 0) nil)
-      (if (%= (%ld32 (%+ p -4)) pool-tag) (free-pool p) nil)
+      (if (%= (%ld-fixnum (%+ p -4)) pool-tag) (free-pool p) nil)
       nil))
 
 (define (rem-task task)
@@ -594,7 +584,7 @@
     ;; The last task to finish takes the machine with it: there is nothing
     ;; left to schedule, and pretending otherwise is a hang. The idle task does
     ;; not count - it is always there and it never does anything.
-    (if (%<= (task-count) (if (%> *idle-task* 0) 2 1))
+    (if (%<= (task-count) (if *idle-task* 2 1))
         (begin (emit-str "\n") (%halt 0))
         nil)
     (rem-task task)
@@ -603,26 +593,26 @@
     (while t (reschedule))))
 
 (define (build-task-exit-stub)
-  (let ((a (asm-new)))
+  (let ((a (make-assembler)))
     (i-li a $t1 0)
     (i-lw a $t0 $zero lg-scratch0)
     (i-lw a $t2 $t0 0)
     (i-jr a $t2)
     (set! *task-exit-stub* (asm-place a))
-    (%raw-st! lg-scratch0 (%symbol-value 'task-finished))
+    (%st-word! lg-scratch0 (%symbol-value 'task-finished))
     *task-exit-stub*))
 
 ;; ---------------------------------------------------------------- ports
-(defrecord (msgport mp) (include node) sigbit sigtask msglist)
+(defrecord (msgport mp) (include node) sigmask sigtask msglist)
 
 (defrecord (message mn) (include node) replyport length body)
 
 (define (create-port name pri)
-  (let ((p (mp-make))
+  (let ((p (mp-alloc))
         (sig (alloc-signal (this-task))))
     (set-node-name! p name)
     (set-node-pri! p pri)
-    (set-mp-sigbit! p sig)
+    (set-mp-sigmask! p sig)
     (set-mp-sigtask! p (this-task))
     (set-mp-msglist! p (new-list))
     (if (%null? name)
@@ -632,13 +622,13 @@
 
 (define (delete-port p)
   (if (%null? (node-name p)) nil (without-interrupts (forget-node p)))
-  (free-signal (mp-sigtask p) (mp-sigbit p))
+  (free-signal (mp-sigtask p) (mp-sigmask p))
   nil)
 
 (define (find-port name) (find-name *port-list* name))
 
 (define (create-message body reply)
-  (let ((m (mn-make)))
+  (let ((m (mn-alloc)))
     (set-mn-replyport! m reply)
     (set-mn-length! m mn-slots)
     (set-mn-body! m body)
@@ -654,7 +644,7 @@
   (let ((task (without-interrupts
                 (add-tail (mp-msglist port) msg)
                 (mp-sigtask port))))
-    (if task (signal task (%lsh 1 (mp-sigbit port))) nil))
+    (if task (signal task (mp-sigmask port)) nil))
   msg)
 
 (define (get-msg port)
@@ -664,7 +654,7 @@
   (let ((m nil))
     (while (%null? m)
       (set! m (get-msg port))
-      (if (%null? m) (wait (%lsh 1 (mp-sigbit port))) nil))
+      (if (%null? m) (wait (mp-sigmask port)) nil))
     ;; Put it back: WaitPort tells you a message is there without taking it.
     (without-interrupts (add-head (mp-msglist port) m))
     m))
@@ -693,7 +683,7 @@
          (table (alloc-pool (%* 8 (%+ n 1))))
          (base (%+ table (%* 8 (%+ n 1))))
          (v (make-vector-n n nil))
-         (lib (lib-make))
+         (lib (lib-alloc))
          (i 0))
     (set-node-name! lib name)
     (set-lib-version! lib version)
@@ -731,7 +721,7 @@
   data)
 
 (define (make-interrupt name pri code data)
-  (let ((i (is-make)))
+  (let ((i (is-alloc)))
     (set-node-name! i name)
     (set-node-pri! i pri)
     (set-is-code! i code)
@@ -743,11 +733,13 @@
 ;; walk of the wait list rather than a registry somebody has to maintain.
 ;; `alloc-signal` hands out bits from 16 up, which leaves the low half for
 ;; things like this.
+;; The bit and the mask, said once each: `sigf-` is `sigb-` shifted, and a
+;; `define` is evaluated when it is compiled, so this costs nothing.
 (define sigb-vblank 5)
-(define sigf-vblank 32)
+(define sigf-vblank (%lsh 1 sigb-vblank))
 (define sigb-input 6)
-(define sigf-input 64)
-(define *vblank-int* 0)
+(define sigf-input (%lsh 1 sigb-input))
+(define *vblank-int* nil)
 (define *vblank-count* 0)
 
 (define (vblank-server data)
@@ -791,30 +783,30 @@
     (%wait-for-input)))
 
 (define (idle-start)
-  (if (%> *idle-task* 0)
+  (if *idle-task*
       nil
       (set! *idle-task* (add-task "idle" -128 (lambda () (idle-task)) 4096)))
   *idle-task*)
 
-(define (idle? task) (%= task *idle-task*))
+(define (idle? task) (%eq? task *idle-task*))
 
 ;; ---------------------------------------------------------------- input
 ;; The input device raises its line for as long as it has events, so a handler
 ;; that only signalled would be re-entered forever. Masking the line is what
 ;; makes a level-triggered device behave: the server hands the work to a task
 ;; and stops listening, and the task turns it back on when the queue is dry.
-(define *input-int* 0)
-(define *input-task* 0)
+(define *input-int* nil)
+(define *input-task* nil)
 
 (define (input-server data)
   (int-disable int-input)
-  (if (%> *input-task* 0) (signal *input-task* sigf-input) nil)
+  (if *input-task* (signal *input-task* sigf-input) nil)
   nil)
 
 (define (input-listen task)
   (set! *input-task* task)
   (poke inp-ctrl (%logior (peek inp-ctrl) 1))
-  (if (%> *input-int* 0)
+  (if *input-int*
       nil
       (begin
         (set! *input-int*
@@ -830,7 +822,7 @@
   (wait sigf-input))
 
 (define (vblank-start)
-  (if (%> *vblank-int* 0)
+  (if *vblank-int*
       nil
       (begin
         (set! *vblank-int*
@@ -919,15 +911,15 @@
   ;; that belonged to the ExecBase this is about to replace. Believing them
   ;; means never installing the servers into the new one, and a machine with
   ;; no vblank and no keyboard.
-  (set! *vblank-int* 0)
-  (set! *input-int* 0)
-  (set! *input-task* 0)
+  (set! *vblank-int* nil)
+  (set! *input-int* nil)
+  (set! *input-task* nil)
   ;; And these, which a resumed image also arrives with: counts and flags that
   ;; described an Exec that no longer exists. When they lived in a structure,
   ;; allocating a fresh one zeroed them all at once; now that they are
   ;; variables, saying so is the price of not having a base pointer.
   (%set-this-task! nil)
-  (set! *idle-task* 0)
+  (set! *idle-task* nil)
   (set! *tdnest* 0)
   (set! *attn-resched* 0)
   (set! *disp-count* 0)
@@ -948,7 +940,7 @@
   (begin
     ;; The code that is already running becomes task zero. Its context is the
     ;; block the trap stub has been using all along, so it is already correct.
-    (let ((boot (tc-make)))
+    (let ((boot (tc-alloc)))
       (set-node-name! boot "boot")
       (set-node-pri! boot 0)
       (zero-task-counters! boot)
@@ -1068,8 +1060,8 @@
     (if (if ctx (%> ctx 0) nil)
         (begin
           ;; Its stack, precisely, from where it was suspended.
-          (gc-scan-frames (%ld32 (%+ ctx (%* 4 reg-sp)))
-                          (%ld32 (%+ ctx (%* 4 8))))
+          (gc-scan-frames (%ld-fixnum (%+ ctx (%* 4 reg-sp)))
+                          (%ld-fixnum (%+ ctx (%* 4 8))))
           ;; And its saved registers. This is the one place left that has to
           ;; guess: a task preempted mid-expression has live values in
           ;; registers whose types nothing recorded. Thirty-two words per

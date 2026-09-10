@@ -21,12 +21,17 @@
 ;; same way it does the registers.
 (define *out* nil)
 (define *in* nil)
-(define *wait* nil)
+;; How to wait for a character - not Exec's `wait`, which blocks a task on
+;; signals. A stream that has no answer falls back on the machine's.
+(define *await* nil)
 
-(define (out-char n) (%st32! uart-data n))
+;; A character, not its number: `get-char` gives one back, and a pair of
+;; primitives that disagree about that is a `%int->char` at every call site
+;; and a wrong one somewhere.
+(define (out-char c) (%st-fixnum! uart-data (%char->int c)))
 
 (define (uart-char)
-  (let ((v (%ld32 uart-data)))
+  (let ((v (%ld-fixnum uart-data)))
     (if (%= v -1) nil (%int->char v))))
 
 (define (emit-ch c)
@@ -38,30 +43,30 @@
 
 ;; Give the machine to somebody else until input might have arrived.
 (define (await-char)
-  (if *wait* (%funcall *wait*) (%wait-for-input)))
+  (if *await* (%funcall *await*) (%wait-for-input)))
 
 ;; Slot 0 is the tag, so a stream says what it is.
 (define stream-slots 4)
 (define st-put 1)
 (define st-get 2)
-(define st-wait 3)
+(define st-await 3)
 
-(define (make-stream put get wait)
+(define (make-stream put get await)
   (let ((s (make-record stream-slots 'stream)))
     (%record-set! s st-put put)
     (%record-set! s st-get get)
-    (%record-set! s st-wait wait)
+    (%record-set! s st-await await)
     s))
 (define (stream-put s) (%record-ref s st-put))
 (define (stream-get s) (%record-ref s st-get))
-(define (stream-wait s) (%record-ref s st-wait))
+(define (stream-await s) (%record-ref s st-await))
 
-(define (current-stream) (make-stream *out* *in* *wait*))
+(define (current-stream) (make-stream *out* *in* *await*))
 
 (define (use-stream! s)
   (set! *out* (stream-put s))
   (set! *in* (stream-get s))
-  (set! *wait* (stream-wait s))
+  (set! *await* (stream-await s))
   s)
 
 ;; The serial line, named so it can be switched back to.
@@ -70,17 +75,17 @@
 (define (emit-str s)
   (let ((i 0) (n (%string-length s)))
     (while (%< i n)
-      (emit-ch (%char->int (%string-ref s i)))
+      (emit-ch (%string-ref s i))
       (set! i (%+ i 1)))
     s))
 
-(define (newline) (emit-ch 10) nil)
-(define (space) (emit-ch 32) nil)
+(define (newline) (emit-ch #\newline) nil)
+(define (space) (emit-ch #\space) nil)
 
 ;; Collect output into a string instead of sending it anywhere.
 (define (with-output-to-string thunk)
   (let ((acc nil) (saved *out*))
-    (set! *out* (lambda (c) (set! acc (%cons (%int->char c) acc))))
+    (set! *out* (lambda (c) (set! acc (%cons c acc))))
     (%funcall thunk)
     (set! *out* saved)
     (list->string (reverse acc))))

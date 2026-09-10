@@ -150,13 +150,15 @@
 
 ;; Straight into the bitmap, and clipped to the rastport's region as well as
 ;; to the bitmap, for the same reason `draw-char` is.
+;; `bg` is a colour, or nil to leave what is already there.
 (define (draw-mono-char rp x y ch fg bg)
+  (check-colour fg)
   (let ((bm (rp-bitmap rp))
         (bw (rp-bitmap-w rp))
         (bh (rp-bitmap-h rp))
         (px (%+ x (rp-origin-x rp)))
         (py (%+ y (rp-origin-y rp))))
-    (if (%>= bg 0) (fill-rect rp x y mono-advance mono-height bg) nil)
+    (if bg (fill-rect rp x y mono-advance mono-height bg) nil)
     (dolist (cr (rp-region rp))
       (mono-rows ch px py fg bm bw bh
                  (rect-x cr) (rect-y cr) (rect-x2 cr) (rect-y2 cr)))

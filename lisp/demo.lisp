@@ -48,7 +48,7 @@
 
 (define (balls . opts)
   (let* ((n (if (%cons? opts) (%car opts) 8))
-         (win (make-demo-window "Balls" 420 300))
+         (win (make-demo-window 420 300 "Balls"))
          (i 0))
     (win-fill win 0 0 (win-inner-w win) (win-inner-h win) pt-white)
     (while (%< i n)
@@ -83,7 +83,7 @@
   ;; A window of its own, and a row of it handed over every sixteen: the
   ;; picture appears in bands rather than after a long silence.
   (let* ((limit (if (%cons? opts) (%car opts) 40))
-         (win (make-demo-window "Mandelbrot" 420 320))
+         (win (make-demo-window 420 320 "Mandelbrot"))
          (bw (win-inner-w win))
          (bh (win-inner-h win))
          (y 0))
@@ -171,7 +171,7 @@
 
 (define (life . opts)
   (let ((n (if (%cons? opts) (%car opts) 60)))
-    (set! *life-win* (make-demo-window "Life" 260 200))
+    (set! *life-win* (make-demo-window 260 200 "Life"))
     (life-seed 28)
     (let ((i 0))
       (while (%< i n)

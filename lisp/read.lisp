@@ -157,6 +157,7 @@
                 ((string=? name "newline") #\newline)
                 ((string=? name "tab") #\tab)
                 ((string=? name "return") (%int->char 13))
+                ((string=? name "backspace") (%int->char 8))
                 (else (error "unknown character name" name))))
         first)))
 
@@ -242,7 +243,7 @@
   (let ((in (string-stream s)))
     (fluid-let ((*out* (stream-put in))
                 (*in* (stream-get in))
-                (*wait* (stream-wait in))
+                (*await* (stream-await in))
                 (*peeked* nil)
                 (*eof-ok* t))
       (%funcall thunk))))

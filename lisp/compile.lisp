@@ -71,11 +71,6 @@
 (define $lit-save $s11)
 
 ;; ---------------------------------------------------------------- ecall codes
-(define trap-arity 1)
-(define trap-type 2)
-(define trap-oom 3)
-(define trap-error 4)
-(define trap-record 6)
 
 ;; ---------------------------------------------------------------- context
 ;; What the compiler knows while it is compiling one function. This was a
@@ -85,8 +80,8 @@
   asm env nlocals maxlocals free boxed name framefix outer nparams
   self-label self-arity leaf)
 
-(define (cx-new asm name outer-env)
-  (let ((c (cx-make)))
+(define (make-context asm name outer-env)
+  (let ((c (cx-alloc)))
     (set-cx-asm! c asm)
     (set-cx-nlocals! c 0)
     (set-cx-maxlocals! c 0)
@@ -646,7 +641,7 @@
     (char->integer 1 %char->int) (integer->char 1 %int->char)
     (logand 2 %logand) (logior 2 %logior) (logxor 2 %logxor)
     (lognot 1 %lognot) (ash 2 %ash) (lsh 2 %lsh)
-    (peek 1 %ld32) (poke 2 %st32!) (peek8 1 %ld8) (poke8 2 %st8!)
+    (peek 1 %ld-fixnum) (poke 2 %st-fixnum!) (peek8 1 %ld-byte) (poke8 2 %st-byte!)
     (min 2 %min) (max 2 %max) (min2 2 %min) (max2 2 %max)))
 
 
@@ -1047,38 +1042,38 @@
   ;; A word or a byte at a tagged address. This was four instructions - strip
   ;; the tag off the address, load, shift the word up, put a tag back on - and
   ;; the collector's inner loops are made of little else.
-  (definline '%ld8 1 (lambda (c) (i-tlb (cx-asm c) $a0 $a0 0)))
-  (definline '%ld16 1
+  (definline '%ld-byte 1 (lambda (c) (i-tlb (cx-asm c) $a0 $a0 0)))
+  (definline '%ld-half 1
     (lambda (c)
       (let ((a (cx-asm c)))
         (i-srai a $t2 $a0 1)
         (i-lhu a $t2 $t2 0)
         (i-slli a $a0 $t2 1)
         (i-ori a $a0 $a0 1))))
-  (definline '%ld32 1 (lambda (c) (i-tlw (cx-asm c) $a0 $a0 0)))
-  (definline '%st8! 2
+  (definline '%ld-fixnum 1 (lambda (c) (i-tlw (cx-asm c) $a0 $a0 0)))
+  (definline '%st-byte! 2
     (lambda (c)
       (i-tsb (cx-asm c) $a1 $a0 0)
       (i-mv (cx-asm c) $a0 $a1)))
-  (definline '%st16! 2
+  (definline '%st-half! 2
     (lambda (c)
       (let ((a (cx-asm c)))
         (i-srai a $t2 $a0 1)
         (i-srai a $t3 $a1 1)
         (i-sh a $t3 $t2 0)
         (i-mv a $a0 $a1))))
-  (definline '%st32! 2
+  (definline '%st-fixnum! 2
     (lambda (c)
       (i-tsw (cx-asm c) $a1 $a0 0)
       (i-mv (cx-asm c) $a0 $a1)))
   ;; Read and write a slot without retagging, for moving raw tagged words
   ;; around, and for reaching the machine's registers from Lisp.
-  (definline '%raw-ld 1
+  (definline '%ld-word 1
     (lambda (c)
       (let ((a (cx-asm c)))
         (i-srai a $t2 $a0 1)
         (i-lw a $a0 $t2 0))))
-  (definline '%raw-st! 2
+  (definline '%st-word! 2
     (lambda (c)
       (let ((a (cx-asm c)))
         (i-srai a $t2 $a0 1)
@@ -1831,8 +1826,8 @@
 
 ;; Compile a lambda body into fresh code. Returns (entry-address . code-object).
 (define (compile-function params body name free . free-boxed-opt)
-  (let* ((a (asm-new))
-         (c (cx-new a name nil))
+  (let* ((a (make-assembler))
+         (c (make-context a name nil))
          (nreq (param-required params))
          (rest (param-rest params))
          (names (param-names params))

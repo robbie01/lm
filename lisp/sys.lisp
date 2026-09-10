@@ -29,12 +29,6 @@
 
 ;; ---------------------------------------------------------------- traps
 ;; Everything that goes wrong arrives here, along with every interrupt.
-(define trap-arity 1)
-(define trap-type 2)
-(define trap-oom 3)
-(define trap-error 4)
-(define trap-reschedule 5)
-(define trap-record 6)
 
 (define cause-wrong-type 24)
 (define cause-range 25)
@@ -185,10 +179,10 @@
   ;; is the index itself rather than the number of a register holding it.
   (let* ((ty (insn-f7 w))
          (f (insn-f3 w))
-         (obj (%raw-ld (%+ ctx (ctx-word (insn-rs1 w)))))
+         (obj (trap-raw ctx (insn-rs1 w)))
          (idx (if (%= 4 (%logand f 4))
                   (insn-rs2 w)
-                  (%raw-ld (%+ ctx (ctx-word (insn-rs2 w)))))))
+                  (trap-raw ctx (insn-rs2 w)))))
     (emit-index-op ty (%logand f 3))
     (cond
      ;; Calling a name nothing was ever stored in. The value is the unbound
@@ -242,7 +236,7 @@
    (else (emit-str ": expected a number, got ") (emit-value tval))))
 
 (define (check-trap cause epc tval ctx)
-  (let ((w (%ld32 epc)))
+  (let ((w (%ld-fixnum epc)))
     (emit-str "\n*** ")
     (cond
      ((%= (insn-op w) op-index) (emit-index-fault w ctx))
@@ -264,9 +258,9 @@
   ;; Step the saved pc over the ecall first: the stub reloads mepc from the
   ;; context on its way out, so this is what makes the trap return to the
   ;; instruction after it rather than run it again.
-  (%st32! ctx (%+ epc 4))
-  ;; a7 holds the reason. %ld32 already yields it as a number.
-  (let ((code (%ld32 (%+ ctx (%* 4 17)))))
+  (%st-fixnum! ctx (%+ epc 4))
+  ;; a7 holds the reason. %ld-fixnum already yields it as a number.
+  (let ((code (%ld-fixnum (%+ ctx (%* 4 17)))))
     (if (%= code trap-reschedule)
         ;; Not an error at all: a task asking to be switched out. Returning
         ;; from here resumes whichever task the scheduler picked.
@@ -277,8 +271,8 @@
             ;; t0 still holds the closure that was about to be entered and t1
             ;; the count it was handed, so the report can name both.
             (emit-str "\ncalled ")
-            (emit-callee (%raw-ld (%+ ctx (ctx-word 5))))
-            (let ((n (%ld32 (%+ ctx (ctx-word 6)))))
+            (emit-callee (trap-raw ctx reg-t0))
+            (let ((n (trap-reg ctx reg-t1)))
               (emit-str " with ")
               (emit-str (number->string n))
               (emit-str (if (%= n 1) " argument" " arguments")))
@@ -292,9 +286,9 @@
             ;; the tag it wanted in t3 and never touched what it was given, so
             ;; both ends can be named.
             (emit-str "\nexpected ")
-            (emit-a-or-an (%raw-ld (%+ ctx (ctx-word 28))))
+            (emit-a-or-an (trap-raw ctx reg-t3))
             (emit-str ", got ")
-            (emit-object (%raw-ld (%+ ctx (ctx-word 10))))
+            (emit-object (trap-raw ctx reg-a0))
             (emit-str ", at ")
             (emit-str (number->hex epc))
             (emit-str "\n"))
@@ -307,7 +301,7 @@
           ;; makes the first line name the call site, which is the one place
           ;; worth looking.
           (if (%= code trap-arity)
-              (backtrace-from-context (trap-reg ctx 1) ctx)
+              (backtrace-from-context (trap-reg ctx reg-ra) ctx)
               (backtrace-from-context epc ctx))
           (abort-to-repl ctx)))))
 
@@ -334,25 +328,31 @@
       (emit-str " at ")
       (emit-str (number->hex p))
       (emit-str "\n")
-      (let ((ra (%ld32 (%- f 4))))
+      (let ((ra (%ld-fixnum (%- f 4))))
         ;; The allocator refill stub sits between two Lisp frames without a
         ;; frame of its own, so the chain steps straight over it; say so
         ;; rather than silently losing the fact that we were allocating.
         (if (in-stub? ra) (emit-str "  (allocating)\n") nil)
         (set! p ra))
-      (set! c (%raw-ld (%- f 16)))
-      (set! f (%ld32 (%- f 8)))
+      (set! c (%ld-word (%- f 16)))
+      (set! f (%ld-fixnum (%- f 8)))
       (set! i (%+ i 1)))
     (if (if go (frame-ok? f) nil) (emit-str "  ...\n") nil)))
 
 ;; The registers a trap saved. x8 is s0, the frame base of whatever was
-;; running; x9 is s1, its code object. (Not ctx-reg: exec.lisp has one of
-;; those and it answers the address rather than the contents.)
-(define (ctx-word n) (%* 4 n))
-(define (trap-reg ctx n) (%ld32 (%+ ctx (ctx-word n))))
+;; running; x9 is s1, its code object.
+;;
+;; Word 0 of the block is the pc and words 1..31 are x1..x31, which is what
+;; the stub writes; `reg-<name>` for each of them is generated with the rest
+;; of the layout, so nothing here counts words.
+(define (ctx-pc c) (%+ c 0))
+(define (ctx-reg c n) (%+ c (%* 4 n)))
+
+(define (trap-reg ctx n) (%ld-fixnum (ctx-reg ctx n)))
+(define (trap-raw ctx n) (%ld-word (ctx-reg ctx n)))
 
 (define (backtrace-from-context epc ctx)
-  (print-backtrace (trap-reg ctx 8) (%raw-ld (%+ ctx (%* 4 9))) epc))
+  (print-backtrace (trap-reg ctx reg-s0) (trap-raw ctx reg-s1) epc))
 
 (define (fatal-trap cause epc tval ctx)
   (emit-str "\n*** ")
@@ -404,12 +404,12 @@
   (if *return-addr-fn* (%funcall *return-addr-fn*) 0))
 
 (define (enter-closure ctx f sp)
-  (%st32! (%+ ctx (ctx-word 0)) (%ld32 (%addr-of f)))  ; pc = its entry
-  (%raw-st! (%+ ctx (ctx-word 5)) f)                   ; t0 = the closure
-  (%st32! (%+ ctx (ctx-word 6)) 0)                     ; t1 = no arguments
-  (%st32! (%+ ctx (ctx-word 2)) sp)                    ; a whole stack
-  (%st32! (%+ ctx (ctx-word 1)) (restart-ra))          ; where it ends up
-  (%st32! (%+ ctx (ctx-word 8)) 0)                     ; and no caller
+  (%st-fixnum! (ctx-reg ctx reg-zero) (%ld-fixnum (%addr-of f)))  ; pc = its entry
+  (%st-word! (ctx-reg ctx reg-t0) f)                   ; t0 = the closure
+  (%st-fixnum! (ctx-reg ctx reg-t1) 0)                     ; t1 = no arguments
+  (%st-fixnum! (ctx-reg ctx reg-sp) sp)                    ; a whole stack
+  (%st-fixnum! (ctx-reg ctx reg-ra) (restart-ra))          ; where it ends up
+  (%st-fixnum! (ctx-reg ctx reg-s0) 0)                     ; and no caller
   nil)
 
 (define (abort-to-repl ctx)
@@ -566,7 +566,7 @@
 (define (run-boot-list)
   ;; The forge left a thunk for every top level form that was not a function
   ;; definition, in source order.
-  (let ((l (%raw-ld lg-bootlist)))
+  (let ((l (%ld-word lg-bootlist)))
     (while (%cons? l)
       (%funcall (%car l))
       (set! l (%cdr l)))))
@@ -575,7 +575,7 @@
   ;; Before anything else, the boot list included: the first thing the boot
   ;; list does is allocate.
   (install-allocator)
-  (%raw-st! lg-traphook (%symbol-value 'handle-trap))
+  (%st-word! lg-traphook (%symbol-value 'handle-trap))
   (run-boot-list)
   ;; Exec comes up before anything else can want a task: the code already
   ;; running becomes task zero, and its context is the trap frame the stub has
@@ -590,8 +590,8 @@
   (banner-exec)
   (emit-str "type (help) for what to try
 ")
-  (if (%raw-ld lg-startup)
-      (%funcall (%raw-ld lg-startup))
+  (if (%ld-word lg-startup)
+      (%funcall (%ld-word lg-startup))
       nil)
   ;; A prompt starts in user, whatever package the boot list happened to leave
   ;; the reader in on its way through.

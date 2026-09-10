@@ -34,7 +34,7 @@
 
 (define (make-table . opts)
   (let* ((cap (if (%cons? opts) (%car opts) 8))
-         (r (tbl-make)))
+         (r (tbl-alloc)))
     (set-tbl-keys! r (make-vector-n cap *table-empty*))
     (set-tbl-vals! r (make-vector-n cap nil))
     (set-tbl-count! r 0)

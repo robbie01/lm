@@ -28,9 +28,9 @@
   ;; The entry address is copied out of the code object rather than passed in,
   ;; so that a caller never has to know one. Both that word and the closure
   ;; slot it lands in are raw addresses, not tagged values, which is why they
-  ;; go through %raw-ld and %raw-st! and not through the slot accessors.
+  ;; go through %ld-word and %st-word! and not through the slot accessors.
   (let ((c (alloc-object t-closure (%+ 2 nfree))))
-    (%raw-st! (%addr-of c) (%raw-ld (%addr-of code)))
+    (%st-word! (%addr-of c) (%ld-word (%addr-of code)))
     (%set-slot! c clo-code code)
     c))
 
@@ -90,10 +90,10 @@
           (set! p (%funcall *object-allocator* size))
           (if (%= p 0) (out-of-memory "object space") nil))
         nil)
-    (%st32! p (%logior (%lsh len 8) type))
+    (%st-fixnum! p (%logior (%lsh len 8) type))
     (let ((i 4))
       (while (%< i size)
-        (%st32! (%+ p i) 0)
+        (%st-fixnum! (%+ p i) 0)
         (set! i (%+ i 4))))
     (%from-addr (%+ p 4)))))
 
@@ -133,7 +133,7 @@
 (define (package-use p) (%slot p pkg-use))
 (define (set-package-use! p v) (%set-slot! p pkg-use v))
 (define (symbol-package s) (%slot s sym-package))
-(define (all-packages) (%raw-ld lg-packages))
+(define (all-packages) (%ld-word lg-packages))
 
 (define (package? x)
   (if (%record? x) (%= (%obj-len x) pkg-slots) nil))
@@ -154,7 +154,7 @@
         (let ((p (make-record pkg-slots nil)))
           (%set-slot! p pkg-name name)
           (%set-slot! p pkg-use nil)
-          (%raw-st! lg-packages (%cons p (%raw-ld lg-packages)))
+          (%st-word! lg-packages (%cons p (%ld-word lg-packages)))
           (%set-slot! p pkg-tag (intern-in p "package"))
           p)))))
 
@@ -170,7 +170,7 @@
 ;; Interning has to be identical on both sides of the bootstrap or a symbol
 ;; read at build time and one read at run time would not be eq.
 (define (find-symbol-in pkg s)
-  (let* ((ob (%raw-ld lg-obarray))
+  (let* ((ob (%ld-word lg-obarray))
          (n (%vector-length ob))
          (b (%mod (qualified-hash (package-name pkg) s) n))
          (chain (%vector-ref ob b))
@@ -193,7 +193,7 @@
   (let ((found (find-symbol-in pkg s)))
     (if found
         found
-        (let* ((ob (%raw-ld lg-obarray))
+        (let* ((ob (%ld-word lg-obarray))
                (n (%vector-length ob))
                (b (%mod (qualified-hash (package-name pkg) s) n))
                (sym (alloc-object t-symbol sym-slots)))
@@ -209,7 +209,7 @@
           (%set-global! lg-symcount (%+ (%global lg-symcount) 1))
           (%set-slot! sym sym-package pkg)
           (%vector-set! ob b (%cons sym (%vector-ref ob b)))
-          (%raw-st! lg-symlist (%cons sym (%raw-ld lg-symlist)))
+          (%st-word! lg-symlist (%cons sym (%ld-word lg-symlist)))
           sym)))))
 
 ;; What a bare name means here: this package first, then whatever the packages
@@ -236,10 +236,10 @@
 ;; The scheduler swaps it like the streams, so two shells can be in two
 ;; packages at once.
 (define (current-package)
-  (let ((p (%raw-ld lg-package)))
-    (if p p (let ((base (make-package "lm"))) (%raw-st! lg-package base) base))))
+  (let ((p (%ld-word lg-package)))
+    (if p p (let ((base (make-package "lm"))) (%st-word! lg-package base) base))))
 
-(define (set-current-package! p) (%raw-st! lg-package p) p)
+(define (set-current-package! p) (%st-word! lg-package p) p)
 
 (define (intern-string s) (intern-in (current-package) s))
 
@@ -324,13 +324,13 @@
 (define uart-ctrl (%+ mmio-base (%+ (%lsh dev-uart 12) 8)))
 (define uart-count (%+ mmio-base (%+ (%lsh dev-uart 12) 12)))
 
-(define (uart-put c) (%st32! uart-data c))
-(define (uart-nl) (%st32! uart-data 10))
+(define (uart-put c) (%st-fixnum! uart-data c))
+(define (uart-nl) (%st-fixnum! uart-data 10))
 
 (define (uart-string s)
   (let ((i 0) (n (%string-length s)))
     (while (%< i n)
-      (%st32! uart-data (%char->int (%string-ref s i)))
+      (%st-fixnum! uart-data (%char->int (%string-ref s i)))
       (set! i (%+ i 1)))
     s))
 
@@ -346,19 +346,19 @@
 ;; that has gone wrong.
 (define (uart-num-raw n)
   (if (%< n 0)
-      (begin (%st32! uart-data 45) (set! n (%- 0 n)))
+      (begin (%st-fixnum! uart-data 45) (set! n (%- 0 n)))
       nil)
   (if (%>= n 10) (uart-num-raw (%/ n 10)) nil)
-  (%st32! uart-data (%+ 48 (%mod n 10))))
+  (%st-fixnum! uart-data (%+ 48 (%mod n 10))))
 
 (define (uart-hex-raw n)
-  (%st32! uart-data 48)
-  (%st32! uart-data 120)
+  (%st-fixnum! uart-data 48)
+  (%st-fixnum! uart-data 120)
   (let ((i 28))
     (while (%>= i 0)
       (let ((d (%logand (%lsh n (%- 0 i)) 15)))
-        (%st32! uart-data (if (%< d 10) (%+ 48 d) (%+ 87 d))))
+        (%st-fixnum! uart-data (if (%< d 10) (%+ 48 d) (%+ 87 d))))
       (set! i (%- i 4)))))
 
-(define (uart-ready?) (%= 1 (%logand (%ld32 uart-status) 1)))
-(define (uart-get) (%ld32 uart-data))
+(define (uart-ready?) (%= 1 (%logand (%ld-fixnum uart-status) 1)))
+(define (uart-get) (%ld-fixnum uart-data))

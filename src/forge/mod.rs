@@ -196,6 +196,32 @@ pub fn write_layout() {
     def!("imm-eof", IMM_EOF);
     def!("imm-void", IMM_VOID);
 
+    // The trap stub saves all thirty-two registers, so a task's context and a
+    // trap frame are the same block, and everything that reads one wants the
+    // same names for its words rather than a number counted out by hand.
+    s.push_str("\n;; ---- trap frame ----\n");
+    def!("ctx-words", 32);
+    def!("ctx-bytes", 32 * 4);
+    for (i, name) in [
+        "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2",
+        "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5",
+        "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7",
+        "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6",
+    ]
+    .iter()
+    .enumerate()
+    {
+        def!(format!("reg-{name}"), i as u32);
+    }
+
+    s.push_str("\n;; ---- ecall codes ----\n");
+    def!("trap-arity", crate::mach::E_ARITY);
+    def!("trap-type", crate::mach::E_TYPE);
+    def!("trap-oom", crate::mach::E_OOM);
+    def!("trap-error", crate::mach::E_ERROR);
+    def!("trap-reschedule", crate::mach::E_RESCHEDULE);
+    def!("trap-record", crate::mach::E_RECORD);
+
     s.push_str("\n;; ---- device registers ----\n");
     def!("mmio-base", MMIO_BASE);
     def!("dev-sys", DEV_SYS);
@@ -211,6 +237,32 @@ pub fn write_layout() {
     def!("int-blit", INT_BLIT);
     def!("int-disk", INT_DISK);
     def!("int-soft", INT_SOFT);
+
+    // The blitter takes its whole command from a block of twelve words, and
+    // these are that block's layout - not the register map, which has a gap
+    // the block does not. One store of `blt-list` runs it; nothing else in
+    // the chip is worth naming on the Lisp side.
+    s.push_str("\n;; ---- blitter command block ----\n");
+    {
+        use crate::dev::blit::*;
+        def!("blit-list-reg", B_LIST);
+        def!("blit-list-size", LIST_WORDS * 4);
+        for (i, name) in ["src", "dst", "w", "h", "smod", "dmod",
+                          "val", "op", "x0", "y0", "x1", "y1"]
+            .iter()
+            .enumerate()
+        {
+            def!(format!("bl-{name}"), (i as u32) * 4);
+        }
+        def!("op-copy", OP_COPY);
+        def!("op-fill", OP_FILL);
+        def!("op-xor", OP_XOR);
+        def!("op-and", OP_AND);
+        def!("op-or", OP_OR);
+        def!("op-mask", OP_MASK);
+        def!("op-line", OP_LINE);
+        def!("op-add", OP_ADD);
+    }
 
     let _ = std::fs::write("lisp/layout.lisp", s);
 }
@@ -419,10 +471,10 @@ pub fn build(out: &str, verbose: bool) -> i32 {
 
     // Wire the pieces the assembly stubs reach through globals.
     for step in [
-        "(%raw-st! lg-toplevel (%symbol-value 'sys:kickstart))",
-        "(%raw-st! lg-refill (%symbol-value 'gc:refill-cons))",
-        "(%raw-st! lg-traphook (%symbol-value 'sys:handle-trap))",
-        "(%raw-st! lg-bootlist (reverse compiler:*boot-thunks*))",
+        "(%st-word! lg-toplevel (%symbol-value 'sys:kickstart))",
+        "(%st-word! lg-refill (%symbol-value 'gc:refill-cons))",
+        "(%st-word! lg-traphook (%symbol-value 'sys:handle-trap))",
+        "(%st-word! lg-bootlist (reverse compiler:*boot-thunks*))",
     ] {
         if let Err(e) = drive(&mut l, step) {
             eprint!("wiring {step}: {e}");

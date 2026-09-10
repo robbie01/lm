@@ -51,8 +51,8 @@
 ;; The assembler's own state.
 (defrecord (assembler asi) buf len labels fixups origin literals nlits)
 
-(define (asm-new)
-  (let ((a (asi-make)))
+(define (make-assembler)
+  (let ((a (asi-alloc)))
     (set-asi-buf! a (make-bytes-n 512))
     (set-asi-len! a 0)
     (set-asi-origin! a 0)
@@ -621,7 +621,7 @@
         (buf (asm-buf a))
         (i 0))
     (while (%< i len)
-      (%st8! (%+ addr i) (%bytes-ref buf i))
+      (%st-byte! (%+ addr i) (%bytes-ref buf i))
       (set! i (%+ i 1)))
     addr))
 
@@ -632,7 +632,7 @@
          (buf (asm-buf a))
          (i 0))
     (while (%< i len)
-      (%st8! (%+ addr i) (%bytes-ref buf i))
+      (%st-byte! (%+ addr i) (%bytes-ref buf i))
       (set! i (%+ i 1)))
     (asm-set-origin! a addr)
     addr))
@@ -644,8 +644,8 @@
   (let* ((n (asm-nlits a))
          (v (alloc-object t-code (%+ code-lits n)))
          (i (%- (%+ code-lits n) 1)))
-    (%st32! (%addr-of v) (asm-origin a))          ; raw entry address
-    (%st32! (%+ (%addr-of v) 4) (asm-len a))   ; raw byte length
+    (%st-fixnum! (%addr-of v) (asm-origin a))          ; raw entry address
+    (%st-fixnum! (%+ (%addr-of v) 4) (asm-len a))   ; raw byte length
     ;; Who this is. Every frame has its code object in s1 and saves its
     ;; caller's, so this one word is what turns the frame chain into a
     ;; backtrace.
@@ -658,4 +658,4 @@
     (register-code v)
     v))
 
-(define (code-object-entry v) (%addr-of (%raw-ld (%addr-of v))))
+(define (code-object-entry v) (%addr-of (%ld-word (%addr-of v))))

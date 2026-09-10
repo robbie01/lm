@@ -134,18 +134,21 @@
 (define (gc-map-byte p) (%lsh (%- p gc-heap-lo) -6))
 
 (define (gc-fill-bytes at n)
-  ;; n bytes of zero at `at`, as rows the blitter can take.
+  ;; n bytes of zero at `at`, as rows the blitter can take. Through a command
+  ;; block like everything else: this used to be six stores to the chip's
+  ;; registers with interrupts held off, which is the arrangement the block
+  ;; was introduced to retire.
   (if (%<= n 0)
       nil
       (let* ((w (if (%< n gc-clear-w) n gc-clear-w))
-             (rows (%/ (%+ n (%- w 1)) w)))
-        (without-interrupts
-          (poke blt-dst at)
-          (poke blt-w w)
-          (poke blt-h rows)
-          (poke blt-dmod w)
-          (poke blt-val 0)
-          (poke blt-op op-fill))))
+             (rows (%/ (%+ n (%- w 1)) w))
+             (b (blit-block)))
+        (poke (%+ b bl-dst) at)
+        (poke (%+ b bl-w) w)
+        (poke (%+ b bl-h) rows)
+        (poke (%+ b bl-dmod) w)
+        (poke (%+ b bl-val) 0)
+        (blit-go b op-fill)))
   nil)
 
 (define (gc-clear-map base)
@@ -186,7 +189,7 @@
               ;; A header with a plausible type: a stray stack word that
               ;; happens to look like an object pointer would otherwise send
               ;; the scanner into nonsense.
-              (let ((ty (%logand (%ld32 p) 255)))
+              (let ((ty (%logand (%ld-fixnum p) 255)))
                 (if (%>= ty 1) (%<= ty 10) nil))
               nil)
           nil)))
@@ -207,7 +210,7 @@
               (if (%>= *mark-sp* gc-stack-cap)
                   (gc-overflow)
                   (begin
-                    (%raw-st! (%+ gc-stack (%lsh *mark-sp* 2)) v)
+                    (%st-word! (%+ gc-stack (%lsh *mark-sp* 2)) v)
                     (set! *mark-sp* (%+ *mark-sp* 1)))))))
       nil))
 
@@ -226,7 +229,7 @@
 ;; them, and the update pass rewrites them, so there is one description of an
 ;; object's shape rather than two that could disagree.
 (define (gc-object-slots base)
-  (let* ((h (%ld32 (%- base 4)))
+  (let* ((h (%ld-fixnum (%- base 4)))
          (ty (%logand h 255))
          (n (%lsh h -8)))
     (cond
@@ -247,7 +250,7 @@
 (define (gc-drain)
   (while (%> *mark-sp* 0)
     (set! *mark-sp* (%- *mark-sp* 1))
-    (let ((v (%raw-ld (%+ gc-stack (%lsh *mark-sp* 2)))))
+    (let ((v (%ld-word (%+ gc-stack (%lsh *mark-sp* 2)))))
       (if (%cons? v)
           (begin (gc-push (%car v)) (gc-push (%cdr v)))
           (gc-scan-object v)))))
@@ -257,9 +260,9 @@
   ;; One pointer-bearing word. Every traversal goes through here, so the same
   ;; walk serves both passes: marking follows the pointer, updating rewrites
   ;; it to wherever the object is going.
-  (let ((v (%raw-ld addr)))
+  (let ((v (%ld-word addr)))
     (if *gc-updating*
-        (if (gc-heap-pointer? v) (%raw-st! addr (gc-forward-value v)) nil)
+        (if (gc-heap-pointer? v) (%st-word! addr (gc-forward-value v)) nil)
         (gc-push v))))
 
 (define (gc-scan-range lo hi)
@@ -277,7 +280,7 @@
 (define (gc-scan-conservative lo hi)
   (let ((p (%logand lo -4)))
     (while (%< p hi)
-      (let ((v (%raw-ld p)))
+      (let ((v (%ld-word p)))
         ;; Anything found this way is pinned, which is also what makes it safe
         ;; to leave the word alone during the update pass: a pinned object
         ;; forwards to itself, so an integer that merely looks like a pointer
@@ -306,7 +309,7 @@
   ;; Only the argument registers the mask says are live. The rest of the
   ;; stub's frame is a return address and temporaries holding untagged
   ;; intermediates, and tracing those is exactly the mistake to avoid.
-  (let ((mask (%ld32 (%+ base stub-mask-off))) (i 0))
+  (let ((mask (%ld-fixnum (%+ base stub-mask-off))) (i 0))
     (while (%< i 8)
       (if (%= 1 (%logand 1 (%lsh mask (%- 0 i))))
           (gc-slot (%+ base (%+ stub-args-off (%* 4 i))))
@@ -327,8 +330,8 @@
       (set! guard (%+ guard 1))
       (if (%> guard 100000) (set! go nil) nil)
       (gc-scan-range sp (%- s0 8))
-      (let ((ra (%ld32 (%- s0 4)))
-            (next (%ld32 (%- s0 8))))
+      (let ((ra (%ld-fixnum (%- s0 4)))
+            (next (%ld-fixnum (%- s0 8))))
         (if (in-stub? ra)
             (begin (gc-scan-stub s0) (set! sp (%+ s0 stub-frame-size)))
             (set! sp s0))
@@ -371,11 +374,11 @@
   ;; A run is described in its own first cell: the end address, then the next
   ;; run. Handing the cell out later is fine, because refill reads both words
   ;; into registers before anything is allocated from it.
-  (%st32! start end)
-  (%st32! (%+ start 4) 0)
+  (%st-fixnum! start end)
+  (%st-fixnum! (%+ start 4) 0)
   (if (%= *run-last* 0)
       (%set-global! lg-cons-free start)
-      (%st32! (%+ *run-last* 4) start))
+      (%st-fixnum! (%+ *run-last* 4) start))
   (set! *run-last* start))
 
 (define lg-cons-live-top lg-scratch1)
@@ -426,14 +429,14 @@
   ;; len is in bytes and is always a multiple of eight.
   (let* ((gran (%lsh len -3))
          (bin (obj-bin-addr gran)))
-    (%st32! start (%logior (%lsh gran 8) t-free))
-    (%st32! (%+ start 4) (%ld32 bin))
-    (%st32! bin start)))
+    (%st-fixnum! start (%logior (%lsh gran 8) t-free))
+    (%st-fixnum! (%+ start 4) (%ld-fixnum bin))
+    (%st-fixnum! bin start)))
 
 (define (gc-clear-bins)
   (let ((i 0))
     (while (%< i obj-bin-count)
-      (%st32! (%+ obj-bins (%lsh i 2)) 0)
+      (%st-fixnum! (%+ obj-bins (%lsh i 2)) 0)
       (set! i (%+ i 1)))))
 
 (define (gc-sweep-objects)
@@ -444,7 +447,7 @@
         (nfree 0))
     (gc-clear-bins)
     (while (%< p hi)
-      (let ((size (obj-block-size (%ld32 p))))
+      (let ((size (obj-block-size (%ld-fixnum p))))
         ;; A zero size would be a corrupt header, and would spin here forever.
         (if (%<= size 0) (gc-corrupt p) nil)
         (if (gc-marked? p)
@@ -504,12 +507,12 @@
   ;; One walk over the pairs, recording the free pointer as it crosses each
   ;; block boundary. Answers the address the live region will end at.
   (let ((p cons-base) (free cons-base) (blk 0))
-    (%st32! gc-cons-prefix cons-base)
+    (%st-fixnum! gc-cons-prefix cons-base)
     (while (%< p hi)
       (let ((b (cons-block-of p)))
         (while (%< blk b)
           (set! blk (%+ blk 1))
-          (%st32! (%+ gc-cons-prefix (%lsh blk 2)) free)))
+          (%st-fixnum! (%+ gc-cons-prefix (%lsh blk 2)) free)))
       (if (gc-marked? p)
           (if (gc-pinned? p)
               (if (%> (%+ p 8) free) (set! free (%+ p 8)) nil)
@@ -523,13 +526,13 @@
     (let ((last (cons-block-of hi)))
       (while (%< blk last)
         (set! blk (%+ blk 1))
-        (%st32! (%+ gc-cons-prefix (%lsh blk 2)) free)))
+        (%st-fixnum! (%+ gc-cons-prefix (%lsh blk 2)) free)))
     free))
 
 (define (gc-forward-cons p)
   (let* ((b (cons-block-of p))
          (start (%+ cons-base (%lsh b 6)))
-         (free (%ld32 (%+ gc-cons-prefix (%lsh b 2))))
+         (free (%ld-fixnum (%+ gc-cons-prefix (%lsh b 2))))
          (q start))
     (if (gc-pinned? p)
         p
@@ -555,7 +558,7 @@
         (i 0)
         (any nil))
     (while (%< i 8)
-      (if (%> (%ld8 (%+ a i)) 0) (begin (set! any t) (set! i 8)) (set! i (%+ i 1))))
+      (if (%> (%ld-byte (%+ a i)) 0) (begin (set! any t) (set! i 8)) (set! i (%+ i 1))))
     any))
 
 (define (gc-count-marks from to)
@@ -565,7 +568,7 @@
         (e (%lsh (%- to gc-heap-lo) -3))
         (n 0))
     (while (%<= (%+ i 8) e)
-      (set! n (%+ n (%popcount (%ld8 (%+ gc-bitmap (%lsh i -3))))))
+      (set! n (%+ n (%popcount (%ld-byte (%+ gc-bitmap (%lsh i -3))))))
       (set! i (%+ i 8)))
     (while (%< i e)
       (if (gc-bit? gc-bitmap i) (set! n (%+ n 1)) nil)
@@ -574,15 +577,15 @@
 
 (define (gc-plan-objects hi)
   (let ((p obj-base) (free obj-base) (blk 0))
-    (%st32! gc-obj-prefix obj-base)
-    (%st32! gc-obj-first obj-base)
+    (%st-fixnum! gc-obj-prefix obj-base)
+    (%st-fixnum! gc-obj-first obj-base)
     (while (%< p hi)
       (let ((b (obj-block-of p)))
         (while (%< blk b)
           (set! blk (%+ blk 1))
-          (%st32! (%+ gc-obj-prefix (%lsh blk 2)) free)
-          (%st32! (%+ gc-obj-first (%lsh blk 2)) p)))
-      (let ((size (obj-block-size (%ld32 p))))
+          (%st-fixnum! (%+ gc-obj-prefix (%lsh blk 2)) free)
+          (%st-fixnum! (%+ gc-obj-first (%lsh blk 2)) p)))
+      (let ((size (obj-block-size (%ld-fixnum p))))
         (if (%<= size 0) (gc-corrupt p) nil)
         (if (gc-marked? p)
             (if (gc-pinned? p)
@@ -593,18 +596,18 @@
     (let ((last (obj-block-of hi)))
       (while (%< blk last)
         (set! blk (%+ blk 1))
-        (%st32! (%+ gc-obj-prefix (%lsh blk 2)) free)
-        (%st32! (%+ gc-obj-first (%lsh blk 2)) p)))
+        (%st-fixnum! (%+ gc-obj-prefix (%lsh blk 2)) free)
+        (%st-fixnum! (%+ gc-obj-first (%lsh blk 2)) p)))
     free))
 
 (define (gc-forward-object p)
   (if (gc-pinned? p)
       p
       (let* ((b (obj-block-of p))
-             (free (%ld32 (%+ gc-obj-prefix (%lsh b 2))))
-             (q (%ld32 (%+ gc-obj-first (%lsh b 2)))))
+             (free (%ld-fixnum (%+ gc-obj-prefix (%lsh b 2))))
+             (q (%ld-fixnum (%+ gc-obj-first (%lsh b 2)))))
         (while (%< q p)
-          (let ((size (obj-block-size (%ld32 q))))
+          (let ((size (obj-block-size (%ld-fixnum q))))
             (if (gc-marked? q)
                 (if (gc-pinned? q)
                     (if (%> (%+ q size) free) (set! free (%+ q size)) nil)
@@ -631,7 +634,7 @@
       (set! p (%+ p 8))))
   (let ((p obj-base))
     (while (%< p obj-hi)
-      (let ((size (obj-block-size (%ld32 p))))
+      (let ((size (obj-block-size (%ld-fixnum p))))
         (if (gc-marked? p) (gc-object-slots (%+ p 4)) nil)
         (set! p (%+ p size))))))
 
@@ -652,8 +655,8 @@
                 (if (%= free p)
                     nil
                     (begin
-                      (%raw-st! free (%raw-ld p))
-                      (%raw-st! (%+ free 4) (%raw-ld (%+ p 4)))
+                      (%st-word! free (%ld-word p))
+                      (%st-word! (%+ free 4) (%ld-word (%+ p 4)))
                       (set! n (%+ n 1))))
                 (set! free (%+ free 8))))
           nil)
@@ -663,7 +666,7 @@
 (define (gc-move-objects hi)
   (let ((p obj-base) (n 0))
     (while (%< p hi)
-      (let ((size (obj-block-size (%ld32 p))))
+      (let ((size (obj-block-size (%ld-fixnum p))))
         (if (gc-marked? p)
             (let ((to (gc-forward-object p)))
               (if (%= to p)
@@ -671,7 +674,7 @@
                   (begin
                     (let ((i 0))
                       (while (%< i size)
-                        (%raw-st! (%+ to i) (%raw-ld (%+ p i)))
+                        (%st-word! (%+ to i) (%ld-word (%+ p i)))
                         (set! i (%+ i 4))))
                     (set! n (%+ n 1)))))
             nil)
@@ -684,7 +687,7 @@
   ;; the size of what is in it rather than the size of the high water mark.
   (let ((p lo))
     (while (%< p hi)
-      (%st32! p 0)
+      (%st-fixnum! p 0)
       (set! p (%+ p 4)))))
 
 ;; ---------------------------------------------------------------- driver
@@ -694,7 +697,7 @@
   ;; it now names whatever the slide happened to leave there.
   (let ((p cons-base) (bad 0) (first 0))
     (while (%< p top)
-      (let ((a (%raw-ld p)) (d (%raw-ld (%+ p 4))))
+      (let ((a (%ld-word p)) (d (%ld-word (%+ p 4))))
         (if (if (%cons? a) (%>= (%addr-of a) top) nil)
             (begin (if (%= first 0) (set! first p) nil) (set! bad (%+ bad 1)))
             nil)
@@ -871,30 +874,30 @@
   ;; Exact fit first, then split from the big-block list, then bump.
   (let* ((gran (%lsh size -3))
          (bin (obj-bin-addr gran))
-         (p (if (%< gran obj-bin-count) (%ld32 bin) 0)))
+         (p (if (%< gran obj-bin-count) (%ld-fixnum bin) 0)))
     (if (%> p 0)
-        (begin (%st32! bin (%ld32 (%+ p 4))) p)
+        (begin (%st-fixnum! bin (%ld-fixnum (%+ p 4))) p)
         (obj-take-slow size gran))))
 
 (define (obj-take-slow size gran)
   ;; Walk the oversized list looking for something to cut down.
   (let ((prev 0)
-        (p (%ld32 obj-bins))
+        (p (%ld-fixnum obj-bins))
         (found 0))
     (while (if (%= found 0) (%> p 0) nil)
-      (let ((have (%lsh (%lsh (%ld32 p) -8) 3)))
+      (let ((have (%lsh (%lsh (%ld-fixnum p) -8) 3)))
         (if (%>= have size)
             (begin
               ;; unlink
               (if (%= prev 0)
-                  (%st32! obj-bins (%ld32 (%+ p 4)))
-                  (%st32! (%+ prev 4) (%ld32 (%+ p 4))))
+                  (%st-fixnum! obj-bins (%ld-fixnum (%+ p 4)))
+                  (%st-fixnum! (%+ prev 4) (%ld-fixnum (%+ p 4))))
               ;; return the tail of the block, if the split is worth keeping
               (if (%>= (%- have size) 8)
                   (gc-free-block (%+ p size) (%- have size))
                   nil)
               (set! found p))
-            (begin (set! prev p) (set! p (%ld32 (%+ p 4)))))))
+            (begin (set! prev p) (set! p (%ld-fixnum (%+ p 4)))))))
     (if (%> found 0)
         found
         ;; Nothing on the lists: take fresh ground.
@@ -938,7 +941,7 @@
     (if (%>= n code-registry-max)
         (error "code registry full")
         nil)
-    (%raw-st! (%+ r (%lsh n 2)) obj)
+    (%st-word! (%+ r (%lsh n 2)) obj)
     (%set-global! lg-code-reg-n (%+ n 1))
     obj)))
 
@@ -946,12 +949,12 @@
 (define (code-take size)
   (let ((prev 0) (p (%global lg-code-free)) (got 0))
     (while (if (%= got 0) (%> p 0) nil)
-      (let ((have (%ld32 p)) (next (%ld32 (%+ p 4))))
+      (let ((have (%ld-fixnum p)) (next (%ld-fixnum (%+ p 4))))
         (if (%>= have size)
             (begin
               (if (%= prev 0)
                   (%set-global! lg-code-free next)
-                  (%st32! (%+ prev 4) next))
+                  (%st-fixnum! (%+ prev 4) next))
               ;; Keep the tail if it is big enough to hold a header.
               (if (%>= (%- have size) 16)
                   (code-free-block (%+ p size) (%- have size))
@@ -961,8 +964,8 @@
     got))
 
 (define (code-free-block p size)
-  (%st32! p size)
-  (%st32! (%+ p 4) (%global lg-code-free))
+  (%st-fixnum! p size)
+  (%st-fixnum! (%+ p 4) (%global lg-code-free))
   (%set-global! lg-code-free p)
   (%set-global! lg-code-free-n (%+ (%global lg-code-free-n) size)))
 
@@ -990,13 +993,13 @@
         (keep 0)
         (freed 0))
     (while (%< i n)
-      (let ((obj (%raw-ld (%+ r (%lsh i 2)))))
+      (let ((obj (%ld-word (%+ r (%lsh i 2)))))
         (if (gc-marked? (%- (%addr-of obj) 4))
             (begin
-              (%raw-st! (%+ r (%lsh keep 2)) obj)
+              (%st-word! (%+ r (%lsh keep 2)) obj)
               (set! keep (%+ keep 1)))
-            (let ((entry (%addr-of (%raw-ld (%addr-of obj))))
-                  (len (%addr-of (%raw-ld (%+ (%addr-of obj) 4)))))
+            (let ((entry (%addr-of (%ld-word (%addr-of obj))))
+                  (len (%addr-of (%ld-word (%+ (%addr-of obj) 4)))))
               (if (%>= len 16)
                   (begin (code-free-block entry len) (set! freed (%+ freed len)))
                   nil))))
@@ -1007,7 +1010,7 @@
     ;; reference and keep whatever it names exactly where it is.
     (let ((j keep))
       (while (%< j n)
-        (%raw-st! (%+ r (%lsh j 2)) 0)
+        (%st-word! (%+ r (%lsh j 2)) 0)
         (set! j (%+ j 1))))
     (%set-global! lg-code-reg-n keep)
     freed))
@@ -1035,7 +1038,7 @@
         (hi (%global lg-obj-ptr))
         (zeroed 0))
     (while (%< p hi)
-      (let* ((h (%ld32 p))
+      (let* ((h (%ld-fixnum p))
              (size (obj-block-size h)))
         (if (%<= size 0) (gc-corrupt p) nil)
         (if (%= (%logand h 255) t-free)
@@ -1056,7 +1059,7 @@
 (define (gc-blank-free-code)
   (let ((p (%global lg-code-free)))
     (while (%> p 0)
-      (let ((size (%ld32 p)) (next (%ld32 (%+ p 4))))
+      (let ((size (%ld-fixnum p)) (next (%ld-fixnum (%+ p 4))))
         ;; The first two words are the size and the next pointer, and the free
         ;; list is still threaded through them.
         (if (%> size 8) (gc-blank (%+ p 8) (%+ p size)) nil)
@@ -1112,7 +1115,7 @@
       t))
 
 (define (package-in-use? p)
-  (let ((l (%raw-ld lg-symlist)) (used nil))
+  (let ((l (%ld-word lg-symlist)) (used nil))
     (while (%cons? l)
       (let ((s (%car l)))
         (if (%eq? (symbol-package s) p)
@@ -1144,14 +1147,14 @@
   ;; Out of the obarray, out of the symbol list, out of the package list. The
   ;; symbols go when the collector next runs, unless something is still
   ;; holding one - which is what uninterning means anywhere else too.
-  (let* ((ob (%raw-ld lg-obarray))
+  (let* ((ob (%ld-word lg-obarray))
          (n (%vector-length ob))
          (i 0))
     (while (%< i n)
       (%vector-set! ob i (drop-symbols-of p (%vector-ref ob i)))
       (set! i (%+ i 1))))
-  (%raw-st! lg-symlist (drop-symbols-of p (%raw-ld lg-symlist)))
-  (%raw-st! lg-packages (remove-eq p (%raw-ld lg-packages)))
+  (%st-word! lg-symlist (drop-symbols-of p (%ld-word lg-symlist)))
+  (%st-word! lg-packages (remove-eq p (%ld-word lg-packages)))
   p)
 
 (define (forget-unused-packages)

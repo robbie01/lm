@@ -114,6 +114,19 @@
 (define (even? n) (%= 0 (%logand n 1)))
 (define (odd? n) (%= 1 (%logand n 1)))
 (define (abs n) (if (%< n 0) (%- 0 n) n))
+(define (clamp v lo hi) (if (%< v lo) lo (if (%> v hi) hi v)))
+
+;; Integer square root, by Newton. Wanted by anything that has to turn a
+;; distance into a length, which on a machine with no floats is more things
+;; than you would think.
+(define (isqrt n)
+  (if (%< n 2)
+      (if (%< n 0) 0 n)
+      (let ((x n) (y (%lsh (%+ n 1) -1)))
+        (while (%< y x)
+          (set! x y)
+          (set! y (%lsh (%+ x (%/ n x)) -1)))
+        x)))
 (define (neg n) (%- 0 n))
 (define (min2 a b) (if (%< a b) a b))
 (define (max2 a b) (if (%> a b) a b))
@@ -425,7 +438,7 @@
   (if (%eq? a b)
       t
       (if (%float? a)
-          (if (%float? b) (%= (%ld32 (%addr-of a)) (%ld32 (%addr-of b))) nil)
+          (if (%float? b) (%= (%ld-fixnum (%addr-of a)) (%ld-fixnum (%addr-of b))) nil)
           nil)))
 
 (define (equal? a b)

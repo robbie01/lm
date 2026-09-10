@@ -33,6 +33,17 @@ pub const C_OVER: u32 = 26;
 /// machine would rather say out loud.
 pub const C_DIVZERO: u32 = 27;
 
+/// What `a7` carries when compiled code raises an ecall on purpose. The
+/// compiler emits these, `sys.lisp` reports them and the test bench names
+/// them, so they are generated into `layout.lisp` rather than written down
+/// three times and kept in step by hand.
+pub const E_ARITY: u32 = 1;
+pub const E_TYPE: u32 = 2;
+pub const E_OOM: u32 = 3;
+pub const E_ERROR: u32 = 4;
+pub const E_RESCHEDULE: u32 = 5;
+pub const E_RECORD: u32 = 6;
+
 pub const IRQ_SOFT: u32 = 3; // machine software interrupt
 pub const IRQ_TIMER: u32 = 7;
 pub const IRQ_EXT: u32 = 11;

@@ -17,9 +17,10 @@
 (export '(build-boot-code reserve-reset))
 
 ;; ---------------------------------------------------------------- context
-;; 32 words: word 0 is the pc, words 1..31 are x1..x31.
-(define ctx-words 32)
-(define ctx-bytes 128)
+;; 32 words: word 0 is the pc, words 1..31 are x1..x31. `ctx-words`,
+;; `ctx-bytes` and a name for every one of those words come from layout.lisp,
+;; which is generated - the stub below is the thing that decides the shape, so
+;; it is the last place that should be repeating the numbers.
 (define (ctx-off n) (%* 4 n))
 
 (define trap-save 0)      ; filled in below, in the Exec pool
@@ -32,7 +33,7 @@
 ;; The first thing assembled, so that it lands at the base of code space,
 ;; which is where the processor starts fetching.
 (define (emit-reset-stub toplevel-global)
-  (let ((a (asm-new)))
+  (let ((a (make-assembler)))
     ;; A stack to stand on.
     (i-li a $sp (%+ boot-stack boot-stack-size))
     (i-sw-abs a $sp lg-stacktop $t0)
@@ -76,7 +77,7 @@
   ;; and the temporaries. The walker steps over the second half and takes only
   ;; the masked part of the first, which is what keeps the collector precise
   ;; across an allocation.
-  (let* ((a (asm-new))
+  (let* ((a (make-assembler))
          (i 0))
     (i-addi a $sp $sp (%- 0 stub-frame-size))
     (i-sw a $t5 $sp stub-mask-off)      ; the live-register mask
@@ -117,19 +118,19 @@
 ;; context is in one contiguous block, the scheduler can switch tasks simply
 ;; by pointing mscratch at a different one.
 (define (emit-trap-stub)
-  (let ((a (asm-new)))
+  (let ((a (make-assembler)))
     ;; mscratch holds the save area. Swap it into t0 so there is a register to
     ;; work with without having destroyed anything yet.
     (i-csrrw a $t0 csr-mscratch $t0)
     (let ((r 1))
       (while (%< r 32)
-        (if (%= r 5) nil (i-sw a r $t0 (ctx-off r)))
+        (if (%= r reg-t0) nil (i-sw a r $t0 (ctx-off r)))
         (set! r (%+ r 1))))
     ;; Recover the original t0 from mscratch, and put the save area back.
     (i-csrrw a $ra csr-mscratch $t0)
-    (i-sw a $ra $t0 (ctx-off 5))
+    (i-sw a $ra $t0 (ctx-off reg-t0))
     (i-csrrs a $ra csr-mepc $zero)
-    (i-sw a $ra $t0 (ctx-off 0))
+    (i-sw a $ra $t0 (ctx-off reg-zero))
 
     ;; A stack of its own, so a fault caused by a broken stack pointer can
     ;; still be reported.
@@ -172,7 +173,7 @@
     ;; Restore. The handler may have edited the context - that is how a task
     ;; switch and how resuming past an ecall both work.
     (i-csrrs a $t0 csr-mscratch $zero)
-    (i-lw a $ra $t0 (ctx-off 0))
+    (i-lw a $ra $t0 (ctx-off reg-zero))
     (i-csrrw a $zero csr-mepc $ra)
     ;; gp and tp go back with everything else. They are this task's cons run,
     ;; and they have to be per task: the inline allocator stores into the cell
@@ -185,9 +186,9 @@
     ;; in gc.lisp, under `gc-invalidate-runs`.
     (let ((r 1))
       (while (%< r 32)
-        (if (memq r (list 5)) nil (i-lw a r $t0 (ctx-off r)))
+        (if (%= r reg-t0) nil (i-lw a r $t0 (ctx-off r)))
         (set! r (%+ r 1))))
-    (i-lw a $t0 $t0 (ctx-off 5))
+    (i-lw a $t0 $t0 (ctx-off reg-t0))
     (i-mret a)
     (asm-place a)
     a))

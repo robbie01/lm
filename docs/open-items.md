@@ -68,7 +68,7 @@ Allocating is a call, so such a function is not a leaf by the current test. The
 alternative is to add `t0` to the live-register mask the allocator's slow path
 publishes, and let leaves allocate.
 
-**`%ld16` and `%st16!` have no tagged-address instruction.**
+**`%ld-half` and `%st-half!` have no tagged-address instruction.**
 Still four instructions each. There was no funct3 left in custom-3 and no
 measured demand.
 
@@ -161,15 +161,62 @@ something draws window chrome through a rastport that is not the window's, or
 the compositor blits a source rectangle it should have refused. Worth an hour
 with a small repro - one window, one repaint - rather than a guess.
 
-## Records cost about eight percent of code space
+## Records cost about nine percent of code space
 
 `defrecord` emits a getter and a setter function per field, so that an accessor
 is a value as well as something the compiler open-codes. That is roughly two
-hundred small functions almost nobody calls: code went from 314 to 339 KiB when
-the records landed. Emitting them only for records that are asked for by name
-would get most of it back, and would cost a declaration nobody wants to write.
-Worth revisiting when code space starts to matter, which is the same day
-compacting it does.
+hundred small functions almost nobody calls: code went from 314 to 341 KiB over
+the two passes that introduced them. Emitting them only for records that are
+asked for by name would get most of it back, and would cost a declaration
+nobody wants to write. Worth revisiting when code space starts to matter, which
+is the same day compacting it does.
+
+## Something in the heap is one instruction away from being wrong
+
+There is a memory corruption that nothing reaches on the code as it stands, and
+that a single extra call anywhere in `fill-rect` is enough to reach. It has a
+reproduction, which is the useful part:
+
+- Add any call at the head of `hw:fill-rect` - `(define (layout-nudge c) c)`
+  and `(layout-nudge c)` will do; it need not compute anything.
+- Run `(workbench) (new-shell) (eyes) (balls 4) (mandelbrot) (life 40)`.
+- Within a few seconds: `instruction access fault at pc 37f7f7f6` in
+  `wait-vblank`, called from a ball task, every run, at the same address.
+
+What is known:
+
+- `0x37f7f7f6` is the trap stub's thirty-bit narrowing of `0xf7f7f7f6`, which
+  is a word of colour bytes - so a Lisp pointer named a *bitmap*, and the entry
+  word fetched from it was pixels.
+- It is **not** object reuse. Stubbing `gc-free-block` so that swept blocks are
+  never handed out again does not help.
+- It is layout-sensitive but not *only* layout: the same nudge applied to the
+  previous commit does nothing. Something about this tree makes it reachable.
+- The one change that decides it is `rect` becoming a record. With rectangles
+  back to four-element lists the nudge is harmless; as records, it faults. The
+  compositor allocates a rectangle per window per frame, so that moves the
+  system's hottest allocation from cons space into object space.
+- It is the same fault address, in the same function, as the compositor bug
+  chased two sessions ago and attributed to the cons-run refill race. That race
+  was real and is fixed; this is what was underneath it.
+
+So the thing to look at is object space under churn: what is marked, what the
+conservative register scan of a suspended task does with an object rather than
+a pair, and whether anything holds a record somewhere the frame walk cannot
+see. Sweeping and reuse are ruled out; marking and roots are not.
+
+## `bm-blit-rect` still takes twelve positional arguments
+
+`(bm-blit-rect sbm sbw sbh dbm dbw dbh sx sy dx dy w h)`, with the source and
+destination triples adjacent and interchangeable. The fix is a `bitmap` record
+holding the address and the two dimensions, which would make it eight
+arguments and two single values that cannot be transposed a triple at a time -
+and would collapse `rp-bitmap`/`rp-bitmap-w`/`rp-bitmap-h` to one accessor, and
+`*screen*`/`*screen-w*`/`*screen-h*` to one variable.
+
+Held back deliberately: it is another pass of object allocation over the
+graphics path, and the entry above says this is not the week to add one
+blind.
 
 ## Closing a window frees a bitmap the compositor may still be reading
 

@@ -51,7 +51,7 @@
   ;; wrong their arithmetic is, drawing does not have to be clipped to a
   ;; region that somebody has to keep correct, and the order things appear in
   ;; is decided once, by the compositor, instead of every time anybody paints.
-  (let ((v (win-make)))
+  (let ((v (win-alloc)))
     (set-win-x! v x)
     (set-win-y! v y)
     (set-win-w! v w)
@@ -229,8 +229,8 @@
                       (list (list (%- tx 7) (%+ (%+ tx tw) 7))))
           (pt-title-box rp close-x pt-box-y 0)
           (pt-title-box rp zoom-x pt-box-y 1)
-          (draw-text rp tx 4 title pt-black -1))
-        (draw-text rp tx 4 title pt-g7 -1))
+          (draw-text rp tx 4 title pt-black nil))
+        (draw-text rp tx 4 title pt-g7 nil))
     ;; The content border, one pixel of outline round the interior.
     (pt-frame rp (%- (win-inner-x win) 1) (%- (win-inner-y win) 1)
               (%+ (win-inner-w win) 2) (%+ (win-inner-h win) 2) outline)
@@ -241,7 +241,7 @@
   ;; A menu bar with nothing in the menus yet, which is honest enough.
   (fill-rect rp 0 0 *screen-w* pt-menubar-h pt-g2)
   (pt-hline rp 0 (%- pt-menubar-h 1) *screen-w* pt-g6)
-  (draw-text rp pt-menubar-first-x 3 "Workbench" pt-black -1)
+  (draw-text rp pt-menubar-first-x 3 "Workbench" pt-black nil)
   nil)
 
 ;; ---------------------------------------------------------------- composite
@@ -339,7 +339,7 @@
 ;; two calls something drawing pixel by pixel wants: straight at the bitmap,
 ;; because a plot that walks a clipping region is a plot that costs more in
 ;; bookkeeping than in pixels.
-(define (make-demo-window title w h)
+(define (make-demo-window w h title)
   (let* ((n (length *windows*))
          (win (make-window (%+ 40 (%* n 24)) (%+ 40 (%* n 20))
                            (%+ w (%* 2 pt-band))
@@ -457,7 +457,7 @@
     nil))
 
 (define (make-shell cols rows)
-  (let ((v (sh-make)))
+  (let ((v (sh-alloc)))
     (set-sh-cols! v cols)
     (set-sh-rows! v rows)
     (set-sh-grid! v (make-bytes (%* cols rows)))
@@ -513,14 +513,14 @@
 
 (define (shell-putc-1 rp win sh c)
   (cond
-   ((%= c 10) (shell-newline rp win sh))
-   ((%= c 13) nil)
-   ((%= c 8)
+   ((%eq? c #\newline) (shell-newline rp win sh))
+   ((%eq? c (%int->char 13)) nil)
+   ((%eq? c #\backspace)
     ;; Backspace erases, because a prompt you cannot correct is a toy.
     (if (%> (sh-col sh) 0)
         (begin
           (set-sh-col! sh (%- (sh-col sh) 1))
-          (shell-poke sh 32)
+          (shell-poke sh (%char->int #\space))
           (fill-rect rp (shell-cell-x win (sh-col sh))
                      (shell-cell-y win (sh-row sh))
                      mono-advance mono-height wb-back))
@@ -529,10 +529,10 @@
     (if (%>= (sh-col sh) (sh-cols sh))
         (shell-newline rp win sh)
         nil)
-    (shell-poke sh c)
+    (shell-poke sh (%char->int c))
     (draw-mono-char rp (shell-cell-x win (sh-col sh))
                (shell-cell-y win (sh-row sh))
-               (%int->char c) wb-text wb-back)
+               c wb-text wb-back)
     (set-sh-col! sh (%+ (sh-col sh) 1))))
   nil)
 
@@ -552,7 +552,7 @@
             (if (%= ch 32)
                 nil
                 (draw-mono-char rp (shell-cell-x win c) (shell-cell-y win r)
-                           (%int->char ch) wb-text -1)))
+                           (%int->char ch) wb-text nil)))
           (set! c (%+ c 1))))
       (set! r (%+ r 1)))
     nil))
@@ -566,7 +566,7 @@
    (lambda ()
      (let ((k (window-pop-key win)))
        (if k
-           (begin (shell-putc win sh k) (%int->char k))
+           (let ((c (%int->char k))) (shell-putc win sh c) c)
            nil)))
    ;; Nothing to read: sleep until `window-push-key` says otherwise.
    (lambda () (wait sigf-input))))

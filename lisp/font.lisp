@@ -212,7 +212,10 @@
       (set! row (%+ row 1)))
     nil))
 
+;; `bg` is a colour to fill the cell with first, or nil to leave what is
+;; there - which is what drawing over pinstripes needs.
 (define (draw-char rp x y ch fg bg)
+  (check-colour fg)
   (let ((i (font-index ch)))
     (if (%< i 0)
         0
@@ -221,9 +224,7 @@
               (bh (rp-bitmap-h rp))
               (px (%+ x (rp-origin-x rp)))
               (py (%+ y (rp-origin-y rp))))
-          (if (%>= bg 0)
-              (fill-rect rp x y (font-adv-of i) font-height bg)
-              nil)
+          (if bg (fill-rect rp x y (font-adv-of i) font-height bg) nil)
           (let ((ink (font-ink-of i))
                 (ox (%+ px (font-left-of i))))
             (dolist (cr (rp-region rp))
