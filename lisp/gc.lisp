@@ -142,7 +142,9 @@
       nil
       (let* ((w (if (%< n gc-clear-w) n gc-clear-w))
              (rows (%/ (%+ n (%- w 1)) w))
-             (b (blit-block)))
+             ;; The collector's own block: this runs with interrupts off, and
+             ;; it is the one blitter caller that is not drawing.
+             (b (gc-blit-block)))
         (poke (%+ b bl-dst) at)
         (poke (%+ b bl-w) w)
         (poke (%+ b bl-h) rows)

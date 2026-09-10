@@ -91,21 +91,41 @@
 (define (add-head l n) (insert-before (node-succ (list-head l)) n))
 (define (add-tail l n) (insert-before (list-tail l) n))
 
+;; Taking a node out, and *saying so in the node*. Removal has to be
+;; idempotent, because there is no way to ask a node whether it is on a list
+;; and every caller that takes one off is entitled to assume it worked.
+;;
+;; It used to leave the node's own links alone, pointing at the neighbours it
+;; had when it was removed - which turned a second removal into a splice of
+;; two nodes that had since moved on. That is not hypothetical:
+;;
+;;   `switch-tasks` takes the next task off the ready list with `rem-head`,
+;;   which is `remove-node`. The task runs, signals somebody - who is enqueued
+;;   on the ready list, quite possibly exactly between the two neighbours the
+;;   first task still remembers - and then ends. Ending reaps it, and reaping
+;;   is `forget-node`, which removed it a second time: the stale neighbours
+;;   were joined to each other, and the task in between was lost. Not
+;;   corrupted, not woken: simply on no list, marked ready, holding a signal
+;;   it had already been sent, and never scheduled again.
+;;
+;;   It needed a task to exit while another was newly ready, so it took four
+;;   tasks and a particular interleaving, and it looked exactly like a lost
+;;   wakeup. It was in every version of this scheduler.
 (define (remove-node n)
   (let ((s (node-succ n))
         (p (node-pred n)))
-    (set-node-succ! p s)
-    (set-node-pred! s p)
+    (if (if s p nil)
+        (begin (set-node-succ! p s) (set-node-pred! s p))
+        nil)
+    (set-node-succ! n nil)
+    (set-node-pred! n nil)
     n))
 
-;; Removal for good rather than to move it somewhere else. The links go too:
-;; the collector can see them now, so a node somebody still holds would
-;; otherwise keep every node that was after it alive.
-(define (forget-node n)
-  (remove-node n)
-  (set-node-succ! n nil)
-  (set-node-pred! n nil)
-  n)
+;; The same thing. It is spelled differently where the point is that the node
+;; is finished with rather than moving somewhere else - and the links going is
+;; what the collector needs either way, so that a node somebody still holds
+;; does not keep every node that was behind it alive.
+(define (forget-node n) (remove-node n))
 
 (define (rem-head l)
   (if (list-empty? l) nil (remove-node (list-first l))))
@@ -155,7 +175,8 @@
   fn                             ; the closure the task runs
   result switches
   binds                          ; this task's fluid bindings, innermost first
-  quantum elapsed)
+  quantum elapsed
+  parent children)               ; a dependent task dies with the one that made it
 
 (define ts-invalid 0)
 (define ts-added 1)
@@ -299,12 +320,18 @@
         (%cons 'package (current-package))
         ;; A blitter command block of its own, so that programming the chip
         ;; needs no lock: two tasks are never half way through the same one.
-        (%cons '*blit-list* (alloc-pool blit-list-size))))
+        (%cons '*blit-list* (alloc-pool blit-list-size))
+        ;; And one reply port, made the first time this task asks a server for
+        ;; something. One per task and not one per call, because a task has
+        ;; one blocker and therefore one conversation.
+        (%cons '*reply-port* nil)))
 
 ;; Dead tasks waiting to be reclaimed. A task cannot free the stack it is
 ;; standing on, so it goes on this list instead and the next context switch
 ;; does the work - that runs on the trap stack, with the corpse saved and
 ;; never to be resumed, which is the first moment its stack is genuinely idle.
+(define *reply-port* nil)   ; per task; see `initial-binds` and `reply-port`
+
 (define *reaped* nil)
 
 (define (reap-tasks)
@@ -411,17 +438,37 @@
   (if *in-interrupt* (error "wait: called from an interrupt server") nil)
   (let ((saved (%disable)))
     (let ((task (this-task)) (got 0))
-      (while (%= got 0)
-        (set! got (%logand (tc-sigrecvd task) mask))
-        (if (%= got 0)
-            (begin
-              (set-tc-sigwait! task mask)
-              (set-tc-state! task ts-wait)
-              (add-tail (wait-list) task)
+      (set! got (%logand (tc-sigrecvd task) mask))
+      (if (%= got 0)
+          (begin
+            (set-tc-sigwait! task mask)
+            (set-tc-state! task ts-wait)
+            ;; On the wait list *once*, and it stays there until `signal`
+            ;; takes it off - which `signal` only does when a bit this task
+            ;; asked for has arrived, so coming back round the loop still
+            ;; waiting means still being on the list.
+            ;;
+            ;; This used to be inside the loop, and `add-tail` does not unlink
+            ;; a node from wherever it already is: it splices it in and leaves
+            ;; the old neighbours pointing at it. A second pass therefore
+            ;; stitched the wait list into itself, and the tasks in the segment
+            ;; that came adrift were on no list at all - runnable, signalled,
+            ;; and never scheduled again. It needed a task to be rescheduled
+            ;; without being signalled to show at all, which is why it only
+            ;; turned up with three or four tasks running and looked like a
+            ;; lost wakeup rather than a corrupted list.
+            (add-tail (wait-list) task)
+            (while (%= got 0)
+              ;; You cannot block with interrupts off, so they go back on for
+              ;; the reschedule and come off again on the way back.
               (%restore-interrupts saved)
               (reschedule)
-              (set! saved (%disable)))
-            nil))
+              (set! saved (%disable))
+              (set! got (%logand (tc-sigrecvd task) mask)))
+            ;; `signal` took it off the wait list on the way to making it
+            ;; ready; nothing to undo here.
+            nil)
+          nil)
       (set-tc-sigrecvd! task
                     (%logand (tc-sigrecvd task) (%lognot got)))
       (set-tc-sigwait! task 0)
@@ -501,10 +548,57 @@
       (if (%= (%ld-fixnum (%+ p -4)) pool-tag) (free-pool p) nil)
       nil))
 
+;; A dependent task: a goroutine, near enough. It is removed when the task
+;; that made it is, so a server that fans work out to helpers does not have to
+;; remember what it started, and a shell that dies does not leave its workers
+;; holding its window.
+;;
+;; The link is one way for the collector's sake as well as the scheduler's: a
+;; parent holds its children, so a child cannot outlive the list it is on.
+(define (spawn name pri fn . opts)
+  (let ((child (apply add-task (list* name pri fn opts)))
+        (me (this-task)))
+    (if me
+        (without-interrupts
+          (set-tc-parent! child me)
+          (set-tc-children! me (%cons child (tc-children me))))
+        nil)
+    child))
+
+(define (task-children task) (tc-children task))
+(define (task-parent task) (tc-parent task))
+
+(define (rem-children task)
+  ;; Depth first, and the list is taken before anything is removed: removing a
+  ;; child runs this again for its own children, and a child that ends by
+  ;; itself is already off its parent's list.
+  (let ((cs (without-interrupts
+              (let ((c (tc-children task)))
+                (set-tc-children! task nil)
+                c))))
+    (while (%cons? cs)
+      (let ((c (%car cs)))
+        (if (%= (tc-state c) ts-removed) nil (rem-task c)))
+      (set! cs (%cdr cs))))
+  nil)
+
+(define (forget-child task)
+  ;; A task that ends on its own takes itself off its parent's list, so a
+  ;; long-lived parent does not accumulate corpses.
+  (let ((p (tc-parent task)))
+    (if p
+        (without-interrupts
+          (set-tc-children! p (remove-eq task (tc-children p)))
+          (set-tc-parent! task nil))
+        nil))
+  nil)
+
 (define (rem-task task)
   ;; A task that has ended stays a task and says so. Signalling it does
   ;; nothing, because it is in no state to be woken; that is the whole
   ;; difference from a handle that could come back as somebody else.
+  (rem-children task)
+  (forget-child task)
   (without-interrupts
     (set-tc-state! task ts-removed)
     (set! *task-count* (%- *task-count* 1)))
@@ -607,13 +701,18 @@
 
 (defrecord (message mn) (include node) replyport length body)
 
-(define (create-port name pri)
+(define (create-port name pri) (create-port-for (this-task) name pri))
+
+;; A port belongs to the task that waits on it, which is not always the task
+;; that makes it: a server's port has to be the server's, and the server is
+;; not running yet when it is created.
+(define (create-port-for owner name pri)
   (let ((p (mp-alloc))
-        (sig (alloc-signal (this-task))))
+        (sig (alloc-signal owner)))
     (set-node-name! p name)
     (set-node-pri! p pri)
     (set-mp-sigmask! p sig)
-    (set-mp-sigtask! p (this-task))
+    (set-mp-sigtask! p owner)
     (set-mp-msglist! p (new-list))
     (if (%null? name)
         nil
@@ -665,6 +764,100 @@
 (define (reply-msg msg)
   (let ((r (mn-replyport msg)))
     (if r (put-msg r msg) nil)))
+
+;; ---------------------------------------------------------------- servers
+;; A driver is a task with a port, and talking to it is sending it a message.
+;;
+;; That is the whole of the device model. There is no registry of device names
+;; and no `OpenDevice`: a driver is reached by naming the symbol that holds it,
+;; because this is a Lisp machine and a symbol is already a name the whole
+;; system agrees on. What AmigaOS needed a string-keyed table of IO ports for,
+;; we get from the reader.
+;;
+;; Why a task rather than a lock: a resource that only one task touches cannot
+;; be raced for, and the queue in front of it is the scheduler's, which already
+;; exists and is already right. The blitter is the cautionary tale - it was
+;; shared, and a command block filled by two contexts at once wrote pixels
+;; across a task's saved registers. Nothing about that was hard to fix once it
+;; was found; the trouble was that the API let it be written at all.
+
+(defrecord (server sv) (include node) port task)
+
+(define (server-port s) (sv-port s))
+(define (server-task s) (sv-task s))
+
+(define (server-loop s handler)
+  (let ((port (sv-port s)))
+    (while t
+      (let ((m (get-msg port)))
+        (if (%null? m)
+            (wait (mp-sigmask port))
+            (begin
+              ;; The answer goes back in the message the caller sent, so a
+              ;; request and its reply are one object and there is nothing to
+              ;; match up at the other end.
+              (set-mn-body! m (%funcall handler (mn-body m)))
+              (reply-msg m)))))))
+
+(define (make-server name pri handler . opts)
+  ;; Forbid rather than a rendezvous: the port has to exist before the server
+  ;; runs and before anybody can be handed the server to talk to, and not
+  ;; being switched out is the simplest way to say that.
+  (let ((s (sv-alloc)))
+    (set-node-name! s name)
+    (set-node-pri! s pri)
+    (forbid)
+    (let ((task (apply spawn
+                       (list* name pri (lambda () (server-loop s handler)) opts))))
+      (set-sv-task! s task)
+      (set-sv-port! s (create-port-for task name pri)))
+    (permit)
+    s))
+
+;; Every task has one reply port, because every task has one blocker: a task
+;; that is waiting for an answer is waiting for *the* answer, so there is
+;; never a second one outstanding to tell it apart from. Fanning out is done
+;; by making more tasks, which is what `spawn` is for.
+(define (reply-port)
+  (if *reply-port*
+      *reply-port*
+      (begin (set! *reply-port* (create-port nil 0)) *reply-port*)))
+
+(define (request port body)
+  ;; Send, block, answer.
+  (let* ((r (reply-port))
+         (m (create-message body r)))
+    (put-msg port m)
+    (wait (mp-sigmask r))
+    (get-msg r)
+    (mn-body m)))
+
+(define (send port body)
+  ;; No answer wanted, and no waiting.
+  (put-msg port (create-message body nil))
+  nil)
+
+;; An edge rather than a message: something happened at this port. This is
+;; what an interrupt server posts, because a server must not allocate, and it
+;; is why a task can `wait` on a mask that spans device interrupts and message
+;; ports without knowing which is which. One blocker; any number of sources.
+(define (notify port)
+  (let ((task (mp-sigtask port)))
+    (if task (signal task (mp-sigmask port)) nil))
+  nil)
+
+(define (port-ready? p) (if (list-empty? (mp-msglist p)) nil t))
+
+;; `select`, for a task that genuinely has to listen in several places -
+;; usually a server with a control port beside its work port. Answers the
+;; first port with something on it.
+(define (wait-ports ports)
+  (let ((mask 0) (hit nil))
+    (dolist (p ports) (set! mask (%logior mask (mp-sigmask p))))
+    (while (%null? hit)
+      (dolist (p ports) (if (if hit nil (port-ready? p)) (set! hit p) nil))
+      (if hit nil (wait mask)))
+    hit))
 
 ;; ---------------------------------------------------------------- libraries
 ;; A library is reached through a jump table below its base pointer, which is
@@ -795,31 +988,53 @@
 ;; that only signalled would be re-entered forever. Masking the line is what
 ;; makes a level-triggered device behave: the server hands the work to a task
 ;; and stops listening, and the task turns it back on when the queue is dry.
+;;
+;; Listening is a *port*, not a task. It used to be one global holding the one
+;; task allowed to hear about input, which is the shape that forces
+;; multiplexing on everybody downstream: one listener, so one loop, so every
+;; kind of event decoded in one place. A port each means a task that wants
+;; input asks for one, and a task that wants two things at once has two ports
+;; and one `wait` over both.
+;;
+;; What the server posts is a `notify` - an edge, no message - because a
+;; server must not allocate. A port is the right thing to post it to anyway:
+;; the mask a task waits on then spans device interrupts and messages alike,
+;; and nothing waiting has to know which kind of thing woke it.
 (define *input-int* nil)
-(define *input-task* nil)
+(define *input-ports* nil)
 
 (define (input-server data)
   (int-disable int-input)
-  (if *input-task* (signal *input-task* sigf-input) nil)
+  (let ((p *input-ports*))
+    (while (%cons? p)
+      (notify (%car p))
+      (set! p (%cdr p))))
   nil)
 
-(define (input-listen task)
-  (set! *input-task* task)
-  (poke inp-ctrl (%logior (peek inp-ctrl) 1))
-  (if *input-int*
-      nil
-      (begin
-        (set! *input-int*
-              (make-interrupt "input" 0 (lambda (d) (input-server d)) 0))
-        (add-int-server int-input *input-int*)))
-  (int-enable int-input)
+(define (input-listen)
+  ;; Answers a port that is notified whenever the device has events.
+  (let ((port (create-port nil 0)))
+    (without-interrupts (set! *input-ports* (%cons port *input-ports*)))
+    (poke inp-ctrl (%logior (peek inp-ctrl) 1))
+    (if *input-int*
+        nil
+        (begin
+          (set! *input-int*
+                (make-interrupt "input" 0 (lambda (d) (input-server d)) 0))
+          (add-int-server int-input *input-int*)))
+    (int-enable int-input)
+    port))
+
+(define (input-unlisten port)
+  (without-interrupts (set! *input-ports* (remove-eq port *input-ports*)))
+  (delete-port port)
   nil)
 
-(define (wait-input)
+(define (wait-input port)
   ;; Drain first: the line was masked when the server fired, so anything that
   ;; arrived since is sitting in the device with nobody listening.
   (int-enable int-input)
-  (wait sigf-input))
+  (wait (mp-sigmask port)))
 
 (define (vblank-start)
   (if *vblank-int*
@@ -872,15 +1087,12 @@
 ;; Everything that interrupts the machine arrives here, on the trap stack,
 ;; with the interrupted task's registers already in its context block.
 (define (handle-interrupt n ctx)
-  ;; Saying which context this is, and nothing else. A server draws with the
-  ;; blitter too and needs a command block that is not the interrupted task's,
-  ;; but `blit-block` works that out from this flag rather than being handed it
-  ;; - see the comment there for what happens when the handler assigns instead,
-  ;; which is that a task switch in the middle of the assignment gives two
-  ;; tasks one block.
+  ;; Saying which context this is, and nothing else. `blit-block` refuses in
+  ;; interrupt context and `wait` refuses too: a server does not draw and does
+  ;; not block, it signals a task and returns.
   ;;
-  ;; This flag is safe to set the same way only because it is cleared before
-  ;; the handler returns, and no other task runs until it does.
+  ;; This flag is safe to set this way only because it is cleared before the
+  ;; handler returns, and no other task runs until it does.
   (set! *in-interrupt* t)
   (handle-interrupt-1 n ctx)
   (set! *in-interrupt* nil)

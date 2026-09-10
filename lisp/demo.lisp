@@ -346,3 +346,68 @@
     (princ "nesting: ") (princ *nest-hits*)
     (princ " traps taken inside the trap handler, all of them survived")
     (newline)))
+
+
+;; ---------------------------------------------------------------- talking
+;; `(talking)` exercises the way tasks are meant to reach anything they do not
+;; own: by sending it a message.
+;;
+;; There is no device registry here and no `OpenDevice`. A driver is a task
+;; with a port, and it is reached by naming the symbol that holds it - which
+;; is the one thing a Lisp machine gets for free and an Amiga had to build a
+;; string-keyed table for.
+(define *talk-server* nil)
+
+(define (talking)
+  ;; A server. The handler is called with whatever was sent and its answer
+  ;; goes back in the same message.
+  (set! *talk-server*
+        (make-server "arith" 0
+          (lambda (body)
+            (cond ((eq? (%car body) 'add) (+ (cadr body) (caddr body)))
+                  ((eq? (%car body) 'mul) (* (cadr body) (caddr body)))
+                  (else 'what)))))
+  (let ((p (server-port *talk-server*)))
+    (num-check 'request (request p (list 'add 2 3)) 5)
+    ;; and it is ordinary arithmetic on the other side, bignums and all
+    (num-check 'request-promotes (request p (list 'mul 1000000 1000000))
+               1000000000000)
+    (num-check 'request-again (request p (list 'add 10 20)) 30)
+
+    ;; Select. A task has one blocker, so listening in two places is one
+    ;; `wait` over both masks rather than a poll over either.
+    (let ((a (create-port nil 0))
+          (b (create-port nil 0)))
+      (spawn "sender" 0 (lambda () (wait-vblank)
+                                   (put-msg b (create-message 'from-b nil))))
+      (let ((hit (wait-ports (list a b))))
+        (num-check 'select-b (eq? hit b) t)
+        (num-check 'select-body (message-body (get-msg hit)) 'from-b))
+      (put-msg a (create-message 'from-a nil))
+      (let ((hit (wait-ports (list a b))))
+        (num-check 'select-a (eq? hit a) t)
+        (num-check 'select-body-a (message-body (get-msg hit)) 'from-a))
+      (delete-port a)
+      (delete-port b))
+
+    ;; Dependent tasks. A child dies with its parent, so a server that fans
+    ;; work out does not have to remember what it started.
+    (let ((me (this-task)) (parent nil))
+      (set! parent
+            (add-task "parent" 0
+              (lambda ()
+                (spawn "kid-one" 0 (lambda () (wait 262144)))
+                (spawn "kid-two" 0 (lambda () (wait 262144)))
+                (signal me 65536)
+                (wait 131072))))
+      (wait 65536)
+      (num-check 'children (length (task-children parent)) 2)
+      (rem-task parent)
+      (num-check 'children-gone (find-task "kid-one") nil))
+
+    ;; And the rule that closes the bug this all started from: an interrupt
+    ;; server does not draw.
+    (num-check 'blitter-is-task-context
+               (if hw::*in-interrupt* 'in-interrupt 'task) 'task))
+  (princ "talking: done (nothing above = all correct)")
+  (newline))

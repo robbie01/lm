@@ -650,15 +650,16 @@
   ;; Drain whatever has arrived, then sleep until the device says there is
   ;; more. This used to ask again as fast as the processor could be handed
   ;; back, which was most of what the machine did while it looked idle.
-  (input-listen (this-task))
-  (while *wb-running*
-    (let ((n (input-pending)))
-      (if (%> n 0)
-          (let ((i 0))
-            (while (%< i n)
-              (wb-event (input-event))
-              (set! i (%+ i 1))))
-          (wait-input))))
+  (let ((port (input-listen)))
+    (while *wb-running*
+      (let ((n (input-pending)))
+        (if (%> n 0)
+            (let ((i 0))
+              (while (%< i n)
+                (wb-event (input-event))
+                (set! i (%+ i 1))))
+            (wait-input port))))
+    (input-unlisten port))
   nil)
 
 ;; ---------------------------------------------------------------- startup

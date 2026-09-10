@@ -154,7 +154,7 @@
 ;; 83 public, out of 165 definitions.
 (export '(
   peek-signed peek-scratch
-  *blit-list* *int-blit-list* *in-interrupt* blit-block blit-go blt-list
+  *blit-list* *gc-blit-list* *in-interrupt* blit-block gc-blit-block blit-go blt-list
   *screen* alloc-pool bm-blit-rect bm-clip bm-fill-rect
   bm-plot bm-point bm-at bm-addr bm-w bm-h bitmap? make-bitmap alloc-bitmap
   make-bitmap-rastport make-rastport-on rp-bitmap
@@ -247,6 +247,18 @@
   task-snapshot task?
   this-task
   rem-task reschedule sigb-input sigb-vblank sigf-input sigf-vblank signal
+  ;; ---- talking between tasks ----
+  ;; A port and a message were internal before, which is why the only device
+  ;; that listened for input was the one task allowed to. They are the public
+  ;; mechanism now: a driver is a task with a port, and a program reaches it
+  ;; by naming the symbol that holds it.
+  create-port create-port-for delete-port find-port
+  create-message message-body set-message-body! delete-message
+  put-msg get-msg wait-port reply-msg port-ready? wait-ports notify
+  request send make-server server-port server-task
+  spawn task-children task-parent rem-children
+  *reply-port* reply-port input-unlisten
+  node-name node-pri find-name find-task list-nodes
   *vblank-count* vblank-start wait-input wait-vblank
   task-count tasks wait
 ))

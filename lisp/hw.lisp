@@ -307,39 +307,54 @@
 ;; `*out*` and the current package are, and interrupt servers have one more.
 ;; Two contexts are never half way through the same block.
 (define *blit-list* 0)      ; the running task's, swapped in with its bindings
-(define *int-blit-list* 0)  ; and one more for interrupt servers
+(define *gc-blit-list* 0)   ; and one the collector owns outright
 (define *in-interrupt* nil) ; set by the trap handler, cleared before it returns
 
-;; Which block this context fills. A *question*, deliberately: the obvious
-;; thing is for the trap handler to swap the interrupt's block into
-;; `*blit-list*` and put the task's back afterwards, and that is wrong in a way
-;; that took three sessions to find.
+;; The blitter belongs to task context.
 ;;
-;; `*blit-list*` is per task, and the scheduler swaps it with the rest of a
-;; task's bindings - from inside the trap handler. So the handler would save
-;; task A's block, install the interrupt's, switch to task B (which captures
-;; the *interrupt's* block as A's, because that is what the variable holds by
-;; then), and finally put A's block back - into B's live value. Two tasks then
-;; program one block, and what the chip runs is half of each: a destination
-;; from one window with the stride of another, writing pixels across whatever
-;; follows the bitmap it thinks it has.
+;; Every task fills a command block of its own, so programming the chip needs
+;; no lock: two tasks are never half way through the same one, and the store
+;; that commits it is a single word. That is ownership by disjointness, and it
+;; is the whole arbitration - there is nothing to claim and nothing to release.
 ;;
-;; Asking instead of assigning cannot go wrong that way, because nothing is
-;; written and there is nothing for a task switch to capture.
+;; An interrupt server does not get one and is not meant to. It used to: the
+;; trap handler swapped a second block in for the duration, which looked
+;; harmless and was the worst bug this machine has had. `*blit-list*` is per
+;; task and the scheduler swaps it with the rest of a task's bindings - from
+;; inside that handler - so the swap leaked one task's block into another's,
+;; and two contexts then programmed one block. What the chip ran was half of
+;; each: a destination from one window with the stride of another, writing
+;; pixels across whatever followed the bitmap it thought it had.
 ;;
-;; The collector clears its bit maps with the blitter, and that can happen
-;; before there is an Exec to have handed anybody a block, so the first caller
-;; on either path makes one.
+;; The fix at the time was to choose the block by asking rather than by
+;; assigning, which closed the race. This closes the class: an interrupt
+;; server has no business drawing. It runs with the world half saved, it must
+;; not allocate, it must not block, and anything it draws is drawn over by the
+;; next task that composites. If a server wants pixels it signals a task and
+;; the task draws them - which is what every interrupt in this system already
+;; does, and why nothing was using the second block by the time it was
+;; deleted.
+;;
+;; The collector is the exception and has a block of its own rather than a
+;; borrowed one. It clears its bit maps with the chip, it can run in either
+;; context, and it holds interrupts off for the whole collection - so one
+;; block, owned outright, is exactly the right shape for it. It is also why
+;; `blit-block` can afford to be strict: the one caller that legitimately runs
+;; anywhere does not go through it.
 (define (blit-block)
   (if *in-interrupt*
-      (begin
-        (if (%= *int-blit-list* 0)
-            (set! *int-blit-list* (alloc-pool blit-list-size))
-            nil)
-        *int-blit-list*)
-      (begin
-        (if (%= *blit-list* 0) (set! *blit-list* (alloc-pool blit-list-size)) nil)
-        *blit-list*)))
+      (error "the blitter is task context only: signal a task instead")
+      nil)
+  (if (%= *blit-list* 0) (set! *blit-list* (alloc-pool blit-list-size)) nil)
+  *blit-list*)
+
+;; The collector's own. Not a fluid binding: a collection runs with interrupts
+;; off from end to end, so there is never a second one to keep apart from.
+(define (gc-blit-block)
+  (if (%= *gc-blit-list* 0)
+      (set! *gc-blit-list* (alloc-pool blit-list-size))
+      nil)
+  *gc-blit-list*)
 
 (define (blit-go b op)
   (poke (%+ b bl-op) op)

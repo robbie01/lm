@@ -200,6 +200,83 @@ got.
 **`%eq?` is unchecked and should stay that way.** It compares identity on
 values of any kind. It is not a numeric comparison and should not become one.
 
+## Fixed: the scheduler lost tasks
+
+A task could be taken off the ready list by something that had nothing to do
+with it, and then never run again: not woken late, not corrupted - on no list
+at all, marked ready, holding a signal it had already been sent.
+
+`remove-node` spliced a node out of its list and left the node's *own* links
+pointing at the neighbours it had at the time. A second removal therefore
+joined those two stale neighbours to each other, and anything that had been
+inserted between them in the meantime came out with it. And a second removal
+is normal:
+
+    switch-tasks takes the next task off the ready list with rem-head, which
+    is remove-node. That task runs, signals somebody - who is enqueued on the
+    ready list, quite possibly exactly between the two neighbours the running
+    task still remembers - and then ends. Ending reaps it, and reaping is
+    forget-node, which removed it a second time.
+
+So it needed one task to exit while another was newly ready, which took four
+or five tasks and a particular interleaving. Everything about it looked like a
+lost wakeup, which is where two sessions of suspicion went. Removal is
+idempotent now: taking a node out says so in the node.
+
+The same audit turned up a second one in `wait`, which added itself to the
+wait list on *every* pass of its loop rather than once. `add-tail` does not
+unlink first either, so a task that was rescheduled without being signalled
+stitched the wait list into itself. Nothing was reaching that path, but it is
+the same mistake and it is fixed the same way.
+
+## Devices are tasks, and talking to one is sending it a message
+
+The blitter bug was not a hard bug to fix once it was found. What was wrong was
+that the API let it be written: a resource with no owner, reachable from any
+context, and a corruption that surfaced minutes later somewhere else. So the
+mechanism is now the one AmigaOS used for `QBlit` and Go uses for everything -
+a server you send to, rather than a lock you take.
+
+**A driver is a task with a port.** `make-server` spawns it; `request` sends
+and waits for the answer; `send` does not wait; `notify` is an edge with no
+message, which is what an interrupt server posts because a server must not
+allocate. There is no device registry and no `OpenDevice`: a driver is reached
+by naming the symbol that holds it, which is the one thing a Lisp machine gets
+for free and an Amiga needed a string-keyed table of IO ports for.
+
+**One blocker per task.** `wait` takes a signal mask, and a port has a signal
+bit - so a task waiting for a message, a device interrupt and the vertical
+blank is doing one `wait` over the union, and does not have to know which kind
+of thing woke it. That is the orthogonality worth protecting: interrupts and
+messages are the same mechanism seen from the two ends. `wait-ports` is the
+`select` on top of it, for a server with a control port beside its work port.
+
+**Multiplex by making more tasks.** `spawn` makes a dependent one - a
+goroutine, near enough - that is removed when its parent is, so a server that
+fans work out does not have to remember what it started. The one place that
+was multiplexing by hand is fixed: input used to be a single global naming the
+one task allowed to hear about it, so every kind of event had to be decoded in
+one loop. `input-listen` answers a port now, and any number of tasks can have
+one.
+
+**The blitter belongs to task context.** `blit-block` refuses in an interrupt
+server, and says to signal a task instead. That is the rule the original bug
+broke, made explicit and checked: a server runs with the world half saved, it
+must not allocate, it must not block, and anything it draws is drawn over by
+the next task that composites. The collector is the exception and has a block
+of its own rather than a borrowed one - it can run in either context, it holds
+interrupts off from end to end, and it is not drawing.
+
+`(talking)` at the prompt exercises all of it.
+
+**What is not done.** Only input has been moved; the graphics, disk and timer
+sides are still called directly rather than asked. A blit is ten instructions
+and a message is a task switch, so routing every blit through a server would
+be the wrong trade - the shape that fits is a server for whole operations that
+are already batched, which the compositor is close to being. And `wait-ports`
+returns the first ready port, not a random one, so a busy port can starve a
+quiet one; Go shuffles, and this should too when it matters.
+
 ## The forge got twice as fast, and the rest of it is known
 
 A build was 15.7 seconds and is now 7.2, with a byte-identical image.
