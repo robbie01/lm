@@ -156,7 +156,10 @@ work - a build from before them has it too - and it survives with only the
 workbench and two shells open, so it is the chrome and not a demo.
 
 It should not be possible: a window draws through a rastport clipped to its own
-bitmap, and `bm-fill-rect` clips again to the bitmap's edges. So either
+bitmap, and `bm-fill-rect` clips again to the bitmap's edges. Quite possibly
+the same fault as *Something writes two pixels over the current-task register*
+below - a blit that leaves its bitmap lands on the desktop when the bitmap is
+the screen's, and on a task's saved state when it is a window's. So either
 something draws window chrome through a rastport that is not the window's, or
 the compositor blits a source rectangle it should have refused. Worth an hour
 with a small repro - one window, one repaint - rather than a guess.
@@ -171,39 +174,85 @@ asked for by name would get most of it back, and would cost a declaration
 nobody wants to write. Worth revisiting when code space starts to matter, which
 is the same day compacting it does.
 
-## Something in the heap is one instruction away from being wrong
+## Something writes two pixels over the current-task register
 
-There is a memory corruption that nothing reaches on the code as it stands, and
-that a single extra call anywhere in `fill-rect` is enough to reach. It has a
-reproduction, which is the useful part:
+There is a memory corruption that nothing reaches on the code as it stands,
+and that a single extra call anywhere in `fill-rect` is enough to reach. It
+has a reproduction, which is the useful part:
 
 - Add any call at the head of `hw:fill-rect` - `(define (layout-nudge c) c)`
   and `(layout-nudge c)` will do; it need not compute anything.
 - Run `(workbench) (new-shell) (eyes) (balls 4) (mandelbrot) (life 40)`.
-- Within a few seconds: `instruction access fault at pc 37f7f7f6` in
-  `wait-vblank`, called from a ball task, every run, at the same address.
+- Within a few seconds it dies, the same way every run.
 
-What is known:
+**What it is.** `s2` holds the running task, and it acquires a value like
+`0xa09f7f7`: the task pointer with its low *two bytes* replaced by `f7f7`,
+which is a colour. So two pixels are written over half a pointer. Then
+`switch-tasks` reads a slot of what is now a fixnum, or a `ret` goes to an
+address made of pixels - which is what `instruction access fault at pc
+37f7f7f6` was, two sessions running.
 
-- `0x37f7f7f6` is the trap stub's thirty-bit narrowing of `0xf7f7f7f6`, which
-  is a word of colour bytes - so a Lisp pointer named a *bitmap*, and the entry
-  word fetched from it was pixels.
-- It is **not** object reuse. Stubbing `gc-free-block` so that swept blocks are
-  never handed out again does not help.
-- It is layout-sensitive but not *only* layout: the same nudge applied to the
-  previous commit does nothing. Something about this tree makes it reachable.
-- The one change that decides it is `rect` becoming a record. With rectangles
-  back to four-element lists the nudge is harmless; as records, it faults. The
-  compositor allocates a rectangle per window per frame, so that moves the
-  system's hottest allocation from cons space into object space.
-- It is the same fault address, in the same function, as the compositor bug
-  chased two sessions ago and attributed to the cons-run refill race. That race
-  was real and is fixed; this is what was underneath it.
+**What has been ruled out**, with the tools below:
 
-So the thing to look at is object space under churn: what is marked, what the
-conservative register scan of a suspended task does with an object rather than
-a pair, and whether anything holds a record somewhere the frame walk cannot
-see. Sweeping and reuse are ruled out; marking and roots are not.
+- **Not the blitter leaving its bitmap for somewhere else.** `LM_BLIT_GUARD=1`
+  checks every blit's source and destination against an exact invariant - a
+  blit may only ever write to the pool or the collector's scratch above
+  `fast-base` - and it never fires.
+- **Not the ordinary store path.** `LM_WATCH_HI=f7f7` reports every word store
+  whose top half is a colour pattern, and the only ones are the trap stub
+  saving registers that were *already* wrong.
+- **Not object reuse.** Stubbing `gc-free-block` so swept blocks are never
+  handed out again does not help.
+- **Not argument passing.** `compile-args` writes `a0+i` with no bound on `i`,
+  and `a0+8` is `s2` - but `compile-call` sends anything over eight arguments
+  to `compile-call-many` instead, so it is never reached with `i` past seven.
+- **Nothing else writes `s2`.** The only two instructions that do are
+  `%this-task` and `%set-this-task!`, and the latter runs once, in `exec-init`.
+
+**Where to look next.** The gap the guard leaves is a blit that overruns
+*within* the pool - past the end of its own bitmap and into the context block
+or stack that follows it, which is exactly the arrangement `bm-clip`'s comment
+warns about. Catching that needs the guard to know the destination bitmap's
+own bounds, and the command block has four words (`bl-x0`..`bl-y1`) that fill
+and copy do not use: Lisp could put the bitmap's base and length there for the
+guard to check, at the cost of two stores a blit.
+
+**Every instrument written in Lisp moves it.** Adding the check to `bm-plot`,
+or to `fill-rect`, or a watchdog task, each made it stop happening. That is
+why both tools below are on the Rust side, where they add nothing to the
+image.
+
+## Two debugging tools, both off by default
+
+- `LM_BLIT_GUARD=1` - every blit's source and destination range is checked
+  against where a bitmap can possibly be. Costs a few comparisons per blit.
+- `LM_WATCH_HI=f7f7` - report every word store whose top sixteen bits are
+  that, with the pc and the function it happened in. `LM_WATCH_ADDR=<hex>`
+  with `LM_WATCH_LEN=<n>` reports every store into that range instead, which
+  is how the corrupt register was traced back to the stub that saved it.
+
+## Window management is a farce
+
+There is more of it than it looks - `wb-button-down` raises the window under
+the pointer, closes it if the click was in the close box, and starts a drag if
+it was anywhere else in the title bar, and `wb-event` wires all of that to the
+mouse. What there is not:
+
+- **The zoom box is drawn and does nothing.** `pt-title-box` draws it with a
+  bar in it and `in-close-box?` has no counterpart for it. Neither has the
+  collapse box, which is not drawn at all.
+- **No resize.** `pt-grow-box` exists, is exported, and is drawn by nobody;
+  windows are the size they were created.
+- **Nothing but the pointer chooses the front window.** No keyboard way round
+  the stack, no window menu, no list of open windows anywhere.
+- **The front window takes every keystroke**, so activation and focus are the
+  same thing and neither can be changed without the mouse.
+- **A window cannot be moved off the top of the screen** but can be dragged
+  until only a sliver of its title bar shows, and there is nothing to bring it
+  back.
+
+Worth doing as one pass rather than piecemeal: the boxes, a resize corner, and
+some way to cycle the front window from the keyboard.
 
 ## `bm-blit-rect` still takes twelve positional arguments
 
@@ -214,9 +263,12 @@ arguments and two single values that cannot be transposed a triple at a time -
 and would collapse `rp-bitmap`/`rp-bitmap-w`/`rp-bitmap-h` to one accessor, and
 `*screen*`/`*screen-w*`/`*screen-h*` to one variable.
 
-Held back deliberately: it is another pass of object allocation over the
-graphics path, and the entry above says this is not the week to add one
-blind.
+Written and then held back. The change works - the suite passes and every
+demo runs on its own - but putting it in shifts the image's code layout enough
+that the corruption above happens in the *default* build, with no nudge at
+all. It is a better reproduction than the nudge and it is the first thing to
+try again once that is understood; the diff is small enough to redo from this
+description.
 
 ## Closing a window frees a bitmap the compositor may still be reading
 

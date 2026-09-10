@@ -381,9 +381,74 @@ fn prof_load(m: &mut Machine, a: u32, pc: u32, dst: u32) {
 }
 
 #[inline(always)]
+/// TEMPORARY: report a word being stored whose top half matches LM_WATCH_HI.
+/// The corruption being chased shows up as a jump to `0xf7f7xxxx`, and every
+/// attempt to catch it from Lisp moves it, so the net has to be down here.
+fn watch_hi() -> Option<u32> {
+    use std::sync::OnceLock;
+    static HI: OnceLock<Option<u32>> = OnceLock::new();
+    *HI.get_or_init(|| {
+        std::env::var("LM_WATCH_HI")
+            .ok()
+            .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+    })
+}
+
+/// The name of the function the machine is standing in, read out of the code
+/// object every frame keeps in s1 - the same word a backtrace uses.
+fn watch_where(m: &Machine) -> String {
+    let s1 = m.x[9];
+    if s1 & 7 != 4 {
+        return String::from("?");
+    }
+    let name = m.peek32(s1.wrapping_add(4 * crate::heap::CODE_NAME));
+    if name & 7 != 4 {
+        return String::from("?");
+    }
+    let hdr = m.peek32(name.wrapping_sub(4));
+    if hdr & 0xff != crate::heap::T_STRING {
+        return String::from("?");
+    }
+    let n = (hdr >> 8).min(64);
+    let mut out = String::new();
+    for i in 0..n {
+        out.push(m.peek32(name + i) as u8 as char);
+    }
+    out
+}
+
+fn watch_range() -> Option<(u32, u32)> {
+    use std::sync::OnceLock;
+    static R: OnceLock<Option<(u32, u32)>> = OnceLock::new();
+    *R.get_or_init(|| {
+        let lo = std::env::var("LM_WATCH_ADDR").ok()?;
+        let lo = u32::from_str_radix(lo.trim_start_matches("0x"), 16).ok()?;
+        let len = std::env::var("LM_WATCH_LEN")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(128);
+        Some((lo, len))
+    })
+}
+
 fn do_store(m: &mut Machine, a: u32, f: u32, v: u32, fuel: u32) -> bool {
     if f > 2 {
         return false;
+    }
+    if let Some(hi) = watch_hi() {
+        if f == 2 && (v >> 16) == hi {
+            eprintln!("watch: stored {v:#x} to {a:#x} from pc {:#x}", m.pc);
+        }
+    }
+    if let Some((lo, len)) = watch_range() {
+        if a >= lo && a < lo + len {
+            eprintln!(
+                "watch: wrote {v:#x} ({} bytes) to {a:#x} from pc {:#x} in {}",
+                1 << f,
+                m.pc,
+                watch_where(m)
+            );
+        }
     }
     let sz = 1u32 << f;
     if m.in_ram(a, sz) {

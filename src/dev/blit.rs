@@ -172,6 +172,28 @@ pub fn command(m: &mut Machine, reg: u32, v: u32) {
         (w as u64) * (h as u64)
     };
 
+    if guard_on() {
+        if v == OP_LINE {
+            let b = &m.blit.live;
+            let (x0, x1) = (b.x0.min(b.x1), b.x0.max(b.x1));
+            let (y0, y1) = (b.y0.min(b.y1), b.y0.max(b.y1));
+            guard_range(
+                m,
+                dst.wrapping_add(y0.wrapping_mul(dmod)).wrapping_add(x0),
+                dst.wrapping_add(y1.wrapping_mul(dmod)).wrapping_add(x1) + 1,
+                "line",
+                v,
+            );
+        } else if h > 0 && w > 0 {
+            let extent = (h - 1).wrapping_mul(dmod).wrapping_add(w);
+            guard_range(m, dst, dst.wrapping_add(extent), "dst", v);
+            if v == OP_COPY || v == OP_MASK {
+                let sext = (h - 1).wrapping_mul(smod).wrapping_add(w);
+                guard_range(m, src, src.wrapping_add(sext), "src", v);
+            }
+        }
+    }
+
     if v == OP_LINE {
         let (x0, y0, x1, y1) = (m.blit.live.x0, m.blit.live.y0, m.blit.live.x1, m.blit.live.y1);
         line(m, dst, dmod, x0, y0, x1, y1, val as u8);
@@ -228,6 +250,36 @@ pub fn command(m: &mut Machine, reg: u32, v: u32) {
 }
 
 #[allow(clippy::too_many_arguments)]
+// ---------------------------------------------------------------- guard
+// A blit may only ever write to a bitmap, and every bitmap is either pool
+// memory or the collector's scratch above `fast-base`. Code space, cons space
+// and object space are never a legitimate destination, so a blit that names
+// one is writing pixels over the machine - which is what turns up later as a
+// jump into a word of colour bytes a long way from the blit that did it.
+//
+// Off unless LM_BLIT_GUARD is set.
+fn guard_on() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("LM_BLIT_GUARD").is_ok())
+}
+
+fn guard_range(m: &Machine, lo: u32, hi: u32, what: &str, op: u32) {
+    use crate::map::{CODE_BASE, FAST_BASE, POOL_END};
+    let bad = |a: u32| a >= CODE_BASE && a < FAST_BASE;
+    if bad(lo) || bad(hi.saturating_sub(1)) {
+        eprintln!(
+            "blit guard: {what} {lo:#x}..{hi:#x} is not a bitmap (op {op}, pc {:#x})",
+            m.pc
+        );
+    } else if lo < POOL_END && hi > POOL_END {
+        eprintln!(
+            "blit guard: {what} {lo:#x}..{hi:#x} runs off the end of the pool (op {op}, pc {:#x})",
+            m.pc
+        );
+    }
+}
+
 fn line(m: &mut Machine, base: u32, pitch: u32, x0: u32, y0: u32, x1: u32, y1: u32, c: u8) {
     let (mut x, mut y) = (x0 as i32, y0 as i32);
     let (x1, y1) = (x1 as i32, y1 as i32);
