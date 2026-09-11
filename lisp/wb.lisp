@@ -36,7 +36,7 @@
 (defrecord (window win)
   x y w h title
   refresh                 ; (lambda (w)) draws the interior
-  keys                    ; characters waiting, oldest first
+  keys                    ; the port its keys are sent to, if anybody reads it
   task
   data                    ; whatever the window is for
   rp                      ; where this window draws: its own bitmap
@@ -98,6 +98,16 @@
 (define *damage* nil)      ; a list of rectangles, newest first
 (define damage-max 32)     ; beyond which a new one joins its nearest
 
+;; Every task that draws adds to the list and the compositor empties it, so it
+;; is shared, and it is guarded by a mutex rather than a Forbid: adding damage
+;; is a walk of up to thirty-two rectangles, which is long to hold every other
+;; task in the machine off for, and only the tasks that draw ever contend for
+;; it. A task that dies holding it may have left the list half merged, so the
+;; repair is to repaint everything.
+(define *damage-lock*
+  (make-mutex "damage"
+              (lambda (m) (set! *damage* (list (rect 0 0 (bm-w *screen*) (bm-h *screen*)))))))
+
 (define (rect-union a b)
   (if (%null? a)
       b
@@ -122,10 +132,9 @@
   ;; have a union that is nearly the whole screen, and a compositor asked to
   ;; repaint the whole screen sixty times a second is a compositor that never
   ;; finishes one - which looks exactly like a window that will not appear.
-  ;; Forbid, not Disable. Only tasks ever add damage - the vblank and input
-  ;; servers signal, they do not draw - so there is no reason to stop the clock
-  ;; and the keyboard for the length of this walk.
-  (without-preemption
+  ;; The mutex, not Disable: only tasks ever add damage - the vblank and input
+  ;; servers signal, they do not draw.
+  (with-mutex *damage-lock*
     ;; Six tasks drawing into one window ask for the same rectangle six times.
     ;; Dropping what is already covered is what keeps the list short.
     (let ((have nil) (n 0))
@@ -383,7 +392,7 @@
 
 ;; One pass of the compositor: take whatever damage has accumulated and pay it.
 (define (wb-composite)
-  (let ((ds (without-preemption (let ((d *damage*)) (set! *damage* nil) d)))
+  (let ((ds (with-mutex *damage-lock* (let ((d *damage*)) (set! *damage* nil) d)))
         (screen (rect 0 0 (bm-w *screen*) (bm-h *screen*))))
     (dolist (d ds)
       (let ((i (rect-intersect d screen)))
@@ -456,17 +465,21 @@
   (bm-at (window-bitmap win) (win-inner-x win) (%+ y (win-inner-y win))))
 
 ;; The window list is read by the compositor and written by whoever opens,
-;; closes or raises a window - all tasks, so Forbid is the lock. Only the
-;; read-modify-write is inside it: painting the window is far too long to hold
-;; every other task off for.
+;; closes or raises a window. It is never changed in place - every change
+;; builds a new list and puts it in `*windows*` with one store - so a reader
+;; takes it as it stands and needs no lock at all. The writers take
+;; `*windows-lock*` against each other: two raises at once would each build
+;; from the list as it was before the other, and one of them would be lost.
+(define *windows-lock* (make-mutex "windows"))
+
 (define (window-open win)
-  (without-preemption (set! *windows* (%cons win *windows*)))
+  (with-mutex *windows-lock* (set! *windows* (%cons win *windows*)))
   (window-draw win)
   (wb-update)
   win)
 
 (define (window-close win)
-  (without-preemption (set! *windows* (remove-eq win *windows*)))
+  (with-mutex *windows-lock* (set! *windows* (remove-eq win *windows*)))
   (let ((task (win-task win)))
     (if task (begin (rem-task task) (set-win-task! win nil)) nil))
   ;; The hole it leaves has to be repainted.
@@ -493,7 +506,7 @@
   (if (%eq? win (front-window))
       nil
       (begin
-        (without-preemption
+        (with-mutex *windows-lock*
           (set! *windows* (%cons win (remove-eq win *windows*))))
         (wb-update))))
 
@@ -529,34 +542,26 @@
         nil)))
 
 ;; ---------------------------------------------------------------- keys
-;; One queue per window, oldest first. The input task writes to it and the
-;; shell's stream reads from it, which is the whole of the routing.
+;; Keys go to a window as messages, to a port belonging to the task that reads
+;; the window - its shell's. The input task sends and never waits; the shell
+;; takes them in order when it wants one and sleeps on the port when there are
+;; none, and a shell that has ended has its keys answered with a failure that
+;; nobody is waiting to hear. A window nobody reads has no port, and a key sent
+;; to it goes nowhere - which is better than the queue it used to grow for ever.
 ;;
-;; Both ends hold Forbid. Each is a read of the queue followed by a write of
-;; it, and they run in two different tasks: a push preempted between its read
-;; and its write put back a queue that still had the key the shell had just
-;; taken, and a pop preempted the same way dropped whatever arrived in between.
-;; Typing at a person's speed hardly ever lands in that window; typing at a
-;; program's speed garbled a line in a way that still parsed.
+;; It was a list that both tasks read and rewrote, and then the same list with
+;; a Forbid at both ends, after keys typed at a program's speed came through
+;; dropped or doubled. A queue two tasks share is what a port already is.
 (define (window-push-key win c)
-  (without-preemption (set-win-keys! win (append (win-keys win) (list c))))
-  ;; And wake whoever is reading that window. A shell blocked on its keyboard
-  ;; should be woken by a keystroke, not by a clock it asks sixty times a
-  ;; second whether one has arrived.
-  ;; The task may have ended - a shell's prompt is a task and `bye` ends it -
-  ;; and a window that outlives its task must not go on signalling it.
-  (let ((task (win-task win)))
-    (if (if task (task? task) nil)
-        (signal task sigf-input)
-        (set-win-task! win nil)))
+  (let ((p (win-keys win)))
+    (if p (send p c) nil))
   nil)
 
 (define (window-pop-key win)
-  (without-preemption
-    (let ((q (win-keys win)))
-      (if (%cons? q)
-          (begin (set-win-keys! win (%cdr q)) (%car q))
-          nil))))
+  (let ((p (win-keys win)))
+    (if p
+        (let ((m (get-msg p))) (if m (message-body m) nil))
+        nil)))
 
 ;; ---------------------------------------------------------------- shells
 ;; A shell keeps characters, not pixels: a grid it can redraw from, which is
@@ -693,8 +698,8 @@
        (if k
            (let ((c (%int->char k))) (shell-putc win sh c) c)
            nil)))
-   ;; Nothing to read: sleep until `window-push-key` says otherwise.
-   (lambda () (wait sigf-input))))
+   ;; Nothing to read: sleep until a key is sent.
+   (lambda () (wait (port-signal (win-keys win))))))
 
 (define (new-shell . opts)
   ;; A window with a prompt in it, and a task of its own to run the prompt.
@@ -709,8 +714,12 @@
          (sh (make-shell cols rows)))
     (set-win-data! win sh)
     (set-win-refresh! win (lambda (v) (shell-refresh v)))
+    ;; The task and its port before the window is on the screen, so that no
+    ;; key can arrive at it before there is somewhere for the key to go.
+    (let ((task (start-repl "shell" (shell-stream win sh))))
+      (set-win-keys! win (create-port-for task nil 0))
+      (set-win-task! win task))
     (window-open win)
-    (set-win-task! win (start-repl "shell" (shell-stream win sh)))
     win))
 
 ;; ---------------------------------------------------------------- input
