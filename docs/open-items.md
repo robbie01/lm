@@ -831,27 +831,64 @@ forge-built one is a freshly constructed one.
 
 ## Locking
 
-Three mechanisms, and the rule for choosing between them:
+Four ways for tasks to share, in the order to reach for them:
 
-- **`without-interrupts`** — for anything an interrupt server touches. It saves
-  and restores the hardware state, works before Exec exists, and stops the
-  clock, the keyboard and the frame for its duration. The scheduler's lists,
-  the signal bits, the pool free list and object allocation need this.
-- **`without-preemption`** (Forbid) — for anything only tasks touch. Interrupts
-  keep running; only the scheduler is held off. It costs one increment, needs
-  nothing declared, and cannot deadlock. `*windows*` and `*damage*` in the
-  workbench are what it is for, and what it holds. A task that waits inside
-  one gives it up while it sleeps and has it back when it wakes, as Exec's
-  `Wait` did. It used to keep it, and `(without-preemption (print "hi"))`
-  waited for ever on a console driver that could not run to answer.
-- **A semaphore** — not built. For sections that are long, or that block, or
-  that only a few tasks contend for. Forbid stops *every* task in the system,
-  which is fine for a few instructions and wrong for anything that waits.
+- **A port.** Something one task owns cannot be raced for, so give the thing
+  to a task and talk to it with messages. Every driver is built this way, and
+  so are a window's keys: the input task sends them to the port of the shell
+  that reads the window.
+- **A mutex** (`make-mutex`, `with-mutex`) - for data several tasks really do
+  share, and for any section that may have to wait. It belongs to the task
+  that holds it. It nests for its owner and only the owner can let it go;
+  waiters queue in priority order and are handed it directly; a waiter lends
+  the owner its priority; ownership moves only by `mutex-hand-over`; and a
+  wait that would close a circle of tasks is an error that names the circle.
+  A task that ends holding one, or whose stack an error abandons inside
+  `with-mutex`, has it taken away, and the next task to take it is told:
+  `mutex-lock` answers `abandoned`, and `with-mutex` runs the mutex's repair
+  first. The workbench's damage list and window list are guarded this way,
+  and the damage lock's repair is to repaint everything.
+- **`without-preemption`** (Forbid) - for a few instructions of state only
+  tasks touch, where a mutex would cost more than the section. It holds every
+  other task off, so it is for sections too short to notice.
+- **`without-interrupts`** - for anything an interrupt server touches: the
+  scheduler's lists, the signal bits, the pool free list, object allocation.
 
-Both are lexical. `Disable`/`Enable` and `Forbid`/`Permit` are no longer public
-at all; the one section in the machine that cannot be lexical is in `wait`,
-which releases the interrupt state around a `reschedule` inside a loop and
-takes it again on the way back, and that one works the state by hand.
+Nothing sleeps inside either of the last two. Whatever would wake a sleeping
+task is another task or an interrupt, which is exactly what they hold off. So
+`wait` - and everything built on it: `wait-vblank`, `request`, reading a key -
+`reschedule`, taking a mutex and the running task ending itself are all errors
+inside either one, and each says which section refused it. Printing is not:
+inside a section it goes straight to the serial line, and a blit is waited for
+by spinning.
+
+That rule replaced two others in one day. For a long time a wait inside a
+Forbid hung the machine - `switch-tasks` will not take the processor from a
+task holding one, so `(without-preemption (print "hi"))` waited for ever on a
+console driver that could not run to answer. Then, briefly, it was Exec's rule:
+the section was set aside while the task slept. That cured the hang, and quietly
+made every section with a wait in it into two sections with a gap between.
+
+Not built, because nothing needs them yet: a shared mode for readers - the
+compositor reads the window list without any lock, because the list is only
+ever replaced and never changed in place - and counting semaphores, which a port
+holding N messages already is.
+
+Both sections are lexical. `Disable`/`Enable` and `Forbid`/`Permit` are not
+public; the one section in the machine that cannot be lexical is inside `wait`,
+which lets interrupts in around the `reschedule` that blocks and takes them back
+after, and works the state by hand.
+
+**Fixed: a fault report could take the machine down.** Faults were reported by
+the trap handler, through the faulting task's own output. In a window that is
+drawing, and drawing takes the damage mutex, which the handler - interrupts off
+- may not take; so a stack overflow in a shell reported itself into a second
+fault, and that into a third. `*out*` bound to something that faults - a stream
+where its output function belonged - did the same to the serial prompt, eight
+traps deep, until the stub ran out of frames and jumped through a garbage
+pointer. The handler now writes the report into a string, and the restart
+prints it once the task's bindings are unwound, on its own stack, with
+interrupts on. A handler that faults eight deep anyway halts and says so.
 
 **Fixed: two tasks could be handed the same run of cons space.** Worth keeping
 on the record, because it wore a disguise for a long time. Cons allocation is
@@ -906,16 +943,12 @@ without the forge in the loop at all.
 
 ## Loose ends
 
-- **`lm --script` turns every `\n` into a newline**, including the one in
-  `#\newline`, which arrives as `#` and a line break. Write `(%int->char 10)`.
-- **Binding `*out*` to a window shell's stream from the serial task kills the
-  machine.** `(fluid-let ((*out* (wb::shell-stream w (win-data w)))) (print
-  1))` takes a wrong-type trap, the trap report goes to that same stream and
-  faults again, ten levels deep, until the machine halts.
-- **`(reschedule)` inside a Forbid** comes back to the task that called it,
-  even one that has just removed itself.
-- **`gc-verify` can call words in a hole dangling** - see *When to collect* -
-  because a hole still holds whatever pairs were last there.
+None at the moment. The last four are fixed: `lm --script` leaves character
+literals alone, so `#\newline` survives its `\n` translation; a borrowed shell
+stream no longer takes the machine down (see *Fixed: a fault report could take
+the machine down*, under Locking); `(reschedule)` inside a Forbid is an error
+rather than a call that quietly came back; and `gc-verify` steps over the holes
+a pinned pair leaves.
 
 ## Note to self
 

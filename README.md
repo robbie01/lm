@@ -839,9 +839,9 @@ mattered yet.
 
 An Amiga Exec, in Lisp, in one shared address space with no MMU and no
 protection. Tasks with 32 signal bits and `Wait`/`Signal`; message ports on top
-of signals; `Forbid`/`Permit` for cooperative critical sections and
-`Disable`/`Enable` for real ones; libraries reached through a jump table below
-their base pointer.
+of signals; mutexes that belong to the task holding them; Forbid and Disable
+for sections too short to sleep in; libraries reached through a jump table
+below their base pointer.
 
 `PutMsg` costs a pointer on a list. Nothing is copied, because there is nothing
 to copy it between - which is the whole reason to have a shared address space.
@@ -927,8 +927,8 @@ that for free, and the only question was whether anyone kept the answer — and
 `%restore-interrupts` puts back what it found. So there is no "enable"
 operation for anything to get wrong, and no shared nesting count that everyone
 has to agree to maintain: each caller keeps its own answer on its own stack.
-Exec's `Disable`/`Enable` counter is still there, and still what a debugger
-would read, but nothing depends on it for correctness. `without-interrupts` is
+Exec's `Disable`/`Enable` counter is gone; nothing ever read it but the pair
+itself. `without-interrupts` is
 the form you write, and it is a macro rather than something taking a thunk,
 because a thunk that captures anything is a closure and the collector may not
 allocate.
@@ -949,13 +949,34 @@ write the same cell and carry on, and it would surface much later as a pair
 holding somebody else's cdr. Now `refill-cons` carves a 256 KiB chunk out of
 the frontier for the asking task alone, the trap stub restores `gp` and `tp`
 with everything else, and the sequence is private to one task. After a
-compaction every run describes the wrong heap, so the collector zeroes each
-suspended task's saved pair and each one refills on its next allocation.
+compaction every run describes the wrong heap, so each suspended task keeps
+only the cell its run was about to use - moved with everything else, its `gp`
+updated to match - and refills after that. The collector used to zero both
+registers instead, and a task preempted between its room check and its stores
+then wrote its pair into nil's cell.
 
 **A device command is a critical section.** Setting up a blit is several
 register writes and then the one that starts it; two tasks interleaved there
 start each other's work. That one is visible — it draws a line across the
 screen from a rectangle that was supposed to be clipped to a window.
+
+### Locks
+
+Ports come first: a resource one task owns cannot be raced for, which is why
+every driver is a task. For data that tasks really do share there is a mutex,
+and it is the Windows kind rather than a bare semaphore - it belongs to the
+task holding it. Only the owner can let it go; it nests; waiters queue in
+priority order and are handed it directly; a waiter lends the owner its
+priority; and a task that dies holding one, or whose stack an error abandons,
+has it taken away, and the next owner is told - through a repair function the
+mutex can be made with. A wait that would close a circle of tasks is an error
+naming the circle, not a hang.
+
+`without-preemption` and `without-interrupts` stay, for sections a few
+instructions long, and nothing may sleep inside either: `wait`, `reschedule`
+and taking a mutex there are errors that say so. `(locking)` at the prompt
+checks all of it. The rules, and how they came about, are under *Locking* in
+[docs/open-items.md](docs/open-items.md).
 
 ### Waiting for a frame
 
