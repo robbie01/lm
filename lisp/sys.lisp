@@ -433,6 +433,12 @@
   (emit-str (number->hex epc))
   (emit-str ", value ")
   (emit-str (number->hex tval))
+  ;; The machine refuses any store into its first eight bytes, because those
+  ;; are what car and cdr of nil read. Somebody treated nil as a pair of their
+  ;; own, and the address alone would not say so.
+  (if (if (%= cause 7) (%< tval 8) nil)
+      (emit-str ", which is nil's cell")
+      nil)
   (emit-str "\n")
   (backtrace-from-context epc ctx)
   (abort-to-repl ctx))

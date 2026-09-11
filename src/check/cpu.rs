@@ -787,12 +787,14 @@ fn cases() -> Vec<Case> {
         A0,
         99,
     );
-    // nil is the word 0 and is a legal pair, so this must not trap.
+    // nil is the word 0 and is a legal pair, so this must not trap - and its
+    // cell holds zero, so car of nil is nil. This used to store a 7 there
+    // first, to have something to see; nothing may store there now.
     c(
         "car of nil",
-        vec![addi(A2, ZERO, 7), sw(A2, ZERO, 0), car(A0, ZERO)],
+        vec![addi(A0, ZERO, 7), car(A0, ZERO)],
         A0,
-        7,
+        0,
     );
 
     v
@@ -917,6 +919,14 @@ pub fn run_all() -> bool {
 
         let (cause, _) = trap(vec![addi(A3, ZERO, 77), sref(A3, ZERO, 0)]);
         extra.push(("a store through nil still traps", cause == C_TYPE));
+
+        // And so does a plain store into nil's cell, car or cdr - see
+        // `do_store`. The inline allocator is plain stores, and one that had
+        // lost its run used to write its pair there without a sound.
+        let (cause, tval) = trap(vec![addi(A3, ZERO, 7), sw(A3, ZERO, 0)]);
+        extra.push(("a raw store to nil's car faults", cause == C_SFAULT && tval == 0));
+        let (cause, tval) = trap(vec![addi(A3, ZERO, 7), sw(A3, ZERO, 4)]);
+        extra.push(("a raw store to nil's cdr faults", cause == C_SFAULT && tval == 4));
     }
 
     {

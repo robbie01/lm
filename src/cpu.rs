@@ -498,6 +498,15 @@ fn do_store(m: &mut Machine, a: u32, f: u32, v: u32, fuel: u32) -> bool {
         }
     }
     let sz = 1u32 << f;
+    // The first eight bytes are nil's cell: they are what `car` and `cdr` of
+    // nil read, so they have to stay zero for the machine's whole life. The
+    // checked stores behind `set-car!` and `set-cdr!` already refuse nil; this
+    // is every other store, which is how an allocator that had lost its run
+    // once wrote a window there and gave nil a car that nobody noticed until
+    // something far away read it.
+    if a < 8 {
+        return false;
+    }
     if m.in_ram(a, sz) {
         unsafe {
             match f {
