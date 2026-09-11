@@ -410,13 +410,19 @@
 (define (point x y) (bm-point *screen* x y))
 
 ;; ---------------------------------------------------------------- blitter
-;; The one register worth naming: the address of a command block. The chip
-;; has a full set of parameter registers too, and programming through them
-;; takes six stores that something has to hold off - which is what the block
-;; exists to avoid, so nothing here reaches for them.
-(define blt-list (dev-addr dev-blit blit-list-reg))
-(define blt-status (dev-addr dev-blit blit-status-reg))
-(define blt-ctrl (dev-addr dev-blit blit-ctrl-reg))
+;; The blitter is shared - every task blits, dozens of times a frame - so it
+;; belongs to the kernel, like `sys` and the timer: never claimed, and reached
+;; only through the functions below. Its registers are taken out of the device
+;; once, here, through the accessor, and none of them is exported. The way
+;; onto the chain is `blit-go`, and there is no other.
+;;
+;; Three registers are worth naming. The chip has a full set of parameter
+;; registers too, and programming through them takes six stores that
+;; something has to hold off - which is what descriptors exist to avoid.
+(define *blit* (make-device "blit" dev-blit 'kernel))
+(define blt-list (dev-reg *blit* blit-list-reg))
+(define blt-status (dev-reg *blit* blit-status-reg))
+(define blt-ctrl (dev-reg *blit* blit-ctrl-reg))
 
 ;; ---------------------------------------------------------------- commands
 ;; A blit is a descriptor in memory: the parameters, a status word the chip

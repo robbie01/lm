@@ -133,6 +133,12 @@ back. And each of the three is taken back by the driver phase that owns that
 chip: `gfx.driver` needs `gfx-ctrl`, `input.driver` needs `inp-ctrl`, and the
 blitter's commit store is one line inside `blit-go`.
 
+**All three are back now**, in phases 3, 5 and 6: no device register is named
+outside hw.lisp. What is left is arithmetic. `mmio-base` and the device
+numbers are exported with the rest of the memory map, so a program can still
+compute a register's address and store to it - which is the wild store below,
+and this plan does not pretend to close it.
+
 **A device becomes a value**, on the bitmap's pattern:
 
     (defrecord (device dv) name base owner)
@@ -576,8 +582,11 @@ for every task, the compositor included. Now the compositor waits on a
 signal like everything else. And bitmap allocation did not move behind the
 driver, for the reason under *gfx.driver* above.
 
-**6. The blitter's chain register** goes through the device accessor, and `hw`
-stops exporting `blt-list`. The last name is back.
+**6. The blitter's chain register. Done.** The blitter is a device value like
+the others, owned by the kernel because every task blits. `blt-list`,
+`blt-status` and `blt-ctrl` are taken out of it through `dev-reg`, once, and
+none of them is exported: the only way onto the chain is `blit-go`. The last
+of the three names is back.
 
 There is no flag day. Each phase takes one address out of circulation and
 leaves the machine strictly harder to misuse than it was.

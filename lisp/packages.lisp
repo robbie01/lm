@@ -159,11 +159,11 @@
 (export '(
   peek-signed peek-scratch
   bm-pixels set-bm-pixels! bitmap? bm-alloc
-  blit-busy? blit-drain blit-sync blit-wait-block blit-wait-ring new-blit-ring blt-status
+  blit-busy? blit-drain blit-sync blit-wait-block blit-wait-ring new-blit-ring
   make-device device? device-owner device-name device-usable? dev-reg
   claim-device claim-device-for release-device release-devices-of release-all-devices
   *disk* disk-go disk-status disk-busy? disk-blocks disk-interrupts!
-  *blit-ring* *gc-blit-ring* *in-interrupt* blit-block gc-blit-block blit-go blt-list
+  *blit-ring* *gc-blit-ring* *in-interrupt* blit-block gc-blit-block blit-go
   *screen* alloc-pool bm-blit-rect bm-clip bm-fill-rect
   bm-plot bm-point bm-at bm-addr bm-w bm-h bitmap? make-bitmap alloc-bitmap
   make-bitmap-rastport make-rastport-on rp-bitmap
