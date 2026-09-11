@@ -833,16 +833,25 @@
   ;; After compaction no live pointer may name a pair above the new top: such
   ;; a pointer was either never updated or was updated wrongly, and either way
   ;; it now names whatever the slide happened to leave there.
-  (let ((p cons-base) (bad 0) (first 0))
+  ;;
+  ;; The holes a pinned pair left are stepped over. They hold whatever pairs
+  ;; were last there - garbage by definition, see `gc-move-cons` - and a word
+  ;; of garbage that looks like a pointer above the top is not a dangling one.
+  ;; The chain of them is in address order, because the move built it walking
+  ;; upwards.
+  (let ((p cons-base) (bad 0) (first 0) (hole (%global lg-cons-free)))
     (while (%< p top)
-      (let ((a (%ld-word p)) (d (%ld-word (%+ p 4))))
-        (if (if (%cons? a) (%>= (%addr-of a) top) nil)
-            (begin (if (%= first 0) (set! first p) nil) (set! bad (%+ bad 1)))
-            nil)
-        (if (if (%cons? d) (%>= (%addr-of d) top) nil)
-            (begin (if (%= first 0) (set! first p) nil) (set! bad (%+ bad 1)))
-            nil))
-      (set! p (%+ p 8)))
+      (if (%= p hole)
+          (begin (set! p (%ld-fixnum hole))
+                 (set! hole (%ld-fixnum (%+ hole 4))))
+          (let ((a (%ld-word p)) (d (%ld-word (%+ p 4))))
+            (if (if (%cons? a) (%>= (%addr-of a) top) nil)
+                (begin (if (%= first 0) (set! first p) nil) (set! bad (%+ bad 1)))
+                nil)
+            (if (if (%cons? d) (%>= (%addr-of d) top) nil)
+                (begin (if (%= first 0) (set! first p) nil) (set! bad (%+ bad 1)))
+                nil)
+            (set! p (%+ p 8)))))
     (uart-string "  verify: ")
     (uart-num-raw bad)
     (uart-string " dangling, first at ")
