@@ -69,8 +69,10 @@
   (set! *await* (stream-await s))
   s)
 
-;; The serial line, named so it can be switched back to.
-(define (console-stream) (make-stream nil nil nil))
+;; The raw serial line, named so it can be switched back to. The console
+;; proper - whole lines, and a prompt that sleeps - is console.driver's: see
+;; console.lisp.
+(define (serial-stream) (make-stream nil nil nil))
 
 (define (emit-str s)
   (let ((i 0) (n (%string-length s)))

@@ -1019,6 +1019,18 @@
 (define (input-buttons) (%ld-fixnum (dev-reg *input* inp-buttons)))
 (define (input-mods) (%ld-fixnum (dev-reg *input* inp-mods)))
 
+;; ---------------------------------------------------------------- serial
+;; The serial line. Its registers are reached raw, from runtime.lisp, by
+;; whatever has to report something when nothing else can be trusted - the
+;; collector, running out of memory, the trap handler - and that path is
+;; unchecked on purpose: see console.lisp. This record is for the other path.
+;; console.driver claims it, which says which task is reading the line; it
+;; does not refuse the raw functions anything.
+(define *serial* (make-device "serial" dev-uart nil))
+
+;; Whether the chip raises its line when a byte arrives.
+(define (serial-interrupts! on) (%st-fixnum! uart-ctrl (if on 1 0)))
+
 ;; ---------------------------------------------------------------- storage
 ;; The disk controller. A command runs on its own time: `disk-go` programs it
 ;; and returns at once, the status reads `disk-busy` for as long as the

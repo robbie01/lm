@@ -29,10 +29,11 @@
 (defpackage disk use lm hw exec)                                   ; disk.driver, the task that owns the disk
 (defpackage input use lm hw exec)                                  ; input.driver, the task that owns the keyboard and mouse
 (defpackage gfx use lm hw exec)                                    ; gfx.driver, the task that owns the display
+(defpackage console use lm hw exec)                                ; console.driver, the serial line for everything but emergencies
 (defpackage snap use lm gc hw sys exec disk)                       ; saving the machine
 (defpackage wb use lm hw sys exec input gfx)                       ; the workbench: windows and shells
 (defpackage eyes use lm gc hw exec sys wb input)                   ; xeyes, one instance per pair
-(defpackage user use lm gc hw asm compiler sys exec disk input gfx snap wb eyes)  ; where a prompt starts, and the demos
+(defpackage user use lm gc hw asm compiler sys exec disk input gfx console snap wb eyes)  ; where a prompt starts, and the demos
 
 ;; ---------------------------------------------------------------- exports
 ;; The prelude goes first: every other list below is read in the package it
@@ -52,7 +53,7 @@
   reg-s8 reg-s9 reg-s10 reg-s11 reg-t3 reg-t4 reg-t5 reg-t6
   bl-src bl-dst bl-w bl-h bl-smod bl-dmod bl-val bl-op bl-status bl-next bl-x0 bl-y0 bl-x1 bl-y1
   blit-list-reg blit-status-reg blit-list-size
-  disk-busy disk-cmd-read disk-cmd-write disk-cmd-flush int-disk int-blit blit-ctrl-reg
+  disk-busy disk-cmd-read disk-cmd-write disk-cmd-flush int-disk int-blit blit-ctrl-reg int-uart
   op-copy op-fill op-xor op-and op-or op-mask op-line op-add
   trap-arity trap-type trap-oom trap-error trap-reschedule trap-record
   %* %+ %- %/ %< %<= %= %> %>= %addr-of %alloc-code %alloc-pool %apply %ash
@@ -81,7 +82,7 @@
   bytes-ref bytes-set! bytes? caadr caar cadddr caddr cadr car case cdadr
   cdar cdddr cddr cdr chain2 char->integer char-alphabetic? char-downcase
   char-numeric? char-upcase char-whitespace? char<? char=? char>? char?
-  code-object? comment compose cond cons console-stream constantly
+  code-object? comment compose cond cons serial-stream constantly
   current-package current-stream cycles decf defconstant define
   define-values defmacro defsubst fluid-let bind-fluid! unbind-fluid! task-binds
   set-task-binds! swap-binds-in! swap-binds-out! place-value set-place-value!
@@ -186,6 +187,7 @@
   screen-width
   timer-never timer-set-in
   *gfx* gfx-show gfx-colour! gfx-vblank-irq! gfx-present!
+  *serial* serial-interrupts!
   blit-irq-each! blit-done? set-blit-sleep! interrupts-on?
 ))
 
@@ -301,6 +303,11 @@
 (export '(
   open-screen attach-screen set-colour set-colours screen-sync vblank-count
   start-gfx-driver gfx-driver-running? *gfx-driver* *blit-sleeps*
+))
+
+(in-package console)
+(export '(
+  console-stream start-console-driver console-driver-running? *console-driver*
 ))
 
 (in-package snap)

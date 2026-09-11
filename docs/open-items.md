@@ -286,6 +286,16 @@ demo.lisp's `wait-vblank` was the same symbol as Exec's and had replaced it
 for every task since the first commit, so the compositor polled the frame
 counter instead of sleeping until the frame.
 
+**And the console**, console.driver: whole lines, and a prompt that sleeps on
+a port between keys instead of spinning. The raw serial functions stay, and
+stay unchecked, for the collector, the trap handler and a rebuild.
+
+**A scripted run stops at `bye`, not at the end of its script.** Nothing on
+the host notices that the script has been consumed, so a run without `bye`
+goes on idling through frames until its instruction budget is spent: the full
+suite took ten minutes that way and takes a second and a quarter with `bye`
+at the end.
+
 **What is not done.** The timer stays the kernel's, by design. A blit is ten
 instructions
 and a message is a task switch, so routing every blit through a server would

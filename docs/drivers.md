@@ -1,8 +1,7 @@
 # Every peripheral owned by a process
 
-A plan, partly built. What is done is marked below: the bitmap type, the
-asynchronous blitter and its descriptor chain, devices as values, and the
-disk, input and display drivers.
+A plan, and now a record of building it: every phase below is done, and what
+each one turned up on the way is written beside it.
 
 The goal is that a peripheral has exactly one owner, that reaching one you do
 not own is impossible rather than merely discouraged, and that the mechanism
@@ -414,6 +413,31 @@ server that owns nothing but the queue. AmigaOS drew the same line, between
 `serial.device` and the raw `kprintf` that works when nothing else does; the
 mistake would be pretending one mechanism can be both.
 
+**Built**, as described, in lisp/console.lisp. The raw functions in
+runtime.lisp are unchanged and unchecked. console.driver holds the line - its
+claim on the serial device is bookkeeping, saying who reads it, and refuses
+the raw path nothing - writes whole lines, and owns the receive side, so the
+prompt on the serial line sleeps on a port between keys instead of spinning.
+The prompt's stream collects a line and hands it over whole. Wherever handing
+it over is impossible - in a trap handler, with interrupts off, before the
+driver is up - it writes what it has collected raw and carries on raw, so
+nothing comes out of order; and it hands over what it has before it waits for
+input, or the prompt would sit in a buffer. Input arrives a burst at a time:
+one key, or a whole script.
+
+A rebuild is the case that shaped it most. `(rebuild)` redefines the kernel
+while it reads its own sources from the console, so it must not wait on a
+driver. Its output goes raw for the duration, and its input is already in the
+stream: the whole script arrived as one burst before the rebuild began.
+
+The first rebuild after the split stopped dead anyway, and the reason is
+worth keeping. stream.lisp is one of the sources, and compiling it runs
+`(define *in* nil)`. Before, that set the rebuild's input to what it already
+was, the raw line. Now it cut the rebuild off from the stream holding the
+rest of its sources, and left it waiting on a serial port the driver had
+already emptied. `rebuild` holds on to its stream now and puts it back before
+every form.
+
 ## What each driver is
 
 A driver is a task with a port. Its request vocabulary is a small language,
@@ -591,8 +615,9 @@ of the three names is back.
 There is no flag day. Each phase takes one address out of circulation and
 leaves the machine strictly harder to misuse than it was.
 
-**7. The console split.** Raw uart for panics and the collector; a console
-server for everything else.
+**7. The console split. Done.** See *The uart is the honest exception*. The
+whole suite now reaches the host through console.driver a line at a time, and
+a self-hosting rebuild, which must not go through it, still works.
 
 ## What this does not fix, and one thing it makes worse
 
@@ -621,9 +646,13 @@ server for everything else.
   non-owner fault, watch a driver die and its device come free, watch a client
   blocked on a dead driver get an error rather than silence. Built: `(drivers)`
   does the last three, and `(devices)` the first two.
-- The blitter registry test is the one that matters: a deliberately wild blit -
-  the exact command that corrupted the machine three sessions running - has to
-  fault at the instruction, name the task, and leave the machine alive.
-- And the negative test, which is the one that will actually be run every day:
-  the workbench, four windows, the Mandelbrot and a collection, with
-  enforcement on and nothing reported.
+- The blitter registry test went with the registry. What replaced it is
+  structural: a blit names bitmaps, a bitmap is a byte object that knows its
+  length, and every rectangle is clipped to it before a descriptor is filled,
+  so the command that corrupted the machine three sessions running cannot be
+  written through the API at all. What is left is hw.lisp's own arithmetic,
+  which `LM_BLIT_GUARD` checks when asked.
+- And the negative test, the one that is run every day: the workbench, two
+  shells, a line typed through input.driver, a collection, a save through
+  disk.driver, every line of output through console.driver - and nothing
+  reported. That is the suite, and it takes about a second.

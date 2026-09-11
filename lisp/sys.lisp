@@ -547,10 +547,25 @@
   ;; scheduler needs has been overwritten by the sources going past. The image
   ;; this writes turns preemption on for itself when it boots.
   (preemption-off)
+  ;; Output goes to the raw serial line for the whole rebuild. The console
+  ;; stream hands a line to console.driver and waits for the answer, and a
+  ;; rebuild is redefining the kernel that waiting depends on, one define at a
+  ;; time. Input keeps coming from the stream: everything a rebuild reads was
+  ;; typed before it started, and arrived in the stream as one burst.
+  (set! *out* nil)
   (set! *boot-thunks* nil)
   (set! *recording* t)
-  (let ((go t) (n 0))
+  ;; And the stream the sources come from is held here and put back before
+  ;; every form. stream.lisp is one of the sources, and compiling it sets `*in*`
+  ;; to nil - which used to be what it was anyway, the raw line, and is now a
+  ;; line the console driver has already emptied into this stream. Without
+  ;; this a rebuild reads as far as stream.lisp and then waits for ever on a
+  ;; serial port with nothing left in it.
+  (let ((in *in*) (await *await*) (go t) (n 0))
     (while go
+      (set! *in* in)
+      (set! *await* await)
+      (set! *out* nil)
       (let ((form (read-form)))
         (if (%eq? form 'rebuild-end)
             (set! go nil)

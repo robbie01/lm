@@ -608,6 +608,9 @@
     (blit-sync)
     (num-check 'a-long-blit-is-slept-through (%> *blit-sleeps* sleeps) t)
     (num-check 'and-it-landed (%ld-byte (%addr-of (bm-pixels big))) 9))
+  ;; The console: a driver holds the line, and this prompt reads through it.
+  (num-check 'console-driver-running (console-driver-running?) t)
+  (num-check 'the-prompt-reads-through-it (port-open? console::*reader*) t)
   ;; A handler that fails answers with a failure, and the server carries on.
   (princ "drivers: the error below is on purpose")
   (newline)
