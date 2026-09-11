@@ -101,9 +101,8 @@
   (set-eyes-py2! e -1)
   (track-1 e rp))
 
-;; Only the eye that changed is redrawn, and only when it changed: at sixty
-;; frames a second with nothing moving, this does nothing at all. An eye that
-;; is redrawn hands the compositor its own square and nothing more.
+;; Only the pupil that moved is redrawn, and only when it moved: at sixty
+;; frames a second with nothing moving, this does nothing at all.
 (define (track-1 e rp)
   (let* ((tx (target-x e))
          (ty (target-y e))
@@ -112,27 +111,36 @@
     (if (if (%= (%car p1) (eyes-px1 e)) (%= (cadr p1) (eyes-py1 e)) nil)
         nil
         (begin
-          (draw-eye e rp (eyes-lx e) (eyes-ly e))
+          (move-pupil e rp (eyes-px1 e) (eyes-py1 e) (%car p1) (cadr p1))
           (set-eyes-px1! e (%car p1))
-          (set-eyes-py1! e (cadr p1))
-          (draw-pupil e rp (eyes-px1 e) (eyes-py1 e))
-          (eye-damage e (eyes-lx e) (eyes-ly e))))
+          (set-eyes-py1! e (cadr p1))))
     (if (if (%= (%car p2) (eyes-px2 e)) (%= (cadr p2) (eyes-py2 e)) nil)
         nil
         (begin
-          (draw-eye e rp (eyes-rx e) (eyes-ry e))
+          (move-pupil e rp (eyes-px2 e) (eyes-py2 e) (%car p2) (cadr p2))
           (set-eyes-px2! e (%car p2))
-          (set-eyes-py2! e (cadr p2))
-          (draw-pupil e rp (eyes-px2 e) (eyes-py2 e))
-          (eye-damage e (eyes-rx e) (eyes-ry e))))
+          (set-eyes-py2! e (cadr p2))))
     nil))
 
-;; The square an eye covers, its outline included, in the window's own
-;; coordinates.
-(define (eye-damage e cx cy)
-  (let ((r (%+ (eyes-rad e) 1)))
-    (window-damage-rect (eyes-window e) (%- cx r) (%- cy r)
-                        (%+ r (%+ r 1)) (%+ r (%+ r 1)))))
+;; A pupil from where it was to where it is: the old one painted out in the
+;; white it sat on, the new one drawn, and the square round both handed to the
+;; compositor. `pupil-at` keeps a pupil two pixels inside the white, so
+;; painting one out never reaches the outline. This used to redraw the whole
+;; eye - a disc, its outline and then the pupil, well over a hundred rows of
+;; fill - to move a dozen rows of black.
+(define (move-pupil e rp ox oy nx ny)
+  (let* ((pr (eyes-pr e))
+         ;; No old pupil when `draw-all` has just painted the eye clean.
+         (fresh (%< ox 0))
+         (ax (if fresh nx ox))
+         (ay (if fresh ny oy)))
+    (if fresh nil (fill-circle rp ox oy pr pt-white))
+    (fill-circle rp nx ny pr pt-black)
+    (let ((x0 (%- (if (%< ax nx) ax nx) pr))
+          (y0 (%- (if (%< ay ny) ay ny) pr))
+          (x1 (%+ (if (%> ax nx) ax nx) (%+ pr 1)))
+          (y1 (%+ (if (%> ay ny) ay ny) (%+ pr 1))))
+      (window-damage-rect (eyes-window e) x0 y0 (%- x1 x0) (%- y1 y0)))))
 
 ;; Look somewhere in particular, or -1 -1 to go back to following the mouse.
 (define (look-at e x y)
@@ -142,8 +150,8 @@
 
 ;; ---------------------------------------------------------------- the app
 (define (eyes-task e)
-  ;; Once a frame: look, redraw whichever eye has moved - which hands the
-  ;; compositor that eye's square - and wait for the next frame. This used to
+  ;; Once a frame: look, move whichever pupil has moved - which hands the
+  ;; compositor that pupil's square - and wait for the next frame. This used to
   ;; present the whole window every frame whether anything had moved or not,
   ;; and ten pairs of eyes recomposited sixty times a second was more blitting
   ;; than a frame holds.

@@ -1,15 +1,17 @@
-;;; wb.lisp - a workbench: windows, a shell in each, straight to the bitmap.
+;;; wb.lisp - a workbench: windows, a shell in each, and a compositor.
 ;;;
-;;; There is one bitmap and every window draws into it. No window owns a
-;;; backing store, which is what keeps a window down to a few hundred bytes
-;;; instead of a quarter of a megabyte, and the price is that a window has to
-;;; be able to draw itself again on demand. A shell can, because it keeps the
-;;; characters rather than the pixels.
+;;; Every window has two bitmaps of its own. Its owner draws into the first,
+;;; which nothing else ever looks at; the second is what the screen is made
+;;; from, and the only way anything gets from one to the other is the owner
+;;; saying that part of its picture is finished - `window-damage-rect`, or
+;;; `window-damage` for all of it. The compositor paints the screen from the
+;;; second, front to back, over whatever has been damaged since it last ran.
 ;;;
-;;; Repainting is back to front over the window list. That is the whole
-;;; occlusion model: no clip rectangles, no damage regions, just an order and
-;;; the willingness to draw the lot. At blitter speed a whole screen is well
-;;; inside a frame, and the code that results is a page rather than a chapter.
+;;; It used to be one bitmap a window, drawn into and composited from at once.
+;;; A pair of eyes is a white disc, then an outline, then a pupil, and a
+;;; compositor that ran in the middle of that put a white disc on the screen.
+;;; With ten pairs following the pointer somebody was always in the middle,
+;;; and the pupils flickered.
 
 (in-package wb)
 
@@ -38,7 +40,8 @@
   task
   data                    ; whatever the window is for
   rp                      ; where this window draws: its own bitmap
-  bm)                     ; and the pool memory that bitmap lives in
+  bm                      ; that bitmap, which only its owner sees
+  front)                  ; and the copy the screen is composited from
 
 (define *windows* nil)    ; front to back
 (define *wb-running* nil)
@@ -58,6 +61,7 @@
     (set-win-h! v h)
     (set-win-title! v title)
     (set-win-bm! v (alloc-bitmap w h))
+    (set-win-front! v (alloc-bitmap w h))
     (set-win-rp! v (make-bitmap-rastport (win-bm v)))
     v))
 
@@ -76,12 +80,6 @@
   (rect (win-x w) (win-y w)
         (%+ (win-w w) 1) (%+ (win-h w) 1)))
 
-(define (shadow-rects w)
-  (let ((x (win-x w)) (y (win-y w))
-        (ww (win-w w)) (wh (win-h w)))
-    (list (rect (%+ x ww) (%+ y 2) 1 (%- wh 1))
-          (rect (%+ x 2) (%+ y wh) (%- ww 1) 1))))
-
 ;; Coordinates inside a window are the window's own: nothing here knows or
 ;; cares where on the screen it ends up.
 (define (win-inner-x w) pt-band)
@@ -92,13 +90,13 @@
 (define (front-window) (if (%cons? *windows*) (%car *windows*) nil))
 
 ;; ---------------------------------------------------------------- damage
-;; What the compositor owes the screen: one rectangle, grown to cover
+;; What the compositor owes the screen: a short list of rectangles covering
 ;; everything anybody has changed since it last ran. A whole screen is 786,432
 ;; pixels and the blitter is charged one cycle each, which is more than two
 ;; frames at sixty hertz - so compositing everything every time is not a thing
-;; this machine can afford, and the union of what actually moved is.
+;; this machine can afford, and what actually moved is.
 (define *damage* nil)      ; a list of rectangles, newest first
-(define damage-max 16)      ; beyond which they are all merged into one
+(define damage-max 16)     ; beyond which a new one joins its nearest
 
 (define (rect-union a b)
   (if (%null? a)
@@ -129,27 +127,66 @@
   ;; and the keyboard for the length of this walk.
   (without-preemption
     ;; Six tasks drawing into one window ask for the same rectangle six times.
-    ;; Dropping what is already covered is what keeps the list short enough
-    ;; that it never has to be merged into one screen-sized regret.
-    (let ((have nil))
-      (dolist (d *damage*) (if (rect-covers? d r) (set! have t) nil))
+    ;; Dropping what is already covered is what keeps the list short.
+    (let ((have nil) (n 0))
+      (dolist (d *damage*)
+        (if (rect-covers? d r) (set! have t) nil)
+        (set! n (%+ n 1)))
       (if have
           nil
-          (begin
-            (set! *damage* (%cons r *damage*))
-            (if (%> (length *damage*) damage-max)
-                (let ((u nil))
-                  (dolist (d *damage*) (set! u (rect-union u d)))
-                  (set! *damage* (list u)))
-                nil)))))
+          (if (%< n damage-max)
+              (set! *damage* (%cons r *damage*))
+              ;; Full, so r goes in with whichever rectangle it makes least
+              ;; bigger. This used to merge the whole list into one, and ten
+              ;; pairs of eyes damage twenty little squares a frame: the one
+              ;; rectangle round all of them was most of the screen,
+              ;; composited sixty times a second to move twenty pupils.
+              (let ((best *damage*)
+                    (least (union-growth (%car *damage*) r))
+                    (l (%cdr *damage*)))
+                (while (%cons? l)
+                  (let ((g (union-growth (%car l) r)))
+                    (if (%< g least) (begin (set! least g) (set! best l)) nil))
+                  (set! l (%cdr l)))
+                (%set-car! best (rect-union (%car best) r)))))))
   nil)
 
-(define (window-damage w) (damage (window-footprint w)))
+;; How much bigger a gets if it has to cover b as well.
+(define (union-growth a b)
+  (let ((x (if (%< (rect-x a) (rect-x b)) (rect-x a) (rect-x b)))
+        (y (if (%< (rect-y a) (rect-y b)) (rect-y a) (rect-y b)))
+        (x2 (if (%> (rect-x2 a) (rect-x2 b)) (rect-x2 a) (rect-x2 b)))
+        (y2 (if (%> (rect-y2 a) (rect-y2 b)) (rect-y2 a) (rect-y2 b))))
+    (%- (%* (%- x2 x) (%- y2 y)) (%* (rect-w a) (rect-h a)))))
 
-;; Part of a window, in the window's own coordinates: what a task that changed
-;; a little of its window hands the compositor, instead of the whole of it.
+;; The screen where a window is wants compositing again - it moved, came
+;; forward or went away - but nothing in the window has changed.
+(define (footprint-damage w) (damage (window-footprint w)))
+
+;; Part of a window, in the window's own coordinates, is finished: what its
+;; owner has drawn there becomes what the screen shows. This is the only road
+;; from the bitmap a window is drawn in to the one it is shown from, so a
+;; picture part way through being drawn is never on the screen part way
+;; through.
 (define (window-damage-rect win x y w h)
+  (bm-blit-rect (win-bm win) (win-front win) x y x y w h)
   (damage (rect (%+ (win-x win) x) (%+ (win-y win) y) w h)))
+
+;; All of it, and the shadow it throws.
+(define (window-damage w)
+  (bm-blit-rect (win-bm w) (win-front w) 0 0 0 0 (win-w w) (win-h w))
+  (damage (window-footprint w)))
+
+;; The frame and nothing inside it: the title bar and the three bands, which
+;; is everything `window-frame` draws. Coming forward or losing the front
+;; changes those alone, and the interior may be half way through a picture
+;; its owner has not finished.
+(define (window-damage-frame w)
+  (let ((ww (win-w w)) (h (win-h w)))
+    (window-damage-rect w 0 0 ww pt-title-h)
+    (window-damage-rect w 0 pt-title-h pt-band (%- h pt-title-h))
+    (window-damage-rect w (%- ww pt-band) pt-title-h pt-band (%- h pt-title-h))
+    (window-damage-rect w 0 (%- h pt-band) ww pt-band)))
 
 (define (draw-frame rp x y w h)
   ;; Two lines and two colours, which is all a raised edge ever was.
@@ -185,7 +222,7 @@
   (window-frame (window-rastport win) win
                 (win-w win) (win-h win)
                 (%eq? win (front-window)))
-  (window-damage win)
+  (window-damage-frame win)
   nil)
 
 ;; The Platinum frame: a #CC face inside a black outline, raised six-pixel
@@ -257,27 +294,55 @@
 ;; whole body, and it was covering for a race in the allocator rather than for
 ;; anything in this loop: two tasks could come back from a refill holding the
 ;; same run of cons space, and the compositor was where the wreckage showed up.
+;;
+;; Windows are copied from their front bitmaps, which change only when an
+;; owner says a part is finished - see `window-damage-rect`.
 (define (composite r)
-  (let ((spoken-for nil))           ; what something in front has already taken
+  (let ((spoken-for nil))           ; what something in front has taken of r
     (dolist (w *windows*)           ; front to back
-      (let ((wr (window-rect w)))
-        (dolist (piece (region-subtract (region-intersect-rect (list r) wr) spoken-for))
-          (bm-blit-rect (window-bitmap w) *screen*
-                        (%- (rect-x piece) (rect-x wr)) (%- (rect-y piece) (rect-y wr))
-                        (rect-x piece) (rect-y piece) (rect-w piece) (rect-h piece)))
-        (set! spoken-for (%cons wr spoken-for))
-        ;; Its shadow falls on whatever is behind it, so it goes in now,
-        ;; before anything behind can claim those pixels.
-        (dolist (sr (shadow-rects w))
-          (dolist (piece (region-subtract (region-intersect-rect (list r) sr) spoken-for))
-            (bm-fill-rect *screen* (rect-x piece) (rect-y piece)
-                          (rect-w piece) (rect-h piece) pt-black))
-          (set! spoken-for (%cons sr spoken-for)))))
+      (let ((x (win-x w)) (y (win-y w)) (ww (win-w w)) (wh (win-h w)))
+        (set! spoken-for (composite-part r spoken-for x y ww wh w))
+        ;; Its shadow, a column down the right and a row along the bottom,
+        ;; falls on whatever is behind it - so it goes in now, before
+        ;; anything behind can claim those pixels.
+        (set! spoken-for (composite-part r spoken-for (%+ x ww) (%+ y 2) 1 (%- wh 1) nil))
+        (set! spoken-for (composite-part r spoken-for (%+ x 2) (%+ y wh) (%- ww 1) 1 nil))))
     ;; And the desktop, wherever nothing else went: through a rastport clipped
     ;; to exactly that.
     (let ((bare (region-subtract (list r) spoken-for)))
       (if bare (draw-desktop (make-rastport-on *screen* 0 0 bare)) nil)))
   nil)
+
+;; One thing on the screen - a window, or a strip of its shadow when `win` is
+;; nil - painted wherever it meets r and nothing in front of it already has,
+;; and added to what is spoken for. Nothing is made unless the two meet, and
+;; most windows do not meet most damage: this used to build every window's
+;; rectangle and both of its shadow's for every rectangle of damage, and at
+;; twenty rectangles a frame that was most of what the workbench allocated.
+(define (composite-part r spoken-for x y w h win)
+  (let ((i (rect-cut r x y w h)))
+    (if i
+        (begin
+          (dolist (piece (region-subtract (list i) spoken-for))
+            (if win
+                (bm-blit-rect (win-front win) *screen*
+                              (%- (rect-x piece) x) (%- (rect-y piece) y)
+                              (rect-x piece) (rect-y piece)
+                              (rect-w piece) (rect-h piece))
+                (bm-fill-rect *screen* (rect-x piece) (rect-y piece)
+                              (rect-w piece) (rect-h piece) pt-black)))
+          (%cons i spoken-for))
+        spoken-for)))
+
+;; What r and the rectangle x y w h have in common, or nil.
+(define (rect-cut r x y w h)
+  (let ((x0 (if (%> x (rect-x r)) x (rect-x r)))
+        (y0 (if (%> y (rect-y r)) y (rect-y r)))
+        (x1 (let ((e (%+ x w))) (if (%< e (rect-x2 r)) e (rect-x2 r))))
+        (y1 (let ((e (%+ y h))) (if (%< e (rect-y2 r)) e (rect-y2 r)))))
+    (if (if (%< x0 x1) (%< y0 y1) nil)
+        (rect x0 y0 (%- x1 x0) (%- y1 y0))
+        nil)))
 
 ;; One pass of the compositor: take whatever damage has accumulated and pay it.
 (define (wb-composite)
@@ -320,7 +385,7 @@
             nil)
         (if (front-window) (window-draw-frame (front-window)) nil)
         (set! *front-was* (front-window))))
-  (dolist (w *windows*) (window-damage w))
+  (dolist (w *windows*) (footprint-damage w))
   nil)
 
 ;; ---------------------------------------------------------------- surfaces
@@ -383,7 +448,7 @@
   ;;
   ;; The footprint, not the rectangle: the rectangle left the shadow behind, an
   ;; outline of the closed window along its right and bottom edges.
-  (window-damage win)
+  (footprint-damage win)
   (wb-update)
   nil)
 
@@ -494,6 +559,8 @@
     (fill-rect rp (win-inner-x win)
                (%+ (win-inner-y win) (%* (%- rows 1) mono-height))
                (win-inner-w win) mono-height wb-back)
+    (window-damage-rect win (win-inner-x win) (win-inner-y win)
+                        (win-inner-w win) (win-inner-h win))
     (set-sh-row! sh (%- rows 1))
     nil))
 
@@ -513,9 +580,14 @@
 (define (shell-putc win sh c)
   ;; Aimed at the window, because the window is what it was given: a shell
   ;; stream writes into the window it belongs to whatever task is holding it.
+  ;; What changes is handed over as it changes - the cell, or the whole
+  ;; interior when it scrolls - rather than the whole window a character.
   (shell-putc-1 (window-rastport win) win sh c)
-  (window-damage win)
   nil)
+
+(define (shell-cell-done win sh)
+  (window-damage-rect win (shell-cell-x win (sh-col sh)) (shell-cell-y win (sh-row sh))
+                      mono-advance mono-height))
 
 (define (shell-putc-1 rp win sh c)
   (cond
@@ -529,7 +601,8 @@
           (shell-poke sh (%char->int #\space))
           (fill-rect rp (shell-cell-x win (sh-col sh))
                      (shell-cell-y win (sh-row sh))
-                     mono-advance mono-height wb-back))
+                     mono-advance mono-height wb-back)
+          (shell-cell-done win sh))
         nil))
    (else
     (if (%>= (sh-col sh) (sh-cols sh))
@@ -539,6 +612,7 @@
     (draw-mono-char rp (shell-cell-x win (sh-col sh))
                (shell-cell-y win (sh-row sh))
                c wb-text wb-back)
+    (shell-cell-done win sh)
     (set-sh-col! sh (%+ (sh-col sh) 1))))
   nil)
 
@@ -637,7 +711,7 @@
               ;; The pixels have not changed - only where they go. Damage
               ;; both ends: what the window has uncovered and where it is now.
               (damage was)
-              (window-damage *drag-win*))))
+              (footprint-damage *drag-win*))))
       nil))
 
 ;; An event as input.driver sends it: `(key down ascii code mods)`, `(button
