@@ -1168,3 +1168,5 @@ above is doing what it claims.
 - More than eight arguments works, but not in tail position: the caller pushes
   the overflow and a tail call's epilogue would move the stack out from under
   it, so such a call is compiled as an ordinary one followed by a return.
+  `apply` is the same: up to eight arguments it makes a tail call, and past
+  eight an ordinary one.

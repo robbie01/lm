@@ -802,8 +802,25 @@
           val))))
 
 ;; ---------------------------------------------------------------- functions
-(define (apply f args) (apply-list f args))
-(define (funcall f . args) (apply-list f args))
+;; A function can be named by its symbol wherever one is called for, so
+;; (funcall 'car x) and (apply '+ xs) work. This is a Lisp-1, so the function
+;; is the symbol's value. %fluid-value rather than %symbol-value because the
+;; forge keeps its globals somewhere else.
+(define (resolve-function f)
+  (let ((g (if (%symbol? f) (%fluid-value f) f)))
+    (if (%closure? g) g (error "not a function:" f))))
+
+(define (funcall f . args) (%apply (resolve-function f) args))
+
+;; (apply f 1 2 '(3 4)) calls f with 1 2 3 4: the last argument is a list, and
+;; any before it go on its front the way list* puts them there.
+(define (apply f arg . more)
+  (%apply (resolve-function f) (if (%null? more) arg (%cons arg (%apply list* more)))))
+
+;; %apply takes a list of any length: the first eight go in registers and the
+;; rest on the stack, the same as a call written out. This is it without the
+;; symbol lookup, for callers that already hold the function.
+(define (apply-list f args) (%apply f args))
 (define (identity x) x)
 (define (compose f g) (lambda (x) (%funcall f (%funcall g x))))
 (define (constantly x) (lambda () x))

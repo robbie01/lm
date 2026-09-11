@@ -325,6 +325,42 @@ fn cases() -> Vec<Case> {
             "(define (nine a b c d e f g h i) (list i a)) (nine 1 2 3 4 5 6 7 8 9)",
             "(9 1)",
         ),
+        // ---- apply and funcall ----
+        Case("(apply + '(1 2 3))", "6"),
+        Case("(apply + 1 2 '(3 4))", "10"),
+        Case("(apply list '())", "nil"),
+        Case("(apply list 1 2 '())", "(1 2)"),
+        Case("(funcall '+ 1 2)", "3"),
+        Case("(apply 'list 1 '(2 3))", "(1 2 3)"),
+        Case("(apply list '(1 2 3 4 5 6 7 8))", "(1 2 3 4 5 6 7 8)"),
+        // Past eight, apply puts the rest on the stack the way a call would.
+        Case(
+            "(apply list 1 2 3 4 5 6 7 8 9 '(10 11 12))",
+            "(1 2 3 4 5 6 7 8 9 10 11 12)",
+        ),
+        Case("(apply + '(1 2 3 4 5 6 7 8 9 10))", "55"),
+        Case(
+            "(define (nine a b c d e f g h i) (list i a)) (apply nine '(1 2 3 4 5 6 7 8 9))",
+            "(9 1)",
+        ),
+        // The stack pointer has to come back exactly: the first result waits
+        // on the stack while the second is worked out.
+        Case(
+            "(list (apply + 1 2 3 4 5 6 7 8 9 '(10)) (apply list 1 2 3 4 5 6 7 8 9 '(10 11)))",
+            "(55 (1 2 3 4 5 6 7 8 9 10 11))",
+        ),
+        // A call through apply or funcall in tail position is still a tail
+        // call: the bottom of a thousand of them is where the bottom of one is.
+        Case(
+            "(define (down n) (if (%= n 0) (%stack-pointer) (apply down (list (%- n 1))))) (let ((sp (down 1))) (%= sp (down 1000)))",
+            "t",
+        ),
+        Case(
+            "(define (down n) (if (%= n 0) (%stack-pointer) (funcall 'down (%- n 1)))) (let ((sp (down 1))) (%= sp (down 1000)))",
+            "t",
+        ),
+        // A list that does not end in nil is caught, not run off the end of.
+        Case("(apply list 1 '(2 . 3))", "TRAP: wrong type: 0x7"),
         // ---- strings built at run time exercise object allocation ----
         Case(
             "(let ((s (make-string 3))) (string-set! s 0 #\\a) (string-set! s 1 #\\b) (string-set! s 2 #\\c) s)",

@@ -181,28 +181,6 @@
   (dolist (a args) (if (%string? a) (emit-str a) (write a)) (space))
   (newline))
 
-;; ---------------------------------------------------------------- apply
-;; Spreading a list into registers cannot be written as a loop, because there
-;; is no way to index the argument registers. Eight cases cover the calling
-;; convention exactly.
-(define (apply-list f args)
-  (let ((n (length args)))
-    (cond
-     ((%= n 0) (%funcall f))
-     ((%= n 1) (%funcall f (%car args)))
-     ((%= n 2) (%funcall f (%car args) (cadr args)))
-     ((%= n 3) (%funcall f (%car args) (cadr args) (caddr args)))
-     ((%= n 4) (%funcall f (nth 0 args) (nth 1 args) (nth 2 args) (nth 3 args)))
-     ((%= n 5) (%funcall f (nth 0 args) (nth 1 args) (nth 2 args) (nth 3 args)
-                         (nth 4 args)))
-     ((%= n 6) (%funcall f (nth 0 args) (nth 1 args) (nth 2 args) (nth 3 args)
-                         (nth 4 args) (nth 5 args)))
-     ((%= n 7) (%funcall f (nth 0 args) (nth 1 args) (nth 2 args) (nth 3 args)
-                         (nth 4 args) (nth 5 args) (nth 6 args)))
-     ((%= n 8) (%funcall f (nth 0 args) (nth 1 args) (nth 2 args) (nth 3 args)
-                         (nth 4 args) (nth 5 args) (nth 6 args) (nth 7 args)))
-     (else (error "apply: more than eight arguments")))))
-
 ;; ---------------------------------------------------------------- gensym
 (define *gensym-count* 0)
 

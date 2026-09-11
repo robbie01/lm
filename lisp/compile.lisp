@@ -1654,6 +1654,95 @@
                   (i-ldxi a $t2 $t0 clo-entry t-closure)
                   (i-call-reg a $t2))))))))
 
+;; (%apply f list) calls f with the elements of the list as its arguments,
+;; however many there are. That is what apply needs, and no expression can
+;; say it, because the argument registers cannot be indexed.
+;;
+;; Up to eight it is an ordinary call, and a tail call in tail position. Past
+;; eight the rest go on the stack, argument 8+j at 4j(sp), as
+;; compile-call-many leaves them - except that how far the stack moves is only
+;; known at run time. So the stack pointer to come back to waits in a local,
+;; tagged as a fixnum so the collector passes over it. The space is cleared
+;; before it is filled, because the collector reads every word of a frame as
+;; a value.
+;;
+;; A list that does not end in nil stops at the count, on the typed cdr.
+(define (compile-apply c args tail)
+  (if (%= (length args) 2) nil (error "compile: %apply takes a function and a list"))
+  (compile-args c args 2)
+  (let* ((a (cx-asm c))
+         (saved-n (cx-nlocals c))
+         (slot (cx-alloc-local c))
+         (count (asm-gensym-label "acount"))
+         (counted (asm-gensym-label "acounted"))
+         (many (asm-gensym-label "amany"))
+         (clear (asm-gensym-label "aclear"))
+         (fill (asm-gensym-label "afill"))
+         (done (asm-gensym-label "adone"))
+         (k 0))
+    (i-mv a $t0 $a0)
+    ;; the length, which is also the count the callee is told
+    (i-li a $t1 0)
+    (i-mv a $t3 $a1)
+    (asm-label a count)
+    (i-beqz a $t3 counted)
+    (i-cdr a $t3 $t3)
+    (i-addi a $t1 $t1 1)
+    (i-j a count)
+    (asm-label a counted)
+    (i-addi a $t4 $t1 -8)
+    (i-blt a $zero $t4 many)
+    ;; eight or fewer
+    (emit-apply-registers c)
+    (if tail
+        (begin
+          (emit-epilogue c)
+          (i-ldxi a $t2 $t0 clo-entry t-closure)
+          (i-jr a $t2))
+        (begin
+          (i-ldxi a $t2 $t0 clo-entry t-closure)
+          (i-call-reg a $t2)
+          (i-j a done)))
+    ;; more than eight: t4 words of stack, cleared a checked push at a time
+    (asm-label a many)
+    (i-addi a $t3 $sp 1)
+    (store-local c slot $t3)
+    (asm-label a clear)
+    (i-addi a $sp $sp -4)
+    (i-sw a $zero $sp 0)
+    (i-addi a $t4 $t4 -1)
+    (i-bnez a $t4 clear)
+    ;; then filled from the ninth element on, upwards
+    (i-mv a $t3 $a1)
+    (while (%< k 8) (i-cdr a $t3 $t3) (set! k (%+ k 1)))
+    (i-mv a $t4 $sp)
+    (asm-label a fill)
+    (i-car a $t5 $t3)
+    (i-sw a $t5 $t4 0)
+    (i-addi a $t4 $t4 4)
+    (i-cdr a $t3 $t3)
+    (i-bnez a $t3 fill)
+    (emit-apply-registers c)
+    (i-ldxi a $t2 $t0 clo-entry t-closure)
+    (i-call-reg a $t2)
+    (load-local c slot $t3)
+    (i-addi a $sp $t3 -1)
+    (asm-label a done)
+    (set-cx-nlocals! c saved-n)
+    (if tail (emit-return c) nil)))
+
+;; The first eight elements of the list in a1 into a0..a7, as far as it goes.
+;; t3 takes the list before a1 is written.
+(define (emit-apply-registers c)
+  (let ((a (cx-asm c)) (end (asm-gensym-label "aregs")) (k 0))
+    (i-mv a $t3 $a1)
+    (while (%< k 8)
+      (i-beqz a $t3 end)
+      (i-car a (%+ $a0 k) $t3)
+      (i-cdr a $t3 $t3)
+      (set! k (%+ k 1)))
+    (asm-label a end)))
+
 ;; ---------------------------------------------------------------- expressions
 (define (compile-expr c form tail)
   (let ((a (cx-asm c)))
@@ -1692,6 +1781,11 @@
          ;; expression, so it compiles to the ordinary call sequence rather
          ;; than to a call to something named %funcall.
          ((%eq? h '%funcall) (compile-call c (%cdr form) tail))
+
+         ;; (%apply f list) is the same call with its arguments in a list,
+         ;; which takes a loop to lay out. It is a call to the leaf test too,
+         ;; which is why it is here and not among the open-coded operators.
+         ((%eq? h '%apply) (compile-apply c (%cdr form) tail))
 
          ;; ---- an operator whose second argument is written down ----
          ((if (%symbol? h)

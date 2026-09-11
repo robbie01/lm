@@ -587,7 +587,7 @@
 ;; The link is one way for the collector's sake as well as the scheduler's: a
 ;; parent holds its children, so a child cannot outlive the list it is on.
 (define (spawn name pri fn . opts)
-  (let ((child (apply add-task (list* name pri fn opts)))
+  (let ((child (apply add-task name pri fn opts))
         (me (this-task)))
     (if me
         (without-interrupts
@@ -959,8 +959,7 @@
     (set-node-name! s name)
     (set-node-pri! s pri)
     (forbid)
-    (let ((task (apply spawn
-                       (list* name pri (lambda () (server-loop s handler)) opts))))
+    (let ((task (apply spawn name pri (lambda () (server-loop s handler)) opts)))
       (set-sv-task! s task)
       (set-sv-port! s (create-port-for task name pri)))
     (permit)

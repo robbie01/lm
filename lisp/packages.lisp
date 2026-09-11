@@ -39,7 +39,7 @@
 ;; The prelude goes first: every other list below is read in the package it
 ;; belongs to, and reading `export` there means finding it here.
 (in-package lm)
-;; 541 public, out of 474 definitions plus the primitives and the special
+;; 542 public, out of 475 definitions plus the primitives and the special
 ;; forms. The prelude is a library, so its interface is the library.
 (export '(
   alloc-object *object-allocator* *collector*
@@ -115,7 +115,7 @@
   *peeked* *eof-ok* *reader-eof* start-reading-string stop-reading read-next
   act-on-package-form form-head-named?
   set-package-by-name define-package-by-name package-designator
-  remove-eq reverse second set! set-car! set-cdr! set-current-package!
+  remove-eq resolve-function reverse second set! set-car! set-cdr! set-current-package!
   set-package-use! set-symbol-function! set-symbol-value! setf sort space
   stream-get stream-put stream-await string string->list string->number
   string->symbol string-append string-downcase string-hash string-index

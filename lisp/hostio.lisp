@@ -17,7 +17,6 @@
 (define (print x) (%write x) (%newline) x)
 (define (princ x) (%display x) x)
 (define (error . args) (%apply %error args))
-(define (apply-list f args) (%apply f args))
 (define (gensym-1) (%gensym))
 (define (cycles) 0)
 
