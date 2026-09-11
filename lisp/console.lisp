@@ -105,20 +105,44 @@
 ;; is handed out a character at a time.
 ;;
 ;; Wherever asking a task is impossible - in a trap handler, with interrupts
-;; off, before the driver is up - it falls back on the raw line, after
-;; sending whatever it had collected, so that nothing comes out of order.
-;; And it sends what it has collected before it waits for input: a prompt that
-;; is still in a buffer is a prompt nobody sees.
+;; off, before the driver is up - or would give away a critical section the
+;; caller is holding, output falls back on the raw line, after sending
+;; whatever it had collected, so that nothing comes out of order. And it sends
+;; what it has collected before it waits for input: a prompt that is still in
+;; a buffer is a prompt nobody sees.
 (define line-max 200)
 
 (define (console-port)
   (if *console-driver* (server-port *console-driver*) (error "console: there is no driver")))
 
+;; Whether a line can go to the driver. Handing it over is a request, and a
+;; request waits for its answer, so this is as much a question about where it
+;; is being asked from as about the driver: not from a trap handler or an
+;; interrupt server, where there is no task to wait, and not from inside a
+;; critical section of either kind. Waiting there lets the section go for as
+;; long as the driver takes - see `wait` - and a print is the last thing that
+;; should end one, since it is what somebody adds to find out what a section
+;; is doing. Inside one, the line goes out raw, the way the collector's do.
+;;
+;; A Forbid used to get through this and ask. `wait` did not give a Forbid up
+;; then, so the driver never ran to answer, and `(without-preemption (print
+;; "hi"))` spun for ever where `(without-interrupts (print "hi"))` printed.
 (define (can-ask?)
   (if (console-driver-running?)
       (if (%= 0 (%ld-fixnum lg-trapdepth))
-          (if *in-interrupt* nil (interrupts-on?))
+          (if *in-interrupt* nil (if (forbidden?) nil (interrupts-on?)))
           nil)
+      nil))
+
+;; Whether a read can. The same, except that a critical section is no bar.
+;; The driver owns the receive side, so while it is up there is no raw way to
+;; wait for a key: a read inside a section sleeps like any other wait, and
+;; lets the section go until the key comes. That is the only read there is.
+;; It used to hang either way - inside a Forbid it asked and waited for ever,
+;; and inside a Disable nothing could tell the driver a key had come.
+(define (can-listen?)
+  (if (console-driver-running?)
+      (if (%= 0 (%ld-fixnum lg-trapdepth)) (if *in-interrupt* nil t) nil)
       nil))
 
 (define (console-stream)
@@ -138,7 +162,7 @@
            ;; stream is made: Exec makes it before interrupts are on, and asking
            ;; means waiting for an answer.
            (lambda ()
-             (if (if port nil (can-ask?))
+             (if (if port nil (can-listen?))
                  (begin
                    (set! port (create-port nil 0))
                    (request (console-port) (list 'read port)))
@@ -173,6 +197,6 @@
        (lambda ()
          (%funcall flush)
          (%funcall listen)
-         (if (if port (can-ask?) nil)
+         (if (if port (can-listen?) nil)
              (wait (port-signal port))
              (%wait-for-input)))))))

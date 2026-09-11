@@ -256,7 +256,10 @@
   ;; handle-interrupt and switch-tasks are the trap handler's, and the trap
   ;; handler is in sys: exported to one caller, not to applications.
   handle-interrupt switch-tasks
-  idle? idle-start without-preemption
+  ;; `forbidden?` says whether the running task is inside a Forbid, for the
+  ;; few things that would rather not sleep in one: sleeping gives it up -
+  ;; see `wait`.
+  idle? idle-start without-preemption forbidden?
   preemption-off preemption-on
   task-snapshot task?
   this-task

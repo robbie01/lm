@@ -115,20 +115,28 @@
       (set! p (%cdr p))))
   nil)
 
+;; Inside a Forbid it spins instead. Sleeping there would give the Forbid up -
+;; see `wait` - and nothing about a blit needs another task to run: the chip
+;; finishes by itself, and reading its status is what lets it be seen to. So
+;; it waits the way it does with interrupts off, and the way WaitBlit always
+;; did, and a section that draws is still a section when it has finished
+;; drawing.
 (define (blit-sleep d)
-  (let ((me (this-task)))
-    (set! *blit-sleeps* (%+ *blit-sleeps* 1))
-    (without-interrupts
-      (set! *blit-waiters* (%cons (%cons me d) *blit-waiters*))
-      (blit-irq-each! t))
-    ;; Look again before sleeping: if it finished while this went on the list,
-    ;; no interrupt is coming for it. The loop is for a signal left over from
-    ;; the last sleep.
-    (while (if (blit-done? d) nil t)
-      (wait sigf-blit))
-    (without-interrupts
-      (set! *blit-waiters* (remove-waiter me *blit-waiters*))
-      (if (%null? *blit-waiters*) (blit-irq-each! nil) nil)))
+  (if (forbidden?)
+      (while (if (blit-done? d) nil t) (blit-busy?))
+      (let ((me (this-task)))
+        (set! *blit-sleeps* (%+ *blit-sleeps* 1))
+        (without-interrupts
+          (set! *blit-waiters* (%cons (%cons me d) *blit-waiters*))
+          (blit-irq-each! t))
+        ;; Look again before sleeping: if it finished while this went on the
+        ;; list, no interrupt is coming for it. The loop is for a signal left
+        ;; over from the last sleep.
+        (while (if (blit-done? d) nil t)
+          (wait sigf-blit))
+        (without-interrupts
+          (set! *blit-waiters* (remove-waiter me *blit-waiters*))
+          (if (%null? *blit-waiters*) (blit-irq-each! nil) nil))))
   nil)
 
 (define (remove-waiter task ws)

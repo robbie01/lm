@@ -235,8 +235,16 @@
 ;; `without-preemption` (Forbid) leaves interrupts on and holds off the
 ;; scheduler, so no other *task* can run. It is the one to use when only tasks
 ;; touch the data. It costs one increment, needs nothing declared, and cannot
-;; deadlock; what it cannot do is let you block, because nothing else will run
-;; to wake you.
+;; deadlock.
+;;
+;; Neither one lasts through going to sleep. A task that waits inside either
+;; gives it up for as long as it sleeps and has it back when it wakes - see
+;; `wait` - because whatever is going to wake it is exactly what the section
+;; holds off. So a section that waits is two sections, the part before the
+;; sleep and the part after, and anything it needs to be true across the sleep
+;; it has to look at again when it wakes. The console and the blitter would
+;; rather not sleep inside one at all, and do not: a print inside a section
+;; goes straight to the serial line, and a blit is waited for by spinning.
 ;;
 ;; There used to be a counted Disable/Enable pair here as well, with a nesting
 ;; depth and the interrupt state the outermost one found. It is gone.
@@ -445,16 +453,39 @@
   ;; saved. There is no task there to block.
   ;; The one critical section in the machine that is not lexical, and the only
   ;; reason the interrupt state is still worked by hand anywhere: it is opened
-  ;; here, released around the reschedule that blocks - you cannot block with
-  ;; interrupts off - and taken again on the way back. `without-interrupts`
-  ;; cannot say that, so this says it, and restores what it found each time
-  ;; rather than assuming interrupts were on.
+  ;; here, released around the reschedule that blocks, and taken again on the
+  ;; way back. `without-interrupts` cannot say that, so this says it.
+  ;;
+  ;; A caller's own critical section is let go of as well, for as long as the
+  ;; task sleeps and no longer. That is Exec's rule, and the only one that can
+  ;; work: whatever wakes a sleeping task is another task or an interrupt, and
+  ;; those are exactly what a critical section holds off.
+  ;;
+  ;; - A Forbid is set aside. `switch-tasks` will not take the processor from
+  ;;   a task that holds one, so a task that tried to sleep holding it went on
+  ;;   running instead - round the loop below, for ever, since nobody else
+  ;;   could run to signal it. That is how `(without-preemption (print "hi"))`
+  ;;   hung the machine: at the serial prompt a print is a request to
+  ;;   console.driver, and the driver never got its turn to answer.
+  ;;
+  ;; - Interrupts go on for the reschedule, whatever the caller had. A task's
+  ;;   saved context does not hold the interrupt enable - `mret` puts back the
+  ;;   one the trap was taken with - so the task that runs next gets whatever
+  ;;   the reschedule was asked for in. This used to put back what it found
+  ;;   first, which with interrupts off handed the caller's Disable to the
+  ;;   next task and every task after it; and on the way out it put back what
+  ;;   it found on waking, so the caller's section came back open.
+  ;;
+  ;; Both are put back before this returns, so the caller finds its section
+  ;; the way it left it - what it cannot assume is that nothing happened
+  ;; while it slept. A wait that finds its signal already there does not
+  ;; sleep, and gives up nothing.
   (if *in-interrupt* (error "wait: called from an interrupt server") nil)
-  (let ((saved (%disable)))
+  (let ((entry (%disable)))
     (let ((task (this-task)) (got 0))
       (set! got (%logand (tc-sigrecvd task) mask))
       (if (%= got 0)
-          (begin
+          (let ((nest *tdnest*))
             (set-tc-sigwait! task mask)
             (set-tc-state! task ts-wait)
             ;; On the wait list *once*, and it stays there until `signal`
@@ -472,21 +503,21 @@
             ;; turned up with three or four tasks running and looked like a
             ;; lost wakeup rather than a corrupted list.
             (add-tail (wait-list) task)
+            (set! *tdnest* 0)
             (while (%= got 0)
-              ;; You cannot block with interrupts off, so they go back on for
-              ;; the reschedule and come off again on the way back.
-              (%restore-interrupts saved)
+              ;; On for the reschedule, and off again on the way back.
+              (%restore-interrupts 1)
               (reschedule)
-              (set! saved (%disable))
+              (%disable)
               (set! got (%logand (tc-sigrecvd task) mask)))
             ;; `signal` took it off the wait list on the way to making it
-            ;; ready; nothing to undo here.
-            nil)
+            ;; ready, so all there is to undo is setting the Forbid aside.
+            (set! *tdnest* nest))
           nil)
       (set-tc-sigrecvd! task
                     (%logand (tc-sigrecvd task) (%lognot got)))
       (set-tc-sigwait! task 0)
-      (%restore-interrupts saved)
+      (%restore-interrupts entry)
       got)))
 
 (define (set-signal task new mask)
