@@ -34,6 +34,7 @@
 (define cause-range 25)
 (define cause-overflow 26)
 (define cause-divzero 27)
+(define cause-stack 28)     ; the stack pointer went below the task's limit
 
 (define (cause-name c)
   (cond ((%= c 0) "misaligned fetch")
@@ -49,6 +50,7 @@
         ((%= c cause-range) "index out of range")
         ((%= c cause-overflow) "fixnum overflow")
         ((%= c cause-divzero) "division by zero")
+        ((%= c cause-stack) "stack overflow")
         (else "trap")))
 
 ;; The trap stub hands over the cause with the interrupt flag moved from bit

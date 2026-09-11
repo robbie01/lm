@@ -622,6 +622,12 @@ fn op_imm(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
             _ => return illegal(m, w, pc, fuel),
         },
     };
+    // The stack limit. Only a decrement of sp itself is checked, because that
+    // is what every frame and every push is; a frame that would go below the
+    // limit faults instead, with sp left where it was.
+    if rd(w) == 2 && f3(w) == 0 && rs1(w) == 2 && (i as i32) < 0 && !m.stack_ok(v) {
+        return m.fault(C_STACK, v, pc, fuel);
+    }
     w_(m, rd(w), v);
     next!(m, pc.wrapping_add(4), fuel - 1)
 }
@@ -1186,6 +1192,10 @@ fn c_sw(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 fn c_addi(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let d = rd(w);
     let v = r(m, d).wrapping_add(ci_imm(w));
+    // c.addi sp is a push: the same limit as addi.
+    if d == 2 && (ci_imm(w) as i32) < 0 && !m.stack_ok(v) {
+        return m.fault(C_STACK, v, pc, fuel);
+    }
     w_(m, d, v);
     next!(m, pc.wrapping_add(2), fuel - 1)
 }
@@ -1216,6 +1226,9 @@ fn c_lui(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
             return illegal(m, w, pc, fuel);
         }
         let v = r(m, 2).wrapping_add(i);
+        if (i as i32) < 0 && !m.stack_ok(v) {
+            return m.fault(C_STACK, v, pc, fuel);
+        }
         w_(m, 2, v);
     } else {
         let i = (ci_imm(w) << 12) as u32;

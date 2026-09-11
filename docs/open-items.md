@@ -200,6 +200,37 @@ got.
 **`%eq?` is unchecked and should stay that way.** It compares identity on
 values of any kind. It is not a numeric comparison and should not become one.
 
+## Fixed: a recursion that never ends crashed the machine
+
+`(ackermann 5 5)` at the prompt used to end in an illegal instruction, a jump
+to nil, a hang, or - once, by luck - a type error naming one of the kernel's
+list headers. Nothing bounded a stack. The recursion ran off the bottom of its
+own and on through whatever the pool had put underneath, and what came back
+depended on what it had written over.
+
+There is a stack-limit register now, a custom CSR (0x7c0) of the kind ARMv8-M
+microcontrollers have: moving the stack pointer below it faults, with sp left
+where it was, as a new cause, 28, which prints "stack overflow" and a
+backtrace and restarts the prompt - or ends a task that has none. Every frame
+the compiler builds is one `addi sp, sp, -n` and every push is another, so the
+check sits on the instruction that already does the work, and compiled code
+pays nothing for it.
+
+The scheduler sets the limit at each switch: 8 KB above the bottom of the
+incoming task's stack, or a quarter of a small one. It is enforced only with
+interrupts on. The trap handler runs on a stack of its own, and the collector,
+the allocator and the kernel's lists run with interrupts off and can be
+entered with the stack nearly full - they have to finish rather than be
+stopped half way, and the 8 KB under the limit is theirs.
+
+`(ackermann 5 5)` and `(ackermann 10 10)` now say "stack overflow" and the
+prompt carries on; the same in a spawned task ends that task and nothing else;
+and a recursion that conses as it goes stops the same way, with collections
+running in the reserve on the way down. lmdev checks the register itself.
+
+What it does not cover: a program that writes below its stack pointer without
+moving it, and the trap handler's own stack, which has no limit.
+
 ## Fixed: the scheduler lost tasks
 
 A task could be taken off the ready list by something that had nothing to do

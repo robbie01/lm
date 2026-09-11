@@ -32,6 +32,12 @@ pub const C_OVER: u32 = 26;
 /// Division by zero, which the base ISA defines as returning -1 and this
 /// machine would rather say out loud.
 pub const C_DIVZERO: u32 = 27;
+/// The stack pointer was moved below `stklim`. mtval holds where it would have
+/// gone; sp itself is left as it was.
+pub const C_STACK: u32 = 28;
+/// A custom CSR: the lowest address the stack pointer may be moved down to.
+/// Zero means no limit.
+pub const CSR_STKLIM: u32 = 0x7c0;
 
 /// What `a7` carries when compiled code raises an ecall on purpose. The
 /// compiler emits these, `sys.lisp` reports them and the test bench names
@@ -83,6 +89,7 @@ pub struct Machine {
     pub mip: u32,
     pub mtvec: u32,
     pub mscratch: u32,
+    pub stklim: u32,
     pub mepc: u32,
     pub mcause: u32,
     pub mtval: u32,
@@ -156,6 +163,7 @@ impl Machine {
             mip: 0,
             mtvec: 0,
             mscratch: 0,
+            stklim: 0,
             mepc: 0,
             mcause: 0,
             mtval: 0,
@@ -301,6 +309,7 @@ impl Machine {
             0x304 => self.mie,
             0x305 => self.mtvec,
             0x340 => self.mscratch,
+            CSR_STKLIM => self.stklim,
             0x341 => self.mepc,
             0x342 => self.mcause,
             0x343 => self.mtval,
@@ -324,6 +333,7 @@ impl Machine {
             0x304 => self.mie = v & (MIE_MSIE | MIE_MTIE | MIE_MEIE),
             0x305 => self.mtvec = v,
             0x340 => self.mscratch = v,
+            CSR_STKLIM => self.stklim = v,
             0x341 => self.mepc = v & !1,
             0x342 => self.mcause = v,
             0x343 => self.mtval = v,
@@ -351,6 +361,19 @@ impl Machine {
     #[inline]
     pub fn irq_ready(&self) -> bool {
         self.mstatus & MSTATUS_MIE != 0 && (self.mie & self.mip) != 0
+    }
+
+    /// Whether moving the stack pointer down to `sp` is allowed. The limit is
+    /// a stack-limit register of the kind ARMv8-M has: a frame allocated
+    /// below it faults rather than landing on whatever memory is underneath.
+    ///
+    /// Enforced only with interrupts on. Code running with them off - the
+    /// trap handler on its own stack, the collector, the kernel's critical
+    /// sections - may use the reserve below the limit, because it can be
+    /// entered with the stack nearly full and has to finish what it started.
+    #[inline]
+    pub fn stack_ok(&self, sp: u32) -> bool {
+        sp >= self.stklim || self.mstatus & MSTATUS_MIE == 0
     }
 
     /// Vector to `mtvec`. Interrupt causes carry the top bit.

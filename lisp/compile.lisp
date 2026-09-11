@@ -1346,6 +1346,22 @@
         (i-srli a $t2 $t2 2)
         (i-slli a $a0 $t2 1)
         (i-ori a $a0 $a0 1))))
+
+  ;; The lowest address the stack pointer may reach before the processor
+  ;; faults - see `task-stack-limit` in exec.lisp. An address held as a
+  ;; fixnum, the way a task record holds the bounds of its stack.
+  (definline '%set-stack-limit! 1
+    (lambda (c)
+      (let ((a (cx-asm c)))
+        (i-srai a $t2 $a0 1)
+        (i-csrrw a $zero csr-stklim $t2)
+        (i-mv a $a0 $zero))))
+  (definline '%stack-limit 0
+    (lambda (c)
+      (let ((a (cx-asm c)))
+        (i-csrrs a $t2 csr-stklim $zero)
+        (i-slli a $a0 $t2 1)
+        (i-ori a $a0 $a0 1))))
   (definline '%halt 1
     (lambda (c)
       (let ((a (cx-asm c)))

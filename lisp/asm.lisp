@@ -36,6 +36,7 @@
 (define csr-mcause   #x342)
 (define csr-mtval    #x343)
 (define csr-mip      #x344)
+(define csr-stklim   #x7c0)   ; custom: the lowest address sp may reach
 (define csr-cycle    #xc00)
 (define csr-cycleh   #xc80)
 

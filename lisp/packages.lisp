@@ -63,6 +63,7 @@
   %bignum? %enable %enable-timer %eq? %error %eval %fixnum? %float? %flush
   %fluid-value %set-fluid-value!
   %frame-pointer %from-addr %funcall %gensym %global %halt %this-task %set-this-task! %int->char
+  %set-stack-limit! %stack-limit
   %intern %ld-half %ld-fixnum %ld-byte %logand %logior %lognot %logxor %lsh %macro?
   %*o %+o %-o
   %macroexpand-1 %make-bytes %make-string %make-vector %mod %mulhi16 %newline %null?
@@ -201,7 +202,7 @@
   $s3 $s4 $s5 $s6 $s7 $s8 $s9 $s10 $s11 asm-code-object asm-gensym-label asm-label asm-len
   asm-literal make-assembler asm-origin asm-place asm-place-at asm-buf asm-fixups
   asm-labels asm-nlits asm-set-len! asm-set-origin! csr-cycle
-  csr-mcause csr-mepc csr-mie csr-mscratch csr-mstatus csr-mtval csr-mtvec
+  csr-mcause csr-mepc csr-mie csr-mscratch csr-mstatus csr-mtval csr-mtvec csr-stklim
   i-add i-addi i-addi-w i-and i-andi i-beq i-beqz i-bge i-blt i-bltu i-bne
   i-bnez
   i-call-reg i-car i-cdr i-lref i-lobj i-sref i-sobj i-csrrci i-csrrs i-csrrsi i-csrrw i-div i-ecall

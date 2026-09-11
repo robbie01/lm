@@ -1170,6 +1170,46 @@ pub fn run_all() -> bool {
     }
 
     {
+        // The stack limit: moving sp below it faults, with sp left as it was
+        // and where it would have gone in mtval - but only with interrupts
+        // on, so a trap handler or a critical section can use the reserve.
+        let limit_run = |mie: bool, drop: i32| {
+            let mut m = Machine::new();
+            let mut code = vec![];
+            li32(&mut code, A0, 0x2000);
+            code.push(csrrw(ZERO, 0x305, A0)); // mtvec
+            li32(&mut code, A0, 0x9000);
+            code.push(csrrw(ZERO, CSR_STKLIM, A0)); // the limit
+            li32(&mut code, 2, 0x9100); // sp
+            li32(&mut code, A0, if mie { 8 } else { 0 });
+            code.push(csrrw(ZERO, 0x300, A0)); // mstatus
+            code.push(addi(2, 2, drop));
+            li32(&mut code, A2, 1); // got past it
+            let end = emit(&mut m, BASE, &code);
+            m.poke32(end, jal(ZERO, 0));
+            let h = vec![csrrs(A2, 0x342, ZERO), csrrs(A3, 0x343, ZERO), jal(ZERO, 0)];
+            emit(&mut m, 0x2000, &h);
+            m.pc = BASE;
+            m.mtimecmp = u64::MAX;
+            m.gfx.next_vbl = u64::MAX;
+            run::run(&mut m, 400);
+            (m.x[A2 as usize], m.x[A3 as usize], m.x[2])
+        };
+        let (cause, tval, sp) = limit_run(true, -512);
+        extra.push((
+            "stack limit: a frame below it faults",
+            cause == C_STACK && tval == 0x8f00 && sp == 0x9100,
+        ));
+        let (got, _, sp) = limit_run(true, -128);
+        extra.push(("stack limit: a frame above it does not", got == 1 && sp == 0x9080));
+        let (got, _, sp) = limit_run(false, -512);
+        extra.push((
+            "stack limit: with interrupts off the reserve is usable",
+            got == 1 && sp == 0x8f00,
+        ));
+    }
+
+    {
         // The disk works on its own time: a command reads busy until its
         // moment comes, the memory a read is filling holds the old bytes
         // until then, and the new ones after.

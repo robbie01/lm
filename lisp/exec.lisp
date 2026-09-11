@@ -368,6 +368,7 @@
                 (swap-binds-in! (tc-binds next))
                 (set! *switch-count* (%+ *switch-count* 1))
                 (%set-context (tc-context next))
+                (%set-stack-limit! (task-stack-limit next))
                 ;; Only now, with the context switched away from whatever was
                 ;; running, is it safe to hand a dead task's stack back.
                 (if *reaped* (reap-tasks) nil)))))
@@ -503,6 +504,23 @@
 
 (define default-stack 65536)
 (define default-quantum 200000)
+
+;; How far above the bottom of its stack a task is stopped. The processor
+;; faults when the stack pointer goes below the limit with interrupts on, and
+;; the reserve under it is for code running with interrupts off - the
+;; collector, the allocator, the kernel's own lists - which can be entered with
+;; the stack nearly full and has to be able to finish what it started. A small
+;; stack keeps a quarter of itself instead.
+;;
+;; Without this a recursion that never ends did not end in an error: it ran
+;; off the bottom of its stack into whatever the pool had put below it, and
+;; what came back was an illegal instruction, a jump to nil, or a hang.
+(define stack-reserve 8192)
+
+(define (task-stack-limit task)
+  (let* ((lo (tc-splower task))
+         (quarter (%lsh (%- (tc-spupper task) lo) -2)))
+    (%+ lo (if (%< quarter stack-reserve) quarter stack-reserve))))
 
 ;; A fresh record's slots hold nil, and nil is not the fixnum zero - `(%+ nil
 ;; 1)` is not 1, and `(%logand nil m)` is not 0. Anything counted or masked
@@ -1278,6 +1296,7 @@
       (set! *boot-binds* nil)
       (install-task-binds!)
       (%set-this-task! boot)
+      (%set-stack-limit! (task-stack-limit boot))
       (set! *task-count* 1))
 
     (build-task-exit-stub)
