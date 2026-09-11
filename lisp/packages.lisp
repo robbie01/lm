@@ -322,7 +322,7 @@
 (export '(
   *windows* front-window make-window new-shell title-height wb-back
   window-rastport wb-update damage present window-bitmap
-  window-damage window-rect wb-composite
+  window-damage window-damage-rect window-rect wb-composite
   wb-button-down wb-drag wb-face wb-repaint wb-shadow wb-text win-data
   win-inner-h win-inner-w win-inner-x win-inner-y win-refresh
   win-task window-close window-open set-win-data! set-win-refresh! set-win-task!

@@ -119,15 +119,6 @@
           nil)
       nil))
 
-(define (covered? r)
-  ;; Is the damage entirely behind one window? Then the desktop under it does
-  ;; not need painting, and the common case - a task damaging its own window -
-  ;; costs one blit instead of a screenful of fill.
-  (let ((yes nil))
-    (dolist (w *windows*)
-      (if (if yes nil (rect-covers? (window-rect w) r)) (set! yes t) nil))
-    yes))
-
 (define (damage r)
   ;; A list rather than one growing rectangle. Two windows at opposite corners
   ;; have a union that is nearly the whole screen, and a compositor asked to
@@ -154,6 +145,11 @@
   nil)
 
 (define (window-damage w) (damage (window-footprint w)))
+
+;; Part of a window, in the window's own coordinates: what a task that changed
+;; a little of its window hands the compositor, instead of the whole of it.
+(define (window-damage-rect win x y w h)
+  (damage (rect (%+ (win-x win) x) (%+ (win-y win) y) w h)))
 
 (define (draw-frame rp x y w h)
   ;; Two lines and two colours, which is all a raised edge ever was.
@@ -245,44 +241,42 @@
   nil)
 
 ;; ---------------------------------------------------------------- composite
-;; Back to front, into the screen, over whatever was damaged. Overlap needs no
-;; arithmetic: a window in front is blitted after the one behind it and simply
-;; wins.
-
-
+;; Front to back, into the screen, over whatever was damaged - and every pixel
+;; written once. A window is copied only where nothing in front of it lands,
+;; its shadow likewise, and the desktop only where no window or shadow does.
+;;
+;; It used to go back to front and let whatever came last win: the desktop
+;; over the whole damaged rectangle, then every window over that. What that
+;; ended with was right, and the way there was not. The blitter is charged a
+;; cycle a pixel, ten windows' worth of fill and copy is more than a frame,
+;; and the display caught it part way - a window gone to desktop grey, or
+;; showing the one behind it - which at sixty frames a second is flicker.
+;; Written once, a pixel the display catches early is old, never wrong.
+;;
 ;; No critical section. There was one here for a long time, held across the
 ;; whole body, and it was covering for a race in the allocator rather than for
 ;; anything in this loop: two tasks could come back from a refill holding the
-;; same run of cons space, and the compositor - which allocates a rectangle per
-;; window per frame - was where the wreckage showed up.
+;; same run of cons space, and the compositor was where the wreckage showed up.
 (define (composite r)
-  ;; Filling 1024 by 768 costs 786,432 cycles and a frame is 333,333, so the
-  ;; desktop is painted only where it will actually show.
-  (if (covered? r)
-      nil
-      ;; The desktop, through a rastport clipped to this rectangle and nothing
-      ;; else - which is what keeps a repaint from painting over the windows.
-      (draw-desktop (make-rastport-on *screen* 0 0 (list r))))
-  (dolist (w (reverse *windows*))
-    (let* ((wr (window-rect w))
-           (i (rect-intersect wr r)))
-      (if i
-          (let ((bm (window-bitmap w))
-                (sx (%- (rect-x i) (rect-x wr)))
-                (sy (%- (rect-y i) (rect-y wr)))
-                (dx (rect-x i))
-                (dy (rect-y i))
-                (cw (rect-w i))
-                (ch (rect-h i)))
-            (bm-blit-rect bm *screen* sx sy dx dy cw ch))
-          nil)
-      ;; And its shadow, clipped to the damage like everything else.
-      (dolist (sr (shadow-rects w))
-        (let ((si (rect-intersect sr r)))
-          (if si
-              (bm-fill-rect *screen* (rect-x si) (rect-y si)
-                            (rect-w si) (rect-h si) pt-black)
-              nil)))))
+  (let ((spoken-for nil))           ; what something in front has already taken
+    (dolist (w *windows*)           ; front to back
+      (let ((wr (window-rect w)))
+        (dolist (piece (region-subtract (region-intersect-rect (list r) wr) spoken-for))
+          (bm-blit-rect (window-bitmap w) *screen*
+                        (%- (rect-x piece) (rect-x wr)) (%- (rect-y piece) (rect-y wr))
+                        (rect-x piece) (rect-y piece) (rect-w piece) (rect-h piece)))
+        (set! spoken-for (%cons wr spoken-for))
+        ;; Its shadow falls on whatever is behind it, so it goes in now,
+        ;; before anything behind can claim those pixels.
+        (dolist (sr (shadow-rects w))
+          (dolist (piece (region-subtract (region-intersect-rect (list r) sr) spoken-for))
+            (bm-fill-rect *screen* (rect-x piece) (rect-y piece)
+                          (rect-w piece) (rect-h piece) pt-black))
+          (set! spoken-for (%cons sr spoken-for)))))
+    ;; And the desktop, wherever nothing else went: through a rastport clipped
+    ;; to exactly that.
+    (let ((bare (region-subtract (list r) spoken-for)))
+      (if bare (draw-desktop (make-rastport-on *screen* 0 0 bare)) nil)))
   nil)
 
 ;; One pass of the compositor: take whatever damage has accumulated and pay it.

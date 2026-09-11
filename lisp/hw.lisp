@@ -671,14 +671,23 @@
 ;;
 ;; The clipping is computed first, outside, because it is the expensive half
 ;; and it touches nothing shared.
+;;
+;; In place, with no list of four numbers made just to be taken apart again:
+;; this is the innermost step of every rectangle, circle and glyph, and at
+;; twenty eyes a frame those lists were most of what the machine allocated.
 (define (bm-fill-rect bmp x y w h c)
-  (let ((r (bm-clip bmp x y w h)))
-    (if r
+  (let* ((bw (bm-w bmp))
+         (bh (bm-h bmp))
+         (x0 (if (%< x 0) 0 x))
+         (y0 (if (%< y 0) 0 y))
+         (x1 (let ((e (%+ x w))) (if (%> e bw) bw e)))
+         (y1 (let ((e (%+ y h))) (if (%> e bh) bh e))))
+    (if (if (%< x0 x1) (%< y0 y1) nil)
         (let ((b (blit-block)))
-          (poke (%+ b bl-dst) (bm-at bmp (%car r) (cadr r)))
-          (poke (%+ b bl-w) (caddr r))
-          (poke (%+ b bl-h) (cadddr r))
-          (poke (%+ b bl-dmod) (bm-w bmp))
+          (poke (%+ b bl-dst) (bm-at bmp x0 y0))
+          (poke (%+ b bl-w) (%- x1 x0))
+          (poke (%+ b bl-h) (%- y1 y0))
+          (poke (%+ b bl-dmod) bw)
           (poke (%+ b bl-val) c)
           (blit-go b op-fill))
         nil)))
@@ -692,18 +701,31 @@
   ;; Clipped against both ends: the source rectangle and the destination have
   ;; to fit, and the smaller of the two wins. Source and destination may be
   ;; the same bitmap, which is what a scroll inside a window is, or different
-  ;; ones, which is what compositing is.
-  (let* ((sr (bm-clip src sx sy w h))
-         (dr (if sr (bm-clip dst dx dy (caddr sr) (cadddr sr)) nil)))
-    (if dr
-        (let ((b (blit-block)))
-          (poke (%+ b bl-src) (bm-at src (%car sr) (cadr sr)))
-          (poke (%+ b bl-dst) (bm-at dst (%car dr) (cadr dr)))
-          (poke (%+ b bl-w) (caddr dr))
-          (poke (%+ b bl-h) (cadddr dr))
-          (poke (%+ b bl-smod) (bm-w src))
-          (poke (%+ b bl-dmod) (bm-w dst))
-          (blit-go b op-copy))
+  ;; ones, which is what compositing is. Clipped in place, like the fill.
+  (let* ((sw (bm-w src))
+         (sh (bm-h src))
+         (sx0 (if (%< sx 0) 0 sx))
+         (sy0 (if (%< sy 0) 0 sy))
+         (sx1 (let ((e (%+ sx w))) (if (%> e sw) sw e)))
+         (sy1 (let ((e (%+ sy h))) (if (%> e sh) sh e))))
+    (if (if (%< sx0 sx1) (%< sy0 sy1) nil)
+        ;; The destination, the size the source came to.
+        (let* ((dw (bm-w dst))
+               (dh (bm-h dst))
+               (dx0 (if (%< dx 0) 0 dx))
+               (dy0 (if (%< dy 0) 0 dy))
+               (dx1 (let ((e (%+ dx (%- sx1 sx0)))) (if (%> e dw) dw e)))
+               (dy1 (let ((e (%+ dy (%- sy1 sy0)))) (if (%> e dh) dh e))))
+          (if (if (%< dx0 dx1) (%< dy0 dy1) nil)
+              (let ((b (blit-block)))
+                (poke (%+ b bl-src) (bm-at src sx0 sy0))
+                (poke (%+ b bl-dst) (bm-at dst dx0 dy0))
+                (poke (%+ b bl-w) (%- dx1 dx0))
+                (poke (%+ b bl-h) (%- dy1 dy0))
+                (poke (%+ b bl-smod) sw)
+                (poke (%+ b bl-dmod) dw)
+                (blit-go b op-copy))
+              nil))
         nil)))
 
 (define (screen-blit-rect sx sy dx dy w h)
@@ -867,12 +889,23 @@
 ;; The three primitives everything else is built out of. Each shifts by the
 ;; rastport's origin and is cut to its region, and every circle, glyph and
 ;; line above them inherits that for nothing.
+;;
+;; Cut in place: this used to make a rectangle for the request and another for
+;; every piece of region it met, and a circle is a fill a row. Ten pairs of
+;; eyes following the pointer came to a hundred thousand of them a second.
 (define (fill-rect rp x y w h c)
-  (let ((r (rect (%+ x (rp-origin-x rp)) (%+ y (rp-origin-y rp)) w h))
-        (bmp (rp-bitmap rp)))
+  (let* ((x0 (%+ x (rp-origin-x rp)))
+         (y0 (%+ y (rp-origin-y rp)))
+         (x1 (%+ x0 w))
+         (y1 (%+ y0 h))
+         (bmp (rp-bitmap rp)))
     (dolist (cr (rp-region rp))
-      (let ((i (rect-intersect r cr)))
-        (if i (bm-fill-rect bmp (rect-x i) (rect-y i) (rect-w i) (rect-h i) c)
+      (let ((ix0 (if (%> x0 (rect-x cr)) x0 (rect-x cr)))
+            (iy0 (if (%> y0 (rect-y cr)) y0 (rect-y cr)))
+            (ix1 (if (%< x1 (rect-x2 cr)) x1 (rect-x2 cr)))
+            (iy1 (if (%< y1 (rect-y2 cr)) y1 (rect-y2 cr))))
+        (if (if (%< ix0 ix1) (%< iy0 iy1) nil)
+            (bm-fill-rect bmp ix0 iy0 (%- ix1 ix0) (%- iy1 iy0) c)
             nil))))
   nil)
 
@@ -893,16 +926,21 @@
 (define (blit-rect rp sx sy dx dy w h)
   (let* ((ox (rp-origin-x rp))
          (oy (rp-origin-y rp))
-         (d (rect (%+ dx ox) (%+ dy oy) w h)))
+         (x0 (%+ dx ox))
+         (y0 (%+ dy oy))
+         (x1 (%+ x0 w))
+         (y1 (%+ y0 h))
+         (bmp (rp-bitmap rp)))
     (dolist (cr (rp-region rp))
-      (let ((i (rect-intersect d cr)))
-        (if i
-            (let ((bmp (rp-bitmap rp)))
-              (bm-blit-rect bmp bmp
-                            (%+ (%+ sx ox) (%- (rect-x i) (rect-x d)))
-                            (%+ (%+ sy oy) (%- (rect-y i) (rect-y d)))
-                            (rect-x i) (rect-y i)
-                            (rect-w i) (rect-h i)))
+      (let ((ix0 (if (%> x0 (rect-x cr)) x0 (rect-x cr)))
+            (iy0 (if (%> y0 (rect-y cr)) y0 (rect-y cr)))
+            (ix1 (if (%< x1 (rect-x2 cr)) x1 (rect-x2 cr)))
+            (iy1 (if (%< y1 (rect-y2 cr)) y1 (rect-y2 cr))))
+        (if (if (%< ix0 ix1) (%< iy0 iy1) nil)
+            (bm-blit-rect bmp bmp
+                          (%+ (%+ sx ox) (%- ix0 x0))
+                          (%+ (%+ sy oy) (%- iy0 y0))
+                          ix0 iy0 (%- ix1 ix0) (%- iy1 iy0))
             nil))))
   nil)
 

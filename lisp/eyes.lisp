@@ -102,7 +102,8 @@
   (track-1 e rp))
 
 ;; Only the eye that changed is redrawn, and only when it changed: at sixty
-;; frames a second with nothing moving, this does nothing at all.
+;; frames a second with nothing moving, this does nothing at all. An eye that
+;; is redrawn hands the compositor its own square and nothing more.
 (define (track-1 e rp)
   (let* ((tx (target-x e))
          (ty (target-y e))
@@ -114,15 +115,24 @@
           (draw-eye e rp (eyes-lx e) (eyes-ly e))
           (set-eyes-px1! e (%car p1))
           (set-eyes-py1! e (cadr p1))
-          (draw-pupil e rp (eyes-px1 e) (eyes-py1 e))))
+          (draw-pupil e rp (eyes-px1 e) (eyes-py1 e))
+          (eye-damage e (eyes-lx e) (eyes-ly e))))
     (if (if (%= (%car p2) (eyes-px2 e)) (%= (cadr p2) (eyes-py2 e)) nil)
         nil
         (begin
           (draw-eye e rp (eyes-rx e) (eyes-ry e))
           (set-eyes-px2! e (%car p2))
           (set-eyes-py2! e (cadr p2))
-          (draw-pupil e rp (eyes-px2 e) (eyes-py2 e))))
+          (draw-pupil e rp (eyes-px2 e) (eyes-py2 e))
+          (eye-damage e (eyes-rx e) (eyes-ry e))))
     nil))
+
+;; The square an eye covers, its outline included, in the window's own
+;; coordinates.
+(define (eye-damage e cx cy)
+  (let ((r (%+ (eyes-rad e) 1)))
+    (window-damage-rect (eyes-window e) (%- cx r) (%- cy r)
+                        (%+ r (%+ r 1)) (%+ r (%+ r 1)))))
 
 ;; Look somewhere in particular, or -1 -1 to go back to following the mouse.
 (define (look-at e x y)
@@ -132,11 +142,14 @@
 
 ;; ---------------------------------------------------------------- the app
 (define (eyes-task e)
-  ;; Once a frame, and said as a handover rather than as a wait on a clock:
-  ;; the frame is finished, show it, and do not run again until it has been.
+  ;; Once a frame: look, redraw whichever eye has moved - which hands the
+  ;; compositor that eye's square - and wait for the next frame. This used to
+  ;; present the whole window every frame whether anything had moved or not,
+  ;; and ten pairs of eyes recomposited sixty times a second was more blitting
+  ;; than a frame holds.
   (while t
     (track e)
-    (present (eyes-window e))))
+    (wait-vblank)))
 
 (define *eyes-count* 0)
 
