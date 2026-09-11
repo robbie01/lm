@@ -58,19 +58,29 @@
   nil)
 
 (define (decode e)
-  (let ((kind (%car e)) (ascii (cadr e)) (code (caddr e)) (payload (cadddr e)))
-    ;; The position with every event, not only a move: it is what a click
-    ;; means.
-    (set! *mouse-x* (input-mouse-x))
-    (set! *mouse-y* (input-mouse-y))
-    (set! *mouse-buttons* (input-buttons))
-    (cond ((%= kind ev-keydown) (list 'key 'down ascii code (input-mods)))
-          ((%= kind ev-keyup) (list 'key 'up ascii code (input-mods)))
-          ((%= kind ev-mousemove) (list 'mouse 'moved *mouse-x* *mouse-y*))
-          ((%= kind ev-buttondown) (list 'button 'down payload *mouse-x* *mouse-y*))
-          ((%= kind ev-buttonup) (list 'button 'up payload *mouse-x* *mouse-y*))
-          ((%= kind ev-wheel) (list 'wheel (wheel-delta payload) *mouse-x* *mouse-y*))
-          (else (list 'unknown kind ascii code payload)))))
+  (let ((kind (%car e)) (hi (cadr e)) (lo (caddr e)))
+    (cond ((%= kind ev-keydown)
+           (list 'key 'down (key-ascii-bits hi) (key-code-bits hi lo) (input-mods)))
+          ((%= kind ev-keyup)
+           (list 'key 'up (key-ascii-bits hi) (key-code-bits hi lo) (input-mods)))
+          ((%= kind ev-wheel)
+           (list 'wheel (wheel-delta (%logand lo 4095)) *mouse-x* *mouse-y*))
+          ((if (%>= kind ev-mousemove) (%<= kind ev-buttonup) nil)
+           ;; A pointer event says where it happened. This used to read the
+           ;; position registers instead, which say where the pointer is now -
+           ;; so a click taken off the queue late, while the machine was busy,
+           ;; landed wherever the pointer had got to since.
+           (let ((x (%lsh lo -4)) (y (%logand hi 4095)) (b (%logand lo 15)))
+             (set! *mouse-x* x)
+             (set! *mouse-y* y)
+             (set! *mouse-buttons* (input-buttons))
+             (cond ((%= kind ev-mousemove) (list 'mouse 'moved x y))
+                   ((%= kind ev-buttondown) (list 'button 'down b x y))
+                   (else (list 'button 'up b x y)))))
+          (else (list 'unknown kind hi lo)))))
+
+(define (key-ascii-bits hi) (%logand (%lsh hi -4) 255))
+(define (key-code-bits hi lo) (%logior (%lsh (%logand hi 15) 4) (%lsh lo -12)))
 
 ;; Twelve bits, two's complement.
 (define (wheel-delta p) (if (%>= p 2048) (%- p 4096) p))

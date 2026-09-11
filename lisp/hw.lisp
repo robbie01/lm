@@ -965,11 +965,12 @@
   (draw-line rp (%+ x w) y (%+ x w) (%+ y h) c))
 
 ;; ---------------------------------------------------------------- input
-;; The keyboard and mouse. Events wait in a queue in the chip, one word each:
-;; the kind in bits 31..28, ascii in 27..20, the raw key code in 19..12, and a
-;; payload - a button number, a wheel step - in 11..0. Reading the event
-;; register takes one off the queue. The pointer's position and buttons are
-;; registers, since where the mouse is now is what a pointer wants.
+;; The keyboard and mouse. Events wait in a queue in the chip, one word each,
+;; with the kind in bits 31..28. A key has ascii in 27..20 and the raw key
+;; code in 19..12; a pointer event has y in 27..16, x in 15..4 and the button
+;; in 3..0; the wheel has its step in 11..0. Reading the event register takes
+;; one off the queue. The pointer's position and buttons are registers too,
+;; for whoever wants where the mouse is now rather than where it was.
 ;;
 ;; input.driver owns this, and everybody else subscribes to it: see
 ;; input.lisp. Until it has claimed the device, whoever holds it may use it.
@@ -983,10 +984,11 @@
 (define inp-mods #x18)
 (define inp-inject #x1c)
 
-;; The next event, taken apart - (kind ascii code payload) - or nil when the
-;; queue is empty. The register is read once, because reading it is what takes
-;; the event; and into the scratch cell rather than into a number, because a
-;; button event has bit 30 set and the word was never a number anyway.
+;; The next event as (kind hi lo) - the kind, and the word's two halves for
+;; whoever knows how that kind is laid out - or nil when the queue is empty.
+;; The register is read once, because reading it is what takes the event; and
+;; into the scratch cell rather than into a number, because a button event has
+;; bit 30 set and the word was never a number anyway.
 (define (input-take)
   (let ((r (dev-reg *input* inp-event)) (hi 0) (lo 0))
     (without-interrupts
@@ -995,10 +997,7 @@
       (set! hi (%ld-half (%+ peek-scratch 2))))
     (if (if (%= hi 0) (%= lo 0) nil)
         nil
-        (list (%lsh hi -12)
-              (%logand (%lsh hi -4) 255)
-              (%logior (%lsh (%logand hi 15) 4) (%lsh lo -12))
-              (%logand lo 4095)))))
+        (list (%lsh hi -12) hi lo))))
 
 ;; The same word the other way, into the loopback register: an event as
 ;; though the keyboard had sent it.

@@ -10,6 +10,10 @@ pub struct HostWindow {
     down: Vec<Key>,
     last_mouse: (u32, u32),
     last_buttons: u32,
+    /// The size of the last frame shown. The window shows that frame
+    /// stretched to fit, so this is what a pointer position has to be turned
+    /// back into.
+    frame: (usize, usize),
 }
 
 impl HostWindow {
@@ -32,7 +36,36 @@ impl HostWindow {
             down: Vec::new(),
             last_mouse: (0, 0),
             last_buttons: 0,
+            frame: (w, h),
         })
+    }
+
+    /// A point in the window, as a point in the frame it is showing: the
+    /// inverse of `ScaleMode::AspectRatioStretch`, which scales the frame to
+    /// fit without changing its shape and centres it, with bars down the sides
+    /// or across the top and bottom.
+    ///
+    /// minifb reports the pointer in the window's own units and leaves the
+    /// rest to us - its source says as much - so a click on something drawn at
+    /// (300, 30) in a 1024 by 768 frame arrives, in a 640 by 400 window, as
+    /// about (209, 15). Without this every click lands somewhere else, which
+    /// is why raising, dragging and closing windows did nothing.
+    ///
+    /// The unscaled position and `get_size` are in the same units on every
+    /// platform - pixels on Windows, points on macOS - and a ratio of like to
+    /// like is all the arithmetic needs.
+    fn to_frame(&self, x: f32, y: f32) -> (u32, u32) {
+        let (fw, fh) = (self.frame.0 as f32, self.frame.1 as f32);
+        let (ww, wh) = self.win.get_size();
+        let (ww, wh) = (ww as f32, wh as f32);
+        if fw < 1.0 || fh < 1.0 || ww < 1.0 || wh < 1.0 {
+            return (x.max(0.0) as u32, y.max(0.0) as u32);
+        }
+        let scale = (ww / fw).min(wh / fh);
+        let (ox, oy) = ((ww - fw * scale) / 2.0, (wh - fh * scale) / 2.0);
+        let fx = ((x - ox) / scale).clamp(0.0, fw - 1.0);
+        let fy = ((y - oy) / scale).clamp(0.0, fh - 1.0);
+        (fx as u32, fy as u32)
     }
 }
 
@@ -42,6 +75,7 @@ impl Present for HostWindow {
         {
             return false;
         }
+        self.frame = (w, h);
         let _ = self.win.update_with_buffer(buf, w, h);
         true
     }
@@ -77,13 +111,13 @@ impl Present for HostWindow {
         }
         self.down = now;
 
-        if let Some((x, y)) = self.win.get_mouse_pos(MouseMode::Clamp) {
-            let p = (x.max(0.0) as u32, y.max(0.0) as u32);
+        if let Some((x, y)) = self.win.get_unscaled_mouse_pos(MouseMode::Clamp) {
+            let p = self.to_frame(x, y);
             if p != self.last_mouse {
                 self.last_mouse = p;
                 ev.mx = p.0;
                 ev.my = p.1;
-                ev.push(EV_MOUSEMOVE, 0, 0, 0);
+                ev.push_mouse(EV_MOUSEMOVE, p.0, p.1, 0);
             }
         }
         let b = (self.win.get_mouse_down(MouseButton::Left) as u32)
@@ -94,10 +128,10 @@ impl Present for HostWindow {
                 let was = self.last_buttons >> i & 1;
                 let is = b >> i & 1;
                 if was != is {
-                    ev.push(
+                    ev.push_mouse(
                         if is != 0 { EV_BUTTONDOWN } else { EV_BUTTONUP },
-                        0,
-                        0,
+                        self.last_mouse.0,
+                        self.last_mouse.1,
                         i,
                     );
                 }

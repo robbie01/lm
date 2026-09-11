@@ -138,11 +138,21 @@
 
 (define (print-record r quoted depth)
   (emit-str "#[")
-  (let ((i 0) (n (%obj-len r)))
-    (while (%< i n)
-      (if (%> i 0) (space) nil)
-      (print-obj (%slot r i) quoted (%+ depth 1))
-      (set! i (%+ i 1))))
+  (if (%> depth 0)
+      ;; Inside something else, a record is its type and no more. Records
+      ;; point at each other - a task at its parent and the parent at its
+      ;; children, every node at its neighbours on a list - so printing what
+      ;; each one holds walks the whole kernel, thirty-two levels deep, which
+      ;; is what the prompt did the first time somebody printed a task: pages
+      ;; of brackets, and then an error.
+      (begin
+        (if (%> (%obj-len r) 0) (print-obj (%slot r 0) quoted (%+ depth 1)) nil)
+        (emit-str " ..."))
+      (let ((i 0) (n (%obj-len r)))
+        (while (%< i n)
+          (if (%> i 0) (space) nil)
+          (print-obj (%slot r i) quoted (%+ depth 1))
+          (set! i (%+ i 1)))))
   (emit-ch #\]))
 
 (define (write x) (print-obj x t 0) x)

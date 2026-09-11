@@ -518,9 +518,9 @@ adding it moved the fault.
 
 ## Window management is a farce
 
-**The mouse path does not work.** Raising, closing and dragging a window are
-all reported not to work in practice on macOS, which is where this gets used
-by a person rather than by a script.
+**The mouse path did not work.** Raising, closing and dragging a window were
+all reported not to work on macOS, which is where this gets used by a person
+rather than by a script.
 
 That is worth saying plainly because the previous version of this item said
 the opposite: it said there was "more of it than it looks", on the grounds
@@ -529,15 +529,47 @@ wires them to the mouse. All of that is in the source and none of it is
 evidence that it works. Read the code to find out what was *meant*; the only
 thing that says what happens is running it.
 
-So there are two items here, and the first one has to be found before the
-second is worth starting:
+**Found and fixed**, by running it: the Windows build, driven through its
+real window - pointer moves, clicks and key presses sent through the
+operating system, a screenshot after each, and the machine's own log of what
+it received.
 
-- **Why the mouse does nothing.** Unknown. Somewhere between the host's mouse
-  events, the input task, the event decode and `wb-button-down`. Reproduce it
-  on macOS first - the Windows build is where this is being developed, which
-  is circumstance and not a statement about which one matters.
+- **The pointer was in the wrong coordinates.** minifb reports the pointer in
+  the window's own pixels and leaves the rest to the program - its source
+  says so in a TODO - while the window shows the 1024 by 768 screen shrunk to
+  fit and centred, with bars at the sides. So a press on a title bar reached
+  the machine as a point up in the menu bar, and nothing happened. `win.rs`
+  maps the pointer back through the same fit-and-centre arithmetic now. macOS
+  reports the window size and the pointer both in points, so the same ratio
+  holds there, Retina included. This is almost certainly the macOS bug.
+- **A pointer event carries its position now.** The driver used to read the
+  pointer registers when it took an event off the queue, so a click handled
+  late - the machine busy - landed wherever the pointer had got to since. The
+  chip puts x and y in the event word.
+- **Dragging left a staircase of lines.** `wb-drag` repainted the old
+  position without the window's one-pixel shadow, though `window-footprint`
+  existed for exactly that and said so. `window-close` had the same bug and
+  left the closed window's outline behind.
+- **The close box was the zoom box.** `in-close-box?` tested the right end of
+  the title bar, where the zoom box is drawn; the close box is at the left.
+  Clicking the close box started a drag, and clicking the zoom box closed the
+  window.
+- **Printing a task at the prompt gave pages of brackets and then an error.**
+  Records point at each other - a task at its parent, the parent back at its
+  children - and the printer followed all of them. A record inside another
+  prints as its type now.
 
-And then, what was never written at all:
+Checked by dragging a shell, opening a second, raising the first by clicking
+it, closing it with its close box, and typing into a shell. Keys were never
+the problem: they arrived correctly throughout.
+
+Seen and not explained: twice, the first `(new-shell)` of a session showed a
+half-drawn window a second and a half later, and a whole one by four.
+Creating a shell takes 6 ms, no task was stuck, nothing was waiting on the
+blitter and the machine never paused; later shells appeared whole within
+half a second.
+
+What was never written at all still is not:
 
 - **The zoom box is drawn and does nothing.** `pt-title-box` draws it with a
   bar in it and `in-close-box?` has no counterpart for it. Neither has the

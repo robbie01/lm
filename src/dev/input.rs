@@ -2,9 +2,11 @@
 //!
 //!     bits 31..28  kind: 1 key down, 2 key up, 3 mouse move,
 //!                        4 button down, 5 button up, 6 wheel
-//!     bits 27..20  ascii, when the key has one
-//!     bits 19..12  raw key code
-//!     bits 11..0   payload (button number, wheel delta)
+//!
+//!     a key        bits 27..20 ascii, when the key has one
+//!                  bits 19..12 raw key code
+//!     the pointer  bits 27..16 y, bits 15..4 x, bits 3..0 the button
+//!     the wheel    bits 11..0  the step
 //!
 //! Mouse position is a register rather than an event, since polling it is what
 //! a pointer actually wants.
@@ -53,6 +55,14 @@ impl Input {
 
     pub fn push(&mut self, kind: u32, ascii: u32, code: u32, payload: u32) {
         self.push_word((kind << 28) | ((ascii & 0xff) << 20) | ((code & 0xff) << 12) | (payload & 0xfff));
+    }
+
+    /// A pointer event, carrying where it happened. The position registers
+    /// say where the pointer is now, which for an event taken off the queue
+    /// late - the machine was busy - is somewhere else: every click of a busy
+    /// second used to land wherever the pointer had got to by the end of it.
+    pub fn push_mouse(&mut self, kind: u32, x: u32, y: u32, button: u32) {
+        self.push_word((kind << 28) | ((y & 0xfff) << 16) | ((x & 0xfff) << 4) | (button & 0xf));
     }
 
     fn push_word(&mut self, w: u32) {

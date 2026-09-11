@@ -386,7 +386,10 @@
   ;; valid, the damage above repaints over it, and the collector takes the
   ;; pixels when the last reference to them goes - which is the whole answer
   ;; rather than a smaller window in which to be wrong.
-  (damage (window-rect win))
+  ;;
+  ;; The footprint, not the rectangle: the rectangle left the shadow behind, an
+  ;; outline of the closed window along its right and bottom edges.
+  (window-damage win)
   (wb-update)
   nil)
 
@@ -419,10 +422,15 @@
       (%>= y (win-y win))
       nil))
 
+;; The box `window-frame` draws at the left end of the title bar. This used to
+;; test the right end instead, where the zoom box is drawn: clicking the close
+;; box started a drag, and clicking the zoom box closed the window.
 (define (in-close-box? win x y)
-  (if (in-title? win x y)
-      (%>= x (%- (%+ (win-x win) (win-w win)) 10))
-      nil))
+  (let ((bx (%+ (win-x win) pt-box-x))
+        (by (%+ (win-y win) pt-box-y)))
+    (if (if (%>= x bx) (%< x (%+ bx pt-box)) nil)
+        (if (%>= y by) (%< y (%+ by pt-box)) nil)
+        nil)))
 
 ;; ---------------------------------------------------------------- keys
 ;; One queue per window, oldest first. The input server writes to it and the
@@ -621,7 +629,10 @@
                        (%- (bm-w *screen*) (win-w *drag-win*))))
             (ny (clamp (%- y *drag-dy*) 20
                        (%- (bm-h *screen*) (win-h *drag-win*))))
-            (was (window-rect *drag-win*)))
+            ;; The footprint, shadow included: the rectangle alone left the
+            ;; shadow's column and row behind at every step of a drag, a
+            ;; staircase of one-pixel lines across the desktop.
+            (was (window-footprint *drag-win*)))
         (if (if (%= nx (win-x *drag-win*))
                 (%= ny (win-y *drag-win*))
                 nil)
