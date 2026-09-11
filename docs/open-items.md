@@ -649,6 +649,32 @@ What was never written at all still is not:
 Worth doing as one pass rather than piecemeal: the boxes, a resize corner, and
 some way to cycle the front window from the keyboard.
 
+## Fixed: windows flickered under load
+
+Ten pairs of eyes following the pointer flickered badly, for two separate
+reasons.
+
+The compositor painted back to front: the desktop over the whole damaged
+rectangle, then each window over that. Where it ended up was right and the way
+there was not, and on a machine with more to do than a frame holds, the
+display caught it part way - a window gone to desktop blue, or showing the one
+behind it. It paints front to back now and writes every pixel once, so a pixel
+the display catches early is old, never wrong.
+
+And the compositor could copy a window in the middle of being drawn. A pair of
+eyes is a white disc, then an outline, then a pupil; composited between the
+disc and the pupil, an eye was blank for a frame. Each window has two bitmaps
+now. Its owner draws into one that nothing else reads, and
+`window-damage-rect` - or `window-damage`, for all of it - copies the finished
+part into the other, which is the one the compositor reads. Nothing half drawn
+reaches the screen.
+
+The eyes draw only the pupil that moved and damage only its square; damage
+that falls inside one window is one copy with no region arithmetic; and a
+rastport clips without making rectangles. Together that took the stress test
+from about 2.9 million cycles a frame to 200 thousand, inside the 333 thousand
+a frame has.
+
 ## The collector is fifteen times faster, and still stops the world
 
 A collection on a machine with a twenty-five megabyte frontier was 856 million
@@ -696,6 +722,48 @@ and not a tuning pass.
 quarter of a second is a quarter of a second in which the mouse does not move.
 That is no longer a hang but it is still a hitch, and it is the reason to care
 about the paragraph above.
+
+### When to collect, and the five-second pause
+
+Ten pairs of eyes following the pointer paused for five seconds every few
+seconds on an M2. Three things were multiplying each other:
+
+- **Nothing asked for a collection until a space was full** - sixty-four
+  megabytes of objects or a hundred and twenty-eight of pairs - and then all
+  of it was walked. A collection now comes when allocation since the last one
+  reaches twice the live data or eight megabytes, whichever is more
+  (`gc-budget-min`), so the heap walked stays a small multiple of what is
+  live.
+- **The top of cons space never came down.** A pinned pair - one a suspended
+  task's registers pointed at, nearly always among the newest - held the
+  frontier up behind it, so each collection left the top wherever allocation
+  had pushed it and the next started from there. The holes below a pin are
+  runs on `lg-cons-free` now, handed out before fresh ground; and gp and tp
+  are no longer scanned as guesses (see *Fixed: a half-made pair in nil's
+  cell*), which is where most pins came from.
+- **The workbench made thirty-two kilobytes of garbage a frame**, nearly all
+  of it rectangles: a rastport made one for every clipped span, a circle is a
+  fill a row, and the compositor built every window's rectangle for every
+  rectangle of damage. It is about two and a half now, a third of it pairs.
+
+The object half of the collector got cheaper too. The update pass and the
+sweep are one walk; an object's size is worked out without a call; a dead run
+at the top of object space lowers the frontier rather than becoming a free
+block; and marking open-codes the push instead of calling a function a word.
+
+On the ten-eyes stress, with the pointer moving every frame: a collection
+every fifteen hundred frames or so, thirty-one million cycles each - nine
+marking, nine on pairs, thirteen on objects - which is a tenth of a second of
+wall time at three hundred emulated MIPS. `(set! gc::*gc-verbose* t)` prints
+that breakdown for every collection.
+
+A rebuild briefly got nine times slower under the budget, and the collector
+was not really why. The console driver took each burst of typed input as a
+list of characters and reversed it into a string - two pairs a character - and
+a rebuild types a megabyte and a quarter of source in one burst, so a
+collection part way through found a million pairs alive. Input comes through
+a four-kilobyte buffer now, and a rebuild does not collect at all until it
+writes the image: 3.4 seconds.
 
 ### One trap worth remembering
 
@@ -752,7 +820,10 @@ Three mechanisms, and the rule for choosing between them:
 - **`without-preemption`** (Forbid) — for anything only tasks touch. Interrupts
   keep running; only the scheduler is held off. It costs one increment, needs
   nothing declared, and cannot deadlock. `*windows*` and `*damage*` in the
-  workbench are what it is for, and what it holds.
+  workbench are what it is for, and what it holds. A task that waits inside
+  one gives it up while it sleeps and has it back when it wakes, as Exec's
+  `Wait` did. It used to keep it, and `(without-preemption (print "hi"))`
+  waited for ever on a console driver that could not run to answer.
 - **A semaphore** — not built. For sections that are long, or that block, or
   that only a few tasks contend for. Forbid stops *every* task in the system,
   which is fine for a few instructions and wrong for anything that waits.
@@ -780,6 +851,21 @@ the stub does not touch the globals at all.
 That is what the critical section around `composite` was covering for. It is
 gone.
 
+**Fixed: a half-made pair in nil's cell.** The same four instructions, a second
+way. After a collection every suspended task's run described the wrong part of
+the heap, and `drop-task-run` zeroed its gp and tp on the reasoning that the
+next cons would find no room and ask for more. But the room check is one
+instruction and the two stores are the next ones. A task preempted between
+them came back, stored its car and cdr at address zero - which is where `(car
+nil)` and `(cdr nil)` read - and handed back zero, which is nil, as the pair it
+had made. Its list came out a cell short, and nil acquired a car. Under ten
+pairs of eyes that car was a window, and some time later input.driver lost the
+last cell of an event and found the window where the pointer's position should
+have been: `ash: expected a number, got #<window>` in `decode`. The cell gp
+points at is kept now - marked and moved like any other pair, gp updated to
+match - and the run shrinks to that one cell. A store to address zero to seven
+is a fault that says it was nil's cell.
+
 ## A clean self-hosted rebuild
 
 Today a rebuilt image is a running system's heap. Two things stand between
@@ -799,6 +885,17 @@ system actually is, and the machine would be able to build a clean successor
 without the forge in the loop at all.
 
 ## Loose ends
+
+- **`lm --script` turns every `\n` into a newline**, including the one in
+  `#\newline`, which arrives as `#` and a line break. Write `(%int->char 10)`.
+- **Binding `*out*` to a window shell's stream from the serial task kills the
+  machine.** `(fluid-let ((*out* (wb::shell-stream w (win-data w)))) (print
+  1))` takes a wrong-type trap, the trap report goes to that same stream and
+  faults again, ten levels deep, until the machine halts.
+- **`(reschedule)` inside a Forbid** comes back to the task that called it,
+  even one that has just removed itself.
+- **`gc-verify` can call words in a hole dangling** - see *When to collect* -
+  because a hole still holds whatever pairs were last there.
 
 ## Note to self
 

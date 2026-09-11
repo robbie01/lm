@@ -1129,6 +1129,21 @@ than the instruction count beside it, and the difference is real - `cycles` is
 the machine's timebase, and a machine parked on `wfi` has its clock moved
 forward to the next interrupt without executing anything.
 
+The histogram says which instructions run; `--fnprof` says whose:
+
+```
+lm kick.img --fnprof --script '...'
+LM_FNPROF=1 lmforge rebuild
+```
+
+The outer loop hands the core slices of under a thousand instructions and
+charges each one to the function the machine is standing in - the code object
+every Lisp frame keeps in s1 - and once to every function on the frame chain
+above it. It prints the top forty both ways on exit: where the instructions
+were spent, and what they were spent on behalf of. A leaf that never builds a
+frame is charged to its caller. It is how `blit-go` and `alloc-object` turned
+out to be sixty percent of ten pairs of eyes following the mouse.
+
 `lmdev reach` walks the heap once per package, from that package's own symbols,
 and records for every cell the set of packages that can get to it. It answers
 what a namespace actually weighs - and it is how the dead object space in a
