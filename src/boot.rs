@@ -88,12 +88,31 @@ pub fn boot(o: &Options) -> i32 {
     let secs = t.elapsed().as_secs_f64();
 
     if o.trace_exit {
+        // `cycles` is the machine's clock. It counts the instructions run, but
+        // also the time an idle machine skips over and the cycles the devices
+        // charge, so dividing it by the wall clock gave figures like 6,500
+        // MIPS for a workbench that was mostly waiting for the next frame.
+        // What the emulator actually did is `executed`.
+        // And the rate is over the time the emulator was running, not the time
+        // it spent asleep keeping a window's idle machine in step with the
+        // wall clock.
+        let clock = m.cycles as f64 / crate::dev::TIMER_HZ as f64;
+        let waiting = m.cycles.saturating_sub(m.executed);
+        let running = (secs - m.slept).max(1e-6);
+        let asleep = if m.slept > 0.005 {
+            format!(", {:.2}s of it asleep", m.slept)
+        } else {
+            String::new()
+        };
         eprintln!(
-            "\n[{:?} after {} instructions in {:.2}s = {:.1} MIPS]",
+            "\n[{:?} after {} instructions in {:.2}s{} = {:.1} MIPS; the machine's clock ran {:.2}s, {:.0}% of it waiting]",
             stop,
-            m.cycles,
+            m.executed,
             secs,
-            m.cycles as f64 / secs / 1e6
+            asleep,
+            m.executed as f64 / running / 1e6,
+            clock,
+            100.0 * waiting as f64 / m.cycles.max(1) as f64
         );
         if m.prof_on {
             eprint!("{}", crate::prof::report(&m.prof));

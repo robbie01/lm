@@ -994,6 +994,13 @@ Spinning, the same three seconds had not arrived after 174. The input task went
 from 125,215 context switches in that window to one; the shell from 20,893 to
 one.
 
+That stopped being true once the frame interrupt was on for good: an idle
+machine skipped from one frame to the next as fast as the host could go, so a
+workbench ran hundreds of machine seconds a wall-clock second, drawing and
+allocating for every one of them. `run::pace` now sleeps through a windowed
+machine's idle time, and it holds again - without touching the machine's own
+clock, so a run is as deterministic as ever, and without slowing a busy one.
+
 What should happen next, and why `wait-vblank` is the mechanism rather than the
 interface, is in [docs/presenting.md](docs/presenting.md).
 

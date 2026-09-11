@@ -71,7 +71,45 @@ fn idle(m: &mut Machine) {
         wake = m.cycles + 10_000;
     }
     if wake > m.cycles {
+        if m.gfx.win.is_some() {
+            pace(m, wake);
+        }
         m.cycles = wake;
+    }
+}
+
+/// Keep a machine with a window in step with the wall clock while it idles.
+///
+/// A machine waiting for its next frame should wait for it. Without this an
+/// idle workbench ran its sixty frames a second as fast as the host could go -
+/// hundreds of machine seconds a second, every animation and every allocation
+/// done a hundred times over - and the window showed whichever frame it
+/// happened to catch.
+///
+/// Only idle time is paced. A busy machine runs as fast as the host can take
+/// it, and when it next idles it is lined up with the wall clock afresh rather
+/// than made to wait for the time it got ahead. Nothing here touches the
+/// machine's own clock, so a run is exactly as deterministic as it was: only
+/// the wall clock waits.
+fn pace(m: &mut Machine, wake: u64) {
+    use std::time::{Duration, Instant};
+    let now = Instant::now();
+    let hz = TIMER_HZ as f64;
+    let (mut at, mut base) = m.pace.unwrap_or((now, m.cycles));
+    // Where the machine's clock stands against the wall clock. More than a
+    // few frames either way - a long computation, the host looking elsewhere -
+    // and the two are lined up again, not one made to catch the other up.
+    let lead = (m.cycles - base) as f64 / hz - now.duration_since(at).as_secs_f64();
+    if lead.abs() > 0.05 {
+        at = now;
+        base = m.cycles;
+    }
+    m.pace = Some((at, base));
+    let due = at + Duration::from_secs_f64((wake - base) as f64 / hz);
+    if due > now {
+        let t = Instant::now();
+        std::thread::sleep((due - now).min(Duration::from_millis(50)));
+        m.slept += t.elapsed().as_secs_f64();
     }
 }
 
@@ -116,6 +154,7 @@ pub fn run(m: &mut Machine, budget: u64) -> Stop {
         let st = cpu::run_block(m, pc, q);
         let used = (q - m.fuel_left) as u64;
         m.cycles = m.cycles.wrapping_add(used);
+        m.executed += used;
         left = left.saturating_sub(used);
         // And again as soon as the clock has moved, not only at the top of the
         // next round: a run that ends here - its budget spent, or halted -

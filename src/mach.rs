@@ -97,6 +97,16 @@ pub struct Machine {
     /// Retired instruction count. Doubles as the machine timebase, which makes
     /// the whole system deterministic: same image, same schedule, every run.
     pub cycles: u64,
+    /// Instructions actually executed. `cycles` also counts the time an idle
+    /// machine skips over and the stalls the devices charge for their memory
+    /// traffic, which makes it a clock rather than a measure of work. This is
+    /// the work.
+    pub executed: u64,
+    /// Real-time pacing, for a machine with a window: the wall time and the
+    /// cycle count it was last lined up with, and how long it has slept to
+    /// keep in step. See `run::pace`.
+    pub pace: Option<(std::time::Instant, u64)>,
+    pub slept: f64,
     pub trap: (u32, u32, u32), // cause, tval, epc
 
     /// Dynamic instruction histogram. Slots 0..63 are dispatch tokens; the
@@ -168,6 +178,9 @@ impl Machine {
             mcause: 0,
             mtval: 0,
             cycles: 0,
+            executed: 0,
+            pace: None,
+            slept: 0.0,
             trap: (0, 0, 0),
             prof: Box::new([0; crate::prof::SLOTS]),
             watch: Box::default(),
