@@ -1404,16 +1404,33 @@
 ;; allocate: these run inside a collection, so the list walks are done by hand
 ;; rather than through list-nodes, which conses.
 
-;; A collection moved every pair, so every run any task was holding describes
-;; the wrong part of the heap. Zeroing the saved pair of registers is enough:
-;; the allocator checks for room before it stores anything, finds none, and
-;; asks for a fresh chunk. The task that is running gets the same treatment
-;; from `%reload-cons-run`.
+;; A collection moved every pair, so the run every suspended task was holding
+;; describes the wrong part of the heap - and it cannot simply be taken away.
+;;
+;; It used to be: both registers were zeroed, on the reasoning that the
+;; allocator checks for room before it stores anything, finds none, and asks
+;; for a fresh chunk. But the check is one instruction and the stores are the
+;; next ones. A task preempted between them had already checked, and came
+;; back to finish its pair at address zero - which is the cell that `(car
+;; nil)` and `(cdr nil)` read - and then handed back gp, which was zero, as
+;; the pair it had made. So a list came out a cell short, and from then on nil
+;; had a car: whatever that task had been consing. Under ten pairs of eyes and
+;; a moving mouse, a task consing a window would lose its pair that way, and
+;; some time later input.driver would lose the last cell of an event and find
+;; the window where the pointer's position should have been.
+;;
+;; So the cell gp names is kept. `gc-scan-run` has the collector treat it as a
+;; live pair, which moves it along with everything else and updates gp to
+;; match, and here the run shrinks to that one cell. A task that was part way
+;; through a cons finishes it where the pair now is; any other spends the cell
+;; on its next cons and asks for a fresh chunk after that. The task that is
+;; running is suspended nowhere, and gets an empty run from
+;; `%reload-cons-run`.
 (define (drop-task-run task)
   (let ((ctx (tc-context task)))
     (if (if ctx (%> ctx 0) nil)
-        (begin (poke (ctx-reg ctx reg-gp) 0)
-               (poke (ctx-reg ctx reg-tp) 0))
+        (let ((gp (%ld-fixnum (ctx-reg ctx reg-gp))))
+          (poke (ctx-reg ctx reg-tp) (if (%= gp 0) 0 (%+ gp 8))))
         nil)))
 
 (define (gc-invalidate-runs)
@@ -1437,10 +1454,35 @@
                           (%ld-fixnum (%+ ctx (%* 4 8))))
           ;; And its saved registers. This is the one place left that has to
           ;; guess: a task preempted mid-expression has live values in
-          ;; registers whose types nothing recorded. Thirty-two words per
+          ;; registers whose types nothing recorded. Thirty words per
           ;; suspended task, and the compactor pins whatever they reach.
-          (gc-scan-conservative ctx (%+ ctx ctx-bytes)))
+          ;;
+          ;; Thirty rather than all thirty-two, because gp and tp are not a
+          ;; guess: they are the task's cons run, and they are handled below.
+          ;; Scanned as values they pinned the cell at the front of the run
+          ;; and the one just past its end - always among the newest pairs in
+          ;; the heap, and a pinned pair is one the top of cons space cannot
+          ;; come back down past.
+          (gc-scan-conservative ctx (ctx-reg ctx reg-gp))
+          (gc-scan-conservative (ctx-reg ctx reg-t0) (%+ ctx ctx-bytes))
+          (gc-scan-run ctx))
         nil)))
+
+;; The cell at the front of a suspended task's run: either nothing yet, or a
+;; pair the task was interrupted in the middle of filling in. Either way it is
+;; kept, as a pair like any other - marked on the way in, and on the way out
+;; gp is rewritten to wherever it went - so that `drop-task-run` can give it
+;; back. A run with nothing left in it has no such cell, and is given up here
+;; and now: gp is sitting on the first cell of somebody else's chunk.
+;;
+;; The decision is the same both times through, because gp and tp are not
+;; touched in between, so it is taken afresh rather than remembered.
+(define (gc-scan-run ctx)
+  (let ((gp (ctx-reg ctx reg-gp))
+        (tp (ctx-reg ctx reg-tp)))
+    (if (%< (%ld-fixnum gp) (%ld-fixnum tp))
+        (gc-slot gp)
+        (begin (poke gp 0) (poke tp 0)))))
 
 (define (gc-scan-list-of l fn)
   (let ((p (list-first l)))

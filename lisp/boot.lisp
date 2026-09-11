@@ -255,7 +255,7 @@
     ;; private, so there is nothing to race with.
     ;;
     ;; What the collector does about the runs it invalidates by compacting is
-    ;; in gc.lisp, under `gc-invalidate-runs`.
+    ;; in exec.lisp, under `drop-task-run`.
     (let ((r 1))
       (while (%< r 32)
         (if (%= r reg-t0) nil (i-lw a r $t0 (ctx-off r)))
