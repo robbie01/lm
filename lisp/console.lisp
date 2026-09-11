@@ -53,13 +53,34 @@
   (int-enable int-uart)
   nil)
 
-;; Everything waiting, as one string.
+;; Everything waiting, as one string - or as much of it as fits in a chunk, if
+;; a great deal is waiting. The rest stays in the chip, which raises its line
+;; again as soon as `console-poll` turns it back on, and arrives as the next
+;; string.
+;;
+;; Read into a buffer the driver keeps, and copied out at the length it came
+;; to. It used to be a list of characters, reversed and then made into a
+;; string: two pairs a character. For a key that is nothing. For a rebuild,
+;; which types a megabyte of source in one burst, it was twenty megabytes of
+;; pairs - and a collection that came along part way through found a million
+;; of them alive, and spent more time on them than the whole rebuild took.
+(define typed-max 4096)
+(define *typed* nil)
+
 (define (take-typed)
-  (let ((acc nil) (c (uart-char)))
+  (if (%null? *typed*) (set! *typed* (make-string-n typed-max)) nil)
+  (let ((n 0) (c (uart-char)))
     (while c
-      (set! acc (%cons c acc))
-      (set! c (uart-char)))
-    (if acc (list->string (reverse acc)) nil)))
+      (%string-set! *typed* n c)
+      (set! n (%+ n 1))
+      (set! c (if (%< n typed-max) (uart-char) nil)))
+    (if (%= n 0)
+        nil
+        (let ((s (make-string-n n)) (i 0))
+          (while (%< i n)
+            (%string-set! s i (%string-ref *typed* i))
+            (set! i (%+ i 1)))
+          s))))
 
 ;; Running exactly when it holds the line - see `disk-driver-running?`.
 (define (console-driver-running?)
