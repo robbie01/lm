@@ -455,15 +455,15 @@
       (num-check 'still-mine (eq? (mutex-owner m) me) t))
     (mutex-unlock m)
 
-    ;; Nothing sleeps inside a critical section, and the machine carries on:
-    ;; the task that tried ends, and nobody is left holding the section.
-    (let ((a (lk-try "sleeper" (lambda () (without-preemption (wait-vblank)))))
-          (b (lk-try "yielder" (lambda () (without-preemption (reschedule)))))
+    ;; Nothing sleeps with interrupts off, and the machine carries on: the task
+    ;; that tried ends, and the interrupts come back on.
+    (let ((a (lk-try "sleeper" (lambda () (without-interrupts (wait-vblank)))))
+          (b (lk-try "yielder" (lambda () (without-interrupts (reschedule)))))
           (c (lk-try "locker" (lambda () (without-interrupts (mutex-lock m))))))
-      (num-check 'wait-in-forbid (lk-ended? a) t)
-      (num-check 'reschedule-in-forbid (lk-ended? b) t)
+      (num-check 'wait-in-disable (lk-ended? a) t)
+      (num-check 'reschedule-in-disable (lk-ended? b) t)
       (num-check 'lock-in-disable (lk-ended? c) t)
-      (num-check 'forbid-let-go (forbidden?) nil)
+      (num-check 'interrupts-back (interrupts-on?) t)
       (num-check 'lock-untouched (mutex-owner m) nil))
 
     ;; Handed over directly: the waiter wakes holding it.

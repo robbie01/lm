@@ -9,9 +9,10 @@
 ;;; The structures are laid out the way Exec's are, and behave the way Exec's
 ;;; do: doubly linked lists with a virtual head and tail node so that Remove
 ;;; needs no special cases; tasks with 32 signal bits and Wait/Signal; message
-;;; ports built on top of signals; Forbid and Permit for cooperative critical
-;;; sections and Disable and Enable for real ones; libraries reached through a
-;;; jump table below their base pointer.
+;;; ports built on top of signals; mutexes that belong to the task holding
+;;; them; Disable for the few sections too short to need one; libraries reached
+;;; through a jump table below their base pointer. There is no Forbid: see the
+;;; section on critical sections below.
 ;;;
 ;;; The one piece of machinery this gets for free is the context switch. The
 ;;; trap stub already saves all 32 registers into the block that mscratch
@@ -205,8 +206,7 @@
 (define *lib-list* nil)
 (define *port-list* nil)
 (define *int-vectors* nil)     ; a vector of eight lists
-(define *tdnest* 0)            ; Forbid nesting
-(define *attn-resched* 0)      ; a switch a Forbid deferred
+(define *attn-resched* 0)      ; a switch owed to a more urgent task
 (define *quantum* 0)
 (define *disp-count* 0)
 (define *switch-count* 0)
@@ -229,31 +229,28 @@
 ;; same thing.
 
 ;; ---------------------------------------------------------------- critical
-;; Two ways to be atomic, and which one you want depends on who else touches
-;; the thing you are protecting.
+;; One way to be atomic: `without-interrupts`, which turns interrupts off at
+;; the processor. It is for what an interrupt server touches - the scheduler's
+;; lists, the signal bits, the pool free list - and for the kernel's own
+;; sections a few dozen instructions long, the mutex's bookkeeping among them.
+;; The price is that the clock, the keyboard and the frame stop for as long as
+;; it is held, so it is held for as short a time as there is.
 ;;
-;; `without-interrupts` turns interrupts off at the processor. It is the one to
-;; use when an interrupt server touches the data - the scheduler's lists, the
-;; signal bits, the pool free list - and the price is that the clock stops, the
-;; keyboard stops and the frame stops for as long as it is held.
+;; Nothing sleeps inside it. Whatever would wake a sleeping task is another task
+;; or an interrupt, which is exactly what it holds off, so `wait`, `reschedule`,
+;; taking a mutex and the running task ending itself are errors inside it, and
+;; say so: see `sleep-check`. A print inside it goes straight to the serial
+;; line, and a blit is waited for by spinning.
 ;;
-;; `without-preemption` (Forbid) leaves interrupts on and holds off the
-;; scheduler, so no other *task* can run. It is the one to use when only tasks
-;; touch the data. It costs one increment, needs nothing declared, and cannot
-;; deadlock.
+;; Data that tasks share, and any section that may have to wait, wants a mutex
+;; - see below - and talking to another task wants a port.
 ;;
-;; Neither one may be slept in. Whatever would wake a sleeping task is another
-;; task or an interrupt, which is exactly what the two sections hold off, so a
-;; task that slept inside one either never woke or had to give the section up
-;; while it slept - and a section that can come apart in the middle, silently,
-;; is not a section. So `wait`, `reschedule`, taking a mutex and ending the
-;; running task are errors inside either, and say which: see `sleep-check`.
-;; The console and the blitter never needed to sleep there. A print inside a
-;; section goes straight to the serial line, and a blit is waited for by
-;; spinning.
-;;
-;; Data that tasks share and may have to wait for wants a mutex - see below -
-;; and talking to another task wants a port.
+;; There used to be a second kind, `without-preemption`: Forbid, which held
+;; off the scheduler and left interrupts on. Everything it guarded is a mutex
+;; or a port now, or was a few instructions of the kernel's own that Disable
+;; does as well on one processor; the one thing Forbid did that nothing else
+;; does - keep interrupts running through a long section - is what a mutex is
+;; for, and a mutex keeps the other tasks running too.
 ;;
 ;; There used to be a counted Disable/Enable pair here as well, with a nesting
 ;; depth and the interrupt state the outermost one found. It is gone.
@@ -262,45 +259,15 @@
 ;; the depth was read by nothing except the pair itself. The one section that
 ;; is not lexical is in `wait`, and it works the state by hand.
 
-(define (forbid)
-  (set! *tdnest* (%+ *tdnest* 1))
-  nil)
-
-;; Leaving Forbid means paying whatever the scheduler wanted to do while it was
-;; held off. Split out because the macro below wants it too.
-(define (permit-deferred)
-  (if (%> *attn-resched* 0)
+;; A task this one has just woken, or has just dropped its own priority below,
+;; is owed the processor as soon as it can safely be handed over - which is as
+;; soon as the kernel's own section is over. `signal` and `repri!` note the
+;; debt, and the operations that can run up one pay it on their way out.
+;; Leaving a Forbid used to be where that happened.
+(define (yield-if-owed)
+  (if (if (%> *attn-resched* 0) (if *in-interrupt* nil (interrupts-on?)) nil)
       (begin (set! *attn-resched* 0) (reschedule))
       nil))
-
-(define (permit)
-  (let ((n (%- *tdnest* 1)))
-    (set! *tdnest* (if (%< n 0) 0 n))
-    (if (%<= n 0) (permit-deferred) nil))
-  nil)
-
-;; Forbid, lexically, and the one to reach for by default.
-;;
-;; The body runs with the scheduler held off: no other task can take the
-;; processor. Interrupts stay on, which is the whole difference from
-;; `without-interrupts` - the clock keeps counting, the keyboard keeps
-;; arriving, the display keeps its frame - and only tasks are excluded. So it
-;; is the right lock for anything shared between tasks that no interrupt
-;; server touches, and it is the wrong one for anything a server does touch.
-;;
-;; It restores the nesting depth it found rather than decrementing, so an
-;; unbalanced Forbid somewhere inside the body cannot leave the scheduler
-;; switched off for good.
-(defmacro without-preemption body
-  (let ((saved (gensym)) (result (gensym)))
-    `(let ((,saved *tdnest*))
-       (set! *tdnest* (%+ ,saved 1))
-       (let ((,result (begin ,@body)))
-         (set! *tdnest* ,saved)
-         (if (%= ,saved 0) (permit-deferred) nil)
-         ,result))))
-
-(define (forbidden?) (%> *tdnest* 0))
 
 ;; Whether the running task may sleep here, asked by everything that might.
 ;; Asked even when it would not have to sleep this time - a mutex that happens
@@ -319,8 +286,6 @@
 (define (sleep-check what)
   (cond (*in-interrupt*
          (error (string-append what " cannot sleep in an interrupt server: signal a task instead")))
-        ((forbidden?)
-         (error (string-append what " would sleep inside without-preemption, where no other task can run to wake it")))
         ((if *exec-started* (if (interrupts-on?) nil t) nil)
          (error (string-append what " would sleep inside without-interrupts, where nothing can arrive to wake it")))
         (else nil)))
@@ -330,13 +295,13 @@
 ;; the trap handler where the whole register set has already been saved.
 
 ;;
-;; Not inside `without-preemption`, where it used to do nothing at all:
-;; `switch-tasks` will not take the processor from a task that holds a Forbid,
-;; so the call came straight back - and a task that had just removed itself
-;; went on running.
+;; Not with interrupts off: a task's saved context does not hold the interrupt
+;; enable, so the task switched to would start deaf, and so would every task
+;; after it. (Inside a Forbid, while there was one, it quietly came straight
+;; back instead, and a task that had just removed itself went on running.)
 (define (reschedule)
-  (if (forbidden?)
-      (error "reschedule: inside without-preemption, where no other task can run")
+  (if (if *exec-started* (if (interrupts-on?) nil t) nil)
+      (error "reschedule: inside without-interrupts, where the next task would start with them off")
       nil)
   (%ecall trap-reschedule))
 
@@ -400,10 +365,7 @@
 ;; inside the trap handler, with the outgoing task's registers already saved.
 (define (switch-tasks)
   (let ((cur (this-task)))
-    (if (forbidden?)
-        ;; A forbidden task keeps the processor; remember that it owes us one.
-        (set! *attn-resched* 1)
-        (let ((next (rem-head (ready-list))))
+    (let ((next (rem-head (ready-list))))
           (if (%null? next)
               nil
               (begin
@@ -420,7 +382,7 @@
                 (%set-stack-limit! (task-stack-limit next))
                 ;; Only now, with the context switched away from whatever was
                 ;; running, is it safe to hand a dead task's stack back.
-                (if *reaped* (reap-tasks) nil)))))
+                (if *reaped* (reap-tasks) nil))))
     nil))
 
 ;; ---------------------------------------------------------------- signals
@@ -498,7 +460,7 @@
   ;; way back. `without-interrupts` cannot say that, so this says it.
   ;;
   ;; Not from inside a caller's critical section either: see `sleep-check`.
-  ;; That was once a hang - `switch-tasks` will not take the processor from a
+  ;; That was once a hang - `switch-tasks` would not take the processor from a
   ;; task holding a Forbid, so `(without-preemption (print "hi"))` went round
   ;; the loop below for ever while console.driver waited for a turn that never
   ;; came - and then, for a while, Exec's rule: the section was set aside for
@@ -593,7 +555,10 @@
   (set-tc-result! task 0)
   nil)
 
-(define (add-task name pri fn . opts)
+;; A task made and not yet started: on no list, so nothing runs it until
+;; `start-task` does. `make-server` needs the gap, to give the task its port
+;; before it can run.
+(define (make-task name pri fn . opts)
   (let* ((binds (initial-binds))
          (stack (if (%cons? opts) (%car opts) default-stack))
          (task (tc-alloc))
@@ -626,10 +591,17 @@
     (%st-word! (ctx-reg ctx reg-s2) task)
     (%st-word! (ctx-reg ctx reg-t0) fn)
     (poke (ctx-reg ctx reg-t1) 0)
-    (without-interrupts
-      (task-ready! task)
-      (set! *task-count* (%+ *task-count* 1)))
     task))
+
+;; Onto the ready list: from here it runs when the scheduler says so.
+(define (start-task task)
+  (without-interrupts
+    (task-ready! task)
+    (set! *task-count* (%+ *task-count* 1)))
+  task)
+
+(define (add-task name pri fn . opts)
+  (start-task (apply make-task name pri fn opts)))
 
 ;; What the forge handed out before the machine ran - the boot task's stack,
 ;; its context - has no header and was never meant to come back. Ending the
@@ -647,7 +619,11 @@
 ;; The link is one way for the collector's sake as well as the scheduler's: a
 ;; parent holds its children, so a child cannot outlive the list it is on.
 (define (spawn name pri fn . opts)
-  (let ((child (apply add-task name pri fn opts))
+  (start-task (apply make-child name pri fn opts)))
+
+;; A dependent task, made and not yet started.
+(define (make-child name pri fn . opts)
+  (let ((child (apply make-task name pri fn opts))
         (me (this-task)))
     (if me
         (without-interrupts
@@ -725,8 +701,9 @@
   (release-devices-of task)
   (run-cleanups task)
   (without-interrupts
-    (set-tc-state! task ts-removed)
-    (set! *task-count* (%- *task-count* 1)))
+    ;; One that was made and never started was never counted.
+    (if (%= (tc-state task) ts-added) nil (set! *task-count* (%- *task-count* 1)))
+    (set-tc-state! task ts-removed))
   ;; Anybody still waiting on an answer from it gets one. After it is marked
   ;; ended, so that nothing can queue behind the last of these: `put-msg`
   ;; checks the same mark.
@@ -803,9 +780,8 @@
 
 (define (task-finished)
   (let ((task (this-task)))
-    ;; A section the task's function opened with `forbid` or `%disable` and
-    ;; returned without closing was the task's, and ends with it.
-    (set! *tdnest* 0)
+    ;; A Disable the task's function opened with `%disable` and returned
+    ;; without closing was the task's, and ends with it.
     (%enable)
     (set-tc-result! task 0)
     ;; The last task to finish takes the machine with it: there is nothing
@@ -1026,17 +1002,17 @@
                 (reply-msg m))))))))
 
 (define (make-server name pri handler . opts)
-  ;; Forbid rather than a rendezvous: the port has to exist before the server
-  ;; runs and before anybody can be handed the server to talk to, and not
-  ;; being switched out is the simplest way to say that.
+  ;; The port has to exist before the server runs and before anybody can be
+  ;; handed the server to talk to, so the task is made, given its port, and
+  ;; only then started. It used to be a Forbid around the lot, which said the
+  ;; same thing by stopping every other task in the machine.
   (let ((s (sv-alloc)))
     (set-node-name! s name)
     (set-node-pri! s pri)
-    (forbid)
-    (let ((task (apply spawn name pri (lambda () (server-loop s handler)) opts)))
+    (let ((task (apply make-child name pri (lambda () (server-loop s handler)) opts)))
       (set-sv-task! s task)
-      (set-sv-port! s (create-port-for task name pri)))
-    (permit)
+      (set-sv-port! s (create-port-for task name pri))
+      (start-task task))
     s))
 
 ;; Every task has one reply port, because every task has one blocker: a task
@@ -1118,8 +1094,9 @@
 ;;   a hang nobody can explain.
 ;;
 ;; A Windows mutex, near enough; an Amiga SignalSemaphore with the abandonment
-;; the Amiga never had. Only tasks ever touch one, so the bookkeeping is done
-;; inside a Forbid - and never sleeps inside it.
+;; the Amiga never had. The bookkeeping is done with interrupts off, for the
+;; few dozen instructions it takes: a mutex cannot be built out of itself, and
+;; one processor has nothing cheaper to build it from. It never sleeps there.
 
 (defrecord (mutex mx) name owner count head next-held abandoned repair)
 
@@ -1152,7 +1129,7 @@
   ;; Asked even when the mutex is free: a mutex is for code that may wait.
   (sleep-check "mutex-lock:")
   (let* ((me (this-task))
-         (how (without-preemption
+         (how (without-interrupts
                 (let ((o (mx-owner m)))
                   (cond ((%null? o) (mutex-take! m me) (mutex-report! m))
                         ((%eq? o me) (set-mx-count! m (%+ (mx-count m) 1)) t)
@@ -1171,7 +1148,7 @@
            ;; the owner's end - each of which makes this task the owner first
            ;; and signals it second.
            (while (if (%eq? (mx-owner m) me) nil t) (wait sigf-mutex))
-           (without-preemption (mutex-report! m)))
+           (without-interrupts (mutex-report! m)))
           (else how))))
 
 (define (mutex-report! m)
@@ -1183,10 +1160,12 @@
   (if (%eq? (mx-owner m) (this-task))
       nil
       (error (string-append "mutex-unlock: this task does not hold " (mx-name m))))
-  (without-preemption
+  (without-interrupts
     (if (%> (mx-count m) 1)
         (set-mx-count! m (%- (mx-count m) 1))
         (mutex-release! m (this-task))))
+  ;; Whoever it went to may be more urgent than this task.
+  (yield-if-owed)
   nil)
 
 ;; The body with the mutex held. An error in the body does not come back
@@ -1220,16 +1199,17 @@
     (if (if (task? task) (%= (tc-state task) ts-removed) t)
         (error "mutex-hand-over: not a live task" task)
         nil)
-    (without-preemption
+    (without-interrupts
       (unlink-held! me m)
       (if (%eq? (tc-blocked-on task) m) (mutex-unqueue! m task) nil)
       (mutex-take! m task)
       (settle-priority! task)
       (settle-priority! me)
       (signal task sigf-mutex))
+    (yield-if-owed)
     nil))
 
-;; ------------------------- what the above does inside its Forbid
+;; ------------------------- what the above does with interrupts off
 (define (mutex-take! m task)
   (set-mx-owner! m task)
   (set-mx-count! m 1)
@@ -1340,8 +1320,8 @@
       (set! n (%+ n 1)))
     hit))
 
-;; Said outside the Forbid, because an error abandons the stack and the section
-;; with it.
+;; Said outside the section, because an error abandons the stack and the
+;; section with it.
 (define (deadlock-error m me)
   (let ((s (string-append "deadlock: " (string-append (task-name me)
              (string-append " would wait for " (mx-name m)))))
@@ -1364,8 +1344,8 @@
 ;; whose stack an error abandoned: either way, nothing it was doing inside a
 ;; `with-mutex` is going to be finished.
 ;;
-;; No Forbid of its own. `rem-task` holds one around it, and the error path
-;; calls it from the trap handler, where no other task can run anyway.
+;; No section of its own. `rem-task` turns interrupts off around it, and the
+;; error path calls it from the trap handler, where they are off already.
 (define (abandon-mutexes-now task)
   (let ((m (tc-held task)))
     (while m
@@ -1382,7 +1362,7 @@
         nil))
   nil)
 
-(define (abandon-mutexes task) (without-preemption (abandon-mutexes-now task)))
+(define (abandon-mutexes task) (without-interrupts (abandon-mutexes-now task)))
 
 ;; ---------------------------------------------------------------- libraries
 ;; A library is reached through a jump table below its base pointer, which is
@@ -1630,7 +1610,6 @@
   ;; variables, saying so is the price of not having a base pointer.
   (%set-this-task! nil)
   (set! *idle-task* nil)
-  (set! *tdnest* 0)
   (set! *attn-resched* 0)
   (set! *exec-started* nil)
   (set! *exec-generation* (%+ *exec-generation* 1))
@@ -1682,7 +1661,6 @@
     (idle-start)
     (set! *abort-cleanup-fn*
           (lambda ()
-            (set! *tdnest* 0)
             (set! *attn-resched* 0)
             ;; A fault inside an interrupt server never reaches the line that
             ;; clears this, and a machine that believes it is permanently
@@ -1705,16 +1683,16 @@
 ;; stops is being taken off the processor against your will.
 ;;
 ;; There is one caller and it is the one that needs it. A rebuild recompiles
-;; exec.lisp into the machine it is running on, and every `(define *tdnest* 0)`
+;; exec.lisp into the machine it is running on, and every `(define *ready-list* nil)`
 ;; in it is a top level form like any other: for the rest of that rebuild the
 ;; kernel's state resets under it, one variable at a time. Nothing notices as
 ;; long as nothing calls into the kernel - and a timer interrupt is exactly
 ;; that call, arriving unasked.
-;; Forbid is not this. Forbid stops the *scheduler* from taking the processor
-;; away, and leaves the interrupts on - a server still runs, and a server calls
-;; into the kernel, which is exactly what must not happen while a rebuild is
-;; redefining the kernel's variables one `define` at a time. This turns the
-;; sources of those calls off.
+;; Nor is it a critical section. Turning interrupts off would stop those calls
+;; for exactly as long as it was held, and a rebuild is seconds long and has to
+;; hear the serial line all the way through, since that is where its sources
+;; arrive. This turns the sources of the calls off instead, and leaves that one
+;; on.
 (define (preemption-off)
   ;; The chips too, not just the clock. Every top level `define` in this file
   ;; resets a kernel variable as the rebuild goes past, so for a moment there

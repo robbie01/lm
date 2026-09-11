@@ -839,9 +839,9 @@ mattered yet.
 
 An Amiga Exec, in Lisp, in one shared address space with no MMU and no
 protection. Tasks with 32 signal bits and `Wait`/`Signal`; message ports on top
-of signals; mutexes that belong to the task holding them; Forbid and Disable
-for sections too short to sleep in; libraries reached through a jump table
-below their base pointer.
+of signals; mutexes that belong to the task holding them; Disable for the few
+sections too short to need one; libraries reached through a jump table below
+their base pointer.
 
 `PutMsg` costs a pointer on a list. Nothing is copied, because there is nothing
 to copy it between - which is the whole reason to have a shared address space.
@@ -972,10 +972,13 @@ has it taken away, and the next owner is told - through a repair function the
 mutex can be made with. A wait that would close a circle of tasks is an error
 naming the circle, not a hang.
 
-`without-preemption` and `without-interrupts` stay, for sections a few
-instructions long, and nothing may sleep inside either: `wait`, `reschedule`
-and taking a mutex there are errors that say so. `(locking)` at the prompt
-checks all of it. The rules, and how they came about, are under *Locking* in
+`without-interrupts` stays, for the few sections an interrupt server shares
+and for the kernel's own few-instruction bookkeeping, and nothing may sleep
+inside it: `wait`, `reschedule` and taking a mutex there are errors that say
+so. There is no Forbid. Everything it guarded is a mutex or a port now, and
+the one thing it did that Disable does not - leave interrupts on through a
+long section - is what a mutex is for. `(locking)` at the prompt checks all of
+it. The rules, and how they came about, are under *Locking* in
 [docs/open-items.md](docs/open-items.md).
 
 ### Waiting for a frame

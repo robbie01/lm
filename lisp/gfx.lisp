@@ -115,15 +115,12 @@
       (set! p (%cdr p))))
   nil)
 
-;; Inside a Forbid it spins instead. Sleeping there is an error - see
-;; `sleep-check` - and nothing about a blit needs another task to run: the
-;; chip finishes by itself, and reading its status is what lets it be seen to.
-;; So it waits the way it does with interrupts off, and the way WaitBlit always
-;; did, and a section may draw.
+;; Only asked from a task with interrupts on. Wherever sleeping is not allowed
+;; `blit-wait-block` spins on the chip instead - it finishes by itself, and
+;; reading its status is what lets it be seen to - which is the way WaitBlit
+;; always waited, and why a section may draw.
 (define (blit-sleep d)
-  (if (forbidden?)
-      (while (if (blit-done? d) nil t) (blit-busy?))
-      (let ((me (this-task)))
+  (let ((me (this-task)))
         (set! *blit-sleeps* (%+ *blit-sleeps* 1))
         (without-interrupts
           (set! *blit-waiters* (%cons (%cons me d) *blit-waiters*))
@@ -135,7 +132,7 @@
           (wait sigf-blit))
         (without-interrupts
           (set! *blit-waiters* (remove-waiter me *blit-waiters*))
-          (if (%null? *blit-waiters*) (blit-irq-each! nil) nil))))
+          (if (%null? *blit-waiters*) (blit-irq-each! nil) nil)))
   nil)
 
 (define (remove-waiter task ws)

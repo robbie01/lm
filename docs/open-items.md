@@ -249,7 +249,7 @@ with live pairs.
 Testing it turned up a second bug. A window's key queue was read and rewritten
 by the input task and by the shell's task with no lock, so keys arriving faster
 than a person types were dropped or doubled, garbling a line in a way that
-still parsed. Both ends hold Forbid now.
+still parsed. Keys reach a shell as messages on its port now.
 
 ## Fixed: the scheduler lost tasks
 
@@ -831,7 +831,7 @@ forge-built one is a freshly constructed one.
 
 ## Locking
 
-Four ways for tasks to share, in the order to reach for them:
+Three ways for tasks to share, in the order to reach for them:
 
 - **A port.** Something one task owns cannot be raced for, so give the thing
   to a task and talk to it with messages. Every driver is built this way, and
@@ -848,34 +848,43 @@ Four ways for tasks to share, in the order to reach for them:
   `mutex-lock` answers `abandoned`, and `with-mutex` runs the mutex's repair
   first. The workbench's damage list and window list are guarded this way,
   and the damage lock's repair is to repaint everything.
-- **`without-preemption`** (Forbid) - for a few instructions of state only
-  tasks touch, where a mutex would cost more than the section. It holds every
-  other task off, so it is for sections too short to notice.
-- **`without-interrupts`** - for anything an interrupt server touches: the
-  scheduler's lists, the signal bits, the pool free list, object allocation.
+- **`without-interrupts`** - for anything an interrupt server touches (the
+  scheduler's lists, the signal bits, the pool free list, object allocation),
+  and for the kernel's own few-instruction bookkeeping, the mutex's among it.
+  Held as briefly as there is.
 
-Nothing sleeps inside either of the last two. Whatever would wake a sleeping
-task is another task or an interrupt, which is exactly what they hold off. So
-`wait` - and everything built on it: `wait-vblank`, `request`, reading a key -
+Nothing sleeps with interrupts off. Whatever would wake a sleeping task is
+another task or an interrupt, which is exactly what is held off. So `wait` -
+and everything built on it: `wait-vblank`, `request`, reading a key -
 `reschedule`, taking a mutex and the running task ending itself are all errors
-inside either one, and each says which section refused it. Printing is not:
-inside a section it goes straight to the serial line, and a blit is waited for
-by spinning.
+there, and say so. Printing is not: with interrupts off it goes straight to the
+serial line, and a blit is waited for by spinning.
 
-That rule replaced two others in one day. For a long time a wait inside a
-Forbid hung the machine - `switch-tasks` will not take the processor from a
-task holding one, so `(without-preemption (print "hi"))` waited for ever on a
-console driver that could not run to answer. Then, briefly, it was Exec's rule:
-the section was set aside while the task slept. That cured the hang, and quietly
-made every section with a wait in it into two sections with a gap between.
+**There is no Forbid.** `without-preemption` held off the scheduler and left
+interrupts on, and once there were mutexes nothing needed it. What it guarded
+in the workbench is behind mutexes, and the key queue is a port. The kernel's
+own uses were a few instructions each, which Disable does as well on one
+processor. Starting a server before its port existed was an ordering problem,
+not a locking one, and is solved by making the task, giving it its port and
+only then starting it. The one thing Forbid could do that nothing else can -
+keep interrupts running through a long section - is what a mutex is for, and a
+mutex keeps the other tasks running too.
+
+It went in three steps in one day. For a long time a wait inside a Forbid hung
+the machine - `switch-tasks` would not take the processor from a task holding
+one, so `(without-preemption (print "hi"))` waited for ever on a console driver
+that could not run to answer. Then, briefly, it was Exec's rule: the section
+was set aside while the task slept, which cured the hang and quietly made every
+section with a wait in it into two sections with a gap between. Then waiting
+inside one became an error, and after that there was nothing left for it to do.
 
 Not built, because nothing needs them yet: a shared mode for readers - the
 compositor reads the window list without any lock, because the list is only
 ever replaced and never changed in place - and counting semaphores, which a port
 holding N messages already is.
 
-Both sections are lexical. `Disable`/`Enable` and `Forbid`/`Permit` are not
-public; the one section in the machine that cannot be lexical is inside `wait`,
+`without-interrupts` is lexical, and `Disable`/`Enable` are not public; the one
+section in the machine that cannot be lexical is inside `wait`,
 which lets interrupts in around the `reschedule` that blocks and takes them back
 after, and works the state by hand.
 
@@ -946,8 +955,8 @@ without the forge in the loop at all.
 None at the moment. The last four are fixed: `lm --script` leaves character
 literals alone, so `#\newline` survives its `\n` translation; a borrowed shell
 stream no longer takes the machine down (see *Fixed: a fault report could take
-the machine down*, under Locking); `(reschedule)` inside a Forbid is an error
-rather than a call that quietly came back; and `gc-verify` steps over the holes
+the machine down*, under Locking); `(reschedule)` cannot quietly come back from
+inside a Forbid any more, there being no Forbid; and `gc-verify` steps over the holes
 a pinned pair leaves.
 
 ## Note to self

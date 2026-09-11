@@ -547,9 +547,9 @@
 (define *stack-top-fn* nil)
 (define *task-abort-fn* nil)
 (define *return-addr-fn* nil)
-;; Exec keeps nesting counts for Disable and Forbid. An abort walks out of
-;; however many of those the faulting code was holding, so they have to be put
-;; back to nothing - and only Exec knows where they live.
+;; Exec keeps state that an abort walks out of and has to put back - a switch
+;; it owed, whether it thinks it is inside an interrupt server, the mutexes the
+;; task was holding - and only Exec knows where that lives.
 (define *abort-cleanup-fn* nil)
 ;; What a resumed image has to put back that is not memory: devices, and
 ;; whatever was running them. The workbench fills this in.

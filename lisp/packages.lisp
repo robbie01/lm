@@ -248,18 +248,13 @@
 (in-package exec)
 ;; 19 public, out of 183 definitions.
 (export '(
-  ;; Forbid and Permit are not exported. `without-preemption` is the way in,
-  ;; and there is no section yet that cannot be lexical - which is the only
-  ;; thing that would earn a raw pair its place, the way `wait` earns one for
-  ;; the interrupt state.
+  ;; There is no Forbid. Data tasks share is guarded by a mutex, and the
+  ;; kernel's own few-instruction sections turn interrupts off.
   add-task cause exec-init exec-start
   ;; handle-interrupt and switch-tasks are the trap handler's, and the trap
   ;; handler is in sys: exported to one caller, not to applications.
   handle-interrupt switch-tasks
-  ;; `forbidden?` says whether the running task is inside a Forbid, for the
-  ;; few things that have to do something else there - print raw, spin for a
-  ;; blit - because sleeping in one is an error: see `sleep-check`.
-  idle? idle-start without-preemption forbidden?
+  idle? idle-start start-task
   ;; ---- shared data ----
   ;; A lock that belongs to the task holding it: see the mutex section of
   ;; exec.lisp for what that buys.

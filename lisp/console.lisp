@@ -139,19 +139,19 @@
 ;; Whether a line can go to the driver. Handing it over is a request, and a
 ;; request waits for its answer, so this is as much a question about where it
 ;; is being asked from as about the driver: not from a trap handler or an
-;; interrupt server, where there is no task to wait, and not from inside a
-;; critical section of either kind, where waiting is an error - see
-;; `sleep-check` - and a print is the last thing that should be one, since it
-;; is what somebody adds to find out what a section is doing. Inside one, the
-;; line goes out raw, the way the collector's do.
+;; interrupt server, where there is no task to wait, and not with interrupts
+;; off, where waiting is an error - see `sleep-check` - and a print is the
+;; last thing that should be one, since it is what somebody adds to find out
+;; what a section is doing. There, the line goes out raw, the way the
+;; collector's do.
 ;;
-;; A Forbid used to get through this and ask. `wait` did not give a Forbid up
-;; then, so the driver never ran to answer, and `(without-preemption (print
-;; "hi"))` spun for ever where `(without-interrupts (print "hi"))` printed.
+;; While there was a Forbid, a print inside one got through this and asked,
+;; and the driver never ran to answer: `(without-preemption (print "hi"))`
+;; spun for ever where `(without-interrupts (print "hi"))` printed.
 (define (can-ask?)
   (if (console-driver-running?)
       (if (%= 0 (%ld-fixnum lg-trapdepth))
-          (if *in-interrupt* nil (if (forbidden?) nil (interrupts-on?)))
+          (if *in-interrupt* nil (interrupts-on?))
           nil)
       nil))
 
@@ -159,7 +159,7 @@
 ;; here: the driver owns the receive side, so while it is up there is no raw
 ;; way to wait for a key, and a read that has to wait inside a section is
 ;; refused by `wait` itself - an error that says where it is, rather than the
-;; hang it used to be under both kinds of section.
+;; hang it used to be.
 (define (can-listen?)
   (if (console-driver-running?)
       (if (%= 0 (%ld-fixnum lg-trapdepth)) (if *in-interrupt* nil t) nil)
