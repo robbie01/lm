@@ -22,6 +22,13 @@
 (define (fixnum? x) (%fixnum? x))
 (define (number? x) (if (%fixnum? x) t (%bignum? x)))
 (define (function? x) (%closure? x))
+
+;; `t` is its own value. The forge's interpreter says so in Rust, which is
+;; enough for an image it builds; an image the machine builds from these
+;; sources takes its values from these sources and nowhere else, and needs to
+;; be told.
+(define t 't)
+
 (define (boolean? x) (if (%null? x) t (%eq? x t)))
 
 ;; ---------------------------------------------------------------- pairs
@@ -711,22 +718,25 @@
         (list->string acc))))
 
 (define (string->number s)
-  (let ((cs (string->list s)) (neg nil) (acc 0) (ok nil))
-    (if (%cons? cs)
-        (if (%eq? (%car cs) #\-)
-            (begin (set! neg t) (set! cs (%cdr cs)))
-            (if (%eq? (%car cs) #\+) (set! cs (%cdr cs)) nil))
+  ;; Straight off the string. The reader asks this about every token it reads,
+  ;; nearly all of them names, and turning each one into a list of characters
+  ;; first cost a pair a character just to answer no.
+  (let ((i 0) (n (%string-length s)) (neg nil) (acc 0) (ok nil))
+    (if (%> n 0)
+        (if (%eq? (%string-ref s 0) #\-)
+            (begin (set! neg t) (set! i 1))
+            (if (%eq? (%string-ref s 0) #\+) (set! i 1) nil))
         nil)
     ;; `*` and `+` here rather than `%*` and `%+`: a literal wider than a
     ;; fixnum used to wrap round silently, so a program that wrote out a
     ;; twenty-digit number got a small negative one and no complaint.
-    (while (%cons? cs)
-      (if (char-numeric? (%car cs))
+    (while (%< i n)
+      (if (char-numeric? (%string-ref s i))
           (begin
             (set! ok t)
-            (set! acc (+ (* acc 10) (digit->int (%car cs))))
-            (set! cs (%cdr cs)))
-          (begin (set! ok nil) (set! cs nil))))
+            (set! acc (+ (* acc 10) (digit->int (%string-ref s i))))
+            (set! i (%+ i 1)))
+          (begin (set! ok nil) (set! i n))))
     (if ok (if neg (- 0 acc) acc) nil)))
 
 ;; ---------------------------------------------------------------- vectors

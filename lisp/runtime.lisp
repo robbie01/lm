@@ -169,19 +169,48 @@
 ;; ---------------------------------------------------------------- symbols
 ;; Interning has to be identical on both sides of the bootstrap or a symbol
 ;; read at build time and one read at run time would not be eq.
+;; qualified-hash in two halves. djb2 is a polynomial: the hash of pkg:name is
+;; the prefix's hash times 33 to the power of the name's length, plus the
+;; name's own hash counted from zero - all modulo 2^30, which is what the mask
+;; does at every step. So a name that is looked for in several packages, which
+;; a bare name is - its own package, then everything that package uses - is
+;; hashed once, and placed in each package with one multiply and one add. The
+;; bucket is the one qualified-hash gives, to the bit.
+(define (name-hash s) (hash-string-into 0 s))
+
+(define (name-power s)
+  (let ((i (%string-length s)) (p 1))
+    (while (%> i 0)
+      (set! p (%logand (%* p 33) 1073741823))
+      (set! i (%- i 1)))
+    p))
+
+(define (prefix-hash pkg-name)
+  (%logand (%+ (%* (hash-string-into 5381 pkg-name) 33) 58) 1073741823))
+
+;; While a fresh image is being compiled, every symbol a lookup comes back with
+;; is noted here: those are the names its sources use, and anything else this
+;; machine has - something typed at a prompt, a function the sources no longer
+;; define - is left out of it. See `genesis` and `save-fresh`.
+(define *names-seen* nil)
+
 (define (find-symbol-in pkg s)
+  (find-symbol-hashed pkg s (name-hash s) (name-power s)))
+
+(define (find-symbol-hashed pkg s nh np)
   (let* ((ob (%ld-word lg-obarray))
          (n (%vector-length ob))
-         (b (%mod (qualified-hash (package-name pkg) s) n))
-         (chain (%vector-ref ob b))
+         (h (%logand (%+ (%* (prefix-hash (package-name pkg)) np) nh) 1073741823))
+         (chain (%vector-ref ob (%mod h n)))
          (found nil))
     (while (%cons? chain)
       (let ((sym (%car chain)))
-        (if (if (%eq? (symbol-package sym) pkg)
+        (if (if (%eq? (%slot sym sym-package) pkg)
                 (string=? (%symbol-name sym) s)
                 nil)
             (begin (set! found sym) (set! chain nil))
             (set! chain (%cdr chain)))))
+    (if found (if *names-seen* (table-set! *names-seen* found t) nil) nil)
     found))
 
 (define (intern-in pkg s)
@@ -210,18 +239,22 @@
           (%set-slot! sym sym-package pkg)
           (%vector-set! ob b (%cons sym (%vector-ref ob b)))
           (%st-word! lg-symlist (%cons sym (%ld-word lg-symlist)))
+          (if *names-seen* (table-set! *names-seen* sym t) nil)
           sym)))))
 
 ;; What a bare name means here: this package first, then whatever the packages
 ;; it uses have exported, and failing both a new symbol of its own.
 (define (find-visible pkg s)
-  ;; What a bare name would resolve to here, without making anything.
-  (let ((here (find-symbol-in pkg s)))
+  ;; What a bare name would resolve to here, without making anything. The
+  ;; name is hashed once, for all the packages it may be looked for in.
+  (let* ((nh (name-hash s))
+         (np (name-power s))
+         (here (find-symbol-hashed pkg s nh np)))
     (if here
         here
         (let ((u (package-use pkg)) (found nil))
           (while (%cons? u)
-            (let ((sym (find-symbol-in (%car u) s)))
+            (let ((sym (find-symbol-hashed (%car u) s nh np)))
               (if (if sym (symbol-exported? sym) nil)
                   (begin (set! found sym) (set! u nil))
                   (set! u (%cdr u)))))

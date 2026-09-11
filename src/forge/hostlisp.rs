@@ -18,7 +18,26 @@ use crate::mach::Machine;
 use crate::map::*;
 use crate::forge::read::Reader;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Set every millisecond by a ticker thread when `LM_FORGE_PROF` is in the
+/// environment; the evaluator notices at its next step and records which
+/// interpreted function it is inside.
+static PROF_TICK: AtomicBool = AtomicBool::new(false);
+
+/// Where the build's time goes, by interpreted function. Sampled rather than
+/// timed, because a clock read per call would cost more than most calls.
+pub struct Prof {
+    /// Interpreted closures being evaluated, innermost last. A tail call
+    /// replaces the top rather than pushing, the way the evaluator does.
+    stack: Vec<V>,
+    own: HashMap<V, u64>,
+    total: HashMap<V, u64>,
+    prim_calls: Vec<u64>,
+    samples: u64,
+}
 
 pub const T_PRIM: u32 = 9; // slot0 raw primitive index, slot1 name symbol
 
@@ -109,16 +128,84 @@ pub struct Lisp<'a> {
     /// Environments captured by interpreted closures. A heap slot cannot hold
     /// an Rc, so the closure stores an index into this table instead.
     pub envs: Vec<Env>,
+    pub prof: Option<Box<Prof>>,
+    /// Indexed by symbol identity: has any frame ever bound this symbol? One
+    /// that has never been bound cannot be found in a frame, so a reference
+    /// to it goes straight to the globals.
+    pub lexbound: Vec<bool>,
+}
+
+impl Prof {
+    fn from_env() -> Option<Box<Prof>> {
+        std::env::var_os("LM_FORGE_PROF")?;
+        std::thread::spawn(|| loop {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            PROF_TICK.store(true, Ordering::Relaxed);
+        });
+        Some(Box::new(Prof {
+            stack: Vec::new(),
+            own: HashMap::new(),
+            total: HashMap::new(),
+            prim_calls: vec![0; PRIMS.len()],
+            samples: 0,
+        }))
+    }
 }
 
 /// One lexical frame. Reference counted, so a frame dies with the call that
 /// made it unless a closure captured it.
 pub struct Frame {
-    pub vars: RefCell<Vec<(V, V)>>,
+    pub vars: RefCell<Vars>,
     pub parent: Env,
 }
 
 pub type Env = Option<Rc<Frame>>;
+
+/// A frame's bindings. Nearly every frame holds a handful, so those live in
+/// the frame itself, and only one that outgrows that - a long `let`, or
+/// internal defines piling up - moves them to a vector. A call used to cost
+/// two allocations, the frame and a vector for its bindings; now it is one.
+const VARS_INLINE: usize = 6;
+
+pub enum Vars {
+    Inline(usize, [(V, V); VARS_INLINE]),
+    Heap(Vec<(V, V)>),
+}
+
+impl Vars {
+    fn new() -> Vars {
+        Vars::Inline(0, [(NIL, NIL); VARS_INLINE])
+    }
+
+    fn push(&mut self, b: (V, V)) {
+        match self {
+            Vars::Heap(v) => v.push(b),
+            Vars::Inline(n, a) if *n < VARS_INLINE => {
+                a[*n] = b;
+                *n += 1;
+            }
+            Vars::Inline(_, a) => {
+                let mut v = a.to_vec();
+                v.push(b);
+                *self = Vars::Heap(v);
+            }
+        }
+    }
+
+    fn as_slice(&self) -> &[(V, V)] {
+        match self {
+            Vars::Inline(n, a) => &a[..*n],
+            Vars::Heap(v) => v,
+        }
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [(V, V)] {
+        match self {
+            Vars::Inline(n, a) => &mut a[..*n],
+            Vars::Heap(v) => v,
+        }
+    }
+}
 
 enum Step {
     Val(V),
@@ -159,6 +246,8 @@ impl<'a> Lisp<'a> {
             globals: Vec::new(),
             macros: Vec::new(),
             envs: Vec::new(),
+            prof: Prof::from_env(),
+            lexbound: Vec::new(),
         };
         let ts = l.h.intern("t");
         l.set_global(ts, tt);
@@ -181,7 +270,7 @@ impl<'a> Lisp<'a> {
     fn lookup(&self, sym: V, env: &Env) -> Option<V> {
         let mut e = env.as_ref();
         while let Some(f) = e {
-            for (s, v) in f.vars.borrow().iter().rev() {
+            for (s, v) in f.vars.borrow().as_slice().iter().rev() {
                 if *s == sym {
                     return Some(*v);
                 }
@@ -196,7 +285,7 @@ impl<'a> Lisp<'a> {
         while let Some(f) = e {
             {
                 let mut vars = f.vars.borrow_mut();
-                for (s, v) in vars.iter_mut().rev() {
+                for (s, v) in vars.as_mut_slice().iter_mut().rev() {
                     if *s == sym {
                         *v = val;
                         return true;
@@ -208,11 +297,33 @@ impl<'a> Lisp<'a> {
         false
     }
 
-    fn extend(env: &Env, vars: Vec<(V, V)>) -> Env {
+    fn extend(env: &Env, vars: Vars) -> Env {
         Some(Rc::new(Frame {
             vars: RefCell::new(vars),
             parent: env.clone(),
         }))
+    }
+
+    /// Could this symbol be in a frame? Only if some frame has bound it. The
+    /// compiler is mostly calls to global functions, and each of those used to
+    /// search every enclosing frame for its name before trying the globals.
+    fn maybe_lexical(&self, sym: V) -> bool {
+        let i = self.h.sym_index(sym);
+        i < self.lexbound.len() && self.lexbound[i]
+    }
+
+    /// Everything that puts a name in a frame says so here first. Two symbols
+    /// that share an identity - which a symbol made without one would - only
+    /// make the test say "maybe" more often, never "no" when it should not.
+    fn mark_lexical(&mut self, sym: V) {
+        if !self.h.is_symbol(sym) {
+            return;
+        }
+        let i = self.h.sym_index(sym);
+        if i >= self.lexbound.len() {
+            self.lexbound.resize(i + 1, false);
+        }
+        self.lexbound[i] = true;
     }
 
     // ---------------------------------------------------------------- eval
@@ -224,15 +335,21 @@ impl<'a> Lisp<'a> {
             self.depth -= 1;
             bail!("evaluator recursion too deep");
         }
+        let pbase = self.prof.as_ref().map_or(0, |p| p.stack.len());
         let r = loop {
+            if PROF_TICK.load(Ordering::Relaxed) {
+                self.prof_sample();
+            }
             // self-evaluating
             if form == NIL || is_fixnum(form) || is_imm(form) {
                 break Ok(form);
             }
             if is_obj(form) {
                 if self.h.otype(form) == T_SYMBOL {
-                    if let Some(v) = self.lookup(form, &env) {
-                        break Ok(v);
+                    if self.maybe_lexical(form) {
+                        if let Some(v) = self.lookup(form, &env) {
+                            break Ok(v);
+                        }
                     }
                     match self.get_global(form) {
                         Some(v) => break Ok(v),
@@ -293,18 +410,10 @@ impl<'a> Lisp<'a> {
                     // Everything but the last form runs for effect; the last
                     // stays in tail position, so tail recursion in the source
                     // does not grow the interpreter's own stack.
-                    let items = self.h.list_vec(args);
-                    let mut bad = None;
-                    for x in &items[..items.len() - 1] {
-                        if let Err(e) = self.eval(*x, &env) {
-                            bad = Some(e);
-                            break;
-                        }
-                    }
-                    if let Some(e) = bad {
-                        return self.pop_err(e);
-                    }
-                    form = items[items.len() - 1];
+                    form = match self.body_tail(args, &env) {
+                        Ok(f) => f,
+                        Err(e) => return self.pop_err(e),
+                    };
                     continue;
                 }
                 if head == self.s.set {
@@ -313,7 +422,7 @@ impl<'a> Lisp<'a> {
                         Ok(v) => v,
                         Err(e) => break Err(e),
                     };
-                    if !self.set_var(name, &env, val) {
+                    if !(self.maybe_lexical(name) && self.set_var(name, &env, val)) {
                         self.set_global(name, val);
                     }
                     break Ok(val);
@@ -326,32 +435,38 @@ impl<'a> Lisp<'a> {
                 }
                 if head == self.s.while_ {
                     let test = self.h.car(args);
-                    let body = self.h.list_vec(self.h.cdr(args));
+                    let body = self.h.cdr(args);
                     loop {
                         match self.eval(test, &env) {
                             Ok(NIL) => break,
                             Ok(_) => {}
                             Err(e) => return self.pop_err(e),
                         }
-                        for x in &body {
-                            if let Err(e) = self.eval(*x, &env) {
+                        let mut p = body;
+                        while is_cons(p) {
+                            if let Err(e) = self.eval(self.h.car(p), &env) {
                                 return self.pop_err(e);
                             }
+                            p = self.h.cdr(p);
                         }
                     }
                     break Ok(NIL);
                 }
                 if head == self.s.let_ {
-                    let binds = self.h.list_vec(self.h.car(args));
+                    let binds = self.h.car(args);
                     let body = self.h.cdr(args);
-                    let mut vars: Vec<(V, V)> = Vec::with_capacity(binds.len());
+                    let mut vars = Vars::new();
                     let mut failed = None;
-                    for bind in binds {
+                    let mut b = binds;
+                    while is_cons(b) {
+                        let bind = self.h.car(b);
+                        b = self.h.cdr(b);
                         let (name, init) = if is_cons(bind) {
                             (self.h.car(bind), self.h.cadr(bind))
                         } else {
                             (bind, NIL)
                         };
+                        self.mark_lexical(name);
                         match self.eval(init, &env) {
                             Ok(v) => vars.push((name, v)),
                             Err(e) => {
@@ -406,12 +521,27 @@ impl<'a> Lisp<'a> {
                 Ok(v) => v,
                 Err(e) => break Err(e),
             };
-            let mut argv: Vec<V> = Vec::new();
+            // Up to eight arguments stay on the Rust stack, and only a longer
+            // call spills to a vector. That is almost every call, and a heap
+            // allocation apiece was a real part of what a build cost.
+            let mut buf = [NIL; 8];
+            let mut n = 0usize;
+            let mut spill: Vec<V> = Vec::new();
             let mut p = args;
             let mut failed = None;
             while is_cons(p) {
                 match self.eval(self.h.car(p), &env) {
-                    Ok(v) => argv.push(v),
+                    Ok(v) => {
+                        if n < 8 {
+                            buf[n] = v;
+                        } else {
+                            if n == 8 {
+                                spill.extend_from_slice(&buf);
+                            }
+                            spill.push(v);
+                        }
+                        n += 1;
+                    }
                     Err(e) => {
                         failed = Some(e);
                         break;
@@ -422,9 +552,17 @@ impl<'a> Lisp<'a> {
             if let Some(e) = failed {
                 return self.pop_err(e);
             }
-            match self.apply_step(f, &argv) {
+            let argv: &[V] = if n <= 8 { &buf[..n] } else { &spill };
+            match self.apply_step(f, argv) {
                 Ok(Step::Val(v)) => break Ok(v),
                 Ok(Step::Tail(nf, ne)) => {
+                    if let Some(p) = self.prof.as_mut() {
+                        if p.stack.len() > pbase {
+                            *p.stack.last_mut().unwrap() = f;
+                        } else {
+                            p.stack.push(f);
+                        }
+                    }
                     form = nf;
                     env = ne;
                     continue;
@@ -433,7 +571,77 @@ impl<'a> Lisp<'a> {
             }
         };
         self.depth -= 1;
+        if let Some(p) = self.prof.as_mut() {
+            p.stack.truncate(pbase);
+        }
         r
+    }
+
+    /// Who is running, for the profiler: a named function by its name, and a
+    /// lambda by its body, so that every closure made from one lambda counts
+    /// as the same thing.
+    fn prof_key(&self, f: V) -> V {
+        let n = self.h.slot(f, CLO_NAME);
+        if self.h.is_symbol(n) {
+            n
+        } else {
+            self.h.slot(f, CLO_BODY)
+        }
+    }
+
+    fn prof_sample(&mut self) {
+        PROF_TICK.store(false, Ordering::Relaxed);
+        let Some(mut p) = self.prof.take() else { return };
+        p.samples += 1;
+        let top = p.stack.last().map_or(NIL, |&f| self.prof_key(f));
+        *p.own.entry(top).or_insert(0) += 1;
+        let mut seen: Vec<V> = Vec::new();
+        for &f in p.stack.iter().rev() {
+            let k = self.prof_key(f);
+            if !seen.contains(&k) {
+                seen.push(k);
+                *p.total.entry(k).or_insert(0) += 1;
+            }
+        }
+        self.prof = Some(p);
+    }
+
+    /// The profile, if one was taken: the functions the samples landed in,
+    /// the functions they landed under, and the primitives called most.
+    pub fn prof_report(&mut self) {
+        let Some(p) = self.prof.take() else { return };
+        let n = p.samples.max(1) as f64;
+        let label = |l: &Lisp, k: V| -> String {
+            if k == NIL {
+                "(top level)".into()
+            } else if l.h.is_symbol(k) {
+                l.h.sym_name(k)
+            } else {
+                let mut s = l.h.write(k);
+                s.truncate(70);
+                format!("lambda {s}")
+            }
+        };
+        eprintln!("forge profile: {} samples of 1ms", p.samples);
+        let mut own: Vec<(&V, &u64)> = p.own.iter().collect();
+        own.sort_by(|a, b| b.1.cmp(a.1));
+        eprintln!("-- where the samples landed");
+        for (k, c) in own.iter().take(45) {
+            eprintln!("{:6.1}% {:6}  {}", 100.0 * **c as f64 / n, c, label(self, **k));
+        }
+        let mut total: Vec<(&V, &u64)> = p.total.iter().collect();
+        total.sort_by(|a, b| b.1.cmp(a.1));
+        eprintln!("-- what they landed under");
+        for (k, c) in total.iter().take(45) {
+            eprintln!("{:6.1}% {:6}  {}", 100.0 * **c as f64 / n, c, label(self, **k));
+        }
+        let mut prims: Vec<(usize, u64)> = p.prim_calls.iter().copied().enumerate().collect();
+        prims.sort_by(|a, b| b.1.cmp(&a.1));
+        let calls: u64 = prims.iter().map(|x| x.1).sum();
+        eprintln!("-- primitive calls: {calls}");
+        for (i, c) in prims.iter().take(30) {
+            eprintln!("{:12}  {}", c, PRIMS[*i].0);
+        }
     }
 
     fn pop_err(&mut self, e: LErr) -> Res {
@@ -446,8 +654,10 @@ impl<'a> Lisp<'a> {
     /// found before this ever runs.
     fn eval_operator(&mut self, head: V, env: &Env) -> Res {
         if self.h.is_symbol(head) {
-            if let Some(v) = self.lookup(head, env) {
-                return Ok(v);
+            if self.maybe_lexical(head) {
+                if let Some(v) = self.lookup(head, env) {
+                    return Ok(v);
+                }
             }
             if let Some(g) = self.get_global(head) {
                 return Ok(g);
@@ -500,6 +710,13 @@ impl<'a> Lisp<'a> {
     /// interpreted; the environment is held on the Rust side and referred to
     /// by index, since an Rc cannot live in a heap slot.
     fn make_closure(&mut self, params: V, body: V, env: &Env, name: V) -> V {
+        let mut p = params;
+        while is_cons(p) {
+            let s = self.h.car(p);
+            self.mark_lexical(s);
+            p = self.h.cdr(p);
+        }
+        self.mark_lexical(p);
         let idx = self.envs.len();
         self.envs.push(env.clone());
         let c = self.h.alloc_obj(T_CLOSURE, 5);
@@ -527,6 +744,9 @@ impl<'a> Lisp<'a> {
         } else {
             self.eval(self.h.cadr(args), env)?
         };
+        if env.is_some() {
+            self.mark_lexical(target);
+        }
         match env {
             // An internal define adds to the innermost frame.
             Some(f) => f.vars.borrow_mut().push((target, val)),
@@ -548,7 +768,16 @@ impl<'a> Lisp<'a> {
     pub fn apply(&mut self, f: V, argv: &[V]) -> Res {
         match self.apply_step(f, argv)? {
             Step::Val(v) => Ok(v),
-            Step::Tail(form, env) => self.eval(form, &env),
+            Step::Tail(form, env) => {
+                if let Some(p) = self.prof.as_mut() {
+                    p.stack.push(f);
+                }
+                let r = self.eval(form, &env);
+                if let Some(p) = self.prof.as_mut() {
+                    p.stack.pop();
+                }
+                r
+            }
         }
     }
 
@@ -579,20 +808,25 @@ impl<'a> Lisp<'a> {
     /// that, and it costs one pair per call. The forge has no collector, so
     /// pairs spent are pairs gone - and the interpreter reads and compiles the
     /// whole system, which is millions of calls. This does the same thing and
-    /// allocates nothing.
+    /// allocates nothing, on either side: it walks the list where it lies
+    /// rather than copying it into a vector first.
     fn body_tail(&mut self, body: V, env: &Env) -> Result<V, LErr> {
-        let items = self.h.list_vec(body);
-        let Some((last, rest)) = items.split_last() else {
+        if !is_cons(body) {
             return Ok(NIL);
-        };
-        for x in rest {
-            self.eval(*x, env)?;
         }
-        Ok(*last)
+        let mut p = body;
+        loop {
+            let next = self.h.cdr(p);
+            if !is_cons(next) {
+                return Ok(self.h.car(p));
+            }
+            self.eval(self.h.car(p), env)?;
+            p = next;
+        }
     }
 
-    fn bind_params(&mut self, f: V, params: V, argv: &[V]) -> Result<Vec<(V, V)>, LErr> {
-        let mut vars: Vec<(V, V)> = Vec::new();
+    fn bind_params(&mut self, f: V, params: V, argv: &[V]) -> Result<Vars, LErr> {
+        let mut vars = Vars::new();
         let mut p = params;
         let mut i = 0usize;
         let mut mode = 0; // 0 required, 1 optional, 2 rest
@@ -792,6 +1026,9 @@ impl<'a> Lisp<'a> {
     }
 
     fn call_prim(&mut self, idx: u32, a: &[V]) -> Res {
+        if let Some(p) = self.prof.as_mut() {
+            p.prim_calls[idx as usize] += 1;
+        }
         let (name, _) = PRIMS[idx as usize];
         macro_rules! n {
             ($i:expr) => {
@@ -803,39 +1040,39 @@ impl<'a> Lisp<'a> {
                 self.need(a, $k, name)?
             };
         }
-        let r = match name {
+        let r = match PRIM_OF[idx as usize] {
             // ---- pairs ----
-            "%cons" => {
+            Prim::Cons => {
                 need!(2);
                 self.h.cons(a[0], a[1])
             }
-            "%car" => {
+            Prim::Car => {
                 need!(1);
                 if !is_cons(a[0]) && a[0] != NIL {
                     bail!("car of {}", self.h.write(a[0]))
                 }
                 self.h.car(a[0])
             }
-            "%cdr" => {
+            Prim::Cdr => {
                 need!(1);
                 if !is_cons(a[0]) && a[0] != NIL {
                     bail!("cdr of {}", self.h.write(a[0]))
                 }
                 self.h.cdr(a[0])
             }
-            "%set-car!" => {
+            Prim::SetCarX => {
                 need!(2);
                 self.h.set_car(a[0], a[1]);
                 a[1]
             }
-            "%set-cdr!" => {
+            Prim::SetCdrX => {
                 need!(2);
                 self.h.set_cdr(a[0], a[1]);
                 a[1]
             }
 
             // ---- arithmetic ----
-            "%+" => {
+            Prim::Add => {
                 need!(2);
                 fix(n!(0).wrapping_add(n!(1)))
             }
@@ -844,40 +1081,40 @@ impl<'a> Lisp<'a> {
             // directly. Same answers either way, which is what matters: the
             // build evaluates constant arithmetic and the image has to agree
             // with it.
-            "%+o" => {
+            Prim::AddO => {
                 need!(2);
                 match self.h.num_add(a[0], a[1]) {
                     Some(v) => v,
                     None => return Err(LErr::new(format!("{name} wants numbers"))),
                 }
             }
-            "%-o" => {
+            Prim::SubO => {
                 need!(2);
                 match self.h.num_sub(a[0], a[1]) {
                     Some(v) => v,
                     None => return Err(LErr::new(format!("{name} wants numbers"))),
                 }
             }
-            "%*o" => {
+            Prim::MulO => {
                 need!(2);
                 match self.h.num_mul(a[0], a[1]) {
                     Some(v) => v,
                     None => return Err(LErr::new(format!("{name} wants numbers"))),
                 }
             }
-            "%mulhi16" => {
+            Prim::Mulhi16 => {
                 need!(2);
                 fix((((n!(0) as u32) * (n!(1) as u32)) >> 16) as i32)
             }
-            "%-" => {
+            Prim::Sub => {
                 need!(2);
                 fix(n!(0).wrapping_sub(n!(1)))
             }
-            "%*" => {
+            Prim::Mul => {
                 need!(2);
                 fix(n!(0).wrapping_mul(n!(1)))
             }
-            "%/" => {
+            Prim::Div => {
                 need!(2);
                 let d = n!(1);
                 if d == 0 {
@@ -885,7 +1122,7 @@ impl<'a> Lisp<'a> {
                 }
                 fix(n!(0).wrapping_div(d))
             }
-            "%mod" => {
+            Prim::Mod => {
                 need!(2);
                 let d = n!(1);
                 if d == 0 {
@@ -893,7 +1130,7 @@ impl<'a> Lisp<'a> {
                 }
                 fix(n!(0).rem_euclid(d))
             }
-            "%rem" => {
+            Prim::Rem => {
                 need!(2);
                 let d = n!(1);
                 if d == 0 {
@@ -905,48 +1142,48 @@ impl<'a> Lisp<'a> {
             // machine's do once the trap handler has widened them. `eqv?` on
             // two bignums is spelled `%=` for exactly this reason: each side
             // of the bootstrap answers it with its own arithmetic.
-            "%=" => {
+            Prim::NumEq => {
                 need!(2);
                 let c = self.cmp2(a, name)?;
                 self.bool(c == 0)
             }
-            "%<" => {
+            Prim::Lt => {
                 need!(2);
                 let c = self.cmp2(a, name)?;
                 self.bool(c < 0)
             }
-            "%>" => {
+            Prim::Gt => {
                 need!(2);
                 let c = self.cmp2(a, name)?;
                 self.bool(c > 0)
             }
-            "%<=" => {
+            Prim::Le => {
                 need!(2);
                 let c = self.cmp2(a, name)?;
                 self.bool(c <= 0)
             }
-            "%>=" => {
+            Prim::Ge => {
                 need!(2);
                 let c = self.cmp2(a, name)?;
                 self.bool(c >= 0)
             }
-            "%logand" => {
+            Prim::Logand => {
                 need!(2);
                 fix(n!(0) & n!(1))
             }
-            "%logior" => {
+            Prim::Logior => {
                 need!(2);
                 fix(n!(0) | n!(1))
             }
-            "%logxor" => {
+            Prim::Logxor => {
                 need!(2);
                 fix(n!(0) ^ n!(1))
             }
-            "%lognot" => {
+            Prim::Lognot => {
                 need!(1);
                 fix(!n!(0))
             }
-            "%ash" => {
+            Prim::Ash => {
                 need!(2);
                 let v = n!(0);
                 let s = n!(1);
@@ -956,7 +1193,7 @@ impl<'a> Lisp<'a> {
                     v >> ((-s) & 31)
                 })
             }
-            "%lsh" => {
+            Prim::Lsh => {
                 need!(2);
                 let v = n!(0) as u32;
                 let s = n!(1);
@@ -968,80 +1205,80 @@ impl<'a> Lisp<'a> {
             }
 
             // ---- identity and type ----
-            "%eq?" => {
+            Prim::EqP => {
                 need!(2);
                 self.bool(a[0] == a[1])
             }
-            "%null?" => {
+            Prim::NullP => {
                 need!(1);
                 self.bool(a[0] == NIL)
             }
-            "%fixnum?" => {
+            Prim::FixnumP => {
                 need!(1);
                 self.bool(is_fixnum(a[0]))
             }
-            "%cons?" => {
+            Prim::ConsP => {
                 need!(1);
                 self.bool(is_cons(a[0]))
             }
-            "%symbol?" => {
+            Prim::SymbolP => {
                 need!(1);
                 self.bool(self.h.is_symbol(a[0]))
             }
-            "%string?" => {
+            Prim::StringP => {
                 need!(1);
                 self.bool(self.h.is_type(a[0], T_STRING))
             }
-            "%vector?" => {
+            Prim::VectorP => {
                 need!(1);
                 self.bool(self.h.is_type(a[0], T_VECTOR))
             }
-            "%bytes?" => {
+            Prim::BytesP => {
                 need!(1);
                 self.bool(self.h.is_type(a[0], T_BYTES))
             }
-            "%closure?" => {
+            Prim::ClosureP => {
                 need!(1);
                 self.bool(self.h.is_type(a[0], T_CLOSURE) || self.h.is_type(a[0], T_PRIM))
             }
-            "%char?" => {
+            Prim::CharP => {
                 need!(1);
                 self.bool(is_char(a[0]))
             }
-            "%float?" => {
+            Prim::FloatP => {
                 need!(1);
                 self.bool(self.h.is_type(a[0], T_FLOAT))
             }
-            "%bignum?" => {
+            Prim::BignumP => {
                 need!(1);
                 self.bool(self.h.is_type(a[0], T_BIGNUM))
             }
-            "%object?" => {
+            Prim::ObjectP => {
                 need!(1);
                 self.bool(is_obj(a[0]))
             }
 
             // ---- raw object access ----
-            "%alloc-obj" => {
+            Prim::AllocObj => {
                 need!(2);
                 self.h.alloc_obj(n!(0) as u32, n!(1) as u32)
             }
-            "%obj-type" => {
+            Prim::ObjType => {
                 need!(1);
                 fix(self.h.otype(a[0]) as i32)
             }
-            "%obj-len" => {
+            Prim::ObjLen => {
                 need!(1);
                 fix(self.h.olen(a[0]) as i32)
             }
             // The bootstrap interpreter does not check the type the way the
             // machine's instruction does; it is here so that the same source
             // reads on both sides of the bootstrap.
-            "%slot" | "%record-ref" => {
+            Prim::Slot | Prim::RecordRef => {
                 need!(2);
                 self.h.slot(a[0], n!(1) as u32)
             }
-            "%set-slot!" | "%record-set!" => {
+            Prim::SetSlotX | Prim::RecordSetX => {
                 need!(3);
                 let i = n!(1) as u32;
                 self.h.set_slot(a[0], i, a[2]);
@@ -1049,25 +1286,25 @@ impl<'a> Lisp<'a> {
             }
 
             // ---- raw memory: the assembler and the kernel live here ----
-            "%ld-byte" => {
+            Prim::LdByte => {
                 need!(1);
                 fix(self.h.m.peek8(n!(0) as u32) as i32)
             }
-            "%ld-half" => {
+            Prim::LdHalf => {
                 need!(1);
                 fix(self.h.m.peek16(n!(0) as u32) as i32)
             }
-            "%ld-fixnum" => {
+            Prim::LdFixnum => {
                 need!(1);
                 let w = self.h.m.peek32(n!(0) as u32);
                 fix(w as i32)
             }
-            "%st-byte!" => {
+            Prim::StByteX => {
                 need!(2);
                 self.h.m.poke8(n!(0) as u32, n!(1) as u8);
                 a[1]
             }
-            "%st-half!" => {
+            Prim::StHalfX => {
                 need!(2);
                 let addr = n!(0) as u32;
                 let v = n!(1) as u32;
@@ -1075,12 +1312,12 @@ impl<'a> Lisp<'a> {
                 self.h.m.poke8(addr + 1, (v >> 8) as u8);
                 a[1]
             }
-            "%st-fixnum!" => {
+            Prim::StFixnumX => {
                 need!(2);
                 self.h.m.poke32(n!(0) as u32, n!(1) as u32);
                 a[1]
             }
-            "%ld32u" => {
+            Prim::Ld32u => {
                 // Read a word as an unsigned value split across two fixnums is
                 // overkill; the heap never needs the top bit at build time.
                 need!(1);
@@ -1088,11 +1325,11 @@ impl<'a> Lisp<'a> {
             }
             // Read and write a word without retagging, for moving tagged
             // values through raw addresses.
-            "%ld-word" => {
+            Prim::LdWord => {
                 need!(1);
                 self.h.m.peek32(n!(0) as u32)
             }
-            "%st-word!" => {
+            Prim::StWordX => {
                 need!(2);
                 self.h.m.poke32(n!(0) as u32, a[1]);
                 a[1]
@@ -1100,52 +1337,52 @@ impl<'a> Lisp<'a> {
             // At build time there is no machine stack to scan, and no
             // collector to scan it; an empty range keeps the shared source
             // honest without pretending otherwise.
-            "%stack-pointer" => fix(0),
-            "%frame-pointer" => fix(0),
-            "%wait-for-input" => NIL,
-            "%ecall" => NIL,
-            "%sync-cons-run" => NIL,
-            "%reload-cons-run" => NIL,
-            "%set-context" => NIL,
-            "%enable-timer" => NIL,
-            "%cycles" => fix(0),
-            "%disable" => NIL,
-            "%restore-interrupts" => NIL,
-            "%enable-after-trap" => NIL,
-            "%enable" => NIL,
-            "%halt" => {
+            Prim::StackPointer => fix(0),
+            Prim::FramePointer => fix(0),
+            Prim::WaitForInput => NIL,
+            Prim::Ecall => NIL,
+            Prim::SyncConsRun => NIL,
+            Prim::ReloadConsRun => NIL,
+            Prim::SetContext => NIL,
+            Prim::EnableTimer => NIL,
+            Prim::Cycles => fix(0),
+            Prim::Disable => NIL,
+            Prim::RestoreInterrupts => NIL,
+            Prim::EnableAfterTrap => NIL,
+            Prim::Enable => NIL,
+            Prim::Halt => {
                 bail!("the build tried to halt the machine")
             }
-            "%addr-of" => {
+            Prim::AddrOf => {
                 need!(1);
                 fix(a[0] as i32)
             }
-            "%from-addr" => {
+            Prim::FromAddr => {
                 need!(1);
                 n!(0) as u32
             }
 
             // ---- allocation regions ----
-            "%alloc-code" => {
+            Prim::AllocCode => {
                 need!(1);
                 fix(self.h.alloc_code(n!(0) as u32) as i32)
             }
-            "%alloc-pool" => {
+            Prim::AllocPool => {
                 need!(1);
                 fix(self.h.alloc_pool(n!(0) as u32) as i32)
             }
-            "%global" => {
+            Prim::Global => {
                 need!(1);
                 fix(self.h.m.peek32(n!(0) as u32) as i32)
             }
-            "%set-global!" => {
+            Prim::SetGlobalX => {
                 need!(2);
                 self.h.m.poke32(n!(0) as u32, n!(1) as u32);
                 a[1]
             }
 
             // ---- strings, vectors, bytes ----
-            "%make-string" => {
+            Prim::MakeString => {
                 need!(1);
                 let n = n!(0) as u32;
                 let fillc = if a.len() > 1 { imm_payload(a[1]) as u8 } else { 32 };
@@ -1155,15 +1392,15 @@ impl<'a> Lisp<'a> {
                 }
                 p
             }
-            "%string-length" | "%bytes-length" => {
+            Prim::StringLength | Prim::BytesLength => {
                 need!(1);
                 fix(self.h.olen(a[0]) as i32)
             }
-            "%string-ref" => {
+            Prim::StringRef => {
                 need!(2);
                 chr(self.h.m.peek8(a[0] + n!(1) as u32) as u32)
             }
-            "%string-set!" => {
+            Prim::StringSetX => {
                 need!(3);
                 let off = n!(1) as u32;
                 let c = if is_char(a[2]) {
@@ -1174,7 +1411,7 @@ impl<'a> Lisp<'a> {
                 self.h.m.poke8(a[0] + off, c);
                 a[2]
             }
-            "%make-vector" => {
+            Prim::MakeVector => {
                 need!(1);
                 let n = n!(0) as u32;
                 let fillv = if a.len() > 1 { a[1] } else { NIL };
@@ -1184,11 +1421,11 @@ impl<'a> Lisp<'a> {
                 }
                 p
             }
-            "%vector-length" => {
+            Prim::VectorLength => {
                 need!(1);
                 fix(self.h.olen(a[0]) as i32)
             }
-            "%vector-ref" => {
+            Prim::VectorRef => {
                 need!(2);
                 let i = n!(1) as u32;
                 if i >= self.h.olen(a[0]) {
@@ -1196,7 +1433,7 @@ impl<'a> Lisp<'a> {
                 }
                 self.h.slot(a[0], i)
             }
-            "%vector-set!" => {
+            Prim::VectorSetX => {
                 need!(3);
                 let i = n!(1) as u32;
                 if i >= self.h.olen(a[0]) {
@@ -1205,7 +1442,7 @@ impl<'a> Lisp<'a> {
                 self.h.set_slot(a[0], i, a[2]);
                 a[2]
             }
-            "%make-bytes" => {
+            Prim::MakeBytes => {
                 need!(1);
                 let n = n!(0) as u32;
                 let p = self.h.alloc_obj(T_BYTES, n);
@@ -1214,11 +1451,11 @@ impl<'a> Lisp<'a> {
                 }
                 p
             }
-            "%bytes-ref" => {
+            Prim::BytesRef => {
                 need!(2);
                 fix(self.h.m.peek8(a[0] + n!(1) as u32) as i32)
             }
-            "%bytes-set!" => {
+            Prim::BytesSetX => {
                 need!(3);
                 let off = n!(1) as u32;
                 let v = n!(2) as u8;
@@ -1227,16 +1464,16 @@ impl<'a> Lisp<'a> {
             }
 
             // ---- symbols ----
-            "%intern" => {
+            Prim::Intern => {
                 need!(1);
                 let s = self.h.str_of(a[0]);
                 self.h.intern(&s)
             }
-            "%symbol-name" => {
+            Prim::SymbolName => {
                 need!(1);
                 self.h.slot(a[0], SYM_NAME)
             }
-            "%symbol-value" => {
+            Prim::SymbolValue => {
                 need!(1);
                 self.h.slot(a[0], SYM_VALUE)
             }
@@ -1246,14 +1483,14 @@ impl<'a> Lisp<'a> {
             // code at build time" is about. A fluid binding has to land in
             // the world doing the reading, so it uses these two rather than
             // the pair above.
-            "%fluid-value" => {
+            Prim::FluidValue => {
                 need!(1);
                 match self.get_global(a[0]) {
                     Some(v) => v,
                     None => self.h.slot(a[0], SYM_VALUE),
                 }
             }
-            "%set-fluid-value!" => {
+            Prim::SetFluidValueX => {
                 need!(2);
                 if self.get_global(a[0]).is_some() {
                     self.set_global(a[0], a[1]);
@@ -1262,53 +1499,53 @@ impl<'a> Lisp<'a> {
                 }
                 a[1]
             }
-            "%set-symbol-value!" => {
+            Prim::SetSymbolValueX => {
                 need!(2);
                 self.h.set_slot(a[0], SYM_VALUE, a[1]);
                 a[1]
             }
-            "%symbol-function" => {
+            Prim::SymbolFunction => {
                 need!(1);
                 self.h.slot(a[0], SYM_FUNCTION)
             }
-            "%set-symbol-function!" => {
+            Prim::SetSymbolFunctionX => {
                 need!(2);
                 self.h.set_slot(a[0], SYM_FUNCTION, a[1]);
                 a[1]
             }
-            "%symbol-plist" => {
+            Prim::SymbolPlist => {
                 need!(1);
                 self.h.slot(a[0], SYM_PLIST)
             }
-            "%set-symbol-plist!" => {
+            Prim::SetSymbolPlistX => {
                 need!(2);
                 self.h.set_slot(a[0], SYM_PLIST, a[1]);
                 a[1]
             }
-            "%symbol-flags" => {
+            Prim::SymbolFlags => {
                 need!(1);
                 self.h.slot(a[0], SYM_FLAGS)
             }
-            "%set-symbol-flags!" => {
+            Prim::SetSymbolFlagsX => {
                 need!(2);
                 self.h.set_slot(a[0], SYM_FLAGS, a[1]);
                 a[1]
             }
-            "%all-symbols" => self.h.g(LG_SYMLIST),
-            "%obarray" => self.h.obarray(),
+            Prim::AllSymbols => self.h.g(LG_SYMLIST),
+            Prim::Obarray => self.h.obarray(),
 
             // ---- characters ----
-            "%char->int" => {
+            Prim::CharToInt => {
                 need!(1);
                 fix(imm_payload(a[0]) as i32)
             }
-            "%int->char" => {
+            Prim::IntToChar => {
                 need!(1);
                 chr(n!(0) as u32)
             }
 
             // ---- closures ----
-            "%make-closure" => {
+            Prim::MakeClosure => {
                 need!(2);
                 // (entry nfree) -> a compiled closure with room for free vars
                 let nfree = n!(1) as u32;
@@ -1316,41 +1553,41 @@ impl<'a> Lisp<'a> {
                 self.h.set_slot(c, CLO_ENTRY, n!(0) as u32);
                 c
             }
-            "%closure-entry" => {
+            Prim::ClosureEntry => {
                 need!(1);
                 fix(self.h.slot(a[0], CLO_ENTRY) as i32)
             }
-            "%apply" => {
+            Prim::Apply => {
                 need!(2);
                 let args = self.h.list_vec(a[1]);
                 return self.apply(a[0], &args);
             }
-            "%funcall" => {
+            Prim::Funcall => {
                 need!(1);
                 return self.apply(a[0], &a[1..]);
             }
 
             // ---- build-time only ----
-            "%write" => {
+            Prim::Write => {
                 need!(1);
                 print!("{}", self.h.write(a[0]));
                 a[0]
             }
-            "%display" => {
+            Prim::Display => {
                 need!(1);
                 print!("{}", self.h.display(a[0]));
                 a[0]
             }
-            "%newline" => {
+            Prim::Newline => {
                 println!();
                 NIL
             }
-            "%flush" => {
+            Prim::Flush => {
                 use std::io::Write;
                 let _ = std::io::stdout().flush();
                 NIL
             }
-            "%error" => {
+            Prim::Error => {
                 let mut msg = String::new();
                 for (i, x) in a.iter().enumerate() {
                     if i > 0 {
@@ -1360,7 +1597,7 @@ impl<'a> Lisp<'a> {
                 }
                 bail!("{msg}")
             }
-            "%read-file" => {
+            Prim::ReadFile => {
                 need!(1);
                 let path = self.h.str_of(a[0]);
                 match std::fs::read_to_string(&path) {
@@ -1368,12 +1605,12 @@ impl<'a> Lisp<'a> {
                     Err(e) => bail!("cannot read {path}: {e}"),
                 }
             }
-            "%load" => {
+            Prim::Load => {
                 need!(1);
                 let n = self.h.str_of(a[0]);
                 return self.load(&n);
             }
-            "%macroexpand-1" => {
+            Prim::Macroexpand1 => {
                 need!(1);
                 let form = a[0];
                 if is_cons(form) {
@@ -1385,26 +1622,25 @@ impl<'a> Lisp<'a> {
                 }
                 form
             }
-            "%macro?" => {
+            Prim::MacroP => {
                 need!(1);
                 let m = self.is_macro(a[0]);
                 self.bool(m)
             }
-            "%gensym" => {
+            Prim::Gensym => {
                 let n = self.h.g(LG_GCCOUNT);
                 self.h.set_g(LG_GCCOUNT, n + 1);
                 let nm = format!("g{n}");
                 self.h.intern(&nm)
             }
-            "%eval" => {
+            Prim::Eval => {
                 need!(1);
                 return self.eval(a[0], &None);
             }
-            "%exit" => {
+            Prim::Exit => {
                 let c = if a.is_empty() { 0 } else { n!(0) };
                 std::process::exit(c);
             }
-            other => bail!("primitive {other} is not implemented"),
         };
         Ok(r)
     }
@@ -1418,125 +1654,140 @@ impl<'a> Lisp<'a> {
     }
 }
 
-/// (name, arity hint). The arity hint is documentation; checks happen inline.
-pub static PRIMS: &[(&str, u32)] = &[
-    ("%cons", 2),
-    ("%car", 1),
-    ("%cdr", 1),
-    ("%set-car!", 2),
-    ("%set-cdr!", 2),
-    ("%+", 2),
-    ("%-", 2),
-    ("%*", 2),
-    ("%/", 2),
-    ("%mod", 2),
-    ("%+o", 2),
-    ("%-o", 2),
-    ("%*o", 2),
-    ("%mulhi16", 2),
-    ("%rem", 2),
-    ("%=", 2),
-    ("%<", 2),
-    ("%>", 2),
-    ("%<=", 2),
-    ("%>=", 2),
-    ("%logand", 2),
-    ("%logior", 2),
-    ("%logxor", 2),
-    ("%lognot", 1),
-    ("%ash", 2),
-    ("%lsh", 2),
-    ("%eq?", 2),
-    ("%null?", 1),
-    ("%fixnum?", 1),
-    ("%cons?", 1),
-    ("%symbol?", 1),
-    ("%string?", 1),
-    ("%vector?", 1),
-    ("%bytes?", 1),
-    ("%closure?", 1),
-    ("%char?", 1),
-    ("%float?", 1),
-    ("%bignum?", 1),
-    ("%object?", 1),
-    ("%alloc-obj", 2),
-    ("%obj-type", 1),
-    ("%obj-len", 1),
-    ("%slot", 2),
-    ("%set-slot!", 3),
-    ("%record-ref", 2),
-    ("%record-set!", 3),
-    ("%ld-byte", 1),
-    ("%ld-half", 1),
-    ("%ld-fixnum", 1),
-    ("%st-byte!", 2),
-    ("%st-half!", 2),
-    ("%st-fixnum!", 2),
-    ("%ld32u", 1),
-    ("%ld-word", 1),
-    ("%st-word!", 2),
-    ("%stack-pointer", 0),
-    ("%frame-pointer", 0),
-    ("%wait-for-input", 0),
-    ("%ecall", 1),
-    ("%sync-cons-run", 0),
-    ("%reload-cons-run", 0),
-    ("%set-context", 1),
-    ("%enable-timer", 0),
-    ("%cycles", 0),
-    ("%disable", 0),
-    ("%restore-interrupts", 1),
-    ("%enable-after-trap", 0),
-    ("%enable", 0),
-    ("%halt", 1),
-    ("%addr-of", 1),
-    ("%from-addr", 1),
-    ("%alloc-code", 1),
-    ("%alloc-pool", 1),
-    ("%global", 1),
-    ("%set-global!", 2),
-    ("%make-string", 1),
-    ("%string-length", 1),
-    ("%string-ref", 2),
-    ("%string-set!", 3),
-    ("%make-vector", 1),
-    ("%vector-length", 1),
-    ("%vector-ref", 2),
-    ("%vector-set!", 3),
-    ("%make-bytes", 1),
-    ("%bytes-length", 1),
-    ("%bytes-ref", 2),
-    ("%bytes-set!", 3),
-    ("%intern", 1),
-    ("%symbol-name", 1),
-    ("%symbol-value", 1),
-    ("%fluid-value", 1),
-    ("%set-fluid-value!", 2),
-    ("%set-symbol-value!", 2),
-    ("%symbol-function", 1),
-    ("%set-symbol-function!", 2),
-    ("%symbol-plist", 1),
-    ("%set-symbol-plist!", 2),
-    ("%symbol-flags", 1),
-    ("%set-symbol-flags!", 2),
-    ("%all-symbols", 0),
-    ("%obarray", 0),
-    ("%char->int", 1),
-    ("%int->char", 1),
-    ("%make-closure", 2),
-    ("%closure-entry", 1),
-    ("%apply", 2),
-    ("%funcall", 1),
-    ("%write", 1),
-    ("%display", 1),
-    ("%newline", 0),
-    ("%flush", 0),
-    ("%error", 1),
-    ("%read-file", 1),
-    ("%load", 1),
-    ("%macroexpand-1", 1),
-    ("%macro?", 1),
-    ("%gensym", 0),
-    ("%eval", 1),
-    ("%exit", 0),
-];
+// Every primitive, once. The same list makes the table the interpreter
+// installs from and the enum `call_prim` dispatches on, so the two cannot
+// disagree about which number is which.
+//
+// Dispatch used to match the name as a string: a comparison per arm, per
+// call, and a build makes seventy million calls. An enum match is a jump.
+macro_rules! prims {
+    ($($id:ident $name:literal $arity:literal;)*) => {
+        #[derive(Clone, Copy)]
+        enum Prim { $($id),* }
+        /// (name, arity hint). The arity hint is documentation; checks happen inline.
+        pub static PRIMS: &[(&str, u32)] = &[$(($name, $arity)),*];
+        static PRIM_OF: &[Prim] = &[$(Prim::$id),*];
+    };
+}
+
+prims! {
+    Cons               "%cons" 2;
+    Car                "%car" 1;
+    Cdr                "%cdr" 1;
+    SetCarX            "%set-car!" 2;
+    SetCdrX            "%set-cdr!" 2;
+    Add                "%+" 2;
+    Sub                "%-" 2;
+    Mul                "%*" 2;
+    Div                "%/" 2;
+    Mod                "%mod" 2;
+    AddO               "%+o" 2;
+    SubO               "%-o" 2;
+    MulO               "%*o" 2;
+    Mulhi16            "%mulhi16" 2;
+    Rem                "%rem" 2;
+    NumEq              "%=" 2;
+    Lt                 "%<" 2;
+    Gt                 "%>" 2;
+    Le                 "%<=" 2;
+    Ge                 "%>=" 2;
+    Logand             "%logand" 2;
+    Logior             "%logior" 2;
+    Logxor             "%logxor" 2;
+    Lognot             "%lognot" 1;
+    Ash                "%ash" 2;
+    Lsh                "%lsh" 2;
+    EqP                "%eq?" 2;
+    NullP              "%null?" 1;
+    FixnumP            "%fixnum?" 1;
+    ConsP              "%cons?" 1;
+    SymbolP            "%symbol?" 1;
+    StringP            "%string?" 1;
+    VectorP            "%vector?" 1;
+    BytesP             "%bytes?" 1;
+    ClosureP           "%closure?" 1;
+    CharP              "%char?" 1;
+    FloatP             "%float?" 1;
+    BignumP            "%bignum?" 1;
+    ObjectP            "%object?" 1;
+    AllocObj           "%alloc-obj" 2;
+    ObjType            "%obj-type" 1;
+    ObjLen             "%obj-len" 1;
+    Slot               "%slot" 2;
+    SetSlotX           "%set-slot!" 3;
+    RecordRef          "%record-ref" 2;
+    RecordSetX         "%record-set!" 3;
+    LdByte             "%ld-byte" 1;
+    LdHalf             "%ld-half" 1;
+    LdFixnum           "%ld-fixnum" 1;
+    StByteX            "%st-byte!" 2;
+    StHalfX            "%st-half!" 2;
+    StFixnumX          "%st-fixnum!" 2;
+    Ld32u              "%ld32u" 1;
+    LdWord             "%ld-word" 1;
+    StWordX            "%st-word!" 2;
+    StackPointer       "%stack-pointer" 0;
+    FramePointer       "%frame-pointer" 0;
+    WaitForInput       "%wait-for-input" 0;
+    Ecall              "%ecall" 1;
+    SyncConsRun        "%sync-cons-run" 0;
+    ReloadConsRun      "%reload-cons-run" 0;
+    SetContext         "%set-context" 1;
+    EnableTimer        "%enable-timer" 0;
+    Cycles             "%cycles" 0;
+    Disable            "%disable" 0;
+    RestoreInterrupts  "%restore-interrupts" 1;
+    EnableAfterTrap    "%enable-after-trap" 0;
+    Enable             "%enable" 0;
+    Halt               "%halt" 1;
+    AddrOf             "%addr-of" 1;
+    FromAddr           "%from-addr" 1;
+    AllocCode          "%alloc-code" 1;
+    AllocPool          "%alloc-pool" 1;
+    Global             "%global" 1;
+    SetGlobalX         "%set-global!" 2;
+    MakeString         "%make-string" 1;
+    StringLength       "%string-length" 1;
+    StringRef          "%string-ref" 2;
+    StringSetX         "%string-set!" 3;
+    MakeVector         "%make-vector" 1;
+    VectorLength       "%vector-length" 1;
+    VectorRef          "%vector-ref" 2;
+    VectorSetX         "%vector-set!" 3;
+    MakeBytes          "%make-bytes" 1;
+    BytesLength        "%bytes-length" 1;
+    BytesRef           "%bytes-ref" 2;
+    BytesSetX          "%bytes-set!" 3;
+    Intern             "%intern" 1;
+    SymbolName         "%symbol-name" 1;
+    SymbolValue        "%symbol-value" 1;
+    FluidValue         "%fluid-value" 1;
+    SetFluidValueX     "%set-fluid-value!" 2;
+    SetSymbolValueX    "%set-symbol-value!" 2;
+    SymbolFunction     "%symbol-function" 1;
+    SetSymbolFunctionX "%set-symbol-function!" 2;
+    SymbolPlist        "%symbol-plist" 1;
+    SetSymbolPlistX    "%set-symbol-plist!" 2;
+    SymbolFlags        "%symbol-flags" 1;
+    SetSymbolFlagsX    "%set-symbol-flags!" 2;
+    AllSymbols         "%all-symbols" 0;
+    Obarray            "%obarray" 0;
+    CharToInt          "%char->int" 1;
+    IntToChar          "%int->char" 1;
+    MakeClosure        "%make-closure" 2;
+    ClosureEntry       "%closure-entry" 1;
+    Apply              "%apply" 2;
+    Funcall            "%funcall" 1;
+    Write              "%write" 1;
+    Display            "%display" 1;
+    Newline            "%newline" 0;
+    Flush              "%flush" 0;
+    Error              "%error" 1;
+    ReadFile           "%read-file" 1;
+    Load               "%load" 1;
+    Macroexpand1       "%macroexpand-1" 1;
+    MacroP             "%macro?" 1;
+    Gensym             "%gensym" 0;
+    Eval               "%eval" 1;
+    Exit               "%exit" 0;
+}

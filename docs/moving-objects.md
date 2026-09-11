@@ -17,8 +17,9 @@ gives the reason in full:
 The forge is under no such obligation, so `src/forge/compact.rs` slides object
 space down on the way into an image, and `lmforge compact` does the same to one
 that came off the disk. That covers every path that persists an image —
-`build`, `rebuild`, and by hand — and a fresh `kick.img` is now 949 KiB with
-object space 100% live.
+`build`, `rebuild`, and by hand — and a fresh `kick.img` is now 904 KiB with
+object space 100% live. An image `rebuild` makes has its code space slid down
+as well, since it resumes nothing and nothing on a stack can point into code.
 
 **So compaction is, for now, a concern for persisted images only.** A long-lived
 running machine has never yet been the thing that hurt. Everything below is

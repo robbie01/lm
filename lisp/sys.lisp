@@ -519,18 +519,20 @@
 ;; built and nothing to remember it for. During a rebuild there is, and then
 ;; the same form is compiled onto the boot list of the image being made as
 ;; well as run here - which is the whole difference between a machine using
-;; its compiler and a machine building its successor.
+;; its compiler and a machine building its successor. During genesis it only
+;; goes on the boot list: the image runs it when it boots, and this machine
+;; has run it already, in the rebuild before.
 (define *recording* nil)
 
 (define (top-level-form form)
-  (if *recording*
-      (%funcall (add-boot-thunk form))
-      (eval-thunk form)))
+  (cond (*image* (add-boot-thunk form))
+        (*recording* (%funcall (add-boot-thunk form)))
+        (else (eval-thunk form))))
 
 (define (record-initialiser name expr)
   ;; compile-top has already given the variable its value; this is so that the
   ;; image being built gives it that value again when it boots.
-  (if *recording* (add-boot-thunk (list 'set! name expr)) nil))
+  (if (if *recording* t *image*) (add-boot-thunk (list 'set! name expr)) nil))
 
 (define (register-macro form) nil)
 
@@ -576,6 +578,51 @@
     (emit-str "rebuilt ")
     (emit-str (number->string n))
     (emit-str " forms\n")
+    n))
+
+;; ---------------------------------------------------------------- genesis
+;; The second half of a fresh rebuild. `rebuild` has just compiled the sources
+;; into this machine, so the compiler, the macros and whatever a compile-time
+;; evaluation calls are all the new ones. Now the same sources go through a
+;; second time, and every definition is kept for the image instead of being
+;; installed here - see `*image*` in compile.lisp. So the image is compiled
+;; entirely by the new compiler, and it holds nothing this machine had before:
+;; not the definitions the rebuild replaced, not what was typed at a prompt.
+;;
+;; The names the sources use are noted as they are read, so that the image
+;; can keep exactly those symbols. `snap:save-fresh` does the rest, from what
+;; this leaves in `*fresh-image*`: the table, the names, and the boot list.
+(define *fresh-image* nil)
+(define *genesis-trace* nil)
+
+(define (genesis)
+  (set! *out* nil)
+  (set! *boot-thunks* nil)
+  (set! *names-seen* (make-table))
+  (set! *image* (make-table))
+  (let ((go t) (n 0))
+    (while go
+      (let ((form (read-form)))
+        ;; A file's `in-package` has to take effect before the next form is
+        ;; read. `rebuild` gets that for nothing, because it runs every top
+        ;; level form as it goes; this one only records them, so it acts on
+        ;; the package forms itself, as the reader's own `read-next` does.
+        (act-on-package-form form)
+        (if *genesis-trace*
+            (begin
+              (write (if (%cons? form) (if (%cons? (%cdr form)) (cadr form) form) form))
+              (emit-str "\n"))
+            nil)
+        (if (%eq? form 'rebuild-end)
+            (set! go nil)
+            (begin (compile-top form) (set! n (%+ n 1))))))
+    ;; And the prompt goes back to running what it is given.
+    (set! *fresh-image* (list *image* *names-seen* (reverse *boot-thunks*)))
+    (set! *image* nil)
+    (set! *names-seen* nil)
+    (emit-str "compiled ")
+    (emit-str (number->string n))
+    (emit-str " forms for a fresh image\n")
     n))
 
 (define (eval-form form) (compile-top form))

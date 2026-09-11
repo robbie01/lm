@@ -33,20 +33,31 @@
           nil))
     c))
 
+;; The next character, left where it is. Nearly always the stream has one
+;; ready, and then this asks it once instead of going the long way round
+;; through `wait-char`, which is four calls a character. The long way is still
+;; there for a console with nothing typed yet.
 (define (peek-char)
-  (if *peeked* *peeked* (begin (set! *peeked* (wait-char)) *peeked*)))
+  (if *peeked*
+      *peeked*
+      (let ((c (get-char)))
+        (set! *peeked* (if c c (wait-char)))
+        *peeked*)))
 
 (define (delimiter? c)
   ;; End of input ends a token as surely as a space does. On a console that
   ;; never happens; on a string it happens at the last character, and a reader
   ;; that did not know it would keep asking for a character that is not coming.
+  ;;
+  ;; Whitespace is never above the space character, so most of a token - its
+  ;; letters - is settled by one comparison without asking char-whitespace?.
   (if (%null? c)
       t
-      (if (char-whitespace? c)
-          t
+      (if (%> (%char->int c) 32)
           (if (%eq? c #\() t
               (if (%eq? c #\)) t
-                  (if (%eq? c #\") t (%eq? c #\;)))))))
+                  (if (%eq? c #\") t (%eq? c #\;))))
+          (char-whitespace? c))))
 
 (define (skip-space)
   (let ((go t))
@@ -54,13 +65,20 @@
       (let ((c (peek-char)))
         (cond
          ((%null? c) (set! go nil))
-         ((char-whitespace? c) (wait-char))
+         ;; A peeked character is taken by forgetting it, which is all that
+         ;; `wait-char` would have done with it.
+         ((if (%eq? c #\space) t (char-whitespace? c)) (set! *peeked* nil))
          ((%eq? c #\;)
-          (let ((d (wait-char)) (going t))
+          ;; To the end of the line. Nothing is peeked in here, so the stream
+          ;; is asked directly, and the long way only when it has nothing yet.
+          (set! *peeked* nil)
+          (let ((going t))
             (while going
-              (cond ((%null? d) (set! going nil))
-                    ((%eq? d #\newline) (set! going nil))
-                    (else (set! d (wait-char)))))))
+              (let ((d (get-char)))
+                (if (%null? d) (set! d (wait-char)) nil)
+                (if (%null? d)
+                    (set! going nil)
+                    (if (%eq? d #\newline) (set! going nil) nil))))))
          (else (set! go nil)))))))
 
 (define (read-form)
@@ -121,7 +139,7 @@
         (begin (set! *peeked* #\.) nil))))
 
 (define (read-string-literal)
-  (let ((acc nil) (go t))
+  (let ((acc nil) (n 0) (go t))
     (while go
       (let ((c (wait-char)))
         (cond
@@ -133,9 +151,20 @@
                                    ((%eq? e #\t) #\tab)
                                    ((%eq? e #\r) (%int->char 13))
                                    (else e))
-                             acc))))
-         (else (set! acc (%cons c acc))))))
-    (list->string (reverse acc))))
+                             acc))
+            (set! n (%+ n 1))))
+         (else (set! acc (%cons c acc)) (set! n (%+ n 1))))))
+    (reversed->string acc n)))
+
+;; n characters, collected last first, as a string - filled from the end, so
+;; that they need not be reversed into a second list on the way.
+(define (reversed->string acc n)
+  (let ((s (make-string-n n)))
+    (while (%cons? acc)
+      (set! n (%- n 1))
+      (%string-set! s n (%car acc))
+      (set! acc (%cdr acc)))
+    s))
 
 (define (read-hash)
   (let ((c (wait-char)))
@@ -162,13 +191,16 @@
         first)))
 
 (define (read-token)
-  (let ((acc nil) (go t))
+  (let ((acc nil) (n 0) (go t))
     (while go
       (let ((c (peek-char)))
         (if (delimiter? c)
             (set! go nil)
-            (set! acc (%cons (wait-char) acc)))))
-    (list->string (reverse acc))))
+            (begin
+              (set! *peeked* nil)
+              (set! acc (%cons c acc))
+              (set! n (%+ n 1))))))
+    (reversed->string acc n)))
 
 ;; Inside a defpackage or in-package form the names are the names of packages
 ;; that may not exist yet, so they are read as names and not as symbols -
@@ -232,8 +264,10 @@
     (make-stream
      (lambda (c) nil)
      (lambda ()
+       ;; No let: in the forge's interpreter a let is a frame, and this runs
+       ;; once for every character of every file the forge reads.
        (if (%< i n)
-           (let ((c (%string-ref s i))) (set! i (%+ i 1)) c)
+           (begin (set! i (%+ i 1)) (%string-ref s (%- i 1)))
            nil))
      (lambda () nil))))
 

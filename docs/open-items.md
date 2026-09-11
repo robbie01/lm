@@ -362,10 +362,41 @@ never seen.
 Also: the environment walk cloned an `Rc` per frame per variable reference,
 which is now a borrow.
 
-**What is left, unmeasured but obvious:** `call_prim` dispatches on the
-primitive's *name* - a match over two hundred string literals on every
-primitive call. It should switch on the index it is already handed. That is a
-large mechanical edit and nobody has needed it yet.
+`call_prim` used to dispatch on the primitive's name, a match over string
+literals on every call; it switches on an enum now. That turned out to be
+worth nothing measurable - the match had been compiled into something cheap -
+which is what the section below found out properly.
+
+## The forge got three times faster again, and images a third smaller
+
+A build was 8.4 seconds and is now 2.6. `LM_FORGE_PROF=1 lmforge build`
+samples which interpreted function is running once a millisecond and prints
+where the time went, and that is how each of these was found.
+
+In the interpreter, with a byte-identical image at every step: a name that no
+frame has ever bound is looked up straight in the globals, instead of after a
+search of every enclosing frame - which was every call to a global function.
+Up to eight arguments stay on the Rust stack rather than in a vector per call;
+a frame keeps its first six bindings inline rather than in a second
+allocation; and bodies, `let`s and `while`s are walked where they lie instead
+of being copied into vectors first. That was 8.4 seconds to 4.2.
+
+In the Lisp, where the image changes because the code in it does. The reader
+takes a peeked character by forgetting it, instead of going round through
+`wait-char` at four calls a character. A name is hashed once for all the
+packages it is looked for in, not once per package. `string->number` reads a
+token where it lies instead of making a list of it first. The assembler writes
+halfwords and words whole instead of a byte at a time. A record accessor checks
+its type inline instead of calling `record-field`. `note-global-ref` only
+remembers names that are still unbound, instead of searching a list of every
+name ever referenced. And assembler labels are fresh strings instead of
+interned symbols: every image used to carry a symbol for every branch the
+compiler had ever made, eight thousand of them, which was more than half of
+object space.
+
+**What is left:** reading is half the build now, and six files are read twice -
+once to bring up the interpreter, once to compile them. Keeping the forms from
+the first reading would save about a fifth.
 
 ## Compiler
 

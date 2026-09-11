@@ -106,7 +106,7 @@
   make-vector make-vector-n map map2 mapcar max max2 member memq merge2 min
   min2 mod modulo mul2 neg negative? newline not nth nthcdr null? num-eq
   num-ge num-gt num-le num-lt number->hex number->string number->string-fix number?
-  object-payload odd? or out-char out-of-memory package package-name
+  object-payload odd? or out-char out-of-memory *names-seen* package package-name
   package-use package? pair? pop position positive? princ print print-list
   print-obj print-record print-symbol print-vector push put qualified-hash
   quasiquote quote quotient reduce rem remainder remove-if rest revappend
@@ -227,7 +227,7 @@
 (in-package compiler)
 ;; 11 public, out of 100 definitions.
 (export '(
-  *boot-thunks* add-boot-thunk compile-file-forms compile-function
+  *boot-thunks* *image* add-boot-thunk compile-file-forms compile-function
   compile-top setup-intrinsics
   trap-error trap-oom trap-type
 ))
@@ -239,7 +239,7 @@
   *task-abort-fn*
   bye compile-time-eval error-trap eval eval-form expand-macro handle-trap
   int-external int-software int-timer kickstart macro-form? print-backtrace
-  rebuild rebuild-end record-initialiser register-macro repl
+  rebuild rebuild-end genesis *fresh-image* record-initialiser register-macro repl
   resume-kickstart
   ctx-pc ctx-reg trap-reg trap-raw
   start-repl system-name top-level-form
@@ -314,7 +314,7 @@
 (in-package snap)
 ;; 2 public, out of 7 definitions.
 (export '(
-  save-image save-rebuilt
+  save-image save-rebuilt save-fresh
 ))
 
 (in-package wb)

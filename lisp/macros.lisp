@@ -374,16 +374,25 @@
                 (append
                  out
                  (list
+                  ;; The check is spelled out rather than a call to
+                  ;; `record-field`. Compiled calls are open-coded and never
+                  ;; see this body, but the forge's interpreter runs it for
+                  ;; every field the compiler touches, and that was two
+                  ;; interpreted calls each time instead of one.
                   (list 'define (list (intern-in pkg (string-append prefix n)) 'r)
                         (if open
                             (list '%record-ref 'r k)
-                            (list 'record-field 'r k (list 'quote type))))
+                            (list 'if (list '%eq? (list '%record-ref 'r 0) (list 'quote type))
+                                  (list '%record-ref 'r k)
+                                  (list 'record-fault (list 'quote type) 'r))))
                   (list 'define (list (intern-in pkg
                                                  (string-append "set-" prefix n "!"))
                                       'r 'v)
                         (if open
                             (list '%record-set! 'r k 'v)
-                            (list 'set-record-field! 'r k (list 'quote type) 'v)))))))
+                            (list 'if (list '%eq? (list '%record-ref 'r 0) (list 'quote type))
+                                  (list '%record-set! 'r k 'v)
+                                  (list 'record-fault (list 'quote type) 'r))))))))
         (set! k (%+ k 1))))
     out))
 

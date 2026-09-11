@@ -36,10 +36,12 @@ enum Cmd {
         verbose: bool,
     },
 
-    /// Build an image by having a previous image build it
+    /// Build a fresh image by having a previous image build it
     ///
-    /// The machine has a reader, a compiler and an image writer; the sources
-    /// are typed at its console and it writes its own successor. This is the
+    /// The machine has a reader, a compiler and an image writer. The sources
+    /// are typed at its console twice - once to make the machine the new
+    /// system, once to compile a fresh image with it - and it writes that
+    /// image out. Nothing the old image held comes with it. This is the
     /// self-hosting path, and it does not go near the bootstrap interpreter.
     Rebuild {
         /// The image to build with
@@ -54,7 +56,7 @@ enum Cmd {
         #[arg(short, long)]
         verbose: bool,
 
-        /// Compile everything and collect, but write nothing
+        /// Compile everything, twice, and collect, but write nothing
         #[arg(short, long)]
         check: bool,
     },
@@ -76,6 +78,13 @@ enum Cmd {
         /// Report what moved and what was pinned
         #[arg(short, long)]
         verbose: bool,
+
+        /// Slide code space down too, and blank the pool's scratch. Only for
+        /// an image that boots through its kickstart, as `rebuild` makes -
+        /// never one from `(save-image)`, which resumes with return addresses
+        /// on its stacks
+        #[arg(long)]
+        fresh: bool,
     },
 
     /// Regenerate lisp/layout.lisp from the Rust definitions
@@ -91,9 +100,9 @@ fn main() -> std::process::ExitCode {
     let code = match cli.command {
         Cmd::Build { out, verbose } => lm::forge::build(&out, verbose),
         Cmd::Rebuild { from, out, verbose, check } => lm::forge::rebuild(&from, &out, verbose, check),
-        Cmd::Compact { from, out, verbose } => {
+        Cmd::Compact { from, out, verbose, fresh } => {
             let out = out.unwrap_or_else(|| from.clone());
-            lm::forge::compact::compact_image(&from, &out, verbose)
+            lm::forge::compact::compact_image(&from, &out, verbose, fresh)
         }
         Cmd::Layout => {
             lm::forge::write_layout();

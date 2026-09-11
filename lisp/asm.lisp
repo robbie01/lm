@@ -124,14 +124,27 @@
     (%bytes-set! (asm-buf a) len (%logand b 255))
     (asm-set-len! a (%+ len 1))))
 
+;; Two bytes, or four, with room made once. These used to be calls to
+;; `asm-byte`, so every byte of code the compiler made went through it one at
+;; a time: a length, a growth check and a store, per byte.
 (define (asm-half a h)
-  (asm-byte a (%logand h 255))
-  (asm-byte a (%logand (%lsh h -8) 255)))
+  (let ((len (asm-len a)))
+    (asm-grow a (%+ len 2))
+    (let ((buf (asm-buf a)))
+      (%bytes-set! buf len (%logand h 255))
+      (%bytes-set! buf (%+ len 1) (%logand (%lsh h -8) 255)))
+    (asm-set-len! a (%+ len 2))))
 
 ;; Emit one 32-bit instruction, low half first.
 (define (asm-word a lo hi)
-  (asm-half a lo)
-  (asm-half a hi))
+  (let ((len (asm-len a)))
+    (asm-grow a (%+ len 4))
+    (let ((buf (asm-buf a)))
+      (%bytes-set! buf len (%logand lo 255))
+      (%bytes-set! buf (%+ len 1) (%logand (%lsh lo -8) 255))
+      (%bytes-set! buf (%+ len 2) (%logand hi 255))
+      (%bytes-set! buf (%+ len 3) (%logand (%lsh hi -8) 255)))
+    (asm-set-len! a (%+ len 4))))
 
 ;; Overwrite an already-emitted instruction, for fixups.
 (define (asm-patch a off lo hi)
@@ -154,10 +167,16 @@
   (asm-set-fixups! a (%cons (%cons kind (%cons (asm-len a) rest))
                            (asm-fixups a))))
 
+;; A label only has to be itself: it is found again with `assq` and nothing
+;; else, so any object that is not eq to another will do. It used to be an
+;; interned symbol, which lasts for ever, and every image carried one for
+;; every branch the compiler had ever made - eight thousand of them. A fresh
+;; string is garbage once its function is placed, and still reads as a name
+;; in an "undefined label" message.
 (define gensym-counter 0)
 (define (asm-gensym-label prefix)
   (set! gensym-counter (%+ gensym-counter 1))
-  (intern-string (string-append prefix (number->string gensym-counter))))
+  (string-append prefix (number->string gensym-counter)))
 
 ;; ---------------------------------------------------------------- encoders
 ;; Field positions in a 32-bit instruction, and which half each lands in:

@@ -19,28 +19,34 @@ use crate::map::*;
 /// Emit the memory map and object layout as Lisp constants, so the Rust side
 /// and the Lisp side cannot drift apart: there is one definition of where
 /// anything lives, and it is in Rust.
-/// Build an image by having a previous image do it.
+/// Build a fresh image by having a previous image do it.
 ///
 /// The machine has a reader, a compiler and an image writer; what it does not
 /// have is a filesystem. So the sources are typed at its console, exactly the
-/// way a person would type them, and it compiles them into a fresh boot list
-/// and writes itself out.
+/// way a person would type them, and it compiles them and writes out what it
+/// made.
+///
+/// Twice, the way the forge does it. The first time through, `sys:rebuild`
+/// compiles them into the machine itself, so that the compiler and the macros
+/// doing the work are the new ones. The second time, `sys:genesis` compiles
+/// them again with those, and keeps every definition for the image instead of
+/// installing it. `snap:save-fresh` then makes the machine into exactly that
+/// image and writes it: what comes out holds nothing the old image had, which
+/// is the difference between a fresh image and an updated one.
 ///
 /// This is the self-hosting path. The bootstrap interpreter in Rust is only
 /// needed to make the first image; after that the machine makes the next one,
 /// and a change to the Lisp reader needs no Rust counterpart at all.
 pub fn rebuild(from: &str, out: &str, verbose: bool, check: bool) -> i32 {
     write_layout();
-    let mut script = String::new();
-    script.push_str("(sys:rebuild)
-");
+    let mut sources = String::new();
     let mut bytes = 0usize;
     for f in SYSTEM {
         match std::fs::read_to_string(f) {
             Ok(t) => {
                 bytes += t.len();
-                script.push_str(&t);
-                script.push('\n');
+                sources.push_str(&t);
+                sources.push('\n');
             }
             Err(e) => {
                 eprintln!("lm: cannot read {f}: {e}");
@@ -48,12 +54,25 @@ pub fn rebuild(from: &str, out: &str, verbose: bool, check: bool) -> i32 {
             }
         }
     }
-    // --check stops short of writing anything: it compiles everything and
-    // then collects, which is the moment a rebuilt heap has to survive.
+    let mut script = String::new();
+    script.push_str("(sys:rebuild)\n");
+    script.push_str(&sources);
+    script.push_str("\nsys:rebuild-end\n");
+    // With --verbose, the second pass names every form as it takes it: when
+    // a rebuild goes wrong, that is where it went wrong.
+    if verbose {
+        script.push_str("(set! sys::*genesis-trace* t)\n");
+    }
+    script.push_str("(sys:genesis)\n");
+    script.push_str(&sources);
+    script.push_str("\nsys:rebuild-end\n");
+    // --check stops short of writing anything: it compiles everything, both
+    // times, and then collects, which is the moment a rebuilt heap has to
+    // survive.
     if check {
-        script.push_str("\nsys:rebuild-end\n(gc)\n(+ 1 2)\n(%halt 9)\n");
+        script.push_str("(gc)\n(+ 1 2)\n(%halt 9)\n");
     } else {
-        script.push_str("\nsys:rebuild-end\n(snap:save-rebuilt)\nbye\n");
+        script.push_str("(snap:save-fresh)\n");
     }
     if verbose {
         println!("rebuild: {} sources, {} bytes, on {from}", SYSTEM.len(), bytes);
@@ -70,7 +89,9 @@ pub fn rebuild(from: &str, out: &str, verbose: bool, check: bool) -> i32 {
         scale: 1,
         script: Some(script),
         interactive: false,
-        budget: u64::MAX,
+        // Twenty times what a rebuild takes, so that one that has gone wrong
+        // stops and says where rather than running for ever.
+        budget: 40_000_000_000,
         disk: if check { None } else { Some(out.to_string()) },
         trace_exit: verbose,
         isaprof: false,
@@ -82,7 +103,10 @@ pub fn rebuild(from: &str, out: &str, verbose: bool, check: bool) -> i32 {
     // --check ends with (%halt 9) on purpose: reaching it is the pass.
     if check {
         if code == 9 {
-            println!("rebuild --check: {} sources compiled and collected cleanly", SYSTEM.len());
+            println!(
+                "rebuild --check: {} sources compiled twice and collected cleanly",
+                SYSTEM.len()
+            );
             return 0;
         }
         eprintln!("lm: the check did not get to the end (exit {code})");
@@ -93,9 +117,10 @@ pub fn rebuild(from: &str, out: &str, verbose: bool, check: bool) -> i32 {
         return 1;
     }
     // The machine wrote that image with a collector that cannot move an
-    // object, so it carries every hole it ever made. Nothing is running now,
-    // so the forge can close them.
-    if crate::forge::compact::compact_image(out, out, verbose) != 0 {
+    // object or a function, so it carries every hole it ever made. Nothing is
+    // running now, and a fresh image resumes nothing, so the forge can close
+    // them in both.
+    if crate::forge::compact::compact_image(out, out, verbose, true) != 0 {
         return 1;
     }
     match std::fs::metadata(out) {
@@ -485,6 +510,9 @@ pub fn build(out: &str, verbose: bool) -> i32 {
         }
         note(&l, f);
     }
+    // Before anything moves: the profile names functions by their heap
+    // addresses, and the collection below slides them.
+    l.prof_report();
 
     // Wire the pieces the assembly stubs reach through globals.
     for step in [

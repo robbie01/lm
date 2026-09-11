@@ -371,10 +371,16 @@
 ;; Without this the symptom is a jump to a nonsense address minutes later,
 ;; with nothing left to point at.
 (define *global-refs* nil)
+;; Only a name that has no value yet can end up in `undefined-globals`, so only
+;; those are kept. The rest - nearly every reference, a call to something
+;; already defined - used to be looked for in the whole list first, and that
+;; made this the hottest function in a build.
 (define (note-global-ref sym)
-  (if (memq sym *global-refs*)
-      nil
-      (set! *global-refs* (%cons sym *global-refs*))))
+  (if (%eq? (%symbol-value sym) *unbound*)
+      (if (memq sym *global-refs*)
+          nil
+          (set! *global-refs* (%cons sym *global-refs*)))
+      nil))
 
 (define (undefined-globals)
   (filter (lambda (s) (%eq? (%symbol-value s) *unbound*)) *global-refs*))
@@ -2146,6 +2152,46 @@
     (set! *boot-thunks* (%cons clo *boot-thunks*))
     clo))
 
+;; ---------------------------------------------------------------- the image
+;; Where a definition goes. Ordinarily that is this machine: `define` puts the
+;; function in its symbol, and the next form can call it. A fresh rebuild
+;; compiles the sources a second time for an image of their own - see
+;; `genesis` in sys.lisp - and while it does, *image* is a table of what that
+;; image will hold in each symbol, and this machine goes on running the
+;; definitions it already has. The forge keeps its interpreter's definitions
+;; apart from the image's in the same way.
+(define *image* nil)
+
+;; symbol -> #(value function macro?), made the first time the image gives the
+;; symbol anything.
+(define (image-entry sym)
+  (let ((e (table-ref *image* sym nil)))
+    (if e
+        e
+        (let ((v (make-vector 3 nil)))
+          (%vector-set! v 0 *unbound*)
+          (table-set! *image* sym v)
+          v))))
+
+(define (image-value sym)
+  (if *image*
+      (let ((e (table-ref *image* sym nil))) (if e (%vector-ref e 0) *unbound*))
+      (%symbol-value sym)))
+
+(define (image-set-value! sym v)
+  (if *image* (%vector-set! (image-entry sym) 0 v) (%set-symbol-value! sym v))
+  v)
+
+(define (image-set-macro! sym expander)
+  (if *image*
+      (let ((e (image-entry sym)))
+        (%vector-set! e 1 expander)
+        (%vector-set! e 2 t))
+      (begin
+        (%set-symbol-function! sym expander)
+        (%set-symbol-flags! sym (%logior (%symbol-flags sym) sym-macro))))
+  expander)
+
 ;; A macro expander takes the form's argument list as a single argument and
 ;; picks it apart itself. The obvious alternative - call it with one argument
 ;; per element - runs into the calling convention at eight, which is a strange
@@ -2185,7 +2231,7 @@
               (let* ((name (caadr form))
                      (r (compile-function (cdadr form) (cddr form) name nil))
                      (clo (make-closure (%cdr r) 0)))
-                (%set-symbol-value! name clo)
+                (image-set-value! name clo)
                 name)
               ;; A variable definition is given its value now, because code
               ;; compiled later in the same build will read it as a constant,
@@ -2201,10 +2247,10 @@
               (let ((name (cadr form)))
                 (if (%cons? (cddr form))
                     (let ((expr (caddr form)))
-                      (%set-symbol-value! name (compile-time-eval expr))
+                      (image-set-value! name (compile-time-eval expr))
                       (record-initialiser name expr))
-                    (if (%eq? (%symbol-value name) *unbound*)
-                        (%set-symbol-value! name nil)
+                    (if (%eq? (image-value name) *unbound*)
+                        (image-set-value! name nil)
                         nil))
                 name)))
          ;; A macro is needed twice: by the compiler running now, and by the
@@ -2219,8 +2265,7 @@
                                                           (cdddr form)))
                                       name nil))
                  (clo (make-closure (%cdr r) 0)))
-            (%set-symbol-function! name clo)
-            (%set-symbol-flags! name (%logior (%symbol-flags name) sym-macro))
+            (image-set-macro! name clo)
             name))
          ((%eq? h 'begin)
           (let ((last nil))

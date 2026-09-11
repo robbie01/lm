@@ -745,21 +745,36 @@ no-op macros so those files can still say which package they are in;
 `read.lisp` replaces them with the real ones on its way past.
 
 `lmforge rebuild` is the one that needs an image: it boots a previous one,
-**types the sources at its console**, and lets the machine compile them into a
-fresh boot list and write its own successor. The machine already has a reader,
-a compiler and an image writer; what it does not have is a filesystem, and a
-console is a perfectly good substitute.
+**types the sources at its console**, and lets the machine compile them and
+write its successor. The machine already has a reader, a compiler and an image
+writer; what it does not have is a filesystem, and a console is a perfectly
+good substitute.
 
-The measurement that decides which is which: the machine compiles a five-line
-function in **148,600 cycles, 0.35 ms**. Over 1,446 top-level forms that is
-about two seconds of machine time — so the self-hosted path is **faster than
-the bootstrap it replaces**, not a sacrifice:
+It goes through the sources twice, the way the forge does. The first pass,
+`sys:rebuild`, compiles them into the machine itself, so that the compiler and
+the macros doing the work are the new ones. The second, `sys:genesis`,
+compiles them again with those, and every definition goes into a table for the
+image instead of into the machine. Then `snap:save-fresh` hands over: it
+warm-resets the machine through its own reset stub into the image's
+`finish-fresh`, which gives every symbol what the table says and nothing else,
+collects from the image's own roots, and writes the file. The forge closes the
+holes on the way out, in code space as well as object space - an image that
+boots through its kickstart resumes nothing, and compiled code reaches other
+code only through closures, so code can move.
+
+What comes out is **a fresh image, not an updated one**: nothing typed at a
+prompt, nothing the new sources no longer define, and nothing compiled by the
+old compiler. Rebuilding from a saved session gives the same image as
+rebuilding from the kickstart, and each generation is the size of the last.
+The machine compiles a five-line function in 148,600 cycles, 0.35 ms, so going
+through the sources twice takes it about as long as the forge takes once:
 
 ```
-lmforge build                       kick.img,  949 KiB, in 11s
-lmforge rebuild --from kick.img     next.img, 1697 KiB, in 2.4s, 1446 forms
-lmforge rebuild --check             compile everything, collect, write nothing
+lmforge build                       kick.img,  904 KiB, in 2.6s
+lmforge rebuild --from kick.img     next.img,  868 KiB, in 2.9s, 2012 forms twice
+lmforge rebuild --check             compile everything twice, collect, write nothing
 lmforge compact [-f IMG] [-o OUT]   slide object space down in a saved image
+                [--fresh]           and code space, for an image that does not resume
 ```
 
 What both of these buy is the end of mirroring. There used to be a second
@@ -770,16 +785,12 @@ twice. What is left cannot disagree about a name, because it does not resolve
 names: it interns every token into one package and stops. Layout is already
 single-sourced out of `map.rs` and `heap.rs`.
 
-Two things to know about the rebuild. The compiler being recompiled is the
-compiler doing the compiling, and calls go through symbol value cells, so the
-new one takes over partway through and finishes the job; if it is broken, the
-way you find out is that the build goes wrong somewhere confusing. And a
-rebuilt image is a **used machine** rather than a fresh one — every function
-it replaced left a hole where it used to be. The forge closes the ones in
-object space on the way out (see below); the ones in code space it cannot,
-because moving machine code means finding every call site, so a rebuilt image
-is still larger than a fresh one and grows a little each generation.
-`lmforge build` is how you renormalise.
+One thing to know about the rebuild. In the first pass the compiler being
+recompiled is the compiler doing the compiling, and calls go through symbol
+value cells, so the new one takes over partway through and finishes the job;
+if it is broken, the way you find out is that the build goes wrong somewhere
+confusing. `lmforge rebuild --verbose` names every form of the second pass as
+it goes, which narrows that down.
 
 ### Compacting on the way out
 
@@ -807,14 +818,18 @@ what it names rather than being rewritten; on a freshly built image nothing
 does.
 
 ```
-objects 2858 KiB -> 401 KiB, 17,185 blocks moved, 0 pinned
-kick.img         3403 KiB -> 949 KiB
+objects 4102 KiB -> 307 KiB, 13,305 blocks moved, 0 pinned
+kick.img 904 KiB
 ```
 
-`lmforge compact` is the same pass on an image that came off the disk, and
-`rebuild` runs it on its own output. A live image pins more — its tasks really
-are holding objects — so it compacts less well: 2570 KiB of object space with
-592 KiB live in it, which still takes the file from 4138 KiB to 1697 KiB.
+`lmforge compact` is the same pass on an image that came off the disk. One
+from `(save-image)` pins more - its tasks really are holding objects - so it
+compacts less well. What `rebuild` makes is the other extreme: a fresh image
+resumes nothing, so nothing in it is pinned, and its code space closes up as
+well. With no stack holding a return address, the entry word of a code object
+and of each closure made from it are the only words that say where code is,
+and `--fresh` moves them. A rebuild's 7.9 MB of object space and 1.3 MB of
+code come out as 295 KiB and 441 KiB.
 
 The machine still cannot do this to itself. What it would take is written down
 in [docs/moving-objects.md](docs/moving-objects.md), along with why it has not
