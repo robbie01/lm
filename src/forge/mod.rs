@@ -324,6 +324,7 @@ pub const SYSTEM: &[&str] = &[
     "lisp/sys.lisp",
     "lisp/exec.lisp",
     "lisp/disk.lisp",
+    "lisp/input.lisp",
     "lisp/snap.lisp",
     "lisp/mono.lisp",
     "lisp/font.lisp",

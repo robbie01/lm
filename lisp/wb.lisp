@@ -635,15 +635,21 @@
               (window-damage *drag-win*))))
       nil))
 
+;; An event as input.driver sends it: `(key down ascii code mods)`, `(button
+;; down n x y)`, `(mouse moved x y)` and so on.
 (define (wb-event e)
-  (let ((kind (event-kind e)))
+  (let ((what (%car e)) (how (cadr e)))
     (cond
-     ((%= kind ev-keydown)
-      (let ((a (event-ascii e)) (f (front-window)))
-        (if (if f (%> a 0) nil) (window-push-key f a) nil)))
-     ((%= kind ev-buttondown) (wb-button-down (mouse-x) (mouse-y)))
-     ((%= kind ev-buttonup) (set! *drag-win* nil))
-     ((%= kind ev-mousemove) (wb-drag (mouse-x) (mouse-y)))
+     ((%eq? what 'key)
+      (if (%eq? how 'down)
+          (let ((a (caddr e)) (f (front-window)))
+            (if (if f (%> a 0) nil) (window-push-key f a) nil))
+          nil))
+     ((%eq? what 'button)
+      (if (%eq? how 'down)
+          (wb-button-down (cadddr e) (nth 4 e))
+          (set! *drag-win* nil)))
+     ((%eq? what 'mouse) (wb-drag (caddr e) (cadddr e)))
      (else nil))))
 
 ;; The compositor. One pass a frame, and only if something changed - a task
@@ -657,18 +663,11 @@
   nil)
 
 (define (wb-input-task)
-  ;; Drain whatever has arrived, then sleep until the device says there is
-  ;; more. This used to ask again as fast as the processor could be handed
-  ;; back, which was most of what the machine did while it looked idle.
+  ;; One message per event, from input.driver, and asleep in between. This
+  ;; used to read the chip itself, which made it the only task that could.
   (let ((port (input-listen)))
     (while *wb-running*
-      (let ((n (input-pending)))
-        (if (%> n 0)
-            (let ((i 0))
-              (while (%< i n)
-                (wb-event (input-event))
-                (set! i (%+ i 1))))
-            (wait-input port))))
+      (wb-event (next-input port)))
     (input-unlisten port))
   nil)
 

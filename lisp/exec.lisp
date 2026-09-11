@@ -779,6 +779,11 @@
 
 (define (port-signal p) (mp-sigmask p))
 
+;; Whether anybody is behind a port: its task exists and has not ended.
+(define (port-open? p)
+  (let ((o (mp-sigtask p)))
+    (if o (if (%= (tc-state o) ts-removed) nil t) nil)))
+
 ;; What a caller gets instead of an answer when nobody is left to give one:
 ;; the task behind the port has ended, or its handler failed. A value, not a
 ;; silence. A caller blocked on a reply that never comes is blocked for ever,
@@ -879,10 +884,16 @@
 ;; across a task's saved registers. Nothing about that was hard to fix once it
 ;; was found; the trouble was that the API let it be written at all.
 
-(defrecord (server sv) (include node) port task)
+(defrecord (server sv) (include node) port task poll)
 
 (define (server-port s) (sv-port s))
 (define (server-task s) (sv-task s))
+
+;; Work that arrives as an edge rather than as a message: a device's interrupt
+;; server notifies the server's own port, and `fn` runs each time the server
+;; wakes. It is how a driver has one blocker and still hears both from its
+;; device and from its clients.
+(define (server-poll! s fn) (set-sv-poll! s fn) s)
 
 (define (server-loop s handler)
   ;; A handler that fails answers its caller with the failure instead of
@@ -902,6 +913,8 @@
 (define (server-run s handler)
   (let ((port (sv-port s)))
     (while t
+      ;; Anything that arrived as an edge first - see `server-poll!`.
+      (let ((poll (sv-poll s))) (if poll (%funcall poll) nil))
       ;; A message stays on the port until it has been answered, so that a
       ;; server which ends part way through one - removed, or failed - leaves
       ;; it where `rem-task` and the restart will find it, and its caller
@@ -1107,59 +1120,6 @@
 
 (define (idle? task) (%eq? task *idle-task*))
 
-;; ---------------------------------------------------------------- input
-;; The input device raises its line for as long as it has events, so a handler
-;; that only signalled would be re-entered forever. Masking the line is what
-;; makes a level-triggered device behave: the server hands the work to a task
-;; and stops listening, and the task turns it back on when the queue is dry.
-;;
-;; Listening is a *port*, not a task. It used to be one global holding the one
-;; task allowed to hear about input, which is the shape that forces
-;; multiplexing on everybody downstream: one listener, so one loop, so every
-;; kind of event decoded in one place. A port each means a task that wants
-;; input asks for one, and a task that wants two things at once has two ports
-;; and one `wait` over both.
-;;
-;; What the server posts is a `notify` - an edge, no message - because a
-;; server must not allocate. A port is the right thing to post it to anyway:
-;; the mask a task waits on then spans device interrupts and messages alike,
-;; and nothing waiting has to know which kind of thing woke it.
-(define *input-int* nil)
-(define *input-ports* nil)
-
-(define (input-server data)
-  (int-disable int-input)
-  (let ((p *input-ports*))
-    (while (%cons? p)
-      (notify (%car p))
-      (set! p (%cdr p))))
-  nil)
-
-(define (input-listen)
-  ;; Answers a port that is notified whenever the device has events.
-  (let ((port (create-port nil 0)))
-    (without-interrupts (set! *input-ports* (%cons port *input-ports*)))
-    (poke inp-ctrl (%logior (peek inp-ctrl) 1))
-    (if *input-int*
-        nil
-        (begin
-          (set! *input-int*
-                (make-interrupt "input" 0 (lambda (d) (input-server d)) 0))
-          (add-int-server int-input *input-int*)))
-    (int-enable int-input)
-    port))
-
-(define (input-unlisten port)
-  (without-interrupts (set! *input-ports* (remove-eq port *input-ports*)))
-  (delete-port port)
-  nil)
-
-(define (wait-input port)
-  ;; Drain first: the line was masked when the server fired, so anything that
-  ;; arrived since is sitting in the device with nobody listening.
-  (int-enable int-input)
-  (wait (mp-sigmask port)))
-
 (define (vblank-start)
   (if *vblank-int*
       nil
@@ -1269,13 +1229,11 @@
 
 ;; ---------------------------------------------------------------- startup
 (define (exec-init)
-  ;; A resumed image arrives with these still set, naming interrupt structures
-  ;; that belonged to the ExecBase this is about to replace. Believing them
-  ;; means never installing the servers into the new one, and a machine with
-  ;; no vblank and no keyboard.
+  ;; A resumed image arrives with this still set, naming an interrupt
+  ;; structure that belonged to the ExecBase this is about to replace.
+  ;; Believing it means never installing the server into the new one, and a
+  ;; machine with no vblank. The drivers see to their own: `start-residents`.
   (set! *vblank-int* nil)
-  (set! *input-int* nil)
-  (set! *input-task* nil)
   ;; And these, which a resumed image also arrives with: counts and flags that
   ;; described an Exec that no longer exists. When they lived in a structure,
   ;; allocating a fresh one zeroed them all at once; now that they are

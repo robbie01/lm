@@ -277,8 +277,11 @@ a server that died or failed, and now gets a failure instead; and a task woken
 by an interrupt waited up to a quantum even when it outranked the task that
 was running, where the handler now switches on the way out.
 
-**What is not done.** Input is half moved and graphics not at all; the timer
-stays the kernel's. A blit is ten instructions
+**The keyboard and mouse are a driver too**, input.driver, and every listener
+now hears every event instead of whichever read the chip first.
+
+**What is not done.** Graphics is not a driver yet; the timer stays the
+kernel's. A blit is ten instructions
 and a message is a task switch, so routing every blit through a server would
 be the wrong trade - the shape that fits is a server for whole operations that
 are already batched, which the compositor is close to being. And `wait-ports`

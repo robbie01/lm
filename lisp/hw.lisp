@@ -914,30 +914,59 @@
   (draw-line rp (%+ x w) y (%+ x w) (%+ y h) c))
 
 ;; ---------------------------------------------------------------- input
-(define inp-event (dev-addr dev-input #x00))
-(define inp-count (dev-addr dev-input #x04))
-(define inp-mousex (dev-addr dev-input #x08))
-(define inp-mousey (dev-addr dev-input #x0c))
-(define inp-buttons (dev-addr dev-input #x10))
-(define inp-ctrl (dev-addr dev-input #x14))
-(define inp-mods (dev-addr dev-input #x18))
+;; The keyboard and mouse. Events wait in a queue in the chip, one word each:
+;; the kind in bits 31..28, ascii in 27..20, the raw key code in 19..12, and a
+;; payload - a button number, a wheel step - in 11..0. Reading the event
+;; register takes one off the queue. The pointer's position and buttons are
+;; registers, since where the mouse is now is what a pointer wants.
+;;
+;; input.driver owns this, and everybody else subscribes to it: see
+;; input.lisp. Until it has claimed the device, whoever holds it may use it.
+(define *input* (make-device "input" dev-input nil))
+(define inp-event #x00)
+(define inp-count #x04)
+(define inp-mousex #x08)
+(define inp-mousey #x0c)
+(define inp-buttons #x10)
+(define inp-ctrl #x14)
+(define inp-mods #x18)
+(define inp-inject #x1c)
 
-(define ev-keydown 1)
-(define ev-keyup 2)
-(define ev-mousemove 3)
-(define ev-buttondown 4)
-(define ev-buttonup 5)
-(define ev-wheel 6)
+;; The next event, taken apart - (kind ascii code payload) - or nil when the
+;; queue is empty. The register is read once, because reading it is what takes
+;; the event; and into the scratch cell rather than into a number, because a
+;; button event has bit 30 set and the word was never a number anyway.
+(define (input-take)
+  (let ((r (dev-reg *input* inp-event)) (hi 0) (lo 0))
+    (without-interrupts
+      (%st-word! peek-scratch (%ld-word r))
+      (set! lo (%ld-half peek-scratch))
+      (set! hi (%ld-half (%+ peek-scratch 2))))
+    (if (if (%= hi 0) (%= lo 0) nil)
+        nil
+        (list (%lsh hi -12)
+              (%logand (%lsh hi -4) 255)
+              (%logior (%lsh (%logand hi 15) 4) (%lsh lo -12))
+              (%logand lo 4095)))))
 
-(define (input-event) (peek inp-event))
-(define (input-pending) (peek inp-count))
-(define (event-kind e) (%logand (%lsh e -28) 15))
-(define (event-ascii e) (%logand (%lsh e -20) 255))
-(define (event-code e) (%logand (%lsh e -12) 255))
-(define (event-payload e) (%logand e 4095))
-(define (mouse-x) (peek inp-mousex))
-(define (mouse-y) (peek inp-mousey))
-(define (mouse-buttons) (peek inp-buttons))
+;; The same word the other way, into the loopback register: an event as
+;; though the keyboard had sent it.
+(define (input-inject kind ascii code payload)
+  (let ((r (dev-reg *input* inp-inject))
+        (hi (%logior (%lsh kind 12) (%logior (%lsh ascii 4) (%lsh code -4))))
+        (lo (%logior (%lsh (%logand code 15) 12) payload)))
+    (without-interrupts
+      (%st-half! peek-scratch lo)
+      (%st-half! (%+ peek-scratch 2) hi)
+      (%st-word! r (%ld-word peek-scratch))))
+  nil)
+
+(define (input-count) (%ld-fixnum (dev-reg *input* inp-count)))
+(define (input-interrupts! on) (poke (dev-reg *input* inp-ctrl) (if on 1 0)))
+(define (input-mouse-x) (%ld-fixnum (dev-reg *input* inp-mousex)))
+(define (input-mouse-y) (%ld-fixnum (dev-reg *input* inp-mousey)))
+(define (input-buttons) (%ld-fixnum (dev-reg *input* inp-buttons)))
+(define (input-mods) (%ld-fixnum (dev-reg *input* inp-mods)))
 
 ;; ---------------------------------------------------------------- storage
 ;; The disk controller. A command runs on its own time: `disk-go` programs it

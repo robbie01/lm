@@ -27,10 +27,11 @@
 (defpackage sys use lm gc asm compiler exec)                       ; the kickstart: traps, reader, prompt
 (defpackage exec use lm gc hw asm sys)                             ; the kernel: tasks, signals, ports, libraries
 (defpackage disk use lm hw exec)                                   ; disk.driver, the task that owns the disk
+(defpackage input use lm hw exec)                                  ; input.driver, the task that owns the keyboard and mouse
 (defpackage snap use lm gc hw sys exec disk)                       ; saving the machine
-(defpackage wb use lm hw sys exec)                                 ; the workbench: windows and shells
-(defpackage eyes use lm gc hw exec sys wb)                         ; xeyes, one instance per pair
-(defpackage user use lm gc hw asm compiler sys exec disk snap wb eyes)  ; where a prompt starts, and the demos
+(defpackage wb use lm hw sys exec input)                           ; the workbench: windows and shells
+(defpackage eyes use lm gc hw exec sys wb input)                   ; xeyes, one instance per pair
+(defpackage user use lm gc hw asm compiler sys exec disk input snap wb eyes)  ; where a prompt starts, and the demos
 
 ;; ---------------------------------------------------------------- exports
 ;; The prelude goes first: every other list below is read in the package it
@@ -166,20 +167,20 @@
   bm-plot bm-point bm-at bm-addr bm-w bm-h bitmap? make-bitmap alloc-bitmap
   make-bitmap-rastport make-rastport-on rp-bitmap
   blit-rect clear-screen
-  draw-circle draw-line ev-buttondown ev-buttonup ev-keydown ev-mousemove
+  draw-circle draw-line
   *screen-rp* screen-rastport make-rastport rastport?
   rp-origin-x rp-origin-y rp-region
   set-rp-origin! set-rp-region! screen-fill-rect screen-plot
   screen-blit-rect rect rect-x rect-y rect-w rect-h rect-x2 rect-y2 rect-ok?
   rect-intersect rect-contains? rect-subtract region-subtract-rect region-area
   region-intersect-rect region-subtract
-  event-ascii fill-circle check-colour
-  attach-screen event-kind fill-rect free-pool gfx-ctrl gfx-on gfx-vbirq
-  inp-ctrl
+  fill-circle check-colour
+  attach-screen fill-rect free-pool gfx-ctrl gfx-on gfx-vbirq
   set-colour rgb
-  input-event
-  input-pending int-ack int-disable int-enable int-pending int-raise millis
-  mouse-x mouse-y open-screen peek peek8 plot poke poke8
+  int-ack int-disable int-enable int-pending int-raise millis
+  open-screen peek peek8 plot poke poke8
+  *input* input-take input-inject input-count input-interrupts!
+  input-mouse-x input-mouse-y input-buttons input-mods
   pool-free-bytes pool-tag pool-used random screen-height screen-sync
   screen-width
   timer-never timer-set-in vblank-count
@@ -249,7 +250,7 @@
   ;; handle-interrupt and switch-tasks are the trap handler's, and the trap
   ;; handler is in sys: exported to one caller, not to applications.
   handle-interrupt switch-tasks
-  idle? idle-start input-listen without-preemption
+  idle? idle-start without-preemption
   preemption-off preemption-on
   task-snapshot task?
   this-task
@@ -264,12 +265,12 @@
   put-msg get-msg wait-port reply-msg port-ready? wait-ports notify
   request send make-server server-port server-task
   spawn task-children task-parent rem-children
-  *reply-port* reply-port input-unlisten
+  *reply-port* reply-port
   node-name node-pri find-name find-task list-nodes
-  *vblank-count* vblank-start wait-input wait-vblank
+  *vblank-count* vblank-start wait-vblank
   task-count tasks wait
   ;; ---- when things go wrong, and drivers ----
-  failure? failure-why make-failure fail-msg port-signal
+  failure? failure-why make-failure fail-msg port-signal port-open? server-poll!
   on-task-end detach-task add-resident start-residents
   make-interrupt add-int-server rem-int-server
 ))
@@ -278,6 +279,18 @@
 (export '(
   disk-read disk-write disk-flush disk-size disk-exclusive disk-write-raw
   start-disk-driver disk-driver-running? *disk-driver* *disk-sleeps*
+))
+
+(in-package input)
+(export '(
+  ;; The words an event is made of. Exported because the events go to other
+  ;; packages: a symbol read in `wb` is not a symbol read here unless it is
+  ;; this one, and a workbench comparing its own `key` with the driver's would
+  ;; never see a key.
+  key mouse button wheel down up moved
+  input-listen input-unlisten next-input inject-input
+  mouse-x mouse-y mouse-buttons
+  start-input-driver input-driver-running? *input-driver*
 ))
 
 (in-package snap)

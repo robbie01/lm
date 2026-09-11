@@ -18,6 +18,10 @@ pub const I_MOUSEY: u32 = 0x0c;
 pub const I_BUTTONS: u32 = 0x10; // bit0 left, bit1 right, bit2 middle
 pub const I_CTRL: u32 = 0x14; // bit0: raise INT_INPUT when an event arrives
 pub const I_MODS: u32 = 0x18; // bit0 shift, bit1 ctrl, bit2 alt
+/// w: queue this word as an event, as though it had come from the keyboard.
+/// A loopback, which is what lets a test drive the input path end to end
+/// without a window or a person.
+pub const I_INJECT: u32 = 0x1c;
 
 pub const EV_KEYDOWN: u32 = 1;
 pub const EV_KEYUP: u32 = 2;
@@ -48,11 +52,14 @@ impl Input {
     }
 
     pub fn push(&mut self, kind: u32, ascii: u32, code: u32, payload: u32) {
+        self.push_word((kind << 28) | ((ascii & 0xff) << 20) | ((code & 0xff) << 12) | (payload & 0xfff));
+    }
+
+    fn push_word(&mut self, w: u32) {
         if self.q.len() >= 512 {
             self.q.pop_front();
         }
-        self.q
-            .push_back((kind << 28) | ((ascii & 0xff) << 20) | ((code & 0xff) << 12) | (payload & 0xfff));
+        self.q.push_back(w);
     }
 
     pub fn pending(&self) -> bool {
@@ -76,6 +83,7 @@ impl Input {
         match reg {
             I_CTRL => self.ctrl = v,
             I_EVENT => self.q.clear(),
+            I_INJECT => self.push_word(v),
             _ => {}
         }
     }

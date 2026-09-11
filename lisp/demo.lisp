@@ -493,10 +493,11 @@
 
 
 ;; ---------------------------------------------------------------- drivers
-;; `(drivers)` checks the driver model end to end, on the disk: one task holds
-;; the controller and every other task asks it, a transfer lets the machine
-;; run while it happens, and a server that fails or dies answers its callers
-;; instead of leaving them blocked. The transfers need a disk - start the
+;; `(drivers)` checks the driver model end to end, on the disk and the
+;; keyboard: one task holds each device and every other task asks it, a
+;; transfer lets the machine run while it happens, every listener hears every
+;; event, and a server that fails or dies answers its callers instead of
+;; leaving them blocked. The transfers need a disk - start the
 ;; machine with --disk FILE; a scratch file will do.
 (define *drv-probe* nil)
 (define *drv-count* 0)
@@ -549,6 +550,23 @@
               (num-check 'the-driver-slept-through-it (%> *disk-sleeps* sleeps) t)
               (num-check 'another-task-ran-meanwhile (%> *drv-count* 0) t)
               (rem-task counter))))))
+  ;; The keyboard and mouse. The driver is the one reader, and every
+  ;; subscriber gets every event - which two tasks reading the chip could
+  ;; never have, because reading an event is what takes it.
+  (num-check 'input-driver-running (input-driver-running?) t)
+  (num-check 'input-held-by-its-driver
+             (%eq? (device-owner *input*) (server-task *input-driver*)) t)
+  (num-check 'input-refused-to-everybody-else (device-usable? *input*) nil)
+  (let ((a (input-listen)) (b (input-listen)))
+    ;; A key with no ascii, so that a workbench, if one is up, lets it go by.
+    (inject-input 1 0 200 0)
+    (let ((ea (next-input a)) (eb (next-input b)))
+      (num-check 'one-listener-hears
+                 (list (%car ea) (cadr ea) (caddr ea) (cadddr ea))
+                 (list 'key 'down 0 200))
+      (num-check 'and-so-does-the-other (equal? ea eb) t))
+    (input-unlisten a)
+    (input-unlisten b))
   ;; A handler that fails answers with a failure, and the server carries on.
   (princ "drivers: the error below is on purpose")
   (newline)

@@ -1,7 +1,8 @@
 # Every peripheral owned by a process
 
 A plan, partly built. What is done is marked below: the bitmap type, the
-asynchronous blitter, devices as values, and the disk driver.
+asynchronous blitter, devices as values, the disk driver and the input
+driver.
 
 The goal is that a peripheral has exactly one owner, that reaching one you do
 not own is impossible rather than merely discouraged, and that the mechanism
@@ -401,10 +402,13 @@ interrupt, and the client sleeps on its reply. A transfer names a byte object,
 never an address, and the driver checks that the blocks fit - the bitmap
 lesson again, since a disk read is a write into memory.
 
-**input.driver** — owns the input device. Decodes raw events into typed
-messages and publishes them to subscriber ports: `(key down code)`, `(mouse
-moved x y)`, `(button down n x y)`. Today every client would have to decode the
-raw device itself, which is why there was only ever one.
+**input.driver. Built**, in lisp/input.lisp. Owns the input device, decodes
+raw events into lists and sends every subscriber a copy: `(key down ascii code
+mods)`, `(mouse moved x y)`, `(button down n x y)`, `(wheel delta x y)`.
+Before, reading an event took it off the chip, so only one task could listen,
+and that task had to decode the raw words itself. Where the pointer is now is
+not a message: the driver keeps the latest position in variables anybody can
+read.
 
 **gfx.driver** — owns the display registers, the screen bitmap, and the
 blitter registry. `(open-screen w h)`, `(bitmap w h)` answering a bitmap the
@@ -484,9 +488,20 @@ Three things turned up on the way, and none of them is about the disk:
 
 `(drivers)` checks all of it, and lmdev checks the controller on its own.
 
-**3. input.driver.** Already a port; this makes it a task with a decode
-vocabulary, and takes back `inp-ctrl`. Removes the last direct
-`input-pending` / `input-event` from clients.
+**3. input.driver. Done.** A resident task with a decode vocabulary, as
+above. `inp-ctrl` is back inside hw.lisp and no client reads the chip: the
+workbench gets messages, and xeyes reads the position the driver keeps. Two
+general pieces came with it. A server can have work that arrives as an edge
+rather than a message: its device's interrupt notifies the server's own port,
+and `server-poll!` runs on every wake, so a driver has one blocker and still
+hears both its device and its clients. And the chip has a loopback register,
+so `(drivers)` can type a key and watch two listeners both receive it.
+
+One trap on the way: the words an event is made of are symbols, and a symbol
+read in one package is not the symbol of the same name read in another. The
+first version sent `input::key` to a workbench comparing against `wb::key`,
+and every event would have been ignored. The vocabulary is exported from
+`input` now, so there is one `key`.
 
 **- Bitmaps. Done**, and it took the place of a phase that was going to build
 a registry in the chip. See *a bitmap is a type, not an address*. Nothing
