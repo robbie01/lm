@@ -419,6 +419,131 @@
   (newline))
 
 
+;; ---------------------------------------------------------------- locking
+;; `(locking)` checks the rules about waiting and the mutex, which are two
+;; halves of one decision: a critical section never sleeps, and shared data
+;; that has to be waited for is guarded by a lock that belongs to somebody.
+;;
+;; What should be an error is tried in a task of its own, which ends when the
+;; error comes. Checking that the task ended, and what it left behind, is how
+;; this can watch an error happen and carry on.
+(define (lk-ended? task) (%= (exec::tc-state task) exec::ts-removed))
+
+(define (lk-settle) (wait-vblank) (wait-vblank) (wait-vblank))
+
+(define (lk-try name thunk)
+  (let ((task (add-task name 0 thunk)))
+    (lk-settle)
+    task))
+
+(define (locking)
+  (let ((m (make-mutex "test"))
+        (me (this-task)))
+    ;; Owned, nested, let go.
+    (num-check 'lock (mutex-lock m) t)
+    (num-check 'owner (eq? (mutex-owner m) me) t)
+    (num-check 'nests (mutex-lock m) t)
+    (mutex-unlock m)
+    (num-check 'still-held (eq? (mutex-owner m) me) t)
+    (mutex-unlock m)
+    (num-check 'free (mutex-owner m) nil)
+
+    ;; Only the owner lets go.
+    (mutex-lock m)
+    (let ((thief (lk-try "thief" (lambda () (mutex-unlock m)))))
+      (num-check 'unlock-by-another-is-an-error (lk-ended? thief) t)
+      (num-check 'still-mine (eq? (mutex-owner m) me) t))
+    (mutex-unlock m)
+
+    ;; Nothing sleeps inside a critical section, and the machine carries on:
+    ;; the task that tried ends, and nobody is left holding the section.
+    (let ((a (lk-try "sleeper" (lambda () (without-preemption (wait-vblank)))))
+          (b (lk-try "yielder" (lambda () (without-preemption (reschedule)))))
+          (c (lk-try "locker" (lambda () (without-interrupts (mutex-lock m))))))
+      (num-check 'wait-in-forbid (lk-ended? a) t)
+      (num-check 'reschedule-in-forbid (lk-ended? b) t)
+      (num-check 'lock-in-disable (lk-ended? c) t)
+      (num-check 'forbid-let-go (forbidden?) nil)
+      (num-check 'lock-untouched (mutex-owner m) nil))
+
+    ;; Handed over directly: the waiter wakes holding it.
+    (mutex-lock m)
+    (let ((got nil))
+      (add-task "waiter" 0 (lambda () (mutex-lock m) (set! got t) (mutex-unlock m)))
+      (lk-settle)
+      (num-check 'waiter-waits got nil)
+      (mutex-unlock m)
+      (lk-settle)
+      (num-check 'waiter-got-it got t)
+      (num-check 'waiter-let-go (mutex-owner m) nil))
+
+    ;; Abandoned by an error inside with-mutex: the next owner is told, through
+    ;; the repair, which with-mutex runs before its own body.
+    (let* ((repaired nil)
+           (r (make-mutex "repairable" (lambda (x) (set! repaired t))))
+           (dier (lk-try "dier" (lambda () (with-mutex r (car 5))))))
+      (num-check 'dier-ended (lk-ended? dier) t)
+      (num-check 'abandoned-is-free (mutex-owner r) nil)
+      (with-mutex r (num-check 'repair-ran-first repaired t))
+      (num-check 'told-once (mutex-lock r) t)
+      (mutex-unlock r))
+
+    ;; And by a task that simply ended holding it.
+    (let ((q (make-mutex "quitter")))
+      (lk-try "quitter" (lambda () (mutex-lock q)))
+      (num-check 'ended-holding-it (mutex-lock q) 'abandoned)
+      (mutex-unlock q))
+
+    ;; Given away on purpose.
+    (let ((h (make-mutex "gift"))
+          (taker (add-task "taker" 0 (lambda () (wait 65536)))))
+      (lk-settle)
+      (mutex-lock h)
+      (mutex-hand-over h taker)
+      (num-check 'handed-over (eq? (mutex-owner h) taker) t)
+      (num-check 'gone-from-me (eq? (mutex-owner h) me) nil)
+      (signal taker 65536)
+      (lk-settle)
+      (num-check 'taker-ended-holding-it (mutex-lock h) 'abandoned)
+      (mutex-unlock h))
+
+    ;; A circle is an error, not a hang. `one` holds m1 and waits for m2; `two`
+    ;; holds m2 and asks for m1, and is refused. What `two` held goes to `one`,
+    ;; abandoned, and `one` finishes.
+    (let* ((m1 (make-mutex "m1"))
+           (m2 (make-mutex "m2"))
+           (one (add-task "one" 0 (lambda ()
+                                    (mutex-lock m1) (wait 65536)
+                                    (mutex-lock m2) (mutex-unlock m2)
+                                    (mutex-unlock m1))))
+           (two (add-task "two" 0 (lambda ()
+                                    (mutex-lock m2) (wait 65536)
+                                    (mutex-lock m1)))))
+      (lk-settle)
+      (signal one 65536)
+      (lk-settle)
+      (signal two 65536)
+      (lk-settle)
+      (num-check 'circle-refused (lk-ended? two) t)
+      (num-check 'circle-broken (lk-ended? one) t)
+      (num-check 'm1-free (mutex-owner m1) nil))
+
+    ;; A waiter lends its priority to the owner, and the owner gives it back.
+    (let* ((p (make-mutex "pri"))
+           (low (add-task "low" 0 (lambda () (mutex-lock p) (wait 65536) (mutex-unlock p))))
+           (high nil))
+      (lk-settle)
+      (set! high (add-task "high" 5 (lambda () (mutex-lock p) (mutex-unlock p))))
+      (lk-settle)
+      (num-check 'lent (exec::node-pri low) 5)
+      (signal low 65536)
+      (lk-settle)
+      (num-check 'given-back (exec::node-pri low) 0)
+      (num-check 'high-got-it (lk-ended? high) t)))
+  (princ "locking: done (nothing above = all correct)")
+  (newline))
+
+
 ;; ---------------------------------------------------------------- blitting
 ;; `(blitting)` checks that the blitter is really asynchronous, and that
 ;; waiting for it means what it says. The second group is the one that

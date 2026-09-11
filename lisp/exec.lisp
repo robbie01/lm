@@ -177,7 +177,12 @@
   binds                          ; this task's fluid bindings, innermost first
   quantum elapsed
   parent children                ; a dependent task dies with the one that made it
-  cleanups)                      ; what to do when it ends, newest first
+  cleanups                       ; what to do when it ends, newest first
+  base                           ; its own priority, which a waiter may add to
+  held                           ; the mutexes it owns, newest first
+  blocked-on                     ; the mutex it is waiting for, if any
+  mx-next                        ; and who is behind it in that mutex's queue
+  gen)                           ; which Exec it belongs to: see `task-alive?`
 
 (define ts-invalid 0)
 (define ts-added 1)
@@ -237,14 +242,18 @@
 ;; touch the data. It costs one increment, needs nothing declared, and cannot
 ;; deadlock.
 ;;
-;; Neither one lasts through going to sleep. A task that waits inside either
-;; gives it up for as long as it sleeps and has it back when it wakes - see
-;; `wait` - because whatever is going to wake it is exactly what the section
-;; holds off. So a section that waits is two sections, the part before the
-;; sleep and the part after, and anything it needs to be true across the sleep
-;; it has to look at again when it wakes. The console and the blitter would
-;; rather not sleep inside one at all, and do not: a print inside a section
-;; goes straight to the serial line, and a blit is waited for by spinning.
+;; Neither one may be slept in. Whatever would wake a sleeping task is another
+;; task or an interrupt, which is exactly what the two sections hold off, so a
+;; task that slept inside one either never woke or had to give the section up
+;; while it slept - and a section that can come apart in the middle, silently,
+;; is not a section. So `wait`, `reschedule`, taking a mutex and ending the
+;; running task are errors inside either, and say which: see `sleep-check`.
+;; The console and the blitter never needed to sleep there. A print inside a
+;; section goes straight to the serial line, and a blit is waited for by
+;; spinning.
+;;
+;; Data that tasks share and may have to wait for wants a mutex - see below -
+;; and talking to another task wants a port.
 ;;
 ;; There used to be a counted Disable/Enable pair here as well, with a nesting
 ;; depth and the interrupt state the outermost one found. It is gone.
@@ -293,11 +302,43 @@
 
 (define (forbidden?) (%> *tdnest* 0))
 
+;; Whether the running task may sleep here, asked by everything that might.
+;; Asked even when it would not have to sleep this time - a mutex that happens
+;; to be free, a signal that has already arrived - so that a section that
+;; sleeps is an error the first time it runs, and not only on the day
+;; something is slow.
+;;
+;; Interrupts are only a question once Exec has turned them on. Before that
+;; the boot task runs with them off, and nothing it does is a section.
+(define *exec-started* nil)
+
+;; Which Exec this is: one more every time `exec-init` runs, at a cold boot and
+;; again after a resume, which throws the old one's tasks away.
+(define *exec-generation* 0)
+
+(define (sleep-check what)
+  (cond (*in-interrupt*
+         (error (string-append what " cannot sleep in an interrupt server: signal a task instead")))
+        ((forbidden?)
+         (error (string-append what " would sleep inside without-preemption, where no other task can run to wake it")))
+        ((if *exec-started* (if (interrupts-on?) nil t) nil)
+         (error (string-append what " would sleep inside without-interrupts, where nothing can arrive to wake it")))
+        (else nil)))
+
 ;; ---------------------------------------------------------------- scheduler
 ;; A reschedule is asked for with an ecall, so that the switch happens inside
 ;; the trap handler where the whole register set has already been saved.
 
-(define (reschedule) (%ecall trap-reschedule))
+;;
+;; Not inside `without-preemption`, where it used to do nothing at all:
+;; `switch-tasks` will not take the processor from a task that holds a Forbid,
+;; so the call came straight back - and a task that had just removed itself
+;; went on running.
+(define (reschedule)
+  (if (forbidden?)
+      (error "reschedule: inside without-preemption, where no other task can run")
+      nil)
+  (%ecall trap-reschedule))
 
 ;; ---------------------------------------------------------------- fluids
 ;; The bindings themselves are in macros.lisp, because the reader and the
@@ -456,36 +497,26 @@
   ;; here, released around the reschedule that blocks, and taken again on the
   ;; way back. `without-interrupts` cannot say that, so this says it.
   ;;
-  ;; A caller's own critical section is let go of as well, for as long as the
-  ;; task sleeps and no longer. That is Exec's rule, and the only one that can
-  ;; work: whatever wakes a sleeping task is another task or an interrupt, and
-  ;; those are exactly what a critical section holds off.
+  ;; Not from inside a caller's critical section either: see `sleep-check`.
+  ;; That was once a hang - `switch-tasks` will not take the processor from a
+  ;; task holding a Forbid, so `(without-preemption (print "hi"))` went round
+  ;; the loop below for ever while console.driver waited for a turn that never
+  ;; came - and then, for a while, Exec's rule: the section was set aside for
+  ;; as long as the task slept. That made the hang go away and made every
+  ;; section with a wait in it two sections with a gap between, which nothing
+  ;; said. A print inside a section does not wait any more; anything that
+  ;; still would is refused here.
   ;;
-  ;; - A Forbid is set aside. `switch-tasks` will not take the processor from
-  ;;   a task that holds one, so a task that tried to sleep holding it went on
-  ;;   running instead - round the loop below, for ever, since nobody else
-  ;;   could run to signal it. That is how `(without-preemption (print "hi"))`
-  ;;   hung the machine: at the serial prompt a print is a request to
-  ;;   console.driver, and the driver never got its turn to answer.
-  ;;
-  ;; - Interrupts go on for the reschedule, whatever the caller had. A task's
-  ;;   saved context does not hold the interrupt enable - `mret` puts back the
-  ;;   one the trap was taken with - so the task that runs next gets whatever
-  ;;   the reschedule was asked for in. This used to put back what it found
-  ;;   first, which with interrupts off handed the caller's Disable to the
-  ;;   next task and every task after it; and on the way out it put back what
-  ;;   it found on waking, so the caller's section came back open.
-  ;;
-  ;; Both are put back before this returns, so the caller finds its section
-  ;; the way it left it - what it cannot assume is that nothing happened
-  ;; while it slept. A wait that finds its signal already there does not
-  ;; sleep, and gives up nothing.
-  (if *in-interrupt* (error "wait: called from an interrupt server") nil)
+  ;; Interrupts go on for the reschedule and off again after it. A task's
+  ;; saved context does not hold the interrupt enable - `mret` puts back the
+  ;; one the trap was taken with - so the task that runs next gets whatever the
+  ;; reschedule was asked for in.
+  (sleep-check "wait:")
   (let ((entry (%disable)))
     (let ((task (this-task)) (got 0))
       (set! got (%logand (tc-sigrecvd task) mask))
       (if (%= got 0)
-          (let ((nest *tdnest*))
+          (begin
             (set-tc-sigwait! task mask)
             (set-tc-state! task ts-wait)
             ;; On the wait list *once*, and it stays there until `signal`
@@ -503,16 +534,12 @@
             ;; turned up with three or four tasks running and looked like a
             ;; lost wakeup rather than a corrupted list.
             (add-tail (wait-list) task)
-            (set! *tdnest* 0)
             (while (%= got 0)
               ;; On for the reschedule, and off again on the way back.
               (%restore-interrupts 1)
               (reschedule)
               (%disable)
-              (set! got (%logand (tc-sigrecvd task) mask)))
-            ;; `signal` took it off the wait list on the way to making it
-            ;; ready, so all there is to undo is setting the Forbid aside.
-            (set! *tdnest* nest))
+              (set! got (%logand (tc-sigrecvd task) mask))))
           nil)
       (set-tc-sigrecvd! task
                     (%logand (tc-sigrecvd task) (%lognot got)))
@@ -578,6 +605,8 @@
     ;; order costs nothing and says what it means.
     (set-node-name! task name)
     (set-node-pri! task pri)
+    (set-tc-base! task pri)
+    (set-tc-gen! task *exec-generation*)
     (zero-task-counters! task)
     (set-tc-state! task ts-added)
     (set-tc-splower! task sp)
@@ -682,8 +711,17 @@
   ;; A task that has ended stays a task and says so. Signalling it does
   ;; nothing, because it is in no state to be woken; that is the whole
   ;; difference from a handle that could come back as somebody else.
+  ;;
+  ;; The running task ending itself leaves the processor, which nothing can
+  ;; do from inside a section: see `sleep-check`. It used to reschedule anyway,
+  ;; have the reschedule refused, and carry on running as a task that had been
+  ;; removed.
+  (if (%eq? task (this-task)) (sleep-check "rem-task of the running task:") nil)
   (rem-children task)
   (forget-child task)
+  ;; What it held goes to whoever is waiting, marked abandoned, before its
+  ;; cleanups run - a cleanup may want the very thing it held.
+  (abandon-mutexes task)
   (release-devices-of task)
   (run-cleanups task)
   (without-interrupts
@@ -765,6 +803,10 @@
 
 (define (task-finished)
   (let ((task (this-task)))
+    ;; A section the task's function opened with `forbid` or `%disable` and
+    ;; returned without closing was the task's, and ends with it.
+    (set! *tdnest* 0)
+    (%enable)
     (set-tc-result! task 0)
     ;; The last task to finish takes the machine with it: there is nothing
     ;; left to schedule, and pretending otherwise is a hang. The idle task does
@@ -953,8 +995,9 @@
   ;; again from the top.
   (let ((mark (task-binds)))
     (set! *repl-restart*
-          (lambda ()
+          (lambda report
             (unwind-binds-to! mark)
+            (print-report report)
             (let ((m (get-msg (sv-port s))))
               (if m (fail-msg m "the server failed while answering") nil))
             (server-run s handler))))
@@ -1044,6 +1087,302 @@
       (dolist (p ports) (if (if hit nil (port-ready? p)) (set! hit p) nil))
       (if hit nil (wait mask)))
     hit))
+
+;; ---------------------------------------------------------------- mutexes
+;; A lock that belongs to a task. A port is the first thing to reach for - a
+;; resource one task owns cannot be raced for - but some data really is shared,
+;; and some sections have to be able to wait, which neither of the critical
+;; sections above can. This is for those.
+;;
+;; What makes it more than a flag:
+;;
+;; - It has an owner, and only the owner can let it go. Taking it again while
+;;   holding it nests; letting go of one this task does not hold is an error.
+;; - Waiters queue in priority order, first come first served among equals,
+;;   and the one at the front is handed the mutex directly when it is let go.
+;;   Nobody barges in between, and nobody wakes only to find it taken.
+;; - A waiter lends its priority to the owner while it waits, and on to
+;;   whatever the owner is waiting for in turn. Otherwise a task holding
+;;   something an urgent one needs can sit behind every task of middling
+;;   priority in the machine - priority inversion, which is what kept
+;;   resetting the Pathfinder lander on Mars.
+;; - A task that ends holding one, or whose stack an error abandons inside
+;;   `with-mutex`, has it taken away. The next task to take it is told it was
+;;   abandoned - `mutex-lock` answers `abandoned` rather than `t`, and
+;;   `with-mutex` runs the mutex's repair first, if it was made with one -
+;;   because whatever it guards was left half changed.
+;; - Ownership moves only when the owner says so, with `mutex-hand-over`.
+;; - Waiting that would close a circle - this task waits for a mutex whose
+;;   owner is waiting, perhaps several tasks removed, for one this task holds
+;;   - is an error there and then, naming everybody in the circle, instead of
+;;   a hang nobody can explain.
+;;
+;; A Windows mutex, near enough; an Amiga SignalSemaphore with the abandonment
+;; the Amiga never had. Only tasks ever touch one, so the bookkeeping is done
+;; inside a Forbid - and never sleeps inside it.
+
+(defrecord (mutex mx) name owner count head next-held abandoned repair)
+
+(define sigb-mutex 8)                  ; you have been handed a mutex
+(define sigf-mutex (%lsh 1 sigb-mutex))
+
+;; `repair`, if given, is a function of the mutex, run by the first task to
+;; take it after it was abandoned - before that task's own body.
+(define (make-mutex name . repair)
+  (let ((m (mx-alloc)))
+    (set-mx-name! m (if (%symbol? name) (%symbol-name name) name))
+    (set-mx-count! m 0)
+    (set-mx-repair! m (if (%cons? repair) (%car repair) nil))
+    m))
+
+(define (mutex-name m) (mx-name m))
+(define (mutex-owner m) (mx-owner m))
+
+;; A task of this Exec that has not ended. A task record outlives the task -
+;; nothing frees a record - and a saved image keeps the records of an Exec that
+;; a resume replaces.
+(define (task-alive? task)
+  (if (%eq? (tc-gen task) *exec-generation*)
+      (if (%= (tc-state task) ts-removed) nil t)
+      nil))
+
+;; Answers `t`, or `abandoned` the first time the mutex is taken after its
+;; owner ended holding it.
+(define (mutex-lock m)
+  ;; Asked even when the mutex is free: a mutex is for code that may wait.
+  (sleep-check "mutex-lock:")
+  (let* ((me (this-task))
+         (how (without-preemption
+                (let ((o (mx-owner m)))
+                  (cond ((%null? o) (mutex-take! m me) (mutex-report! m))
+                        ((%eq? o me) (set-mx-count! m (%+ (mx-count m) 1)) t)
+                        ;; An owner from an Exec that no longer exists - the
+                        ;; image was saved while it held this - is an owner
+                        ;; that ended without letting go.
+                        ((if (task-alive? o) nil t)
+                         (set-mx-abandoned! m t)
+                         (mutex-take! m me)
+                         (mutex-report! m))
+                        ((mutex-circle? m me) 'circle)
+                        (else (mutex-enqueue! m me) (lend-priority! m) 'wait))))))
+    (cond ((%eq? how 'circle) (deadlock-error m me))
+          ((%eq? how 'wait)
+           ;; Until it is handed over - by `mutex-unlock`, `mutex-hand-over` or
+           ;; the owner's end - each of which makes this task the owner first
+           ;; and signals it second.
+           (while (if (%eq? (mx-owner m) me) nil t) (wait sigf-mutex))
+           (without-preemption (mutex-report! m)))
+          (else how))))
+
+(define (mutex-report! m)
+  (if (mx-abandoned m)
+      (begin (set-mx-abandoned! m nil) 'abandoned)
+      t))
+
+(define (mutex-unlock m)
+  (if (%eq? (mx-owner m) (this-task))
+      nil
+      (error (string-append "mutex-unlock: this task does not hold " (mx-name m))))
+  (without-preemption
+    (if (%> (mx-count m) 1)
+        (set-mx-count! m (%- (mx-count m) 1))
+        (mutex-release! m (this-task))))
+  nil)
+
+;; The body with the mutex held. An error in the body does not come back
+;; through here - an error abandons the stack - and the mutex goes with the
+;; stack: the next task to take it finds it abandoned.
+(defmacro with-mutex args
+  (let ((m (gensym)) (result (gensym)))
+    `(let ((,m ,(%car args)))
+       (mutex-lock-repaired ,m)
+       (let ((,result (begin ,@(%cdr args))))
+         (mutex-unlock ,m)
+         ,result))))
+
+(define (mutex-lock-repaired m)
+  (if (%eq? (mutex-lock m) 'abandoned)
+      (let ((r (mx-repair m))) (if r (%funcall r m) nil))
+      nil)
+  nil)
+
+;; Give a mutex this task holds - once, not nested - to another task outright.
+;; If that task was waiting for it, it wakes holding it; if not, it simply
+;; holds it, and must let it go like any other owner.
+(define (mutex-hand-over m task)
+  (let ((me (this-task)))
+    (if (%eq? (mx-owner m) me)
+        nil
+        (error (string-append "mutex-hand-over: this task does not hold " (mx-name m))))
+    (if (%> (mx-count m) 1)
+        (error (string-append "mutex-hand-over: held more than once: " (mx-name m)))
+        nil)
+    (if (if (task? task) (%= (tc-state task) ts-removed) t)
+        (error "mutex-hand-over: not a live task" task)
+        nil)
+    (without-preemption
+      (unlink-held! me m)
+      (if (%eq? (tc-blocked-on task) m) (mutex-unqueue! m task) nil)
+      (mutex-take! m task)
+      (settle-priority! task)
+      (settle-priority! me)
+      (signal task sigf-mutex))
+    nil))
+
+;; ------------------------- what the above does inside its Forbid
+(define (mutex-take! m task)
+  (set-mx-owner! m task)
+  (set-mx-count! m 1)
+  (set-mx-next-held! m (tc-held task))
+  (set-tc-held! task m))
+
+(define (unlink-held! task m)
+  (if (%eq? (tc-held task) m)
+      (set-tc-held! task (mx-next-held m))
+      (let ((p (tc-held task)))
+        (while (if p (if (%eq? (mx-next-held p) m) nil t) nil)
+          (set! p (mx-next-held p)))
+        (if p (set-mx-next-held! p (mx-next-held m)) nil)))
+  (set-mx-next-held! m nil))
+
+;; Let go of it altogether, to whoever is at the front of the queue.
+(define (mutex-release! m owner)
+  (unlink-held! owner m)
+  (let ((next (mutex-dequeue! m)))
+    (if next
+        (begin
+          (mutex-take! m next)
+          (settle-priority! next)
+          (signal next sigf-mutex))
+        (begin (set-mx-owner! m nil) (set-mx-count! m 0))))
+  (settle-priority! owner))
+
+;; In priority order, behind everybody of the same priority.
+(define (mutex-enqueue! m task)
+  (set-tc-blocked-on! task m)
+  (let ((p (node-pri task)) (prev nil) (q (mx-head m)))
+    (while (if q (%>= (node-pri q) p) nil)
+      (set! prev q)
+      (set! q (tc-mx-next q)))
+    (set-tc-mx-next! task q)
+    (if prev (set-tc-mx-next! prev task) (set-mx-head! m task))))
+
+(define (mutex-dequeue! m)
+  ;; Past anybody who is not there to be woken: a waiter from before a resume.
+  (while (if (mx-head m) (if (task-alive? (mx-head m)) nil t) nil)
+    (set-mx-head! m (tc-mx-next (mx-head m))))
+  (let ((w (mx-head m)))
+    (if w
+        (begin
+          (set-mx-head! m (tc-mx-next w))
+          (set-tc-mx-next! w nil)
+          (set-tc-blocked-on! w nil))
+        nil)
+    w))
+
+(define (mutex-unqueue! m task)
+  (let ((prev nil) (q (mx-head m)))
+    (while (if q (if (%eq? q task) nil t) nil)
+      (set! prev q)
+      (set! q (tc-mx-next q)))
+    (if q
+        (begin
+          (if prev (set-tc-mx-next! prev (tc-mx-next q)) (set-mx-head! m (tc-mx-next q)))
+          (set-tc-mx-next! q nil)
+          (set-tc-blocked-on! q nil))
+        nil)))
+
+;; The priority a task should run at: its own, or that of the most urgent
+;; task waiting for anything it holds, whichever is higher. Each queue is in
+;; priority order, so its front is its most urgent.
+(define (settle-priority! task)
+  (let ((p (if (tc-base task) (tc-base task) (node-pri task)))
+        (m (tc-held task)))
+    (while m
+      (let ((w (mx-head m)))
+        (if (if w (%> (node-pri w) p) nil) (set! p (node-pri w)) nil))
+      (set! m (mx-next-held m)))
+    (if (%= p (node-pri task)) nil (repri! task p))))
+
+(define (repri! task p)
+  (without-interrupts
+    (set-node-pri! task p)
+    (cond ((%= (tc-state task) ts-ready)
+           (remove-node task)
+           (enqueue (ready-list) task))
+          ((%= (tc-state task) ts-run)
+           ;; Lowered below somebody who is ready: that one goes next.
+           (let ((h (list-first (ready-list))))
+             (if (if h (%> (node-pri h) p) nil) (set! *attn-resched* 1) nil)))
+          (else nil)))
+  ;; And its place in the queue of whatever it is itself waiting for.
+  (let ((b (tc-blocked-on task)))
+    (if b (begin (mutex-unqueue! b task) (mutex-enqueue! b task)) nil))
+  nil)
+
+;; A new waiter's priority goes to the owner, and on down the line of owners
+;; that are themselves waiting.
+(define (lend-priority! m)
+  (let ((o (mx-owner m)) (n 0))
+    (while (if o (%< n 64) nil)
+      (settle-priority! o)
+      (let ((b (tc-blocked-on o)))
+        (set! o (if b (mx-owner b) nil)))
+      (set! n (%+ n 1)))))
+
+;; Would waiting for m close a circle back to this task?
+(define (mutex-circle? m me)
+  (let ((o (mx-owner m)) (n 0) (hit nil))
+    (while (if o (if hit nil (%< n 64)) nil)
+      (if (%eq? o me)
+          (set! hit t)
+          (let ((b (tc-blocked-on o))) (set! o (if b (mx-owner b) nil))))
+      (set! n (%+ n 1)))
+    hit))
+
+;; Said outside the Forbid, because an error abandons the stack and the section
+;; with it.
+(define (deadlock-error m me)
+  (let ((s (string-append "deadlock: " (string-append (task-name me)
+             (string-append " would wait for " (mx-name m)))))
+        (o (mx-owner m))
+        (n 0))
+    (while (if o (%< n 16) nil)
+      (set! s (string-append s (string-append ", held by " (task-name o))))
+      (let ((b (tc-blocked-on o)))
+        (if (if b (if (%eq? o me) nil t) nil)
+            (begin
+              (set! s (string-append s (string-append ", which is waiting for " (mx-name b))))
+              (set! o (mx-owner b)))
+            (set! o nil)))
+      (set! n (%+ n 1)))
+    (error s)))
+
+;; Everything a task holds, taken from it and handed on - marked abandoned, so
+;; that the next owner knows it was left in the middle of something - and the
+;; queue it was waiting in, if it was. For a task that has ended, and for one
+;; whose stack an error abandoned: either way, nothing it was doing inside a
+;; `with-mutex` is going to be finished.
+;;
+;; No Forbid of its own. `rem-task` holds one around it, and the error path
+;; calls it from the trap handler, where no other task can run anyway.
+(define (abandon-mutexes-now task)
+  (let ((m (tc-held task)))
+    (while m
+      (let ((next (mx-next-held m)))
+        (set-mx-abandoned! m t)
+        (set-mx-count! m 1)
+        (mutex-release! m task)
+        (set! m next))))
+  (let ((b (tc-blocked-on task)))
+    (if b
+        (let ((o (mx-owner b)))
+          (mutex-unqueue! b task)
+          (if o (settle-priority! o) nil))
+        nil))
+  nil)
+
+(define (abandon-mutexes task) (without-preemption (abandon-mutexes-now task)))
 
 ;; ---------------------------------------------------------------- libraries
 ;; A library is reached through a jump table below its base pointer, which is
@@ -1293,6 +1632,8 @@
   (set! *idle-task* nil)
   (set! *tdnest* 0)
   (set! *attn-resched* 0)
+  (set! *exec-started* nil)
+  (set! *exec-generation* (%+ *exec-generation* 1))
   (set! *disp-count* 0)
   (set! *switch-count* 0)
   (set! *idle-count* 0)
@@ -1313,6 +1654,8 @@
     (let ((boot (tc-alloc)))
       (set-node-name! boot "boot")
       (set-node-pri! boot 0)
+      (set-tc-base! boot 0)
+      (set-tc-gen! boot *exec-generation*)
       (zero-task-counters! boot)
       (set-tc-quantum! boot default-quantum)
       (set-tc-state! boot ts-run)
@@ -1344,9 +1687,13 @@
             ;; A fault inside an interrupt server never reaches the line that
             ;; clears this, and a machine that believes it is permanently
             ;; inside a handler refuses every Wait after.
-            (set! *in-interrupt* nil)))
+            (set! *in-interrupt* nil)
+            ;; And every `with-mutex` the task was inside went with its stack:
+            ;; what it held is abandoned, and the next task to take it is told.
+            (let ((me (this-task))) (if me (abandon-mutexes-now me) nil))))
     (set! *task-abort-fn*
-          (lambda ()
+          (lambda report
+            (print-report report)
             (emit-str "task ended by an error\n")
             (task-finished)))
     ;; And the drivers, last, once a task that fails has somewhere to go.
@@ -1395,6 +1742,7 @@
   (timer-set-in *quantum*)
   (%enable-timer)
   (%enable)
+  (set! *exec-started* t)
   nil)
 
 

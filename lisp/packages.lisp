@@ -240,7 +240,7 @@
   bye compile-time-eval error-trap eval eval-form expand-macro handle-trap
   int-external int-software int-timer kickstart macro-form? print-backtrace
   rebuild rebuild-end genesis *fresh-image* record-initialiser register-macro repl
-  resume-kickstart
+  resume-kickstart print-report
   ctx-pc ctx-reg trap-reg trap-raw
   start-repl system-name top-level-form
 ))
@@ -257,9 +257,17 @@
   ;; handler is in sys: exported to one caller, not to applications.
   handle-interrupt switch-tasks
   ;; `forbidden?` says whether the running task is inside a Forbid, for the
-  ;; few things that would rather not sleep in one: sleeping gives it up -
-  ;; see `wait`.
+  ;; few things that have to do something else there - print raw, spin for a
+  ;; blit - because sleeping in one is an error: see `sleep-check`.
   idle? idle-start without-preemption forbidden?
+  ;; ---- shared data ----
+  ;; A lock that belongs to the task holding it: see the mutex section of
+  ;; exec.lisp for what that buys.
+  make-mutex mutex-lock mutex-unlock with-mutex mutex-hand-over
+  mutex-owner mutex-name mutex? task-alive?
+  ;; What `mutex-lock` answers instead of `t` when the last owner ended holding
+  ;; it: exported, so that `'abandoned` typed anywhere is the same symbol.
+  abandoned
   preemption-off preemption-on
   task-snapshot task?
   this-task

@@ -63,7 +63,25 @@
 (define int-timer 7)
 (define int-external 11)
 
+;; How deep traps may nest before the handler is taken to be faulting in a
+;; loop. The stub has eight frames for traps inside traps (`trap-nest-max` in
+;; boot.lisp, which is not in the image), and running out of them used to end
+;; in a jump through a garbage frame pointer: an illegal instruction somewhere
+;; unrelated, and a machine that stopped with nothing said.
+(define trap-nest-limit 8)
+
+(define (trap-spiral cause epc tval)
+  (uart-string "\n*** the trap handler is faulting in a loop: ")
+  (uart-string (cause-name cause))
+  (uart-string " at pc ")
+  (uart-hex-raw epc)
+  (uart-string ", value ")
+  (uart-hex-raw tval)
+  (uart-nl)
+  (%halt 3))
+
 (define (handle-trap cause epc tval ctx)
+  (if (%>= (%ld-fixnum lg-trapdepth) trap-nest-limit) (trap-spiral cause epc tval) nil)
   (if (interrupt? cause)
       (handle-interrupt (interrupt-number cause) ctx)
       (cond ((%= cause 11) (handle-ecall epc ctx))
@@ -330,20 +348,22 @@
         nil)))
 
 (define (check-trap cause epc tval ctx)
-  (let ((w (%ld-fixnum epc)))
-    (emit-str "\n*** ")
-    (cond
-     ((%= (insn-op w) op-index) (emit-index-fault w ctx))
-     ((%= (insn-op w) op-fixnum)
-      (emit-arith-fault (fixnum-op-name w) cause tval))
-     ((%= (insn-op w) op-tagged)
-      (emit-arith-fault (tagged-op-name w) cause tval))
-     (else (emit-pair-fault w tval)))
-    (emit-str ", at pc ")
-    (emit-str (number->hex epc))
-    (emit-str "\n")
-    (backtrace-from-context epc ctx)
-    (abort-to-repl ctx)))
+  (abort-to-repl ctx
+    (compose-report
+      (lambda ()
+        (let ((w (%ld-fixnum epc)))
+          (emit-str "\n*** ")
+          (cond
+           ((%= (insn-op w) op-index) (emit-index-fault w ctx))
+           ((%= (insn-op w) op-fixnum)
+            (emit-arith-fault (fixnum-op-name w) cause tval))
+           ((%= (insn-op w) op-tagged)
+            (emit-arith-fault (tagged-op-name w) cause tval))
+           (else (emit-pair-fault w tval)))
+          (emit-str ", at pc ")
+          (emit-str (number->hex epc))
+          (emit-str "\n")
+          (backtrace-from-context epc ctx))))))
 
 ;; The compiler emits `ecall` for the handful of conditions it detects inline,
 ;; with the reason in a7. Resuming past it means stepping mepc over the
@@ -359,7 +379,9 @@
         ;; Not an error at all: a task asking to be switched out. Returning
         ;; from here resumes whichever task the scheduler picked.
         (switch-tasks)
-        (begin
+        (abort-to-repl ctx
+         (compose-report
+          (lambda ()
           (cond
            ((%= code trap-arity)
             ;; t0 still holds the closure that was about to be entered and t1
@@ -399,8 +421,7 @@
           ;; worth looking.
           (if (%= code trap-arity)
               (backtrace-from-context (trap-reg ctx reg-ra) ctx)
-              (backtrace-from-context epc ctx))
-          (abort-to-repl ctx)))))
+              (backtrace-from-context epc ctx))))))))
 
 ;; ---------------------------------------------------------------- backtrace
 ;; The frame chain the collector walks for roots also walks for blame. Every
@@ -452,21 +473,61 @@
   (print-backtrace (trap-reg ctx reg-s0) (trap-raw ctx reg-s1) epc))
 
 (define (fatal-trap cause epc tval ctx)
-  (emit-str "\n*** ")
-  (emit-str (cause-name cause))
-  (emit-str " at pc ")
-  (emit-str (number->hex epc))
-  (emit-str ", value ")
-  (emit-str (number->hex tval))
-  ;; The machine refuses any store into its first eight bytes, because those
-  ;; are what car and cdr of nil read. Somebody treated nil as a pair of their
-  ;; own, and the address alone would not say so.
-  (if (if (%= cause 7) (%< tval 8) nil)
-      (emit-str ", which is nil's cell")
-      nil)
-  (emit-str "\n")
-  (backtrace-from-context epc ctx)
-  (abort-to-repl ctx))
+  (abort-to-repl ctx
+    (compose-report
+      (lambda ()
+        (emit-str "\n*** ")
+        (emit-str (cause-name cause))
+        (emit-str " at pc ")
+        (emit-str (number->hex epc))
+        (emit-str ", value ")
+        (emit-str (number->hex tval))
+        ;; The machine refuses any store into its first eight bytes, because
+        ;; those are what car and cdr of nil read. Somebody treated nil as a
+        ;; pair of their own, and the address alone would not say so.
+        (if (if (%= cause 7) (%< tval 8) nil)
+            (emit-str ", which is nil's cell")
+            nil)
+        (emit-str "\n")
+        (backtrace-from-context epc ctx)))))
+
+;; ---------------------------------------------------------------- reports
+;; A fault is reported by the task it happened in, once that task is back on
+;; its feet - not by the trap handler. The handler runs with interrupts off and
+;; half the world saved: it cannot wait, cannot take a lock, and has no business
+;; drawing, and a report goes to the task's own output, which in a window is
+;; drawing. So the handler writes the report into a string, and the restart
+;; prints it after it has unwound the task's bindings, on its own stack, with
+;; interrupts on.
+;;
+;; The same move keeps a broken output from taking the machine down. With
+;; `*out*` bound to something that faults - once it was bound to a stream,
+;; where the stream's output function belonged - the report of the fault went
+;; to the same place and faulted again, eight traps deep, until the stub ran
+;; out of frames. Now the report is written where nothing can fault, and
+;; printed through whatever `*out*` is once the binding that broke it is gone.
+(define *printing-report* nil)   ; the task printing one, if any
+
+(define (compose-report thunk)
+  (let ((acc nil))
+    (fluid-let ((*out* (lambda (c) (set! acc (%cons c acc)))))
+      (%funcall thunk))
+    (let ((s (list->string (reverse acc))))
+      (if (if *printing-report* (%eq? *printing-report* (%this-task)) nil)
+          ;; This fault came from printing the last report: the task's own
+          ;; output is what is broken, so this one goes to the serial line.
+          (begin (set! *printing-report* nil) (uart-string s) nil)
+          s))))
+
+(define (print-report reports)
+  (let ((r (if (%cons? reports) (%car reports) nil)))
+    (if r
+        (begin
+          (set! *printing-report* (%this-task))
+          (emit-str r)
+          (set! *printing-report* nil))
+        nil))
+  nil)
 
 ;; ---------------------------------------------------------------- restart
 ;; An error abandons the stack it happened on. Calling the reader from inside
@@ -513,28 +574,38 @@
   ;; ends its task instead of returning to nowhere.
   (if *return-addr-fn* (%funcall *return-addr-fn*) 0))
 
-(define (enter-closure ctx f sp)
+;; The closure is entered with one argument, if one is given: the report of the
+;; fault that brought it here - see `compose-report`.
+(define (enter-closure ctx f sp . arg)
   (%st-fixnum! (ctx-reg ctx reg-zero) (%ld-fixnum (%addr-of f)))  ; pc = its entry
   (%st-word! (ctx-reg ctx reg-t0) f)                   ; t0 = the closure
-  (%st-fixnum! (ctx-reg ctx reg-t1) 0)                     ; t1 = no arguments
+  (if (%cons? arg)
+      (begin (%st-word! (ctx-reg ctx reg-a0) (%car arg))    ; a0 = the argument
+             (%st-fixnum! (ctx-reg ctx reg-t1) 1))          ; t1 = one of them
+      (%st-fixnum! (ctx-reg ctx reg-t1) 0))                 ; t1 = no arguments
   (%st-fixnum! (ctx-reg ctx reg-sp) sp)                    ; a whole stack
   (%st-fixnum! (ctx-reg ctx reg-ra) (restart-ra))          ; where it ends up
   (%st-fixnum! (ctx-reg ctx reg-s0) 0)                     ; and no caller
   nil)
 
-(define (abort-to-repl ctx)
+(define (abort-to-repl ctx . report)
   ;; There is no unwinding here: the stack the fault happened on is abandoned
   ;; where it stands, and nothing on it gets a chance to put anything back. So
   ;; the interrupt state is re-established rather than restored. Without this,
   ;; an error inside `without-interrupts` would leave the machine deaf for as
   ;; long as it ran.
+  ;;
+  ;; The report goes to the restart, which prints it: see `compose-report`.
   (%enable-after-trap)
   (if *abort-cleanup-fn* (%funcall *abort-cleanup-fn*) nil)
-  (cond (*repl-restart* (enter-closure ctx *repl-restart* (restart-stack)))
-        ;; A task with no prompt behind it does not get to take the machine
-        ;; down with it; it just stops being a task.
-        (*task-abort-fn* (enter-closure ctx *task-abort-fn* (restart-stack)))
-        (else (emit-str "no repl to return to; halting\n") (%halt 1))))
+  (let ((r (if (%cons? report) (%car report) nil)))
+    (cond (*repl-restart* (enter-closure ctx *repl-restart* (restart-stack) r))
+          ;; A task with no prompt behind it does not get to take the machine
+          ;; down with it; it just stops being a task.
+          (*task-abort-fn* (enter-closure ctx *task-abort-fn* (restart-stack) r))
+          (else (if r (uart-string r) nil)
+                (uart-string "no repl to return to; halting\n")
+                (%halt 1)))))
 
 ;; ---------------------------------------------------------------- eval
 ;; There is no interpreter on the machine. Every form typed at the REPL is
@@ -703,8 +774,9 @@
   (let ((mark (task-binds))
         (done (if (%cons? then) (%car then) nil)))
     (set! *repl-restart*
-          (lambda ()
+          (lambda report
             (unwind-binds-to! mark)
+            (print-report report)
             (repl-loop)
             (if done (%funcall done) nil)))
     (repl-loop)

@@ -115,12 +115,11 @@
       (set! p (%cdr p))))
   nil)
 
-;; Inside a Forbid it spins instead. Sleeping there would give the Forbid up -
-;; see `wait` - and nothing about a blit needs another task to run: the chip
-;; finishes by itself, and reading its status is what lets it be seen to. So
-;; it waits the way it does with interrupts off, and the way WaitBlit always
-;; did, and a section that draws is still a section when it has finished
-;; drawing.
+;; Inside a Forbid it spins instead. Sleeping there is an error - see
+;; `sleep-check` - and nothing about a blit needs another task to run: the
+;; chip finishes by itself, and reading its status is what lets it be seen to.
+;; So it waits the way it does with interrupts off, and the way WaitBlit always
+;; did, and a section may draw.
 (define (blit-sleep d)
   (if (forbidden?)
       (while (if (blit-done? d) nil t) (blit-busy?))

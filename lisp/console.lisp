@@ -140,10 +140,10 @@
 ;; request waits for its answer, so this is as much a question about where it
 ;; is being asked from as about the driver: not from a trap handler or an
 ;; interrupt server, where there is no task to wait, and not from inside a
-;; critical section of either kind. Waiting there lets the section go for as
-;; long as the driver takes - see `wait` - and a print is the last thing that
-;; should end one, since it is what somebody adds to find out what a section
-;; is doing. Inside one, the line goes out raw, the way the collector's do.
+;; critical section of either kind, where waiting is an error - see
+;; `sleep-check` - and a print is the last thing that should be one, since it
+;; is what somebody adds to find out what a section is doing. Inside one, the
+;; line goes out raw, the way the collector's do.
 ;;
 ;; A Forbid used to get through this and ask. `wait` did not give a Forbid up
 ;; then, so the driver never ran to answer, and `(without-preemption (print
@@ -155,12 +155,11 @@
           nil)
       nil))
 
-;; Whether a read can. The same, except that a critical section is no bar.
-;; The driver owns the receive side, so while it is up there is no raw way to
-;; wait for a key: a read inside a section sleeps like any other wait, and
-;; lets the section go until the key comes. That is the only read there is.
-;; It used to hang either way - inside a Forbid it asked and waited for ever,
-;; and inside a Disable nothing could tell the driver a key had come.
+;; Whether a read can. The same, except that a critical section is no bar
+;; here: the driver owns the receive side, so while it is up there is no raw
+;; way to wait for a key, and a read that has to wait inside a section is
+;; refused by `wait` itself - an error that says where it is, rather than the
+;; hang it used to be under both kinds of section.
 (define (can-listen?)
   (if (console-driver-running?)
       (if (%= 0 (%ld-fixnum lg-trapdepth)) (if *in-interrupt* nil t) nil)
