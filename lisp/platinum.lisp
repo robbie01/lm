@@ -44,18 +44,20 @@
 (define pt-desktop-dark (%+ pt-base 21))
 
 (define (platinum-palette)
-  ;; Sixteen greys, then the accents.
-  (let ((i 0))
-    (while (%< i 16)
+  ;; Sixteen greys, then the accents - as one request to the display driver
+  ;; rather than twenty-two.
+  (let ((pairs (list (%cons pt-lav-light (rgb 204 204 255))
+                     (%cons pt-lav (rgb 153 153 255))
+                     (%cons pt-lav-dark (rgb 102 102 204))
+                     (%cons pt-lav-darkest (rgb 51 51 153))
+                     (%cons pt-desktop (rgb 99 99 156))
+                     (%cons pt-desktop-dark (rgb 90 90 146))))
+        (i 15))
+    (while (%>= i 0)
       (let ((v (%* i 17)))
-        (set-colour (%+ pt-base i) (rgb v v v)))
-      (set! i (%+ i 1))))
-  (set-colour pt-lav-light (rgb 204 204 255))
-  (set-colour pt-lav (rgb 153 153 255))
-  (set-colour pt-lav-dark (rgb 102 102 204))
-  (set-colour pt-lav-darkest (rgb 51 51 153))
-  (set-colour pt-desktop (rgb 99 99 156))
-  (set-colour pt-desktop-dark (rgb 90 90 146))
+        (set! pairs (%cons (%cons (%+ pt-base i) (rgb v v v)) pairs)))
+      (set! i (%- i 1)))
+    (set-colours pairs))
   nil)
 
 ;; ---------------------------------------------------------------- metrics

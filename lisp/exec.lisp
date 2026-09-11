@@ -1070,6 +1070,8 @@
 (define sigf-vblank (%lsh 1 sigb-vblank))
 (define sigb-input 6)
 (define sigf-input (%lsh 1 sigb-input))
+(define sigb-blit 7)                   ; your blits have landed; see gfx.lisp
+(define sigf-blit (%lsh 1 sigb-blit))
 (define *vblank-int* nil)
 (define *vblank-count* 0)
 
@@ -1127,9 +1129,9 @@
       (begin
         (set! *vblank-int*
               (make-interrupt "vblank" 0 (lambda (d) (vblank-server d)) 0))
-        (add-int-server int-vblank *vblank-int*)
-        ;; And tell the display to raise it.
-        (poke gfx-ctrl (%logior (peek gfx-ctrl) gfx-vbirq))))
+        ;; Only the kernel's end of the line. Telling the display chip to
+        ;; raise it is gfx.driver's business: the chip is the driver's.
+        (add-int-server int-vblank *vblank-int*)))
   *vblank-int*)
 
 (define (add-int-server line int)

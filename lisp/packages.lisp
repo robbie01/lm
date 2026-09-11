@@ -28,10 +28,11 @@
 (defpackage exec use lm gc hw asm sys)                             ; the kernel: tasks, signals, ports, libraries
 (defpackage disk use lm hw exec)                                   ; disk.driver, the task that owns the disk
 (defpackage input use lm hw exec)                                  ; input.driver, the task that owns the keyboard and mouse
+(defpackage gfx use lm hw exec)                                    ; gfx.driver, the task that owns the display
 (defpackage snap use lm gc hw sys exec disk)                       ; saving the machine
-(defpackage wb use lm hw sys exec input)                           ; the workbench: windows and shells
+(defpackage wb use lm hw sys exec input gfx)                       ; the workbench: windows and shells
 (defpackage eyes use lm gc hw exec sys wb input)                   ; xeyes, one instance per pair
-(defpackage user use lm gc hw asm compiler sys exec disk input snap wb eyes)  ; where a prompt starts, and the demos
+(defpackage user use lm gc hw asm compiler sys exec disk input gfx snap wb eyes)  ; where a prompt starts, and the demos
 
 ;; ---------------------------------------------------------------- exports
 ;; The prelude goes first: every other list below is read in the package it
@@ -51,7 +52,7 @@
   reg-s8 reg-s9 reg-s10 reg-s11 reg-t3 reg-t4 reg-t5 reg-t6
   bl-src bl-dst bl-w bl-h bl-smod bl-dmod bl-val bl-op bl-status bl-next bl-x0 bl-y0 bl-x1 bl-y1
   blit-list-reg blit-status-reg blit-list-size
-  disk-busy disk-cmd-read disk-cmd-write disk-cmd-flush int-disk
+  disk-busy disk-cmd-read disk-cmd-write disk-cmd-flush int-disk int-blit blit-ctrl-reg
   op-copy op-fill op-xor op-and op-or op-mask op-line op-add
   trap-arity trap-type trap-oom trap-error trap-reschedule trap-record
   %* %+ %- %/ %< %<= %= %> %>= %addr-of %alloc-code %alloc-pool %apply %ash
@@ -175,15 +176,17 @@
   rect-intersect rect-contains? rect-subtract region-subtract-rect region-area
   region-intersect-rect region-subtract
   fill-circle check-colour
-  attach-screen fill-rect free-pool gfx-ctrl gfx-on gfx-vbirq
-  set-colour rgb
+  fill-rect free-pool
+  rgb
   int-ack int-disable int-enable int-pending int-raise millis
-  open-screen peek peek8 plot poke poke8
+  peek peek8 plot poke poke8
   *input* input-take input-inject input-count input-interrupts!
   input-mouse-x input-mouse-y input-buttons input-mods
-  pool-free-bytes pool-tag pool-used random screen-height screen-sync
+  pool-free-bytes pool-tag pool-used random screen-height
   screen-width
-  timer-never timer-set-in vblank-count
+  timer-never timer-set-in
+  *gfx* gfx-show gfx-colour! gfx-vblank-irq! gfx-present!
+  blit-irq-each! blit-done? set-blit-sleep! interrupts-on?
 ))
 
 (in-package asm)
@@ -255,6 +258,7 @@
   task-snapshot task?
   this-task
   rem-task reschedule sigb-input sigb-vblank sigf-input sigf-vblank signal
+  sigb-blit sigf-blit
   ;; ---- talking between tasks ----
   ;; A port and a message were internal before, which is why the only device
   ;; that listened for input was the one task allowed to. They are the public
@@ -291,6 +295,12 @@
   input-listen input-unlisten next-input inject-input
   mouse-x mouse-y mouse-buttons
   start-input-driver input-driver-running? *input-driver*
+))
+
+(in-package gfx)
+(export '(
+  open-screen attach-screen set-colour set-colours screen-sync vblank-count
+  start-gfx-driver gfx-driver-running? *gfx-driver* *blit-sleeps*
 ))
 
 (in-package snap)

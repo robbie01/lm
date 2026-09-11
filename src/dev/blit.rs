@@ -22,7 +22,9 @@ pub const B_X0: u32 = 0x24;
 pub const B_Y0: u32 = 0x28;
 pub const B_X1: u32 = 0x2c;
 pub const B_Y1: u32 = 0x30;
-pub const B_CTRL: u32 = 0x34; // bit0: raise INT_BLIT on completion
+pub const B_CTRL: u32 = 0x34; // raise INT_BLIT: bit0 when the chain runs dry, bit1 after every descriptor
+pub const CTRL_DRAINED: u32 = 1;
+pub const CTRL_EACH: u32 = 2;
 /// Write the address of a command block; the chip fetches its own parameters
 /// and runs. One store, so programming the blitter is atomic without anybody
 /// holding anything off - provided the block belongs to whoever filled it,
@@ -383,8 +385,9 @@ fn perform(m: &mut Machine) {
 /// Then on down the chain. The link is read before the status is written:
 /// once the status word says done, the descriptor is its owner's again - it
 /// can be refilled, link and all - so a link read afterwards would sometimes
-/// be the owner's next command rather than the chain's. The interrupt, if it
-/// was asked for, comes once, when the chain runs dry.
+/// be the owner's next command rather than the chain's. The interrupt comes
+/// when the chain runs dry, or after every descriptor, as the control
+/// register asks.
 fn finish(m: &mut Machine) {
     perform(m);
     m.blit.busy = false;
@@ -397,12 +400,19 @@ fn finish(m: &mut Machine) {
     } else {
         0
     };
+    // The control register as it is now, not as it was when this descriptor
+    // started: a task that has just asked to be woken has to be woken by the
+    // transfer that was already running when it asked.
+    let ctrl = m.blit.pending.ctrl;
+    if ctrl & CTRL_EACH != 0 {
+        m.raise(INT_BLIT);
+    }
     // From the moment this one finished, not from whenever somebody looked,
     // so a chain costs the same however often it is polled.
     if start_block(m, next, done_at) {
         return;
     }
-    if m.blit.live.ctrl & 1 != 0 {
+    if ctrl & CTRL_DRAINED != 0 {
         m.raise(INT_BLIT);
     }
 }

@@ -280,8 +280,14 @@ was running, where the handler now switches on the way out.
 **The keyboard and mouse are a driver too**, input.driver, and every listener
 now hears every event instead of whichever read the chip first.
 
-**What is not done.** Graphics is not a driver yet; the timer stays the
-kernel's. A blit is ten instructions
+**And the display**, gfx.driver, which also wakes a task whose blits have
+landed rather than leaving it to spin. It turned up one more old bug:
+demo.lisp's `wait-vblank` was the same symbol as Exec's and had replaced it
+for every task since the first commit, so the compositor polled the frame
+counter instead of sleeping until the frame.
+
+**What is not done.** The timer stays the kernel's, by design. A blit is ten
+instructions
 and a message is a task switch, so routing every blit through a server would
 be the wrong trade - the shape that fits is a server for whole operations that
 are already batched, which the compositor is close to being. And `wait-ports`

@@ -256,6 +256,7 @@ pub fn write_layout() {
         use crate::dev::blit::*;
         def!("blit-list-reg", B_LIST);
         def!("blit-status-reg", B_STATUS);
+        def!("blit-ctrl-reg", B_CTRL);
         def!("blit-list-size", LIST_WORDS * 4);
         for (i, name) in ["src", "dst", "w", "h", "smod", "dmod",
                           "val", "op", "x0", "y0", "x1", "y1",
@@ -325,6 +326,7 @@ pub const SYSTEM: &[&str] = &[
     "lisp/exec.lisp",
     "lisp/disk.lisp",
     "lisp/input.lisp",
+    "lisp/gfx.lisp",
     "lisp/snap.lisp",
     "lisp/mono.lisp",
     "lisp/font.lisp",

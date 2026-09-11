@@ -14,10 +14,11 @@
       *screen*
       (open-screen screen-width screen-height)))
 
-(define (wait-vblank)
-  (let ((n (vblank-count)))
-    (while (%= n (vblank-count)) (%wait-for-input))
-    n))
+;; There used to be a `wait-vblank` here that polled the frame counter with
+;; the processor asleep in between. It was the same symbol as Exec's - this
+;; package uses exec - so defining it replaced the kernel's for every task,
+;; the compositor included, and every task that meant to sleep until the next
+;; frame spun instead. Exec's is the one now: a signal from the vertical blank.
 
 ;; ---------------------------------------------------------------- balls
 ;; One task per ball, all of them drawing into one window. They coordinate
@@ -594,6 +595,19 @@
       (num-check 'and-so-does-the-other (equal? ea eb) t))
     (input-unlisten a)
     (input-unlisten b))
+  ;; The display. The driver holds the chip, the frame clock is a signal again
+  ;; rather than a poll, and a task whose blit is still running sleeps until
+  ;; the blitter wakes it.
+  (num-check 'gfx-driver-running (gfx-driver-running?) t)
+  (num-check 'gfx-held-by-its-driver
+             (%eq? (device-owner *gfx*) (server-task *gfx-driver*)) t)
+  (num-check 'gfx-refused-to-everybody-else (device-usable? *gfx*) nil)
+  (num-check 'wait-vblank-is-the-kernels (wait-vblank) sigf-vblank)
+  (let ((big (alloc-bitmap 1024 768)) (sleeps *blit-sleeps*))
+    (bm-fill-rect big 0 0 1024 768 9)
+    (blit-sync)
+    (num-check 'a-long-blit-is-slept-through (%> *blit-sleeps* sleeps) t)
+    (num-check 'and-it-landed (%ld-byte (%addr-of (bm-pixels big))) 9))
   ;; A handler that fails answers with a failure, and the server carries on.
   (princ "drivers: the error below is on purpose")
   (newline)

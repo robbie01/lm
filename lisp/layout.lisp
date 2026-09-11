@@ -186,6 +186,7 @@
 ;; ---- blitter command block ----
 (define blit-list-reg #x38)
 (define blit-status-reg #x20)
+(define blit-ctrl-reg #x34)
 (define blit-list-size #x38)
 (define bl-src #x0)
 (define bl-dst #x4)

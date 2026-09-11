@@ -266,17 +266,22 @@
   nil)
 
 ;; ---------------------------------------------------------------- display
-(define gfx-base (dev-addr dev-gfx #x00))
-(define gfx-width (dev-addr dev-gfx #x04))
-(define gfx-height (dev-addr dev-gfx #x08))
-(define gfx-pitch (dev-addr dev-gfx #x0c))
-(define gfx-mode (dev-addr dev-gfx #x10))
-(define gfx-palidx (dev-addr dev-gfx #x14))
-(define gfx-paldat (dev-addr dev-gfx #x18))
-(define gfx-ctrl (dev-addr dev-gfx #x1c))
-(define gfx-vcount (dev-addr dev-gfx #x20))
-(define gfx-sync (dev-addr dev-gfx #x24))
-(define gfx-hz (dev-addr dev-gfx #x30))
+;; The display chip: where the picture comes from, how big it is, the palette,
+;; and whether it raises the vertical blank. gfx.driver owns it - see gfx.lisp
+;; - and everybody else asks the driver. Until the driver has claimed it,
+;; whoever holds it may use it.
+(define *gfx* (make-device "gfx" dev-gfx nil))
+(define gfx-base #x00)
+(define gfx-width #x04)
+(define gfx-height #x08)
+(define gfx-pitch #x0c)
+(define gfx-mode #x10)
+(define gfx-palidx #x14)
+(define gfx-paldat #x18)
+(define gfx-ctrl #x1c)
+(define gfx-vcount #x20)
+(define gfx-sync #x24)
+(define gfx-hz #x30)
 
 (define gfx-on 1)
 (define gfx-vbirq 2)
@@ -350,72 +355,39 @@
 ;; whatever the pool last had in it.
 (define (alloc-bitmap w h) (make-bitmap (make-bytes (%* w h)) w h))
 
-(define *screen* nil)      ; the bitmap currently being displayed
+(define *screen* nil)      ; the bitmap being displayed; gfx.driver sets it
 
-(define (open-screen w h)
-  (set! *screen* (alloc-bitmap w h))
-  (attach-screen))
+;; Point the chip at a bitmap, 8-bit indexed, and turn the picture on - and
+;; the frame clock with it, since writing the control register without that
+;; bit would quietly stop the vertical blank.
+(define (gfx-show b)
+  (let ((base (dev-reg *gfx* 0)))
+    (poke (%+ base gfx-base) (bm-addr b))
+    (poke (%+ base gfx-width) (bm-w b))
+    (poke (%+ base gfx-height) (bm-h b))
+    (poke (%+ base gfx-pitch) (bm-w b))
+    (poke (%+ base gfx-mode) 8)
+    (poke (%+ base gfx-ctrl) (%logior gfx-on gfx-vbirq)))
+  b)
 
-;; Point the display at the bitmap we already have.
-;;
-;; A resumed image still has the bitmap - it is pool memory, and the pool is
-;; saved - and it still has the three globals that say where and how big. What
-;; it does not have is a display: devices are hardware, hardware comes back
-;; reset, and a machine drawing carefully into memory nothing is scanning out
-;; looks exactly like a machine that has crashed.
-(define (attach-screen)
-  (if (%null? *screen*)
-      nil
-      (begin
-        (poke gfx-base (bm-addr *screen*))
-        (poke gfx-width (bm-w *screen*))
-        (poke gfx-height (bm-h *screen*))
-        (poke gfx-pitch (bm-w *screen*))
-        (poke gfx-mode 8)
-        ;; The vblank interrupt goes on with the display. Exec has a server on
-        ;; it before this runs, and writing the control register without the
-        ;; bit would quietly turn the frame clock off again.
-        (poke gfx-ctrl (%logior gfx-on gfx-vbirq))
-        (default-palette)
-        (set! *screen-rp* (make-bitmap-rastport *screen*))
-        *screen*)))
+(define (gfx-vblank-irq! on)
+  (let ((r (dev-reg *gfx* gfx-ctrl)))
+    (poke r (if on
+                (%logior (peek r) gfx-vbirq)
+                (%logand (peek r) (%lognot gfx-vbirq))))))
 
-(define (set-colour i rgb)
-  ;; An index register and a data register: two writes that mean one thing.
-  (without-interrupts
-    (poke gfx-palidx i)
-    (poke gfx-paldat rgb)))
+;; An index register and a data register: two writes that mean one thing.
+(define (gfx-colour! i c)
+  (let ((base (dev-reg *gfx* 0)))
+    (without-interrupts
+      (poke (%+ base gfx-palidx) i)
+      (poke (%+ base gfx-paldat) c))))
+
+(define (gfx-present!) (poke (dev-reg *gfx* gfx-sync) 1))
 
 (define (rgb r g b)
   (%logior (%lsh (%logand r 255) 16)
            (%logior (%lsh (%logand g 255) 8) (%logand b 255))))
-
-(define (default-palette)
-  ;; Sixteen readable colours, then a grey ramp over the rest.
-  (set-colour 0 (rgb 0 0 0))
-  (set-colour 1 (rgb 255 255 255))
-  (set-colour 2 (rgb 200 40 40))
-  (set-colour 3 (rgb 40 200 60))
-  (set-colour 4 (rgb 60 100 230))
-  (set-colour 5 (rgb 230 200 40))
-  (set-colour 6 (rgb 220 120 30))
-  (set-colour 7 (rgb 170 80 220))
-  (set-colour 8 (rgb 40 200 200))
-  (set-colour 9 (rgb 240 130 180))
-  (set-colour 10 (rgb 120 90 50))
-  (set-colour 11 (rgb 90 90 110))
-  (set-colour 12 (rgb 150 150 170))
-  (set-colour 13 (rgb 60 70 90))
-  (set-colour 14 (rgb 30 40 55))
-  (set-colour 15 (rgb 20 24 34))
-  (let ((i 16))
-    (while (%< i 256)
-      (let ((v (%+ 16 (%lsh (%* (%- i 16) 239) -8))))
-        (set-colour i (rgb v v v)))
-      (set! i (%+ i 1)))))
-
-(define (vblank-count) (peek gfx-vcount))
-(define (screen-sync) (poke gfx-sync 1))
 
 (define (bm-at b x y) (%+ (bm-addr b) (%+ (%* y (bm-w b)) x)))
 
@@ -444,6 +416,7 @@
 ;; exists to avoid, so nothing here reaches for them.
 (define blt-list (dev-addr dev-blit blit-list-reg))
 (define blt-status (dev-addr dev-blit blit-status-reg))
+(define blt-ctrl (dev-addr dev-blit blit-ctrl-reg))
 
 ;; ---------------------------------------------------------------- commands
 ;; A blit is a descriptor in memory: the parameters, a status word the chip
@@ -574,12 +547,41 @@
   (while (blit-busy?) nil)
   nil)
 
+(define (blit-done? d) (%= 0 (%ld-fixnum (%+ d bl-status))))
+
+;; How a task whose blit has not landed goes to sleep instead of spinning.
+;; gfx.driver installs it, because the driver owns the chip's completion
+;; interrupt. Until it does, and wherever sleeping is impossible - in an
+;; interrupt server, or with interrupts off - waiting is a spin on the status
+;; register.
+(define *blit-sleep* nil)
+(define (set-blit-sleep! fn) (set! *blit-sleep* fn) nil)
+
+(define (interrupts-on?)
+  (let ((s (%disable)))
+    (%restore-interrupts s)
+    (%= s 1)))
+
+;; Ask the chip for an interrupt after every descriptor, not only at the end
+;; of the chain - while anybody is asleep waiting for one.
+(define (blit-irq-each! on) (%st-fixnum! blt-ctrl (if on 2 0)))
+
 (define (blit-wait-block b)
-  (if (%= b 0)
+  (if (if (%= b 0) t (blit-done? b))
       nil
-      ;; The status read in the loop is what lets the chip notice it has
-      ;; finished, without waiting for the next host slice to look.
-      (while (%= 1 (%ld-fixnum (%+ b bl-status))) (blit-busy?)))
+      (let ((n 0))
+        ;; A short spin first. Most blits are small, and a small one is done
+        ;; before a sleep could be arranged. The status read is what lets the
+        ;; chip notice it has finished, without waiting for the next host
+        ;; slice to look.
+        (while (if (blit-done? b) nil (%< n 64))
+          (blit-busy?)
+          (set! n (%+ n 1)))
+        (if (blit-done? b)
+            nil
+            (if (if *blit-sleep* (if *in-interrupt* nil (interrupts-on?)) nil)
+                (%funcall *blit-sleep* b)
+                (while (if (blit-done? b) nil t) (blit-busy?))))))
   nil)
 
 ;; Every descriptor in a ring. The chain runs in order, so this is the same as

@@ -1,8 +1,8 @@
 # Every peripheral owned by a process
 
 A plan, partly built. What is done is marked below: the bitmap type, the
-asynchronous blitter and its descriptor chain, devices as values, the disk
-driver and the input driver.
+asynchronous blitter and its descriptor chain, devices as values, and the
+disk, input and display drivers.
 
 The goal is that a peripheral has exactly one owner, that reaching one you do
 not own is impossible rather than merely discouraged, and that the mechanism
@@ -429,10 +429,14 @@ and that task had to decode the raw words itself. Where the pointer is now is
 not a message: the driver keeps the latest position in variables anybody can
 read.
 
-**gfx.driver** — owns the display registers, the screen bitmap, and the
-blitter registry. `(open-screen w h)`, `(bitmap w h)` answering a bitmap the
-caller owns, `(free-bitmap b)`, `(damage b rect)`. The compositor is either
-this task or its only client.
+**gfx.driver. Built**, in lisp/gfx.lisp. Owns the display chip: `(screen w
+h)`, `(show)` after a resume, `(colours pairs)` for the palette, and
+`(present)`. It also owns blit completion: a task whose blit is still running
+sleeps, and the blitter's interrupt wakes it. It does not own drawing - tasks
+go on linking their own descriptors, since a message costs as much as eleven
+small blits - and it does not hand out bitmaps: since a bitmap became a byte
+object, allocating one is already safe, and a message per window would buy
+nothing. The compositor stays a client, in wb.lisp.
 
 **Exec** keeps `timer` and `sys` and is not a task.
 
@@ -547,10 +551,30 @@ about 80 MB/s, to be replaced by measurements from the real part. MASK is
 costed as a copy, not a read-modify-write as this plan first said: skipping
 transparent bytes is what byte enables on a write are for.
 
-**5. gfx.driver.** Owns the display registers, the screen and the descriptor
-chain; takes back `gfx-ctrl`. Bitmap allocation moves behind it, so a client is
-handed a bitmap rather than taking one. This is where queued blits get their
-completion signals.
+**5. gfx.driver. Done.** A resident task that holds the display chip.
+`gfx-ctrl` is back inside hw.lisp, and Exec no longer touches the display to
+get its frame clock: the driver turns the vertical blank on. Clients ask for
+screens and palettes, and the workbench's twenty-two palette writes are one
+request.
+
+The part this plan called completion signals: `blit-sync` used to spin on
+the status register. Now it spins briefly - a small blit is done before a
+sleep could be arranged - and then sleeps on a signal. The chip can raise its
+line after every descriptor as well as at the end of the chain, and does
+while anybody is asleep; the driver's interrupt server wakes whoever's
+descriptor is done. The chip reads its control register when a descriptor
+finishes, not when it started, so a task that asks to be woken is woken by
+the transfer that was already running when it asked. With interrupts off, or
+inside an interrupt server, waiting is still a spin, because nothing could
+wake a sleeper.
+
+Two things came out of it. `wait-vblank` had not been the kernel's since the
+first commit: demo.lisp defined one of its own, and since the prompt's
+package uses exec the name was the same symbol - so the demo's version, which
+polls the frame counter and sleeps the processor in between, replaced Exec's
+for every task, the compositor included. Now the compositor waits on a
+signal like everything else. And bitmap allocation did not move behind the
+driver, for the reason under *gfx.driver* above.
 
 **6. The blitter's chain register** goes through the device accessor, and `hw`
 stops exporting `blt-list`. The last name is back.
