@@ -73,7 +73,32 @@
             ((%= cause cause-overflow)
              (if (try-widen epc ctx) nil (check-trap cause epc tval ctx)))
             ((%= cause cause-divzero) (check-trap cause epc tval ctx))
-            (else (fatal-trap cause epc tval ctx)))))
+            (else (fatal-trap cause epc tval ctx))))
+  (keep-cons-run ctx))
+
+;; The handler conses out of the cons run of the task it interrupted - gp and
+;; tp are only registers, and nothing changes them on the way in - but the stub
+;; puts back the gp and tp it saved on the way in. So every pair the handler
+;; made went out a second time as soon as the task consed again: the same cell,
+;; two owners. Usually nobody noticed, because what a fault report makes is
+;; garbage by the time it has been printed. In a window it is not garbage. The
+;; report draws, drawing damages, and the damage list belongs to the compositor
+;; - so `(ackermann 5 5)` in a shell overflowed its stack, said so correctly,
+;; and then the restarted prompt consed over the damage list and took the
+;; compositor down, or ran into an illegal instruction on the way.
+;;
+;; So the run goes back into the frame it was saved in, as the handler left
+;; it. That frame is `ctx` whatever else happened here: a task switch points
+;; mscratch at the next task's frame and leaves this one to be resumed later,
+;; with this run. A collection in the handler empties the run, and the task
+;; comes back to an empty run and asks for a fresh chunk - where before it
+;; came back to its old one, which the compaction had just filled with live
+;; pairs.
+(define (keep-cons-run ctx)
+  (%sync-cons-run)
+  (%st-word! (ctx-reg ctx reg-gp) (%ld-word lg-cons-run))
+  (%st-word! (ctx-reg ctx reg-tp) (%ld-word lg-cons-run-end))
+  nil)
 
 ;; ------------------------- the instructions that check their operands
 ;; car, cdr and their setters check a tag; the indexed accesses check a tag, a

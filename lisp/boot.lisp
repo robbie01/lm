@@ -254,8 +254,11 @@
     ;; of them write the same pair. Give each its own and the sequence is
     ;; private, so there is nothing to race with.
     ;;
-    ;; What the collector does about the runs it invalidates by compacting is
-    ;; in exec.lisp, under `drop-task-run`.
+    ;; The handler conses out of that same run, and hands it back into the
+    ;; frame before returning - see `keep-cons-run` - so what goes back here
+    ;; is the run as the handler left it, not as the trap found it. What the
+    ;; collector does about the runs it invalidates by compacting is in
+    ;; exec.lisp, under `drop-task-run`.
     (let ((r 1))
       (while (%< r 32)
         (if (%= r reg-t0) nil (i-lw a r $t0 (ctx-off r)))

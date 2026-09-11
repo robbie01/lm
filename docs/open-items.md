@@ -231,6 +231,21 @@ running in the reserve on the way down. lmdev checks the register itself.
 What it does not cover: a program that writes below its stack pointer without
 moving it, and the trap handler's own stack, which has no limit.
 
+**It still took the machine down from a window.** The overflow was caught and
+reported correctly - and then the compositor died on a damage rectangle that
+was not one, or something else ran into an illegal instruction. The fault
+handler conses out of the interrupted task's cons run, since gp and tp are only
+registers and nothing changes them on the way in, but the trap stub put back
+the gp and tp it had saved on the way in. So every pair the handler made was
+handed out a second time the next time the task consed. At the console nobody
+could tell, because what a report makes is garbage once it has been printed.
+In a window the report draws, drawing damages, and the damage list belongs to
+the compositor: the restarted prompt consed straight over it. `handle-trap`
+now writes the run back into the frame before it returns (`keep-cons-run` in
+sys.lisp). That also covers a collection inside the handler, after which the
+task used to come back to its old run - space the compaction had just filled
+with live pairs.
+
 ## Fixed: the scheduler lost tasks
 
 A task could be taken off the ready list by something that had nothing to do
