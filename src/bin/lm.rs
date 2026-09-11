@@ -77,13 +77,38 @@ struct Cli {
     trace_traps: bool,
 }
 
+/// `\n` in a script is a newline, so that a script can be typed on one line -
+/// except inside a character literal. `#\n` is the character n and
+/// `#\newline` is the newline character, and both used to arrive cut in two:
+/// a `#`, a line break, and the rest of the name as a symbol.
+fn unescape_script(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        match c {
+            // `#\` and the character after it, whatever it is, as they are.
+            '#' if it.peek() == Some(&'\\') => {
+                out.push('#');
+                out.extend(it.next());
+                out.extend(it.next());
+            }
+            '\\' if it.peek() == Some(&'n') => {
+                it.next();
+                out.push('\n');
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     let o = boot::Options {
         image: cli.image,
         window: !cli.no_window,
         scale: cli.scale,
-        script: cli.script.map(|s| s.replace("\\n", "\n")),
+        script: cli.script.map(|s| unescape_script(&s)),
         interactive: !cli.batch,
         budget: cli.budget.unwrap_or(u64::MAX),
         disk: cli.disk,
