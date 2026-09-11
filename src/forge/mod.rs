@@ -95,6 +95,7 @@ pub fn rebuild(from: &str, out: &str, verbose: bool, check: bool) -> i32 {
         disk: if check { None } else { Some(out.to_string()) },
         trace_exit: verbose,
         isaprof: false,
+        fnprof: false,
         screenshot: None,
         trace_traps: false,
     };

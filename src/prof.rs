@@ -386,3 +386,83 @@ frame/spill loads of a value already in a register: {} ({:.1}% of all instructio
     }
     out
 }
+
+/// Where the time goes, by function.
+///
+/// The histogram above says which instructions run; this says whose. With
+/// `--fnprof` the outer loop hands the core slices of under a thousand
+/// instructions and charges each one to the function the machine is standing
+/// in - the code object every Lisp frame keeps in s1 - and once to every
+/// function on the frame chain above it. The first is where the time was
+/// spent, the second what it was spent on behalf of.
+///
+/// A leaf that never sets up a frame of its own is charged to its caller,
+/// which is also who a backtrace would name. Names are read the first time a
+/// code object is seen, so one freed and reused during the run keeps the name
+/// it had first.
+#[derive(Default)]
+pub struct FnProf {
+    own: std::collections::HashMap<u32, u64>,
+    total: std::collections::HashMap<u32, u64>,
+    names: std::collections::HashMap<u32, String>,
+    all: u64,
+    chain: Vec<u32>,
+}
+
+/// Small enough that a slice is mostly one function, and not a round number,
+/// so that it does not fall into step with a loop.
+pub const FNPROF_SLICE: u64 = 997;
+
+impl FnProf {
+    pub fn sample(&mut self, m: &crate::mach::Machine, used: u64) {
+        self.all += used;
+        let mut code = m.x[9];
+        let mut s0 = m.x[8];
+        *self.own.entry(code).or_insert(0) += used;
+        // The same walk as `cpu::watch_backtrace`: every prologue leaves its
+        // caller's code object at s0-16 and its caller's frame base at s0-8.
+        // A function recursing on the chain is charged once.
+        self.chain.clear();
+        for _ in 0..64 {
+            if !self.chain.contains(&code) {
+                self.chain.push(code);
+                *self.total.entry(code).or_insert(0) += used;
+                if !self.names.contains_key(&code) {
+                    self.names.insert(code, crate::cpu::name_of(m, code));
+                }
+            }
+            if s0 < 0x2000 || s0 >= 0x0100_0000 {
+                break;
+            }
+            code = m.peek32(s0.wrapping_sub(16));
+            s0 = m.peek32(s0.wrapping_sub(8));
+        }
+    }
+
+    pub fn report(&self) -> String {
+        let all = self.all.max(1) as f64;
+        let name = |code: &u32| self.names.get(code).map(|s| s.as_str()).unwrap_or("?");
+        let mut own: Vec<(&u32, &u64)> = self.own.iter().collect();
+        own.sort_by(|a, b| b.1.cmp(a.1));
+        let mut out = format!(
+            "\nwhere {} instructions went, by the function they ran in:\n    own%  total%  function\n",
+            self.all
+        );
+        for (code, n) in own.iter().take(40) {
+            let t = self.total.get(*code).copied().unwrap_or(0);
+            out.push_str(&format!(
+                "  {:>6.1}  {:>6.1}  {}\n",
+                100.0 * **n as f64 / all,
+                100.0 * t as f64 / all,
+                name(code)
+            ));
+        }
+        let mut total: Vec<(&u32, &u64)> = self.total.iter().collect();
+        total.sort_by(|a, b| b.1.cmp(a.1));
+        out.push_str("\nand by the function they ran on behalf of:\n  total%  function\n");
+        for (code, n) in total.iter().take(40) {
+            out.push_str(&format!("  {:>6.1}  {}\n", 100.0 * **n as f64 / all, name(code)));
+        }
+        out
+    }
+}

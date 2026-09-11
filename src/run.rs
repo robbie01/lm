@@ -142,6 +142,10 @@ pub fn run(m: &mut Machine, budget: u64) -> Stop {
             // happens to come round.
             .min(crate::dev::due(m).saturating_sub(m.cycles).max(1))
             .min(m.gfx.next_vbl.saturating_sub(m.cycles).max(1))
+            // A profile wants short slices, each mostly one function. It
+            // changes nothing the machine can see: every event still lands on
+            // its own cycle.
+            .min(if m.fnprof.is_some() { crate::prof::FNPROF_SLICE } else { u64::MAX })
             .min(u32::MAX as u64) as u32;
         if q == 0 {
             return Stop::Fuel;
@@ -156,6 +160,10 @@ pub fn run(m: &mut Machine, budget: u64) -> Stop {
         m.cycles = m.cycles.wrapping_add(used);
         m.executed += used;
         left = left.saturating_sub(used);
+        if let Some(mut p) = m.fnprof.take() {
+            p.sample(m, used);
+            m.fnprof = Some(p);
+        }
         // And again as soon as the clock has moved, not only at the top of the
         // next round: a run that ends here - its budget spent, or halted -
         // would otherwise stop with a transfer that was due before now never

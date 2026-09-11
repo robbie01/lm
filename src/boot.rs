@@ -15,6 +15,7 @@ pub struct Options {
     pub disk: Option<String>,
     pub trace_exit: bool,
     pub isaprof: bool,
+    pub fnprof: bool,
     pub screenshot: Option<String>,
     pub trace_traps: bool,
 }
@@ -31,6 +32,7 @@ impl Default for Options {
             disk: None,
             trace_exit: false,
             isaprof: false,
+            fnprof: false,
             screenshot: None,
             trace_traps: false,
         }
@@ -77,6 +79,9 @@ pub fn boot(o: &Options) -> i32 {
         m.prof_on = true;
         m.table = &crate::cpu::PROF_TABLE;
     }
+    if o.fnprof {
+        m.fnprof = Some(Box::default());
+    }
     if std::env::var("LM_WATCH_S2").is_ok() {
         m.table = &crate::cpu::WATCH_TABLE;
     }
@@ -117,6 +122,9 @@ pub fn boot(o: &Options) -> i32 {
         if m.prof_on {
             eprint!("{}", crate::prof::report(&m.prof));
             eprint!("{}", crate::prof::leaf_report(&m.prof, &m.watch));
+        }
+        if let Some(p) = &m.fnprof {
+            eprint!("{}", p.report());
         }
     }
     if let Some(path) = &o.screenshot {

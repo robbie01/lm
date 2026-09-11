@@ -60,6 +60,14 @@ struct Cli {
     #[arg(long)]
     isaprof: bool,
 
+    /// Report which functions the instructions were spent in, on exit
+    ///
+    /// Charges every thousand or so instructions to the function the machine
+    /// is in and to each function on the frame chain above it. Implies
+    /// --stats.
+    #[arg(long)]
+    fnprof: bool,
+
     /// Write the final display contents as a PPM
     #[arg(long, value_name = "FILE")]
     shot: Option<String>,
@@ -79,8 +87,9 @@ fn main() -> std::process::ExitCode {
         interactive: !cli.batch,
         budget: cli.budget.unwrap_or(u64::MAX),
         disk: cli.disk,
-        trace_exit: cli.stats || cli.isaprof,
+        trace_exit: cli.stats || cli.isaprof || cli.fnprof,
         isaprof: cli.isaprof,
+        fnprof: cli.fnprof,
         screenshot: cli.shot,
         trace_traps: cli.trace_traps,
     };

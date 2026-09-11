@@ -414,7 +414,7 @@ pub fn watch_backtrace(m: &Machine) -> String {
     out
 }
 
-fn name_of(m: &Machine, code: u32) -> String {
+pub(crate) fn name_of(m: &Machine, code: u32) -> String {
     if code & 7 != 4 {
         return String::from("?");
     }

@@ -117,6 +117,9 @@ pub struct Machine {
     pub prof: Box<[u64; crate::prof::SLOTS]>,
     pub watch: Box<crate::prof::Watch>,
     pub prof_on: bool,
+    /// Samples of which function the machine is in, taken only with
+    /// `--fnprof`. See `prof::FnProf`.
+    pub fnprof: Option<Box<crate::prof::FnProf>>,
     /// Which dispatch table the core is using: the plain one, or the one that
     /// counts on the way past.
     pub table: &'static [crate::cpu::Handler; 64],
@@ -185,6 +188,7 @@ impl Machine {
             prof: Box::new([0; crate::prof::SLOTS]),
             watch: Box::default(),
             prof_on: false,
+            fnprof: None,
             sym_name_id: Vec::new(),
             name_ids: std::collections::HashMap::new(),
             table: &crate::cpu::TABLE,
