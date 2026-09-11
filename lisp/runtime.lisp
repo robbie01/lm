@@ -82,7 +82,11 @@
 ;; slots hold whatever the last owner left, which the collector would trace.
 (define (alloc-object type len)
   (without-interrupts
-  (let* ((size (%logand (%+ (%+ 4 (object-payload type len)) 7) -8))
+  ;; A record, which is most of what gets made, is sized here rather than by
+  ;; a call: a slot is a word, and the header is one more.
+  (let* ((size (%logand (%+ (if (%= type t-record) (%lsh len 2) (object-payload type len))
+                            11)
+                        -8))
          (p (%funcall *object-allocator* size)))
     (if (%= p 0)
         (begin

@@ -96,7 +96,7 @@
 ;; frames at sixty hertz - so compositing everything every time is not a thing
 ;; this machine can afford, and what actually moved is.
 (define *damage* nil)      ; a list of rectangles, newest first
-(define damage-max 16)     ; beyond which a new one joins its nearest
+(define damage-max 32)     ; beyond which a new one joins its nearest
 
 (define (rect-union a b)
   (if (%null? a)
@@ -297,7 +297,44 @@
 ;;
 ;; Windows are copied from their front bitmaps, which change only when an
 ;; owner says a part is finished - see `window-damage-rect`.
+;;
+;; Most damage lies wholly inside the frontmost window it touches - a pupil,
+;; a character, a window's own frame - and is then that window's pixels and
+;; nobody else's: one copy, with no region to work out and nothing made. A
+;; window's footprint, shadow included, is what counts as touching, so that a
+;; shadow falling across the damage sends it the long way round.
 (define (composite r)
+  (let ((rx (rect-x r)) (ry (rect-y r))
+        (rx2 (rect-x2 r)) (ry2 (rect-y2 r))
+        (hit nil)                   ; the frontmost window r touches
+        (l *windows*))
+    (while (if hit nil (%cons? l))
+      (let ((w (%car l)))
+        (if (if (%< rx (%+ (win-x w) (%+ (win-w w) 1)))
+                (if (%< (win-x w) rx2)
+                    (if (%< ry (%+ (win-y w) (%+ (win-h w) 1))) (%< (win-y w) ry2) nil)
+                    nil)
+                nil)
+            (set! hit w)
+            nil))
+      (set! l (%cdr l)))
+    (if (if hit
+            (if (%>= rx (win-x hit))
+                (if (%>= ry (win-y hit))
+                    (if (%<= rx2 (%+ (win-x hit) (win-w hit)))
+                        (%<= ry2 (%+ (win-y hit) (win-h hit)))
+                        nil)
+                    nil)
+                nil)
+            nil)
+        (bm-blit-rect (win-front hit) *screen*
+                      (%- rx (win-x hit)) (%- ry (win-y hit))
+                      rx ry (rect-w r) (rect-h r))
+        (composite-pieces r)))
+  nil)
+
+;; Everything else, front to back and every pixel once.
+(define (composite-pieces r)
   (let ((spoken-for nil))           ; what something in front has taken of r
     (dolist (w *windows*)           ; front to back
       (let ((x (win-x w)) (y (win-y w)) (ww (win-w w)) (wh (win-h w)))

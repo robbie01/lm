@@ -93,9 +93,11 @@ pub fn rebuild(from: &str, out: &str, verbose: bool, check: bool) -> i32 {
         // stops and says where rather than running for ever.
         budget: 40_000_000_000,
         disk: if check { None } else { Some(out.to_string()) },
-        trace_exit: verbose,
+        // LM_FNPROF=1 profiles what the machine does during a rebuild, the
+        // same report `lm --fnprof` prints.
+        trace_exit: verbose || std::env::var_os("LM_FNPROF").is_some(),
         isaprof: false,
-        fnprof: false,
+        fnprof: std::env::var_os("LM_FNPROF").is_some(),
         screenshot: None,
         trace_traps: false,
     };

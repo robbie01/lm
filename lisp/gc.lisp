@@ -267,12 +267,6 @@
   (uart-nl)
   (%halt 4))
 
-(define (gc-slots base from to)
-  (let ((i from))
-    (while (%< i to)
-      (gc-slot (%+ base (%* 4 i)))
-      (set! i (%+ i 1)))))
-
 ;; Which words of an object are pointers. Used by both passes: marking follows
 ;; them, and the update pass rewrites them, so there is one description of an
 ;; object's shape rather than two that could disagree.
@@ -475,11 +469,19 @@
     nfree))
 
 ;; ---------------------------------------------------------------- obj sweep
+;; `object-payload`, spelled out rather than called, and a record - which is
+;; most of what a busy heap is made of - asked about first. Every walk of
+;; object space asks this once for every object below the frontier, live or
+;; dead, and the call cost more than the answer.
 (defsubst (obj-block-size h)
   (let ((ty (%logand h 255)) (n (%lsh h -8)))
-    (if (%= ty t-free)
-        (%lsh n 3)
-        (%logand (%+ (%+ 4 (object-payload ty n)) 7) -8))))
+    (cond ((%= ty t-record) (%logand (%+ (%lsh n 2) 11) -8))
+          ((%= ty t-free) (%lsh n 3))
+          ((%= ty t-string) (%logand (%+ n 11) -8))
+          ((%= ty t-bytes) (%logand (%+ n 11) -8))
+          ((%= ty t-symbol) (%logand (%+ (%lsh sym-slots 2) 11) -8))
+          ((%= ty t-float) 8)
+          (else (%logand (%+ (%lsh n 2) 11) -8)))))
 
 (defsubst (obj-bin-addr gran)
   (%+ obj-bins (%lsh (if (%< gran obj-bin-count) gran 0) 2)))
@@ -498,9 +500,21 @@
       (%st-fixnum! (%+ obj-bins (%lsh i 2)) 0)
       (set! i (%+ i 1)))))
 
-(define (gc-sweep-objects)
+;; Objects do not move, so the update pass and the sweep want the same walk:
+;; every object below the frontier, the live ones to have their pointers to
+;; pairs rewritten and the dead ones to be gathered into free blocks. They
+;; used to be two walks, one inside the compaction and one after it, and a
+;; walk costs every object in the heap, dead or alive. On a heap full of what
+;; a minute of drawing threw away that was most of the collection.
+;;
+;; Called with `*gc-updating*` set, between the update of the pairs and their
+;; move, which is where the object half of the update always happened.
+;;
+;; A dead run at the very top is not made into a free block at all: the
+;; frontier comes back down to the last live object, and the next collection
+;; has that much less to walk.
+(define (gc-update-sweep-objects hi)
   (let ((p obj-base)
-        (hi (%global lg-obj-ptr))
         (run 0)
         (runlen 0)
         (nfree 0))
@@ -511,18 +525,16 @@
         (if (%<= size 0) (gc-corrupt p) nil)
         (if (gc-marked? p)
             (begin
+              (gc-object-slots (%+ p 4))
               (if (%> runlen 0)
                   (begin (gc-free-block run runlen) (set! nfree (%+ nfree runlen)))
                   nil)
-              (set! run 0)
               (set! runlen 0))
             (begin
               (if (%= runlen 0) (set! run p) nil)
               (set! runlen (%+ runlen size))))
         (set! p (%+ p size))))
-    (if (%> runlen 0)
-        (begin (gc-free-block run runlen) (set! nfree (%+ nfree runlen)))
-        nil)
+    (if (%> runlen 0) (%set-global! lg-obj-ptr run) nil)
     (%set-global! lg-obj-free-n nfree)
     nfree))
 
@@ -556,6 +568,7 @@
 
 (define *gc-updating* nil)
 (define *gc-moved* 0)
+(define *obj-freed* 0)
 (define *gc-compacted* nil)
 
 ;; ---------------------------------------------------------------- forwarding
@@ -685,10 +698,23 @@
       (%from-addr (gc-forward-cons (%addr-of v)))
       v))
 
+;; Every pointer-bearing word of an object from slot `from` up to slot `to`.
+;; The two passes are spelled out apart, with the push and the rewrite open-
+;; coded: this is every pointer in every live object, once to mark it and once
+;; to update it, and a call per word to a function that then asked which pass
+;; it was in cost more than the word did.
+(define (gc-slots base from to)
+  (let ((p (%+ base (%lsh from 2)))
+        (e (%+ base (%lsh to 2))))
+    (if *gc-updating*
+        (while (%< p e) (gc-update-slot p) (set! p (%+ p 4)))
+        (while (%< p e) (gc-push (%ld-word p)) (set! p (%+ p 4))))))
+
 ;; ---------------------------------------------------------------- update
-(define (gc-update-live cons-hi obj-hi)
-  ;; Every pointer inside every live object. The roots are done separately,
-  ;; through the same walkers that found them in the first place.
+(define (gc-update-pairs cons-hi)
+  ;; Every pointer inside every live pair. The roots are done separately,
+  ;; through the same walkers that found them in the first place, and the
+  ;; objects by `gc-update-sweep-objects`.
   (let ((p cons-base) (mp gc-bitmap))
     (while (%< p cons-hi)
       (if (gc-run-dead? mp)
@@ -701,14 +727,27 @@
                   nil)
               (set! q (%+ q 8)))))
       (set! p (%+ p 256))
-      (set! mp (%+ mp 4))))
-  (let ((p obj-base))
-    (while (%< p obj-hi)
-      (let ((size (obj-block-size (%ld-fixnum p))))
-        (if (gc-marked? p) (gc-object-slots (%+ p 4)) nil)
-        (set! p (%+ p size))))))
+      (set! mp (%+ mp 4)))))
 
 ;; ---------------------------------------------------------------- move
+;; A pinned pair stays where it is, so the pairs below it slide away from it
+;; and leave a hole: from where the slide had got to, up to the pin. That hole
+;; used to be lost for as long as the pin lasted - and a pin is nearly always
+;; one of the newest pairs in the heap, found in a register of a task that was
+;; part way through using it, so it sat at the very top and held the whole of
+;; cons space up behind it. Every collection left the top of cons space
+;; wherever allocation had pushed it, the next went on from there, and in the
+;; end there was no fresh ground left and every run anybody asked for was a
+;; collection.
+;;
+;; So a hole worth having becomes a run, on `lg-cons-free`, for `refill-cons`
+;; to hand out before any fresh ground. Nothing below the pin is still to be
+;; moved and nothing will be moved into the hole, so its first cell can take
+;; the run's description the moment the walk reaches the pin.
+(define gc-gap-min 1024)
+(define *gap-bytes* 0)       ; in holes handed to `lg-cons-free` this time
+(define *cons-live* 0)       ; bytes of pairs the last collection kept
+
 (define (gc-move-cons hi)
   ;; The walk is in address order, so the destination is a running pointer and
   ;; not a lookup. `gc-forward-cons` replays a block of mark bits every time it
@@ -716,7 +755,9 @@
   ;; pass asks and the wrong thing to do sixty thousand times in a row. The
   ;; rule below is the same one `gc-plan-cons` used to build the table, so the
   ;; two cannot disagree.
-  (let ((p cons-base) (mp gc-bitmap) (free cons-base) (n 0))
+  (let ((p cons-base) (mp gc-bitmap) (free cons-base) (n 0) (live 0) (holes 0))
+    (set! *run-last* 0)
+    (%set-global! lg-cons-free 0)
     (while (%< p hi)
       ;; `free` only moves for a live pair, so a dead run leaves it where it
       ;; was - the same rule `gc-plan-cons` followed.
@@ -726,20 +767,29 @@
             (if (%> e hi) (set! e hi) nil)
             (while (%< q e)
               (if (gc-marked? q)
-                  (if (gc-pinned? q)
-                      (if (%> (%+ q 8) free) (set! free (%+ q 8)) nil)
-                      (begin
-                        (if (%= free q)
-                            nil
-                            (begin
-                              (%st-word! free (%ld-word q))
-                              (%st-word! (%+ free 4) (%ld-word (%+ q 4)))
-                              (set! n (%+ n 1))))
-                        (set! free (%+ free 8))))
+                  (begin
+                    (set! live (%+ live 8))
+                    (if (gc-pinned? q)
+                        (begin
+                          (if (%>= (%- q free) gc-gap-min)
+                              (begin (gc-add-run free q)
+                                     (set! holes (%+ holes (%- q free))))
+                              nil)
+                          (if (%> (%+ q 8) free) (set! free (%+ q 8)) nil))
+                        (begin
+                          (if (%= free q)
+                              nil
+                              (begin
+                                (%st-word! free (%ld-word q))
+                                (%st-word! (%+ free 4) (%ld-word (%+ q 4)))
+                                (set! n (%+ n 1))))
+                          (set! free (%+ free 8)))))
                   nil)
               (set! q (%+ q 8)))))
       (set! p (%+ p 256))
       (set! mp (%+ mp 4)))
+    (set! *cons-live* live)
+    (set! *gap-bytes* holes)
     n))
 
 (define (gc-move-objects hi)
@@ -830,8 +880,12 @@
     (set! *gc-updating* t)
     (gc-roots)
     (set! *t-upd* (%cycles))
-    (gc-update-live cons-hi obj-hi)
+    (gc-update-pairs cons-hi)
     (set! *t-upd* (%- (%cycles) *t-upd*))
+    ;; Objects are updated and swept in the one walk.
+    (set! *t-obj* (%cycles))
+    (set! *obj-freed* (gc-update-sweep-objects obj-hi))
+    (set! *t-obj* (%- (%cycles) *t-obj*))
     (set! *gc-updating* nil)
     (set! *t-mv* (%cycles))
     (set! *gc-moved* (gc-move-cons cons-hi))
@@ -839,13 +893,15 @@
     (if *gc-check* (gc-verify cons-top) nil)
     (if (%> cons-hi *cons-dirty-top*) (set! *cons-dirty-top* cons-hi) nil)
     (%set-global! lg-cons-ptr cons-top)
-    ;; An empty run, for this task and for every other. Nobody is holding a
-    ;; pointer into the heap that just slid out from under them: the next cons
-    ;; anybody does finds no room and asks for a fresh chunk.
+    ;; An empty run for this task. Every suspended one keeps just the cell its
+    ;; run was about to use, which `gc-invalidate-runs` sees to. The next cons
+    ;; anybody does after that finds no room and asks for a run - one of the
+    ;; holes the move left behind a pinned pair, while there are any, and fresh
+    ;; ground after them.
     (%set-global! lg-cons-run cons-top)
     (%set-global! lg-cons-run-end cons-top)
-    (%set-global! lg-cons-free 0)
-    (%set-global! lg-cons-free-n (%lsh (%- cons-limit cons-top) -3))
+    (%set-global! lg-cons-free-n (%+ (%lsh (%- cons-limit cons-top) -3)
+                                     (%lsh *gap-bytes* -3)))
     (%reload-cons-run)
     (gc-invalidate-runs)
     (set! *gc-compacted* t)
@@ -860,6 +916,39 @@
 ;; table that was a page of zeroes and compute forwarding addresses out of it.
 ;; `cpop` retired the table and the flag with it, and there is now nothing
 ;; about the collector for a save to get wrong.
+
+;; ---------------------------------------------------------------- when
+;; A collection costs the live data plus the heap it walks, and the heap it
+;; walks is everything below the two frontiers - so the question is not only
+;; how often to collect but how far to let the frontiers get first. It used to
+;; be as far as they would go: sixty-four megabytes of objects and a hundred
+;; and twenty-eight of pairs, filled a frame's worth of rectangles at a time
+;; and then walked end to end. On a workbench full of eyes that was a pause of
+;; seconds every few seconds.
+;;
+;; Now a collection comes when what has been allocated since the last one
+;; reaches twice the live data or eight megabytes, whichever is more. That
+;; keeps the heap walked to a small multiple of what is live, and the work per
+;; byte allocated the same however large the live data grows.
+;;
+;; Live means what the last collection found alive, counted pair by pair and
+;; object by object - not how high the frontiers stand. Those can be held up
+;; by a pinned pair (see `gc-move-cons`), and a budget measured off them grew
+;; by half again every collection.
+(define gc-budget-min 8388608)
+(define *gc-budget* gc-budget-min)    ; bytes allowed between collections
+(define *gc-allocated* 0)             ; object bytes handed out since the last
+(define *cons-given* 0)               ; and bytes of cons runs
+
+(define (gc-over-budget?)
+  (%> (%+ *gc-allocated* *cons-given*) *gc-budget*))
+
+(define (gc-set-budget)
+  (let ((live (%+ (%- (%- (%global lg-obj-ptr) obj-base) (%global lg-obj-free-n))
+                  *cons-live*)))
+    (set! *gc-allocated* 0)
+    (set! *cons-given* 0)
+    (set! *gc-budget* (if (%> (%* 2 live) gc-budget-min) (%* 2 live) gc-budget-min))))
 
 (define (gc-collect)
   ;; Interrupts are off for the whole of this and back on afterwards only if
@@ -893,11 +982,10 @@
                       (set! *t-compact* (%- (%cycles) t0))
                       (let ((v (gc-compact)))
                         (set! *t-compact* (%- (%- (%cycles) t0) *t-compact*))
-                        (set! *t-obj* (%- (%cycles) t0))
                         v)))
-            (o (begin (let ((v (gc-sweep-objects)))
-                        (set! *t-obj* (%- (%- (%cycles) t0) *t-obj*))
-                        v))))
+            ;; Swept inside the compaction, by the walk that updates them.
+            (o *obj-freed*))
+        (gc-set-budget)
         (set! *gc-count* (%+ *gc-count* 1))
         (set! *gc-cycles* (%+ *gc-cycles* (%- (%cycles) t0)))
         (%set-global! lg-gccount *gc-count*)
@@ -911,7 +999,17 @@
               (uart-num-raw o)
               (uart-string " bytes, ")
               (uart-num-raw (%logand (%- (%cycles) t0) 1073741823))
-              (uart-string " cycles]")
+              (uart-string " cycles: marking ")
+              (uart-num-raw (%+ *t-roots* *t-drain*))
+              (uart-string ", pairs ")
+              (uart-num-raw (%+ *t-plan* (%+ *t-upd* *t-mv*)))
+              (uart-string ", objects ")
+              (uart-num-raw *t-obj*)
+              (uart-string "; ")
+              (uart-num-raw (%lsh *cons-live* -3))
+              (uart-string " pairs live, next after ")
+              (uart-num-raw *gc-budget*)
+              (uart-string " bytes]")
               (uart-nl))
             nil)
         c))))
@@ -936,34 +1034,56 @@
   ;; The chunk is this task's alone until it is exhausted. That is the whole
   ;; reason it exists: the four-instruction allocator is not atomic, and a run
   ;; shared between tasks would hand the same cell to two of them.
+  ;;
+  ;; A hole the last compaction left behind a pinned pair goes out before any
+  ;; fresh ground does: see `gc-move-cons`.
   (without-interrupts
     (let ((p (%global lg-cons-ptr)))
-      (if (%< (%- cons-limit p) cons-chunk)
+      ;; This collection's allowance spent (see `gc-budget-min`), or nowhere
+      ;; left to carve a run from.
+      (if (if (gc-over-budget?)
+              t
+              (if (%< (%- cons-limit p) cons-chunk) (%= (%global lg-cons-free) 0) nil))
           (begin (gc-collect) (set! p (%global lg-cons-ptr)))
           nil)
-      (if (%<= (%- cons-limit p) 0) (out-of-memory "cons space") nil)
-      (let ((top (if (%< (%- cons-limit p) cons-chunk) cons-limit (%+ p cons-chunk))))
-        (%set-global! lg-cons-ptr top)
-        (%set-global! lg-cons-run p)
-        (%set-global! lg-cons-run-end top)
-        ;; Taken here, with interrupts still off, rather than by the stub after
-        ;; this has returned. Those two globals are one pair for the whole
-        ;; machine: a task preempted between storing them and picking them up
-        ;; comes back to whatever the task that ran in the gap left there, and
-        ;; the two of them then bump the same run - handing the same cell to
-        ;; both, which is the one thing a private chunk exists to prevent.
-        (%reload-cons-run)
-        p))))
+      (let ((hole (%global lg-cons-free)))
+        (if (%> hole 0)
+            (begin
+              (%set-global! lg-cons-free (%ld-fixnum (%+ hole 4)))
+              (gc-hand-out-run hole (%ld-fixnum hole)))
+            (begin
+              (if (%<= (%- cons-limit p) 0) (out-of-memory "cons space") nil)
+              (let ((top (if (%< (%- cons-limit p) cons-chunk) cons-limit (%+ p cons-chunk))))
+                (%set-global! lg-cons-ptr top)
+                (gc-hand-out-run p top))))))))
+
+(define (gc-hand-out-run start end)
+  (set! *cons-given* (%+ *cons-given* (%- end start)))
+  (%set-global! lg-cons-run start)
+  (%set-global! lg-cons-run-end end)
+  ;; Taken here, with interrupts still off, rather than by the stub after this
+  ;; has returned. Those two globals are one pair for the whole machine: a
+  ;; task preempted between storing them and picking them up comes back to
+  ;; whatever the task that ran in the gap left there, and the two of them then
+  ;; bump the same run - handing the same cell to both, which is the one thing
+  ;; a private chunk exists to prevent.
+  (%reload-cons-run)
+  start)
 
 ;; ---------------------------------------------------------------- allocation
 (define (obj-take size)
-  ;; Exact fit first, then split from the big-block list, then bump.
-  (let* ((gran (%lsh size -3))
-         (bin (obj-bin-addr gran))
-         (p (if (%< gran obj-bin-count) (%ld-fixnum bin) 0)))
-    (if (%> p 0)
-        (begin (%st-fixnum! bin (%ld-fixnum (%+ p 4))) p)
-        (obj-take-slow size gran))))
+  ;; Exact fit first, then split from the big-block list, then bump - unless
+  ;; this collection's allowance is spent, which is answered as no room at
+  ;; all: `alloc-object` collects and asks again.
+  (if (%> *gc-allocated* *gc-budget*)
+      0
+      (let* ((gran (%lsh size -3))
+             (bin (obj-bin-addr gran))
+             (p (if (%< gran obj-bin-count) (%ld-fixnum bin) 0)))
+        (set! *gc-allocated* (%+ *gc-allocated* size))
+        (if (%> p 0)
+            (begin (%st-fixnum! bin (%ld-fixnum (%+ p 4))) p)
+            (obj-take-slow size gran)))))
 
 (define (obj-take-slow size gran)
   ;; Walk the oversized list looking for something to cut down.
@@ -1158,8 +1278,17 @@
   ;; down to the top of the live data, so this is everything the machine has
   ;; dirtied since it booted and no longer needs.
   (gc-blank (%global lg-cons-ptr) *cons-dirty-top*)
+  (gc-blank-cons-holes)
   (gc-blank-free-objects)
   (gc-blank-free-code))
+
+;; The holes pinned pairs left, which lie below the top of cons space and so go
+;; into the file: everything but the two words that make each one a run.
+(define (gc-blank-cons-holes)
+  (let ((r (%global lg-cons-free)))
+    (while (%> r 0)
+      (gc-blank (%+ r 8) (%ld-fixnum r))
+      (set! r (%ld-fixnum (%+ r 4))))))
 
 ;; ---------------------------------------------------------------- reporting
 (define (room)

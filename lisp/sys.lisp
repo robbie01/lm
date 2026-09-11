@@ -665,13 +665,25 @@
 ;; ---------------------------------------------------------------- repl
 (define *repl-depth* 0)
 
-(define (repl)
+(define (repl . then)
   ;; Where the bindings stand here is what an error unwinds to: the prompt's
   ;; own streams and package survive it, and whatever the form that failed had
   ;; bound on top of them does not.
-  (let ((mark (task-binds)))
-    (set! *repl-restart* (lambda () (unwind-binds-to! mark) (repl-loop))))
-  (repl-loop))
+  ;;
+  ;; `then` is what saying goodbye does, and it has to happen however the
+  ;; prompt got to the goodbye. After an error the prompt runs on as the
+  ;; restart, on a fresh stack whose bottom ends the task - so the machine's
+  ;; own prompt used to go on running after `bye` whenever anything had gone
+  ;; wrong in it first, and a script that had hit an error never ended.
+  (let ((mark (task-binds))
+        (done (if (%cons? then) (%car then) nil)))
+    (set! *repl-restart*
+          (lambda ()
+            (unwind-binds-to! mark)
+            (repl-loop)
+            (if done (%funcall done) nil)))
+    (repl-loop)
+    (if done (%funcall done) nil)))
 
 ;; Swallow the newline the reader stopped just short of, so that what the form
 ;; prints starts on a line of its own. Best effort and never blocking: if the
@@ -746,6 +758,6 @@
   (set-current-package! (make-package "user"))
   ;; The first prompt is the machine's own: when it says goodbye, so does the
   ;; machine. One in a window is a task, and only ends its task.
-  (repl)
+  (repl (lambda () (%halt 0)))
   (%halt 0)
   0)
