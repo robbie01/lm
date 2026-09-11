@@ -529,10 +529,17 @@
         nil)))
 
 ;; ---------------------------------------------------------------- keys
-;; One queue per window, oldest first. The input server writes to it and the
+;; One queue per window, oldest first. The input task writes to it and the
 ;; shell's stream reads from it, which is the whole of the routing.
+;;
+;; Both ends hold Forbid. Each is a read of the queue followed by a write of
+;; it, and they run in two different tasks: a push preempted between its read
+;; and its write put back a queue that still had the key the shell had just
+;; taken, and a pop preempted the same way dropped whatever arrived in between.
+;; Typing at a person's speed hardly ever lands in that window; typing at a
+;; program's speed garbled a line in a way that still parsed.
 (define (window-push-key win c)
-  (set-win-keys! win (append (win-keys win) (list c)))
+  (without-preemption (set-win-keys! win (append (win-keys win) (list c))))
   ;; And wake whoever is reading that window. A shell blocked on its keyboard
   ;; should be woken by a keystroke, not by a clock it asks sixty times a
   ;; second whether one has arrived.
@@ -545,10 +552,11 @@
   nil)
 
 (define (window-pop-key win)
-  (let ((q (win-keys win)))
-    (if (%cons? q)
-        (begin (set-win-keys! win (%cdr q)) (%car q))
-        nil)))
+  (without-preemption
+    (let ((q (win-keys win)))
+      (if (%cons? q)
+          (begin (set-win-keys! win (%cdr q)) (%car q))
+          nil))))
 
 ;; ---------------------------------------------------------------- shells
 ;; A shell keeps characters, not pixels: a grid it can redraw from, which is

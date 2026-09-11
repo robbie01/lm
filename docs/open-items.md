@@ -246,6 +246,11 @@ sys.lisp). That also covers a collection inside the handler, after which the
 task used to come back to its old run - space the compaction had just filled
 with live pairs.
 
+Testing it turned up a second bug. A window's key queue was read and rewritten
+by the input task and by the shell's task with no lock, so keys arriving faster
+than a person types were dropped or doubled, garbling a line in a way that
+still parsed. Both ends hold Forbid now.
+
 ## Fixed: the scheduler lost tasks
 
 A task could be taken off the ready list by something that had nothing to do
