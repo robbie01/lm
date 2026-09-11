@@ -243,6 +243,14 @@ pub fn write_layout() {
     // these are that block's layout - not the register map, which has a gap
     // the block does not. One store of `blt-list` runs it; nothing else in
     // the chip is worth naming on the Lisp side.
+    s.push_str("\n;; ---- disk ----\n");
+    {
+        use crate::dev::disk::*;
+        def!("disk-busy", STATUS_BUSY);
+        def!("disk-cmd-read", CMD_READ);
+        def!("disk-cmd-write", CMD_WRITE);
+        def!("disk-cmd-flush", CMD_FLUSH);
+    }
     s.push_str("\n;; ---- blitter command block ----\n");
     {
         use crate::dev::blit::*;
@@ -315,6 +323,7 @@ pub const SYSTEM: &[&str] = &[
     "lisp/compile.lisp",
     "lisp/sys.lisp",
     "lisp/exec.lisp",
+    "lisp/disk.lisp",
     "lisp/snap.lisp",
     "lisp/mono.lisp",
     "lisp/font.lisp",

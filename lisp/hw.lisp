@@ -57,13 +57,20 @@
 ;; device can be made on the spot.
 (define *claimed* nil)
 
+(define (claim-device d) (claim-device-for d (%this-task)))
+
+;; On another task's behalf. A driver's device is claimed for it before it
+;; first runs, so that by the time anybody can reach its port it holds the
+;; device - there is no moment at which the driver exists and the device is
+;; still anybody's.
+;;
 ;; The error is raised outside the critical section: an error abandons the
 ;; stack, and would abandon the section with it.
-(define (claim-device d)
+(define (claim-device-for d task)
   (let ((ok (without-interrupts
               (if (%null? (dv-owner d))
                   (begin
-                    (set-dv-owner! d (%this-task))
+                    (set-dv-owner! d task)
                     (set! *claimed* (%cons d *claimed*))
                     t)
                   nil))))
@@ -933,30 +940,43 @@
 (define (mouse-buttons) (peek inp-buttons))
 
 ;; ---------------------------------------------------------------- storage
-(define dsk-addr (dev-addr dev-disk #x00))
-(define dsk-block (dev-addr dev-disk #x04))
-(define dsk-count (dev-addr dev-disk #x08))
-(define dsk-cmd (dev-addr dev-disk #x0c))
-(define dsk-status (dev-addr dev-disk #x10))
-(define dsk-blocks (dev-addr dev-disk #x14))
+;; The disk controller. A command runs on its own time: `disk-go` programs it
+;; and returns at once, the status reads `disk-busy` for as long as the
+;; transfer takes, and then it reads the result - 0 ok, 1 no disk attached,
+;; 2 the range is not in memory, 3 the host's I/O failed. With the control
+;; register's bit 0 set, the controller raises `int-disk` when it finishes.
+;;
+;; The disk driver owns this, and everything else asks the driver: see
+;; disk.lisp. Until the driver has claimed it - and in the stretch of a
+;; rebuild where there is no Exec to run a driver in - whoever holds the
+;; device may use it.
+(define *disk* (make-device "disk" dev-disk nil))
+(define dsk-addr #x00)
+(define dsk-block #x04)
+(define dsk-count #x08)
+(define dsk-cmd #x0c)
+(define dsk-status #x10)
+(define dsk-blocks #x14)
+(define dsk-ctrl #x18)
 
-(define (disk-read addr block n)
-  (without-interrupts
-    (poke dsk-addr addr)
-    (poke dsk-block block)
-    (poke dsk-count n)
-    (poke dsk-cmd 1)
-    (peek dsk-status)))
+(define (disk-go cmd addr block n)
+  ;; The command goes last: the controller latches the other three when it
+  ;; arrives, so the three before it can be rewritten for the next command
+  ;; while this one runs.
+  (let ((base (dev-reg *disk* 0)))
+    (without-interrupts
+      (poke (%+ base dsk-addr) addr)
+      (poke (%+ base dsk-block) block)
+      (poke (%+ base dsk-count) n)
+      (poke (%+ base dsk-cmd) cmd)))
+  nil)
 
-(define (disk-write addr block n)
-  (without-interrupts
-    (poke dsk-addr addr)
-    (poke dsk-block block)
-    (poke dsk-count n)
-    (poke dsk-cmd 2)
-    (peek dsk-status)))
-
-(define (disk-blocks) (peek dsk-blocks))
+;; One load, no allocation: a status is a small number, and this is read in a
+;; loop with interrupts off.
+(define (disk-status) (%ld-fixnum (dev-reg *disk* dsk-status)))
+(define (disk-busy?) (%= (disk-status) disk-busy))
+(define (disk-blocks) (peek (dev-reg *disk* dsk-blocks)))
+(define (disk-interrupts! on) (poke (dev-reg *disk* dsk-ctrl) (if on 1 0)))
 
 ;; ---------------------------------------------------------------- pool
 ;; Raw memory that the collector never touches and nothing ever moves: task

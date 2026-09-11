@@ -1,7 +1,7 @@
 # Every peripheral owned by a process
 
-A plan. One part of it is built - *a bitmap is a type, not an address* - and
-is marked as such below; the rest is not.
+A plan, partly built. What is done is marked below: the bitmap type, the
+asynchronous blitter, devices as values, and the disk driver.
 
 The goal is that a peripheral has exactly one owner, that reaching one you do
 not own is impossible rather than merely discouraged, and that the mechanism
@@ -394,9 +394,12 @@ A driver is a task with a port. Its request vocabulary is a small language,
 and the point of writing it down is that it is a *language* - the things a
 client can ask for - rather than a set of registers a client pokes.
 
-**disk.driver** — `(read block n into)`, `(write block n from)`, `(flush)`.
-Synchronous to the caller, asynchronous to the device: the driver blocks on
-the completion interrupt, and the client blocks on its reply.
+**disk.driver. Built**, in lisp/disk.lisp. `(read block n bytes)`, `(write
+block n bytes)`, `(flush)`, `(size)` and `(exclusive job)`. Synchronous to the
+caller, asynchronous to the device: the driver sleeps on the completion
+interrupt, and the client sleeps on its reply. A transfer names a byte object,
+never an address, and the driver checks that the blocks fit - the bitmap
+lesson again, since a disk read is a write into memory.
 
 **input.driver** — owns the input device. Decodes raw events into typed
 messages and publishes them to subscriber ports: `(key down code)`, `(mouse
@@ -413,19 +416,26 @@ this task or its only client.
 ## Ownership lifecycle
 
 - **Claim** at driver start, before the driver publishes its port. A client
-  that can reach the port can rely on the driver owning the device.
+  that can reach the port can rely on the driver owning the device. Built:
+  `claim-device-for` claims on the new task's behalf before it first runs.
 - **Release** on driver exit. `rem-task` must release everything the task
   owned, or a crashed driver locks its peripheral out of the machine for good.
-  This is the same shape as `reap-task` freeing a stack, and belongs beside it.
-- **Death.** A driver dying with clients blocked on its port leaves them
-  blocked for ever. Two honest options: let it happen and require drivers to be
-  restarted deliberately, or have `rem-task` reply an error to every message
-  still queued on a port the dead task owned. The second is better and is not
-  much code.
-- **Before Exec**, s2 is zero and every device is the kernel's. The transition
-  is a driver claiming a device that the kernel owned, which needs a rule for
-  when the kernel is allowed to give one up: after `exec-init`, and not
-  otherwise.
+  Built: devices come back through `release-devices-of`, and anything else a
+  driver holds - its interrupt server - through `on-task-end`.
+- **Death.** A driver dying with clients blocked on its port used to leave
+  them blocked for ever. Built, the better of the two ways: a message to a
+  task that has ended is answered with a failure at once, `rem-task` answers
+  everything still queued on the dead task's ports, and a message stays on
+  its port until it is answered, so the one the driver was working on is
+  answered too. A handler that fails answers with the failure and the server
+  starts again on a clean stack. `request` turns a failure into an error in
+  the caller.
+- **Before Exec**, s2 is zero and there is no task to own anything. The rule
+  that came out of building it: a driver's device starts unowned, and while
+  nobody holds it, whoever calls does the work directly. That covers the
+  boot before Exec, the stretch between a driver dying and the next one
+  starting, and a rebuild - which is how `save-rebuilt` writes an image with
+  no driver running.
 
 ## Sequence
 
@@ -450,8 +460,29 @@ other task is refused). `rem-task` releases what a dying task held, and a
 resume releases every claim, because every task that made one is gone.
 `(devices)` checks it.
 
-**2. disk.driver.** The whole model, end to end, on the peripheral where
-nothing is hot and nothing else depends on the answer.
+**2. disk.driver. Done.** The controller is asynchronous now, like the
+blitter: a command latches, the status reads busy until its time is up, and
+the bytes move at the end. `disk.driver` is a resident - Exec starts it at a
+cold boot and again after a resume - that holds the disk, sleeps on the
+completion interrupt, and answers requests. Saving an image is a request: the
+collection and every region's write run in the driver's task with interrupts
+off, the transfers watched rather than slept through, and the task that asked
+sleeps until it is done.
+
+Three things turned up on the way, and none of them is about the disk:
+
+- **`error` halted the machine.** The slot it calls through had never been
+  filled in, so every error message on the machine was followed by a halt.
+  It traps now and goes where a type error goes: a backtrace, then the prompt
+  or the end of the task.
+- **A caller could be left blocked for ever.** Fixed as described under
+  *Death* above.
+- **A task woken by an interrupt waited for the next tick** even when it
+  outranked the task that was running. The interrupt handler now switches on
+  the way out, which is what Exec does, and it is why the driver answers when
+  the disk does rather than up to a quantum later.
+
+`(drivers)` checks all of it, and lmdev checks the controller on its own.
 
 **3. input.driver.** Already a port; this makes it a task with a decode
 vocabulary, and takes back `inp-ctrl`. Removes the last direct
@@ -507,7 +538,8 @@ server for everything else.
 
 - `(drivers)` at the prompt, beside `(talking)`: claim a device, watch a
   non-owner fault, watch a driver die and its device come free, watch a client
-  blocked on a dead driver get an error rather than silence.
+  blocked on a dead driver get an error rather than silence. Built: `(drivers)`
+  does the last three, and `(devices)` the first two.
 - The blitter registry test is the one that matters: a deliberately wild blit -
   the exact command that corrupted the machine three sessions running - has to
   fault at the instruction, name the task, and leave the machine alive.

@@ -176,7 +176,8 @@
   result switches
   binds                          ; this task's fluid bindings, innermost first
   quantum elapsed
-  parent children)               ; a dependent task dies with the one that made it
+  parent children                ; a dependent task dies with the one that made it
+  cleanups)                      ; what to do when it ends, newest first
 
 (define ts-invalid 0)
 (define ts-added 1)
@@ -604,6 +605,29 @@
         nil))
   nil)
 
+;; Something to do when a task ends, however it ends - finishing, failing, or
+;; being removed by somebody else. What a driver holds that is not a device,
+;; like its interrupt server, is given back this way: from outside there is
+;; no telling what a task was holding.
+(define (on-task-end task fn)
+  (without-interrupts (set-tc-cleanups! task (%cons fn (tc-cleanups task))))
+  nil)
+
+(define (run-cleanups task)
+  (let ((fs (without-interrupts
+              (let ((c (tc-cleanups task)))
+                (set-tc-cleanups! task nil)
+                c))))
+    (while (%cons? fs)
+      (%funcall (%car fs))
+      (set! fs (%cdr fs))))
+  nil)
+
+;; Make a task nobody's dependent, so that it outlives whoever started it. A
+;; resident driver is started by whichever task brought Exec up, and is not
+;; that task's to take down with it.
+(define (detach-task task) (forget-child task) task)
+
 (define (rem-task task)
   ;; A task that has ended stays a task and says so. Signalling it does
   ;; nothing, because it is in no state to be woken; that is the whole
@@ -611,9 +635,14 @@
   (rem-children task)
   (forget-child task)
   (release-devices-of task)
+  (run-cleanups task)
   (without-interrupts
     (set-tc-state! task ts-removed)
     (set! *task-count* (%- *task-count* 1)))
+  ;; Anybody still waiting on an answer from it gets one. After it is marked
+  ;; ended, so that nothing can queue behind the last of these: `put-msg`
+  ;; checks the same mark.
+  (fail-ports-of task)
   (if (%eq? task (this-task))
       (begin
         ;; The current task cannot free its own stack while standing on it, so
@@ -748,15 +777,72 @@
 (define (message-body m) (mn-body m))
 (define (set-message-body! m v) (set-mn-body! m v))
 
+(define (port-signal p) (mp-sigmask p))
+
+;; What a caller gets instead of an answer when nobody is left to give one:
+;; the task behind the port has ended, or its handler failed. A value, not a
+;; silence. A caller blocked on a reply that never comes is blocked for ever,
+;; and with one blocker per task that is the whole task lost.
+(defrecord (failure fl) why)
+
+(define (make-failure why)
+  (let ((f (fl-alloc)))
+    (set-fl-why! f why)
+    f))
+
+(define (failure-why f) (fl-why f))
+
 (define (put-msg port msg)
   ;; The signal is sent outside the section on purpose: Signal takes it again,
   ;; and holding it across a wake-up is holding it for longer than the list
   ;; needs.
-  (let ((task (without-interrupts
-                (add-tail (mp-msglist port) msg)
-                (mp-sigtask port))))
-    (if task (signal task (mp-sigmask port)) nil))
+  ;;
+  ;; A port whose task has ended takes nothing: the message is answered with
+  ;; a failure there and then. The check is in the same section as the
+  ;; append, so a task cannot end between the two - `rem-task` marks it ended
+  ;; first, and answers whatever was already queued second.
+  (let ((owner (without-interrupts
+                 (let ((o (mp-sigtask port)))
+                   (if (if o (%= (tc-state o) ts-removed) nil)
+                       'ended
+                       (begin (add-tail (mp-msglist port) msg) o))))))
+    (cond ((%eq? owner 'ended) (fail-msg msg "the task behind that port has ended"))
+          (owner (signal owner (mp-sigmask port)))
+          (else nil)))
   msg)
+
+;; Answer a message with a failure. Straight onto its reply port rather than
+;; through `put-msg`, so that answering a caller who has also ended does not
+;; go round again.
+(define (fail-msg msg why)
+  (set-mn-body! msg (make-failure why))
+  (let ((r (mn-replyport msg)))
+    (if r
+        (let ((owner (without-interrupts
+                       (add-tail (mp-msglist r) msg)
+                       (mp-sigtask r))))
+          (if owner (signal owner (mp-sigmask r)) nil))
+        nil))
+  nil)
+
+;; Everything queued on the ports of a task that has ended, answered. Only
+;; named ports: a server's port has a name, and an unnamed one is a reply
+;; port, which nobody is waiting on an answer from. The ports come off the
+;; list as well, so that looking one up by name cannot find a dead one.
+(define (fail-ports-of task)
+  (let ((ports (without-interrupts
+                 (let ((acc nil) (p (list-first *port-list*)))
+                   (while p
+                     (if (%eq? (mp-sigtask p) task) (set! acc (%cons p acc)) nil)
+                     (set! p (node-next p)))
+                   (dolist (q acc) (forget-node q))
+                   acc))))
+    (dolist (p ports)
+      (let ((m (get-msg p)))
+        (while m
+          (fail-msg m "the task behind that port has ended")
+          (set! m (get-msg p))))))
+  nil)
 
 (define (get-msg port)
   (without-interrupts (rem-head (mp-msglist port))))
@@ -799,17 +885,39 @@
 (define (server-task s) (sv-task s))
 
 (define (server-loop s handler)
+  ;; A handler that fails answers its caller with the failure instead of
+  ;; leaving it blocked, and the server goes back to its port on a clean
+  ;; stack. That is the prompt's restart, for the prompt's reason: an error
+  ;; abandons the stack it happened on, so the only way back is to start
+  ;; again from the top.
+  (let ((mark (task-binds)))
+    (set! *repl-restart*
+          (lambda ()
+            (unwind-binds-to! mark)
+            (let ((m (get-msg (sv-port s))))
+              (if m (fail-msg m "the server failed while answering") nil))
+            (server-run s handler))))
+  (server-run s handler))
+
+(define (server-run s handler)
   (let ((port (sv-port s)))
     (while t
-      (let ((m (get-msg port)))
+      ;; A message stays on the port until it has been answered, so that a
+      ;; server which ends part way through one - removed, or failed - leaves
+      ;; it where `rem-task` and the restart will find it, and its caller
+      ;; hears.
+      (let ((m (without-interrupts (list-first (mp-msglist port)))))
         (if (%null? m)
             (wait (mp-sigmask port))
-            (begin
+            (let ((v (%funcall handler (mn-body m))))
               ;; The answer goes back in the message the caller sent, so a
               ;; request and its reply are one object and there is nothing to
-              ;; match up at the other end.
-              (set-mn-body! m (%funcall handler (mn-body m)))
-              (reply-msg m)))))))
+              ;; match up at the other end. Off the port and answered in one
+              ;; step: there is no moment at which it is on neither.
+              (without-interrupts
+                (remove-node m)
+                (set-mn-body! m v)
+                (reply-msg m))))))))
 
 (define (make-server name pri handler . opts)
   ;; Forbid rather than a rendezvous: the port has to exist before the server
@@ -836,13 +944,17 @@
       (begin (set! *reply-port* (create-port nil 0)) *reply-port*)))
 
 (define (request port body)
-  ;; Send, block, answer.
+  ;; Send, block, answer - or fail, if the task behind the port ends or its
+  ;; handler fails before answering.
   (let* ((r (reply-port))
          (m (create-message body r)))
     (put-msg port m)
-    (wait (mp-sigmask r))
-    (get-msg r)
-    (mn-body m)))
+    ;; Until it comes back. A loop, for the signal an answer leaves behind
+    ;; when it arrives before the `wait`: the next request's first `wait`
+    ;; returns at once, finds nothing, and waits again.
+    (while (%null? (get-msg r)) (wait (mp-sigmask r)))
+    (let ((v (mn-body m)))
+      (if (failure? v) (error "request:" (node-name port) (fl-why v)) v))))
 
 (define (send port body)
   ;; No answer wanted, and no waiting.
@@ -1123,9 +1235,36 @@
       (while (%>= line 0)
         (run-int-servers line)
         (int-ack line)
-        (set! line (int-pending)))))
+        (set! line (int-pending))))
+    ;; A server that woke a task of higher priority than the one it
+    ;; interrupted hands the processor over now rather than at the next tick.
+    ;; That is what makes a driver answer when its device does, instead of up
+    ;; to a quantum later - and a compositor draw when the frame starts.
+    (if (%> *attn-resched* 0)
+        (begin (set! *attn-resched* 0) (switch-tasks))
+        nil))
    ((%= n int-software) (switch-tasks))
    (else nil))
+  nil)
+
+;; ---------------------------------------------------------------- residents
+;; What Exec starts when it starts: the drivers. A driver's file says so when
+;; it is loaded, and `exec-init` starts every one - at a cold boot, and again
+;; after a resume, which is the other time a driver's task has to be made from
+;; nothing. AmigaOS found these by scanning ROM for a RomTag; here one is a
+;; name and a function, and adding one under a name already there replaces
+;; it, which is what loading a driver's file again means.
+(define *residents* nil)
+
+(define (add-resident name start)
+  (let ((keep nil))
+    (dolist (r *residents*)
+      (if (string=? (%car r) name) nil (set! keep (%cons r keep))))
+    (set! *residents* (reverse (%cons (%cons name start) keep))))
+  nil)
+
+(define (start-residents)
+  (dolist (r *residents*) (%funcall (%cdr r)))
   nil)
 
 ;; ---------------------------------------------------------------- startup
@@ -1200,6 +1339,8 @@
           (lambda ()
             (emit-str "task ended by an error\n")
             (task-finished)))
+    ;; And the drivers, last, once a task that fails has somewhere to go.
+    (start-residents)
     *ready-list*))
 
 ;; Stop the clock driving the scheduler. Nothing else changes: tasks still

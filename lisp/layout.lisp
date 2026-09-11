@@ -177,6 +177,12 @@
 (define int-disk #x4)
 (define int-soft #x5)
 
+;; ---- disk ----
+(define disk-busy #x80)
+(define disk-cmd-read #x1)
+(define disk-cmd-write #x2)
+(define disk-cmd-flush #x3)
+
 ;; ---- blitter command block ----
 (define blit-list-reg #x38)
 (define blit-status-reg #x20)

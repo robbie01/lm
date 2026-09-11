@@ -30,6 +30,9 @@
   (poke (%+ hdr (%+ 20 (%* i 12))) start)
   nil)
 
+;; The first thing that went wrong, or 0 if nothing has.
+(define (first-bad bad status) (if (%= bad 0) status bad))
+
 (define (save-image-with top)
   ;; Everything from the collection to the last block written is one critical
   ;; section, and nothing inside it allocates.
@@ -42,65 +45,81 @@
   ;; run calls the collector, from within the stretch that was supposed to be
   ;; indivisible. So the header block is claimed first and the five regions are
   ;; written out by hand rather than through a list.
-  (let ((hdr (alloc-pool 512))
-        (saved-top (%ld-word lg-toplevel))
-        (written 0))
-    (without-interrupts
-      ;; Collect before saving, and blank what was reclaimed. Whatever the
-      ;; machine has been doing since it booted is mostly garbage by now, and
-      ;; there is no sense writing it to disk. Compacting first is what makes
-      ;; an image small: afterwards the live pairs are one contiguous block at
-      ;; the bottom of cons space, and everything above it has been blanked.
-      (gc-for-image)
-      ;; And nothing in flight on the blitter. A command block saved with its
-      ;; status word at pending comes back after resume to a chip that was
-      ;; reset and will never write it back, and whoever waits on it waits for
-      ;; ever.
-      (blit-drain)
-      ;; A resumed image re-enters through here rather than through the boot
-      ;; list: every global it would have set is already set.
-      (%st-word! lg-toplevel top)
-      ;; Five regions: low memory, the Exec pool, code, pairs, objects.
-      (let* ((l0 4096)
-             (l1 (%- (%global lg-poolptr) pool-base))
-             (l2 (%- (%global lg-code-ptr) code-base))
-             (l3 (%- (%global lg-cons-ptr) cons-base))
-             (l4 (%- (%global lg-obj-ptr) obj-base))
-             (k0 snap-header-blocks)
-             (k1 (%+ k0 (region-blocks l0)))
-             (k2 (%+ k1 (region-blocks l1)))
-             (k3 (%+ k2 (region-blocks l2)))
-             (k4 (%+ k3 (region-blocks l3))))
-        (set! written (%+ k4 (region-blocks l4)))
-        (poke hdr snap-magic)
-        (poke (%+ hdr 4) (%global lg-imgentry))
-        (poke (%+ hdr 8) 5)
-        (put-region hdr 0 0 l0 k0)
-        (put-region hdr 1 pool-base l1 k1)
-        (put-region hdr 2 code-base l2 k2)
-        (put-region hdr 3 cons-base l3 k3)
-        (put-region hdr 4 obj-base l4 k4)
-        (disk-write 0 k0 (region-blocks l0))
-        (disk-write pool-base k1 (region-blocks l1))
-        (disk-write code-base k2 (region-blocks l2))
-        (disk-write cons-base k3 (region-blocks l3))
-        (disk-write obj-base k4 (region-blocks l4))
-        ;; The header goes out last, so a run that is interrupted leaves a file
-        ;; that simply does not have a valid header rather than a wrong one.
-        (disk-write hdr 0 1)
-        (%st-word! lg-toplevel saved-top)
-        nil))
-    (emit-str "saved ")
-    (emit-str (number->string written))
-    (emit-str " blocks
+  ;;
+  ;; The section runs in the disk driver's task, not this one. The disk is
+  ;; the driver's, and a transfer inside a section with interrupts off cannot
+  ;; be slept through, only watched - which only the task holding the
+  ;; controller may do. `disk-exclusive` runs the job there, and this task
+  ;; sleeps until it answers: the blocks written, or minus the first status
+  ;; that was not ok.
+  (let* ((hdr (alloc-pool 512))
+         (saved-top (%ld-word lg-toplevel))
+         (result
+          (disk-exclusive
+            (lambda ()
+              ;; Collect before saving, and blank what was reclaimed. Whatever
+              ;; the machine has been doing since it booted is mostly garbage
+              ;; by now, and there is no sense writing it to disk. Compacting
+              ;; first is what makes an image small: afterwards the live pairs
+              ;; are one contiguous block at the bottom of cons space, and
+              ;; everything above it has been blanked.
+              (gc-for-image)
+              ;; And nothing in flight on the blitter. A command block saved
+              ;; with its status word at pending comes back after resume to a
+              ;; chip that was reset and will never write it back, and whoever
+              ;; waits on it waits for ever.
+              (blit-drain)
+              ;; A resumed image re-enters through here rather than through the
+              ;; boot list: every global it would have set is already set.
+              (%st-word! lg-toplevel top)
+              ;; Five regions: low memory, the Exec pool, code, pairs, objects.
+              (let* ((l0 4096)
+                     (l1 (%- (%global lg-poolptr) pool-base))
+                     (l2 (%- (%global lg-code-ptr) code-base))
+                     (l3 (%- (%global lg-cons-ptr) cons-base))
+                     (l4 (%- (%global lg-obj-ptr) obj-base))
+                     (k0 snap-header-blocks)
+                     (k1 (%+ k0 (region-blocks l0)))
+                     (k2 (%+ k1 (region-blocks l1)))
+                     (k3 (%+ k2 (region-blocks l2)))
+                     (k4 (%+ k3 (region-blocks l3)))
+                     (bad 0))
+                (poke hdr snap-magic)
+                (poke (%+ hdr 4) (%global lg-imgentry))
+                (poke (%+ hdr 8) 5)
+                (put-region hdr 0 0 l0 k0)
+                (put-region hdr 1 pool-base l1 k1)
+                (put-region hdr 2 code-base l2 k2)
+                (put-region hdr 3 cons-base l3 k3)
+                (put-region hdr 4 obj-base l4 k4)
+                (set! bad (first-bad bad (disk-write-raw 0 k0 (region-blocks l0))))
+                (set! bad (first-bad bad (disk-write-raw pool-base k1 (region-blocks l1))))
+                (set! bad (first-bad bad (disk-write-raw code-base k2 (region-blocks l2))))
+                (set! bad (first-bad bad (disk-write-raw cons-base k3 (region-blocks l3))))
+                (set! bad (first-bad bad (disk-write-raw obj-base k4 (region-blocks l4))))
+                ;; The header goes out last, so a run that is interrupted leaves
+                ;; a file that simply does not have a valid header rather than a
+                ;; wrong one.
+                (set! bad (first-bad bad (disk-write-raw hdr 0 1)))
+                (%st-word! lg-toplevel saved-top)
+                (if (%= bad 0) (%+ k4 (region-blocks l4)) (%- 0 bad)))))))
+    (if (%< result 0)
+        (error "save-image: the disk answered" (%- 0 result)
+               (if (%= result -1) "- no disk attached; start with --disk FILE" ""))
+        (begin
+          (emit-str "saved ")
+          (emit-str (number->string result))
+          (emit-str " blocks
 ")
-    written))
+          result))))
 
 (define (resume-kickstart)
   ;; Everything the boot list would set up is already in the image. Exec is
   ;; rebuilt, because the task that saved is not the task that resumes.
   (%st-word! lg-traphook (%symbol-value 'handle-trap))
-  ;; Every task that owned a device is gone, so every claim is stale.
+  (%st-word! lg-errhandler (%symbol-value 'error-trap))
+  ;; Every task that owned a device is gone, so every claim is stale. The
+  ;; drivers start again in `exec-init`, and claim theirs afresh.
   (release-all-devices)
   (exec-init)
   (exec-start)

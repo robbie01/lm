@@ -57,9 +57,9 @@ fn vblank(m: &mut Machine) {
 
 /// Nothing to run: skip forward to whatever wakes us next.
 fn idle(m: &mut Machine) {
-    // A running blit is an event too: an idle machine fast-forwards to it
-    // rather than past it.
-    let mut wake = m.gfx.next_vbl.min(m.mtimecmp).min(crate::dev::blit::due(m));
+    // A running blit or disk command is an event too: an idle machine
+    // fast-forwards to it rather than past it.
+    let mut wake = m.gfx.next_vbl.min(m.mtimecmp).min(crate::dev::due(m));
     if m.intreq & m.intena != 0 {
         return; // an interrupt is already waiting
     }
@@ -87,10 +87,10 @@ pub fn run(m: &mut Machine, budget: u64) -> Stop {
             continue;
         }
         service(m);
-        // The blitter finishes on its own schedule, and this is the moment
-        // after every slice at which the machine looks.
+        // The blitter and the disk finish on their own schedule, and this is
+        // the moment after every slice at which the machine looks.
         let now = m.cycles;
-        crate::dev::blit::poll(m, now);
+        crate::dev::poll(m, now);
         m.refresh_mip();
         if m.irq_ready() {
             m.take_interrupt();
@@ -99,9 +99,10 @@ pub fn run(m: &mut Machine, budget: u64) -> Stop {
         let q = HOST_SLICE
             .min(left)
             .min(m.fuel_to_timer().max(1))
-            // End the slice when the running blit is due, so that it lands on
-            // time rather than whenever the next timer happens to come round.
-            .min(crate::dev::blit::due(m).saturating_sub(m.cycles).max(1))
+            // End the slice when a running blit or disk command is due, so
+            // that it lands on time rather than whenever the next timer
+            // happens to come round.
+            .min(crate::dev::due(m).saturating_sub(m.cycles).max(1))
             .min(m.gfx.next_vbl.saturating_sub(m.cycles).max(1))
             .min(u32::MAX as u64) as u32;
         if q == 0 {
@@ -122,7 +123,7 @@ pub fn run(m: &mut Machine, budget: u64) -> Stop {
         // having landed. The state of the machine at the moment it stops has
         // to include everything that finished before that moment.
         let now = m.cycles;
-        crate::dev::blit::poll(m, now);
+        crate::dev::poll(m, now);
 
         match st {
             Stop::Fuel => {}

@@ -361,6 +361,9 @@
             (emit-str "\n"))
            ((%= code trap-oom)
             (emit-str "\nout of memory at ") (emit-str (number->hex epc)) (emit-str "\n"))
+           ;; `error` has already said what went wrong. All that is left is
+           ;; where, and the restart.
+           ((%= code trap-error) nil)
            (else (emit-str "\nunknown ecall\n")))
           ;; The arity check is in the callee prologue, before it has loaded
           ;; its own literal vector, so s0 and s1 still describe the caller.
@@ -457,6 +460,13 @@
 ;; What a resumed image has to put back that is not memory: devices, and
 ;; whatever was running them. The workbench fills this in.
 (define *resume-fn* nil)
+
+;; What `error` calls once it has printed its message: a trap, so that the
+;; rest happens where every other failure goes - a backtrace from the saved
+;; registers, then the prompt, or the end of the task. The slot print.lisp
+;; reads it from was never filled in before, so every `error` on the machine
+;; used to halt the machine.
+(define (error-trap args) (%ecall trap-error))
 
 (define (restart-stack)
   ;; A task must restart on its own stack. Putting it back on the boot task's
@@ -643,6 +653,7 @@
   ;; list does is allocate.
   (install-allocator)
   (%st-word! lg-traphook (%symbol-value 'handle-trap))
+  (%st-word! lg-errhandler (%symbol-value 'error-trap))
   (run-boot-list)
   ;; Exec comes up before anything else can want a task: the code already
   ;; running becomes task zero, and its context is the trap frame the stub has

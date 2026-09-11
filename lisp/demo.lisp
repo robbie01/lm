@@ -490,3 +490,104 @@
     (exec::free-signal me sig))
   (princ "devices: done (nothing above = all correct)")
   (newline))
+
+
+;; ---------------------------------------------------------------- drivers
+;; `(drivers)` checks the driver model end to end, on the disk: one task holds
+;; the controller and every other task asks it, a transfer lets the machine
+;; run while it happens, and a server that fails or dies answers its callers
+;; instead of leaving them blocked. The transfers need a disk - start the
+;; machine with --disk FILE; a scratch file will do.
+(define *drv-probe* nil)
+(define *drv-count* 0)
+(define *drv-stuck* nil)
+
+;; A request that hands back whatever came back, failure or not, instead of
+;; raising on a failure the way `request` does - so that a check can look.
+(define (raw-request port body)
+  (let* ((r (reply-port))
+         (m (create-message body r)))
+    (put-msg port m)
+    (while (%null? (get-msg r)) (wait (port-signal r)))
+    (message-body m)))
+
+(define (bytes-same? a b)
+  (let ((n (bytes-length a)) (i 0) (same (%= (bytes-length a) (bytes-length b))))
+    (while (if same (%< i n) nil)
+      (if (%= (bytes-ref a i) (bytes-ref b i)) nil (set! same nil))
+      (set! i (%+ i 1)))
+    same))
+
+(define (drivers)
+  (num-check 'disk-driver-running (disk-driver-running?) t)
+  (num-check 'disk-held-by-its-driver
+             (%eq? (device-owner *disk*) (server-task *disk-driver*)) t)
+  (num-check 'disk-refused-to-everybody-else (device-usable? *disk*) nil)
+  ;; Through the driver: out, back, and the same bytes.
+  (let ((out (make-bytes 1024)) (in (make-bytes 1024)) (i 0))
+    (while (%< i 1024)
+      (bytes-set! out i (%logand (%+ (%* i 7) 3) 255))
+      (set! i (%+ i 1)))
+    (let ((st (disk-write 40 2 out)))
+      (if (%= st 1)
+          (begin
+            (princ "drivers: no disk attached, so no transfers - start with --disk FILE")
+            (newline))
+          (begin
+            (num-check 'write-through-the-driver st 0)
+            (num-check 'read-through-the-driver (disk-read 40 2 in) 0)
+            (num-check 'the-same-bytes-came-back (bytes-same? out in) t)
+            ;; And the machine runs while a transfer does: the driver sleeps
+            ;; on the controller, and another task counts in the meantime.
+            (let ((big (make-bytes (* 512 256)))
+                  (sleeps *disk-sleeps*)
+                  (counter (spawn "counter" 0
+                                  (lambda ()
+                                    (while t (set! *drv-count* (%+ *drv-count* 1)))))))
+              (set! *drv-count* 0)
+              (num-check 'a-big-write (disk-write 100 256 big) 0)
+              (num-check 'the-driver-slept-through-it (%> *disk-sleeps* sleeps) t)
+              (num-check 'another-task-ran-meanwhile (%> *drv-count* 0) t)
+              (rem-task counter))))))
+  ;; A handler that fails answers with a failure, and the server carries on.
+  (princ "drivers: the error below is on purpose")
+  (newline)
+  (let ((s (make-server "fragile" 0
+                        (lambda (body)
+                          (if (eq? body 'break) (error "fragile: asked to fail") body)))))
+    (num-check 'a-failing-handler-answers (failure? (raw-request (server-port s) 'break)) t)
+    (num-check 'and-the-server-carries-on (raw-request (server-port s) 'hello) 'hello)
+    (rem-task (server-task s)))
+  ;; A server that dies with a caller waiting: the caller hears, and so does
+  ;; anybody who asks after.
+  (let* ((me (this-task))
+         (sig (exec::alloc-signal me))
+         (s (make-server "stuck" 0
+                         (lambda (body) (set! *drv-stuck* t) (wait 536870912) body))))
+    (set! *drv-stuck* nil)
+    (set! *drv-probe* 'unset)
+    (spawn "caller" 0 (lambda ()
+                        (set! *drv-probe* (raw-request (server-port s) 'hello))
+                        (signal me sig)))
+    (while (%null? *drv-stuck*) (reschedule))
+    (rem-task (server-task s))
+    (wait sig)
+    (num-check 'a-caller-hears-when-its-server-dies (failure? *drv-probe*) t)
+    (num-check 'and-a-dead-server-answers-at-once
+               (failure? (raw-request (server-port s) 'again)) t)
+    (exec::free-signal me sig))
+  ;; A driver that dies gives its device back, and the next one takes it.
+  (let ((old *disk-driver*))
+    (rem-task (server-task old))
+    (num-check 'a-dead-driver-gives-the-disk-back (device-owner *disk*) nil)
+    (num-check 'and-is-not-running (disk-driver-running?) nil)
+    (num-check 'with-no-driver-a-call-goes-direct (number? (disk-size)) t)
+    (start-disk-driver)
+    (num-check 'a-new-driver-takes-it (disk-driver-running?) t)
+    (num-check 'in-a-new-task
+               (%eq? (server-task *disk-driver*) (server-task old)) nil)
+    (num-check 'with-one-interrupt-server
+               (length (list-nodes (exec::int-vector int-disk))) 1)
+    (num-check 'and-it-answers (number? (disk-size)) t))
+  (princ "drivers: done (nothing above = all correct)")
+  (newline))

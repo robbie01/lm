@@ -269,8 +269,16 @@ interrupts off from end to end, and it is not drawing.
 
 `(talking)` at the prompt exercises all of it.
 
-**What is not done.** Only input has been moved; the graphics, disk and timer
-sides are still called directly rather than asked. A blit is ten instructions
+**The disk is a driver now** - see *disk.driver* in docs/drivers.md. Moving it
+turned up three problems that had nothing to do with disks, all fixed:
+`error` had halted the machine since the first commit, because the slot it
+calls through was never filled in; a caller could be left blocked for ever by
+a server that died or failed, and now gets a failure instead; and a task woken
+by an interrupt waited up to a quantum even when it outranked the task that
+was running, where the handler now switches on the way out.
+
+**What is not done.** Input is half moved and graphics not at all; the timer
+stays the kernel's. A blit is ten instructions
 and a message is a task switch, so routing every blit through a server would
 be the wrong trade - the shape that fits is a server for whole operations that
 are already batched, which the compositor is close to being. And `wait-ports`

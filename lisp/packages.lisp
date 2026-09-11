@@ -26,10 +26,11 @@
 (defpackage compiler use lm hw asm sys)                            ; Lisp to native RISC-V
 (defpackage sys use lm gc asm compiler exec)                       ; the kickstart: traps, reader, prompt
 (defpackage exec use lm gc hw asm sys)                             ; the kernel: tasks, signals, ports, libraries
-(defpackage snap use lm gc hw sys exec)                            ; saving the machine
+(defpackage disk use lm hw exec)                                   ; disk.driver, the task that owns the disk
+(defpackage snap use lm gc hw sys exec disk)                       ; saving the machine
 (defpackage wb use lm hw sys exec)                                 ; the workbench: windows and shells
 (defpackage eyes use lm gc hw exec sys wb)                         ; xeyes, one instance per pair
-(defpackage user use lm gc hw asm compiler sys exec snap wb eyes)  ; where a prompt starts, and the demos
+(defpackage user use lm gc hw asm compiler sys exec disk snap wb eyes)  ; where a prompt starts, and the demos
 
 ;; ---------------------------------------------------------------- exports
 ;; The prelude goes first: every other list below is read in the package it
@@ -49,6 +50,7 @@
   reg-s8 reg-s9 reg-s10 reg-s11 reg-t3 reg-t4 reg-t5 reg-t6
   bl-src bl-dst bl-w bl-h bl-smod bl-dmod bl-val bl-op bl-status bl-next bl-x0 bl-y0 bl-x1 bl-y1
   blit-list-reg blit-status-reg blit-list-size
+  disk-busy disk-cmd-read disk-cmd-write disk-cmd-flush int-disk
   op-copy op-fill op-xor op-and op-or op-mask op-line op-add
   trap-arity trap-type trap-oom trap-error trap-reschedule trap-record
   %* %+ %- %/ %< %<= %= %> %>= %addr-of %alloc-code %alloc-pool %apply %ash
@@ -157,12 +159,13 @@
   bm-pixels set-bm-pixels! bitmap? bm-alloc
   blit-busy? blit-drain blit-sync blit-wait-block new-blit-block blt-status
   make-device device? device-owner device-name device-usable? dev-reg
-  claim-device release-device release-devices-of release-all-devices
+  claim-device claim-device-for release-device release-devices-of release-all-devices
+  *disk* disk-go disk-status disk-busy? disk-blocks disk-interrupts!
   *blit-list* *gc-blit-list* *in-interrupt* blit-block gc-blit-block blit-go blt-list
   *screen* alloc-pool bm-blit-rect bm-clip bm-fill-rect
   bm-plot bm-point bm-at bm-addr bm-w bm-h bitmap? make-bitmap alloc-bitmap
   make-bitmap-rastport make-rastport-on rp-bitmap
-  blit-rect clear-screen disk-write
+  blit-rect clear-screen
   draw-circle draw-line ev-buttondown ev-buttonup ev-keydown ev-mousemove
   *screen-rp* screen-rastport make-rastport rastport?
   rp-origin-x rp-origin-y rp-region
@@ -227,7 +230,7 @@
 (export '(
   *abort-cleanup-fn* *repl-restart* *resume-fn* *return-addr-fn* *stack-top-fn*
   *task-abort-fn*
-  bye compile-time-eval eval eval-form expand-macro handle-trap
+  bye compile-time-eval error-trap eval eval-form expand-macro handle-trap
   int-external int-software int-timer kickstart macro-form? print-backtrace
   rebuild rebuild-end record-initialiser register-macro repl
   resume-kickstart
@@ -265,6 +268,16 @@
   node-name node-pri find-name find-task list-nodes
   *vblank-count* vblank-start wait-input wait-vblank
   task-count tasks wait
+  ;; ---- when things go wrong, and drivers ----
+  failure? failure-why make-failure fail-msg port-signal
+  on-task-end detach-task add-resident start-residents
+  make-interrupt add-int-server rem-int-server
+))
+
+(in-package disk)
+(export '(
+  disk-read disk-write disk-flush disk-size disk-exclusive disk-write-raw
+  start-disk-driver disk-driver-running? *disk-driver* *disk-sleeps*
 ))
 
 (in-package snap)

@@ -1125,6 +1125,60 @@ pub fn run_all() -> bool {
         extra.push(("blitter fill", ok));
     }
 
+    {
+        // The disk works on its own time: a command reads busy until its
+        // moment comes, the memory a read is filling holds the old bytes
+        // until then, and the new ones after.
+        let path = std::env::temp_dir().join(format!("lm-check-disk-{}.img", std::process::id()));
+        let mut m = Machine::new();
+        let attached = m.disk.attach(path.to_str().unwrap()).is_ok();
+        for i in 0..512u32 {
+            m.poke8(0x4000 + i, (i * 7 + 3) as u8);
+        }
+        let mut code = vec![];
+        li32(&mut code, A0, MMIO_BASE + (DEV_DISK << 12));
+        li32(&mut code, A6, 0x5000);
+        li32(&mut code, T0, crate::dev::disk::STATUS_BUSY);
+        li32(&mut code, A1, 0x4000);
+        code.push(sw(A1, A0, 0x00)); // addr
+        li32(&mut code, A1, 3);
+        code.push(sw(A1, A0, 0x04)); // block 3
+        li32(&mut code, A1, 1);
+        code.push(sw(A1, A0, 0x08)); // one block
+        li32(&mut code, A1, 2);
+        code.push(sw(A1, A0, 0x0c)); // write
+        code.push(lw(A2, A0, 0x10)); // straight away: busy
+        code.push(lw(A3, A0, 0x10)); // until it is not
+        code.push(beq(A3, T0, -4));
+        code.push(sw(A6, A0, 0x00)); // and back, somewhere else
+        li32(&mut code, A1, 1);
+        code.push(sw(A1, A0, 0x18)); // with the completion interrupt this time
+        code.push(sw(A1, A0, 0x0c)); // read
+        code.push(lw(A4, A0, 0x10)); // busy again
+        code.push(lbu(A5, A6, 0)); // and the old byte still there
+        code.push(lw(A7, A0, 0x10));
+        code.push(beq(A7, T0, -4));
+        code.push(lbu(T1, A6, 0));
+        code.push(lbu(T2, A6, 1));
+        let end = emit(&mut m, BASE, &code);
+        m.poke32(end, jal(ZERO, 0));
+        m.pc = BASE;
+        m.mtimecmp = u64::MAX;
+        m.gfx.next_vbl = u64::MAX;
+        run::run(&mut m, 5000);
+        let r = |x: u32| m.x[x as usize];
+        let on_host = std::fs::read(&path)
+            .map(|b| b.len() == 4 * 512 && (0..512).all(|i| b[3 * 512 + i] == (i * 7 + 3) as u8))
+            .unwrap_or(false);
+        let _ = std::fs::remove_file(&path);
+        extra.push(("disk attaches a host file", attached));
+        extra.push(("disk busy straight after a command", r(A2) == 0x80 && r(A4) == 0x80));
+        extra.push(("disk write lands on the host", r(A3) == 0 && on_host));
+        extra.push(("disk read leaves the old bytes until it is done", r(A5) == 0));
+        extra.push(("disk read brings the new ones after", r(A7) == 0 && r(T1) == 3 && r(T2) == 10));
+        extra.push(("disk completion raises its interrupt", m.intreq & (1 << INT_DISK) != 0));
+    }
+
     for (name, ok) in extra {
         if ok {
             pass += 1;

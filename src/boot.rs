@@ -84,6 +84,7 @@ pub fn boot(o: &Options) -> i32 {
     let t = std::time::Instant::now();
     let stop = run::run(&mut m, o.budget);
     m.uart.flush();
+    crate::dev::disk::settle(&mut m);
     let secs = t.elapsed().as_secs_f64();
 
     if o.trace_exit {

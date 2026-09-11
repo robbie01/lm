@@ -80,7 +80,14 @@ pub fn read(m: &mut Machine, a: u32, f: u32) -> u32 {
             }
             m.blit.read(reg)
         }
-        DEV_DISK => m.disk.read(reg),
+        DEV_DISK => {
+            // The same for the disk: looking is a moment it can have finished.
+            if reg == disk::D_STATUS {
+                let now = m.now;
+                disk::poll(m, now);
+            }
+            m.disk.read(reg)
+        }
         _ => 0,
     };
     // Sub-word reads pick the requested lane out of the register value.
@@ -132,4 +139,16 @@ pub fn write(m: &mut Machine, a: u32, f: u32, v: u32) {
         DEV_DISK => disk::command(m, reg, v),
         _ => {}
     }
+}
+
+/// Finish whatever the chips that work on their own time - the blitter and
+/// the disk - have finished by `now`.
+pub fn poll(m: &mut Machine, now: u64) {
+    blit::poll(m, now);
+    disk::poll(m, now);
+}
+
+/// The next moment one of them finishes, or never.
+pub fn due(m: &Machine) -> u64 {
+    blit::due(m).min(disk::due(m))
 }
