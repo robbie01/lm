@@ -100,6 +100,8 @@
   ;; Everything the boot list would set up is already in the image. Exec is
   ;; rebuilt, because the task that saved is not the task that resumes.
   (%st-word! lg-traphook (%symbol-value 'handle-trap))
+  ;; Every task that owned a device is gone, so every claim is stale.
+  (release-all-devices)
   (exec-init)
   (exec-start)
   (if *resume-fn* (%funcall *resume-fn*) nil)

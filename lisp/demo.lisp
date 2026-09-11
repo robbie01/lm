@@ -454,3 +454,39 @@
       (num-check 'big-landed (%ld-byte (%addr-of (bm-pixels big))) 5)))
   (princ "blitting: done (nothing above = all correct)")
   (newline))
+
+
+;; ---------------------------------------------------------------- devices
+;; `(devices)` checks device ownership. A device is a value: holding it is the
+;; permission, a claimed one refuses every task but its owner, and a task that
+;; dies gives back what it held.
+(define *dev-probe* nil)
+
+(define (devices)
+  (let ((d (make-device "probe" dev-disk nil))
+        (me (this-task))
+        (sig (exec::alloc-signal (this-task))))
+    (num-check 'unclaimed-is-usable (device-usable? d) t)
+    (claim-device d)
+    (num-check 'claimed-by-this-task (%eq? (device-owner d) me) t)
+    (num-check 'usable-by-its-owner (device-usable? d) t)
+    ;; another task asks, and is refused
+    (set! *dev-probe* 'unset)
+    (spawn "probe" 0 (lambda ()
+                       (set! *dev-probe* (device-usable? d))
+                       (signal me sig)))
+    (wait sig)
+    (num-check 'refused-to-other-tasks *dev-probe* nil)
+    (release-device d)
+    (num-check 'released-on-request (device-owner d) nil)
+    ;; a task that claims it and then ends gives it back
+    (spawn "claimer" 0 (lambda () (claim-device d) (signal me sig)))
+    (wait sig)
+    (while (find-task "claimer") (reschedule))
+    (num-check 'released-when-its-owner-died (device-owner d) nil)
+    ;; and the kernel's own devices are the kernel's
+    (num-check 'sys-is-kernel (device-owner hw::*sys*) 'hw::kernel)
+    (num-check 'timer-is-kernel (device-owner hw::*timer*) 'hw::kernel)
+    (exec::free-signal me sig))
+  (princ "devices: done (nothing above = all correct)")
+  (newline))

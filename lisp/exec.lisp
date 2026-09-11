@@ -373,7 +373,7 @@
 
 ;; ---------------------------------------------------------------- signals
 (define (alloc-signal task)
-  ;; Signals 0..15 are reserved the way Exec reserves them; 16..31 are free.
+  ;; Signals 0..15 are reserved the way Exec reserves them; 16..30 are free.
   ;; What comes back is the bit as a mask, because that is what `signal` and
   ;; `wait` take: a bit number and a mask are both fixnums and nothing would
   ;; catch one handed to the other.
@@ -381,11 +381,22 @@
   ;; The failure is raised outside the critical section, because an error here
   ;; abandons the stack and would abandon the section with it.
   (let ((got (without-interrupts
+               ;; Up to 30, not 31. A mask is a fixnum and a fixnum has
+               ;; thirty-one bits, so `(%lsh 1 31)` is not a bit, it is zero -
+               ;; and a signal whose mask is zero is one nobody can receive.
                (let ((alloc (tc-sigalloc task)) (n 16) (g -1))
-                 (while (if (%< n 32) (%< g 0) nil)
+                 (while (if (%< n 31) (%< g 0) nil)
                    (if (%= 0 (%logand alloc (%lsh 1 n)))
                        (begin
                          (set-tc-sigalloc! task (%logior alloc (%lsh 1 n)))
+                         ;; And clear it, the way AllocSignal does. The bit can
+                         ;; still be set from its last owner - a port that was
+                         ;; notified and then deleted before anybody waited on
+                         ;; it - and a new signal that arrives already received
+                         ;; makes the first wait on it return at once.
+                         (set-tc-sigrecvd! task
+                                           (%logand (tc-sigrecvd task)
+                                                    (%lognot (%lsh 1 n))))
                          (set! g n))
                        (set! n (%+ n 1))))
                  g))))
@@ -599,6 +610,7 @@
   ;; difference from a handle that could come back as somebody else.
   (rem-children task)
   (forget-child task)
+  (release-devices-of task)
   (without-interrupts
     (set-tc-state! task ts-removed)
     (set! *task-count* (%- *task-count* 1)))

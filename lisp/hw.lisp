@@ -1,14 +1,81 @@
 ;;; hw.lisp - the custom chips.
 ;;;
-;;; Every device is a 4 KiB page of naturally aligned 32-bit registers, so
-;;; talking to hardware from Lisp is just peek and poke. Nothing here is
-;;; privileged: this is a single address space with no MMU, and any task can
-;;; reach the display or the blitter directly. That is the Amiga bargain -
-;;; nothing protects you, and in exchange nothing gets in the way.
+;;; Every device is a 4 KiB page of naturally aligned 32-bit registers. There
+;;; is no MMU and no privileged mode, and there will not be one: what keeps a
+;;; task off a device it does not own is that it cannot name one. A device is
+;;; a value, a register is an offset into it, and the only way to turn the two
+;;; into an address is `dev-reg`, below.
 
 (in-package hw)
 
 (define (dev-addr dev reg) (%+ mmio-base (%+ (%lsh dev 12) reg)))
+
+;; ---------------------------------------------------------------- devices
+;; A device is a value, and holding it is the permission to use it.
+;;
+;; Register names are offsets into a device's page, not addresses. The base
+;; lives only in the device record, so an offset on its own names nothing: the
+;; only way to reach a register is `dev-reg`, and the only way to call that is
+;; to hold the device. That is the whole of the enforcement - it is scoping,
+;; the same way a bitmap is protected by being a value rather than an address.
+;;
+;; A device's owner is one of three things:
+;;
+;;   kernel   Exec's: `sys` and `timer`. Never claimed, and not checked
+;;            against the running task, because there is no task to check it
+;;            against - Exec runs inside whatever task called it, or inside
+;;            the trap handler with the interrupted task still in s2. These
+;;            are reached only through the functions in this file, and the
+;;            device values are not exported.
+;;   nil      A driver's device that no driver has claimed yet. Usable by
+;;            whoever holds it, which is how code written before its driver
+;;            existed keeps working until the driver arrives.
+;;   a task   Claimed. `dev-reg` from any other task is an error.
+(defrecord (device dv) name base owner)
+
+(define (make-device name dev owner)
+  (let ((d (dv-alloc)))
+    (set-dv-name! d name)
+    (set-dv-base! d (dev-addr dev 0))
+    (set-dv-owner! d owner)
+    d))
+
+(define (device-owner d) (dv-owner d))
+(define (device-name d) (dv-name d))
+
+(define (device-usable? d)
+  (let ((o (dv-owner d)))
+    (if (%null? o) t (if (%eq? o 'kernel) t (%eq? o (%this-task))))))
+
+(define (dev-reg d off)
+  (if (device-usable? d)
+      (%+ (dv-base d) off)
+      (error "dev-reg:" (dv-name d) "belongs to another task")))
+
+;; The devices some task holds right now. A task that dies gives back exactly
+;; these - which a list of the machine's own devices would not cover, since a
+;; device can be made on the spot.
+(define *claimed* nil)
+
+;; The error is raised outside the critical section: an error abandons the
+;; stack, and would abandon the section with it.
+(define (claim-device d)
+  (let ((ok (without-interrupts
+              (if (%null? (dv-owner d))
+                  (begin
+                    (set-dv-owner! d (%this-task))
+                    (set! *claimed* (%cons d *claimed*))
+                    t)
+                  nil))))
+    (if ok d (error "claim-device:" (dv-name d) "is already owned"))))
+
+(define (release-device d)
+  (if (%eq? (dv-owner d) (%this-task))
+      (without-interrupts
+        (set-dv-owner! d nil)
+        (set! *claimed* (remove-eq d *claimed*)))
+      (error "release-device:" (dv-name d) "is not this task's"))
+  nil)
 ;; A whole machine word, all thirty-two bits of it, promoting when it does
 ;; not fit a fixnum.
 ;;
@@ -89,47 +156,54 @@
 (define (poke8 a v) (%st-byte! a v))
 
 ;; ---------------------------------------------------------------- system
-(define sys-halt (dev-addr dev-sys #x00))
-(define sys-debug (dev-addr dev-sys #x04))
-(define sys-intreq (dev-addr dev-sys #x08))
-(define sys-intena (dev-addr dev-sys #x0c))
-(define sys-intnum (dev-addr dev-sys #x10))
-(define sys-cyclo (dev-addr dev-sys #x14))
-(define sys-cychi (dev-addr dev-sys #x18))
-(define sys-random (dev-addr dev-sys #x1c))
-(define sys-ramsize (dev-addr dev-sys #x20))
-(define sys-chipsize (dev-addr dev-sys #x24))
-(define sys-intset (dev-addr dev-sys #x28))
+;; Offsets into the page, not addresses; `*sys*` is the page.
+(define *sys* (make-device "sys" dev-sys 'kernel))
+(define sys-halt #x00)
+(define sys-debug #x04)
+(define sys-intreq #x08)
+(define sys-intena #x0c)
+(define sys-intnum #x10)
+(define sys-cyclo #x14)
+(define sys-cychi #x18)
+(define sys-random #x1c)
+(define sys-ramsize #x20)
+(define sys-chipsize #x24)
+(define sys-intset #x28)
 
 (define (halt code) (%halt code))
 ;; Thirty bits and never negative, so it stays a fixnum and `(mod (random) n)`
 ;; is fixnum arithmetic. The register is a full word; taking all of it would
 ;; hand back a bignum half the time.
-(define (random) (%logand (%ld-fixnum sys-random) 1073741823))
-(define (int-enable line) (poke sys-intena (%logior (peek sys-intena) (%lsh 1 line))))
-(define (int-disable line) (poke sys-intena (%logand (peek sys-intena) (%lognot (%lsh 1 line)))))
-(define (int-ack line) (poke sys-intreq (%lsh 1 line)))
-(define (int-raise line) (poke sys-intset (%lsh 1 line)))
+(define (random) (%logand (%ld-fixnum (dev-reg *sys* sys-random)) 1073741823))
+(define (int-enable line)
+  (let ((r (dev-reg *sys* sys-intena)))
+    (poke r (%logior (peek r) (%lsh 1 line)))))
+(define (int-disable line)
+  (let ((r (dev-reg *sys* sys-intena)))
+    (poke r (%logand (peek r) (%lognot (%lsh 1 line))))))
+(define (int-ack line) (poke (dev-reg *sys* sys-intreq) (%lsh 1 line)))
+(define (int-raise line) (poke (dev-reg *sys* sys-intset) (%lsh 1 line)))
 ;; The line number, or -1 when nothing is pending - which the chip spells as
 ;; a word of all ones. The raw load rather than `peek-signed`: a line number
 ;; is five bits and the sentinel is the one value where the two readings
 ;; differ, so the one-instruction form says exactly what is meant and cannot
 ;; allocate. This runs inside the trap handler.
-(define (int-pending) (%ld-fixnum sys-intnum))
+(define (int-pending) (%ld-fixnum (dev-reg *sys* sys-intnum)))
 
 ;; ---------------------------------------------------------------- timer
-(define tmr-lo (dev-addr dev-timer #x00))
-(define tmr-hi (dev-addr dev-timer #x04))
-(define tmr-cmplo (dev-addr dev-timer #x08))
-(define tmr-cmphi (dev-addr dev-timer #x0c))
-(define tmr-freq (dev-addr dev-timer #x10))
-(define tmr-wall (dev-addr dev-timer #x14))
+(define *timer* (make-device "timer" dev-timer 'kernel))
+(define tmr-lo #x00)
+(define tmr-hi #x04)
+(define tmr-cmplo #x08)
+(define tmr-cmphi #x0c)
+(define tmr-freq #x10)
+(define tmr-wall #x14)
 
 ;; The timebase is the retired instruction count, so the clock is exact and
 ;; the same program produces the same schedule on every run.
-(define (timer-now-low) (peek tmr-lo))
-(define (timer-freq) (peek tmr-freq))
-(define (millis) (peek tmr-wall))
+(define (timer-now-low) (peek (dev-reg *timer* tmr-lo)))
+(define (timer-freq) (peek (dev-reg *timer* tmr-freq)))
+(define (millis) (peek (dev-reg *timer* tmr-wall)))
 
 (define (timer-set-in n)
   ;; Fire n ticks from now. The compare is 64-bit; the low half is written
@@ -146,21 +220,43 @@
   ;; It used to carry at 2^30 and mask the low half back together by hand,
   ;; which was the same problem answered by giving up on the top two bits.
   (without-interrupts
-    (%st-word! peek-scratch (%ld-word tmr-lo))
+    (%st-word! peek-scratch (%ld-word (dev-reg *timer* tmr-lo)))
     (let* ((l0 (%ld-half peek-scratch))
            (l1 (%ld-half (%+ peek-scratch 2)))
            (s0 (%+ l0 (%logand n 65535)))
            (s1 (%+ (%+ l1 (%lsh n -16)) (%lsh s0 -16))))
       ;; the high half first, so a wrap cannot leave a compare in the past
-      (%st-fixnum! tmr-cmphi (%+ (%ld-fixnum tmr-hi) (%lsh s1 -16)))
+      (%st-fixnum! (dev-reg *timer* tmr-cmphi)
+                   (%+ (%ld-fixnum (dev-reg *timer* tmr-hi)) (%lsh s1 -16)))
       (%st-half! peek-scratch (%logand s0 65535))
       (%st-half! (%+ peek-scratch 2) (%logand s1 65535))
-      (%st-word! tmr-cmplo (%ld-word peek-scratch)))))
+      (%st-word! (dev-reg *timer* tmr-cmplo) (%ld-word peek-scratch)))))
 
 (define (timer-never)
   (without-interrupts
-    (poke tmr-cmphi -1)
-    (poke tmr-cmplo -1)))
+    (poke (dev-reg *timer* tmr-cmphi) -1)
+    (poke (dev-reg *timer* tmr-cmplo) -1)))
+
+;; ---------------------------------------------------------------- releasing
+;; A driver that dies must not take its peripheral with it: the next one could
+;; never claim it.
+(define (release-devices-of task)
+  (without-interrupts
+    (let ((keep nil))
+      (dolist (d *claimed*)
+        (if (%eq? (dv-owner d) task)
+            (set-dv-owner! d nil)
+            (set! keep (%cons d keep))))
+      (set! *claimed* keep)))
+  nil)
+
+;; After a resume, Exec is rebuilt from nothing and every task that owned a
+;; device is gone, so every claim the image remembers is a claim nobody holds.
+(define (release-all-devices)
+  (without-interrupts
+    (dolist (d *claimed*) (set-dv-owner! d nil))
+    (set! *claimed* nil))
+  nil)
 
 ;; ---------------------------------------------------------------- display
 (define gfx-base (dev-addr dev-gfx #x00))

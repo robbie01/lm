@@ -156,6 +156,8 @@
   peek-signed peek-scratch
   bm-pixels set-bm-pixels! bitmap? bm-alloc
   blit-busy? blit-drain blit-sync blit-wait-block new-blit-block blt-status
+  make-device device? device-owner device-name device-usable? dev-reg
+  claim-device release-device release-devices-of release-all-devices
   *blit-list* *gc-blit-list* *in-interrupt* blit-block gc-blit-block blit-go blt-list
   *screen* alloc-pool bm-blit-rect bm-clip bm-fill-rect
   bm-plot bm-point bm-at bm-addr bm-w bm-h bitmap? make-bitmap alloc-bitmap

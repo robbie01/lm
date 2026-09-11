@@ -435,9 +435,20 @@ Each step lands on its own and the machine works after each one.
 are already unreachable outside hw.lisp and three leak one name each, listed
 above.
 
-**1. A device is a value.** The `device` record, `dev-peek` and `dev-poke`
-with the owner check, and Exec claiming `sys` and `timer`. Nothing else moves
-yet. Small, and it proves the shape on the two chips nobody argues about.
+**1. A device is a value. Done.** A `device` record holds the page's base
+and an owner; register names are offsets, and `(dev-reg d off)` is the only
+way to turn one into an address. `sys` and `timer` are converted.
+
+One correction to the plan as written: Exec cannot "claim" `sys` and `timer`
+and be checked against the running task, because Exec is not a task - it runs
+inside whichever task called it, or inside the trap handler with the
+interrupted task still in s2. So the owner is one of three things: `kernel`
+(never claimed, not checked, reached only through hw.lisp's functions and not
+exported), nil (a driver's device nobody has claimed yet, usable by whoever
+holds it, which keeps pre-driver code working), or a task (claimed; every
+other task is refused). `rem-task` releases what a dying task held, and a
+resume releases every claim, because every task that made one is gone.
+`(devices)` checks it.
 
 **2. disk.driver.** The whole model, end to end, on the peripheral where
 nothing is hot and nothing else depends on the answer.
