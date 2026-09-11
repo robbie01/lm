@@ -213,7 +213,9 @@
   ;; returns. Marking reads them next, so it must not start until the clears
   ;; have landed - a mark bit left over from the last collection is a dead
   ;; object kept and, worse, a live one's forwarding computed from nonsense.
-  (blit-wait-block *gc-blit-list*))
+  ;; All of them: the clears go on the chain back to back, and wait for each
+  ;; other only there.
+  (blit-wait-ring *gc-blit-ring*))
 
 ;; ---------------------------------------------------------------- marking
 ;; Is this word something the heap could have handed out? Used both for real

@@ -451,7 +451,34 @@
         (bm-fill-rect big 0 0 1024 768 5)
         (num-check 'big-commit-is-quick (%< (%- (%cycles) t0) 10000) t))
       (blit-sync)
-      (num-check 'big-landed (%ld-byte (%addr-of (bm-pixels big))) 5)))
+      (num-check 'big-landed (%ld-byte (%addr-of (bm-pixels big))) 5))
+    ;; A chain: a blit queued behind a big one does not wait for it. Its
+    ;; commit is a few hundred cycles, not the big one's two hundred thousand
+    ;; - the chip gets to it by itself - and the two land in order.
+    (let ((big (alloc-bitmap 1024 768)) (small (alloc-bitmap 16 16)))
+      (blit-drain)
+      (bm-fill-rect big 0 0 1024 768 6)
+      (let ((t0 (%cycles)))
+        (bm-fill-rect small 0 0 16 16 7)
+        (num-check 'queued-behind-a-big-one-is-quick (%< (%- (%cycles) t0) 5000) t))
+      (num-check 'and-the-big-one-still-running (blit-busy?) t)
+      (blit-sync)
+      (num-check 'the-queued-one-landed (%ld-byte (%addr-of (bm-pixels small))) 7)
+      (num-check 'after-the-big-one (%ld-byte (%addr-of (bm-pixels big))) 6))
+    ;; More blits than a ring has descriptors: taking one waits for the chip
+    ;; to be done with it, and every one of them lands.
+    (let ((bs nil) (i 0))
+      (while (%< i 20)
+        (let ((b (alloc-bitmap 8 8)))
+          (bm-fill-rect b 0 0 8 8 (%+ i 1))
+          (set! bs (%cons b bs)))
+        (set! i (%+ i 1)))
+      (blit-sync)
+      (let ((ok t) (v 20))
+        (dolist (b bs)
+          (if (%= (%ld-byte (%addr-of (bm-pixels b))) v) nil (set! ok nil))
+          (set! v (%- v 1)))
+        (num-check 'twenty-through-a-ring-of-eight ok t))))
   (princ "blitting: done (nothing above = all correct)")
   (newline))
 

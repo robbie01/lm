@@ -446,19 +446,54 @@
 (define blt-status (dev-addr dev-blit blit-status-reg))
 
 ;; ---------------------------------------------------------------- commands
-;; The blitter takes its whole command from a block in memory, in one store, so
-;; nothing has to be held off while it is programmed.
+;; A blit is a descriptor in memory: the parameters, a status word the chip
+;; clears when it has finished, and a link to the next descriptor. The chip
+;; walks the links by itself, so a queue of blits is a chain in memory, and
+;; putting one more on it is a store into the last one's link - no waiting for
+;; the chip, and no processor involved in getting from one blit to the next.
 ;;
-;; That works only because the block belongs to whoever is filling it. A shared
-;; block would have exactly the race the registers had: an interrupt server
-;; that blits inside a task's setup would overwrite the half the task had
-;; written, and the task would then commit a coherent command made of both.
-;; So every task has a block of its own, swapped in by the scheduler the way
-;; `*out*` and the current package are, and interrupt servers have one more.
-;; Two contexts are never half way through the same block.
-(define *blit-list* 0)      ; the running task's, swapped in with its bindings
-(define *gc-blit-list* 0)   ; and one the collector owns outright
+;; A descriptor belongs to whoever is filling it. A shared one would have
+;; exactly the race the registers had: an interrupt server that blits inside a
+;; task's setup would overwrite the half the task had written, and the task
+;; would then commit a coherent command made of both. So every task has
+;; descriptors of its own, swapped in by the scheduler the way `*out*` and the
+;; current package are. Two contexts are never half way through the same one.
+;;
+;; A ring of them, not one. The chip reads a descriptor when it reaches it
+;; rather than when it is committed, so a descriptor cannot be refilled until
+;; the chip has finished it - and a task with only one would wait for each blit
+;; before starting the next, which is the synchronous chip back again. Eight go
+;; round, and a task waits only when it has eight in flight.
+(define blit-ring-size 8)
+(define *blit-ring* 0)      ; the running task's, swapped in with its bindings
+(define *gc-blit-ring* 0)   ; and one the collector owns outright
+(define *blit-tail* 0)      ; the last descriptor put on the chain, anybody's
 (define *in-interrupt* nil) ; set by the trap handler, cleared before it returns
+
+;; A ring is a word saying which descriptor is next, then the descriptors.
+(define (ring-slot r i) (%+ r (%+ 8 (%* i blit-list-size))))
+
+;; Every status clear: pool memory is not zeroed, and a descriptor that
+;; happened to read "pending" before it was ever used would make the first
+;; wait on it wait for a write-back that is never coming.
+(define (new-blit-ring)
+  (let ((r (alloc-pool (%+ 8 (%* blit-ring-size blit-list-size))))
+        (i 0))
+    (%st-fixnum! r 0)
+    (while (%< i blit-ring-size)
+      (let ((d (ring-slot r i)))
+        (%st-fixnum! (%+ d bl-status) 0)
+        (%st-fixnum! (%+ d bl-next) 0))
+      (set! i (%+ i 1)))
+    r))
+
+;; The ring's next descriptor, once the chip has finished with it.
+(define (ring-take r)
+  (let* ((i (%ld-fixnum r))
+         (d (ring-slot r i)))
+    (blit-wait-block d)
+    (%st-fixnum! r (if (%= (%+ i 1) blit-ring-size) 0 (%+ i 1)))
+    d))
 
 ;; The blitter belongs to task context.
 ;;
@@ -469,7 +504,8 @@
 ;;
 ;; An interrupt server does not get one and is not meant to. It used to: the
 ;; trap handler swapped a second block in for the duration, which looked
-;; harmless and was the worst bug this machine has had. `*blit-list*` is per
+;; harmless and was the worst bug this machine has had. `*blit-list*` - one
+;; block then, a ring now - is per
 ;; task and the scheduler swaps it with the rest of a task's bindings - from
 ;; inside that handler - so the swap leaked one task's block into another's,
 ;; and two contexts then programmed one block. What the chip ran was half of
@@ -495,33 +531,33 @@
   (if *in-interrupt*
       (error "the blitter is task context only: signal a task instead")
       nil)
-  (if (%= *blit-list* 0) (set! *blit-list* (new-blit-block)) nil)
-  *blit-list*)
+  (if (%= *blit-ring* 0) (set! *blit-ring* (new-blit-ring)) nil)
+  (ring-take *blit-ring*))
 
 ;; The collector's own. Not a fluid binding: a collection runs with interrupts
 ;; off from end to end, so there is never a second one to keep apart from.
 (define (gc-blit-block)
-  (if (%= *gc-blit-list* 0)
-      (set! *gc-blit-list* (new-blit-block))
-      nil)
-  *gc-blit-list*)
+  (if (%= *gc-blit-ring* 0) (set! *gc-blit-ring* (new-blit-ring)) nil)
+  (ring-take *gc-blit-ring*))
 
 ;; ---------------------------------------------------------------- waiting
 ;; The blitter is asynchronous: a blit takes time, and `blit-go` returns
 ;; before it has happened. Two different questions follow, and they have
 ;; different answers.
 ;;
-;; *Is the chip free?* It has one command buffer, so a commit has to wait for
-;; the running transfer. That is `blit-drain`, and it asks the status register.
+;; *Is the chip idle?* That is `blit-drain`, and it asks the status register.
+;; Hardly anything needs it any more, since a commit goes on the chain whether
+;; the chip is busy or not. What does is whatever needs every blit in the
+;; machine finished - saving an image.
 ;;
 ;; *Have my pixels landed?* That is the one drawing code actually cares about,
 ;; and it must not be answered by waiting for the chip to go idle, because the
 ;; chip is the compositor's too: it composites continuously and the chip is
 ;; busy about half the time, so a task that plotted a pixel only when the chip
 ;; was idle would spend most of its life waiting for other people's windows.
-;; So the chip writes a status word back into each command block when it
-;; finishes it, and a task waits on *its own* block. That is `blit-sync`, and
-;; it is a load from the task's own memory.
+;; So the chip writes a status word back into each descriptor when it finishes
+;; it, and a task waits on *its own* descriptors. That is `blit-sync`, and it
+;; is a few loads from the task's own memory.
 ;;
 ;; The rule, which is the WaitBlit rule on the Amiga: **before touching pixels
 ;; with the processor, `blit-sync`.** `bm-plot` and `bm-point` do it for you.
@@ -546,47 +582,54 @@
       (while (%= 1 (%ld-fixnum (%+ b bl-status))) (blit-busy?)))
   nil)
 
-(define (blit-sync) (blit-wait-block *blit-list*))
+;; Every descriptor in a ring. The chain runs in order, so this is the same as
+;; waiting for the last one issued, without having to remember which it was.
+(define (blit-wait-ring r)
+  (if (%= r 0)
+      nil
+      (let ((i 0))
+        (while (%< i blit-ring-size)
+          (blit-wait-block (ring-slot r i))
+          (set! i (%+ i 1)))))
+  nil)
 
-;; A command block, with its status word clear. Pool memory is not zeroed, and
-;; a block that happened to read "pending" before it was ever used would make
-;; the first `blit-sync` wait for a write-back that is never coming.
-(define (new-blit-block)
-  (let ((b (alloc-pool blit-list-size)))
-    (%st-fixnum! (%+ b bl-status) 0)
-    (%st-fixnum! (%+ b bl-next) 0)
-    b))
+(define (blit-sync) (blit-wait-ring *blit-ring*))
 
-;; Start a blit and return without waiting for it to finish.
+;; Put a filled descriptor on the chain and return. The chip may be busy with
+;; anybody's blits; this one waits its turn in memory, not here.
 ;;
-;; The chip has to be free to take a command, and the wait for that is a spin
-;; on the status register with interrupts on - then, with interrupts off for
-;; one status read and two stores, a check that nobody else got in first.
-;; Waiting with them off would be the old problem again: a full-screen fill
-;; holding every interrupt off for two frames.
+;; The link is the delicate part. The chip reads a descriptor's link when it
+;; finishes that descriptor, so a link written onto a tail it has already
+;; finished is never seen. Hence the order: link only while the chip is busy -
+;; then it cannot have finished the tail, because the tail is the last thing
+;; it has - and afterwards look again, and start the chip from here if it has
+;; gone idle without taking this one. On hardware the chip runs while this
+;; does, and the second look is what catches it finishing in between; the
+;; emulator only lets the chip move when somebody looks, but the code is the
+;; one for the hardware.
 ;;
-;; The block goes to pending inside that section, after the drain, and not
-;; before it. The drain is what lets this task's *previous* command finish,
-;; and finishing writes that command's done back into this same block - so a
-;; pending set before the drain was wiped by the previous command's
-;; write-back, and this one ran with its block already saying done. The first
-;; victim was the collector: four fills through one block to clear its maps,
-;; a wait that returned while the last one was still running, and marking that
-;; read bits the fill had not cleared yet. It showed up as a load from address
-;; minus four in `gc-object-slots`, with the compositor's frame on top of the
-;; backtrace because the compositor was the task that happened to allocate.
-(define (blit-go b op)
-  (%st-fixnum! (%+ b bl-op) op)
-  (let ((done nil))
-    (while (%null? done)
-      (blit-drain)
-      (without-interrupts
-        (if (blit-busy?)
-            nil
-            (begin
-              (%st-fixnum! (%+ b bl-status) 1)
-              (%st-fixnum! blt-list b)
-              (set! done t))))))
+;; The fields go in before the section. The descriptor is this task's, the
+;; ring has already waited for the chip to be done with it, and it is on no
+;; chain until the section puts it on one.
+(define (blit-go d op)
+  (%st-fixnum! (%+ d bl-op) op)
+  (%st-fixnum! (%+ d bl-next) 0)
+  (%st-fixnum! (%+ d bl-status) 1)
+  (without-interrupts
+    (let ((linked (if (if (%> *blit-tail* 0) (blit-busy?) nil)
+                      (begin (%st-fixnum! (%+ *blit-tail* bl-next) d) t)
+                      nil)))
+      (set! *blit-tail* d)
+      ;; Not linked, or linked onto a tail the chip finished before it could
+      ;; see the link: either way it is not coming for this one by itself. A
+      ;; store to the list register starts it - or, if the chip is busy with a
+      ;; chain whose end nothing here knows, waits for that chain first, which
+      ;; is slow but right.
+      (if (if linked (blit-busy?) nil)
+          nil
+          (if (%= 1 (%ld-fixnum (%+ d bl-status)))
+              (%st-fixnum! blt-list d)
+              nil))))
   nil)
 
 

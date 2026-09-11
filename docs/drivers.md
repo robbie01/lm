@@ -1,8 +1,8 @@
 # Every peripheral owned by a process
 
 A plan, partly built. What is done is marked below: the bitmap type, the
-asynchronous blitter, devices as values, the disk driver and the input
-driver.
+asynchronous blitter and its descriptor chain, devices as values, the disk
+driver and the input driver.
 
 The goal is that a peripheral has exactly one owner, that reaching one you do
 not own is impossible rather than merely discouraged, and that the mechanism
@@ -44,6 +44,12 @@ Measured on this machine, under the workbench:
     a small blit (8x8 fill, through bm-fill-rect)          169 cycles
     one composite pass                              2,310,890 cycles
     blits in one composite pass                             66
+
+(Measured before the blitter had a chain. Since phase 4 a composite pass is
+783,454 cycles, and a small blit costs the task that issues it about 850
+cycles all in: clipping 189, taking a descriptor 156, filling it 212, linking
+it 137. The argument below only gets stronger: a message is now eleven times a
+whole small blit, and seventy times the part that talks to the chip.)
 
 So a message is **fifty-seven times** a small blit. Routing each blit of a
 composite through a driver would cost 639,000 cycles on a 2,310,000 cycle
@@ -258,7 +264,8 @@ not been cleared. It surfaced as a load from address minus four in
 `gc-object-slots`, only when enough had been allocated for the last fill to
 still be running. Pending is now set after the wait, with the chip known idle.
 
-What is left is the descriptor chain and the cost model, below.
+The descriptor chain and the cost model are built too: see *The three
+changes*, and phase 4 in the sequence.
 
 That is worth fixing for a reason beyond tidiness: the target is eventually an
 FPGA SoC, and this is the one part of the machine whose model is not
@@ -302,6 +309,9 @@ makes the design fit.
 
 ### The three changes
 
+**All three are built.** The second came first, as the asynchronous part
+above; the other two are phase 4.
+
 **1. The command block becomes a descriptor with a `next` pointer.** The
 register is already called `blt-list` and already takes the address of a block
 in memory; make the chip walk the chain rather than run one block. This is
@@ -321,6 +331,12 @@ operations - XOR, AND, MASK - costing about double because they read before
 they write, and an extra burst at each end of a row that does not start on a
 burst boundary. The point is that the emulator should predict the FPGA rather
 than flatter it.
+
+Measured on the workbench with two shells, a full-screen composite pass:
+2,310,890 cycles before, 783,454 after. The pass no longer waits on the chip
+at all - issuing it takes 750,016 of those cycles, and the chip finishes about
+33,000 cycles after the last blit is queued. What is left is the processor's
+own work, the region arithmetic and clipping, which is where to look next.
 
 ### Considered and shelved: composing at scanout
 
@@ -361,15 +377,18 @@ merely tidy. An asynchronous chip needs an owner to run the queue:
 - A client that does not need the pixels yet does not wait at all. A client
   that does waits on its own signal, along with everything else it waits on.
 
-The cost works because clients queue rather than call. Measured now, a
-compositor blit averages 2,310,890 / 66 = about 35,000 cycles:
+The cost only works if clients queue rather than call, and phase 4 made that
+sharper. A composite pass is now 783,454 cycles for 66 blits, about 11,900
+each:
 
-    request per blit, blocking      9,680 cycles     28%
-    send per blit, queued           ~2,500 cycles     8%
+    request per blit, blocking      9,680 cycles     81%
+    send per blit, queued           ~2,500 cycles    21%
+    link a descriptor, no message      137 cycles     1%
 
-and the queued form blocks once a frame instead of sixty-six times, in
-exchange for real overlap - the task computing the next rectangle while the
-chip moves the last one.
+So a message per blit is out, even a queued one. What a graphics driver can
+own is the rules of the chain and its completion signals; clients go on
+linking their own descriptors, and talk to the driver once a frame, not once
+a blit.
 
 `bm-blit-rect` and friends keep their shape. What changes underneath is that
 filling a descriptor and appending it replaces filling a block and storing its
@@ -507,12 +526,26 @@ and every event would have been ignored. The vocabulary is exported from
 a registry in the chip. See *a bitmap is a type, not an address*. Nothing
 downstream depends on it any more, which is why the numbering below moved up.
 
-**4. The blitter's descriptor chain and cost model.** The asynchronous part
-is done. Left: the chip walks the `next` word so commands can queue, and the
-cost becomes bandwidth rather than a flat byte per cycle. One constraint the
-chain adds: once the chip reads descriptors as it reaches them rather than all
-at commit, a task cannot refill a descriptor the chip might still be about to
-read - so each task needs a few, not one.
+**4. The blitter's descriptor chain and cost model. Done.** The chip walks
+the `next` word, so a blit is queued by linking it onto the last one:
+`blit-go` no longer waits for the chip to be idle, only for its own
+descriptor to be free. Each task has a ring of eight descriptors, for the
+reason given when this was planned - the chip reads a descriptor when it
+reaches it, so one cannot be refilled until the chip has finished it.
+
+The linking is written the way it has to be on hardware, where the chip runs
+while the processor links: link only while the chip is busy, then look again
+and start it if it went idle without taking the new descriptor. And the chip
+reads a descriptor's link before it writes its status, so a descriptor its
+owner sees as done is one the chip has entirely finished with.
+
+The cost is bandwidth now: a row is a burst with a setup cost, partial words
+at the ends are whole words, XOR, AND, OR and ADD read the destination before
+writing it, and each descriptor is fetched and written back. The constants
+are at the top of blit.rs and assume a 32-bit path at the machine's clock,
+about 80 MB/s, to be replaced by measurements from the real part. MASK is
+costed as a copy, not a read-modify-write as this plan first said: skipping
+transparent bytes is what byte enables on a write are for.
 
 **5. gfx.driver.** Owns the display registers, the screen and the descriptor
 chain; takes back `gfx-ctrl`. Bitmap allocation moves behind it, so a client is

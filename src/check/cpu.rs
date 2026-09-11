@@ -1126,6 +1126,50 @@ pub fn run_all() -> bool {
     }
 
     {
+        // The blitter walks a chain: one store starts two descriptors, each
+        // is marked done in its own status word, and the interrupt comes
+        // once, when the chain runs dry.
+        let mut m = Machine::new();
+        let (a, b) = (0x6000u32, 0x6100u32);
+        let put = |m: &mut Machine, d: u32, dst: u32, val: u32, next: u32| {
+            // src dst w h smod dmod val op(fill) x0 y0 x1 y1 status next
+            let words = [0, dst, 16, 4, 0, 16, val, 1, 0, 0, 0, 0, 1, next];
+            for (i, w) in words.iter().enumerate() {
+                m.poke32(d + 4 * i as u32, *w);
+            }
+        };
+        put(&mut m, a, 0x4000, 0xAB, b);
+        put(&mut m, b, 0x5000, 0xCD, 0);
+        let mut code = vec![];
+        li32(&mut code, A0, MMIO_BASE + (DEV_BLIT << 12));
+        li32(&mut code, A1, 1);
+        code.push(sw(A1, A0, 0x34)); // ctrl: interrupt when the chain is done
+        li32(&mut code, A1, a);
+        code.push(sw(A1, A0, 0x38)); // list: go
+        code.push(lw(A2, A0, 0x20)); // busy straight away
+        let end = emit(&mut m, BASE, &code);
+        m.poke32(end, jal(ZERO, 0));
+        m.pc = BASE;
+        m.mtimecmp = u64::MAX;
+        m.gfx.next_vbl = u64::MAX;
+        run::run(&mut m, 2000);
+        let filled = |m: &Machine, at: u32, v: u8| (0..64).all(|i| m.peek8(at + i) == v);
+        extra.push((
+            "blitter chain: both descriptors ran",
+            filled(&m, 0x4000, 0xAB) && filled(&m, 0x5000, 0xCD),
+        ));
+        extra.push((
+            "blitter chain: each marked done",
+            m.peek32(a + 48) == 0 && m.peek32(b + 48) == 0,
+        ));
+        extra.push(("blitter chain: busy while it runs", m.x[A2 as usize] & 1 == 1));
+        extra.push((
+            "blitter chain: the interrupt at the end",
+            m.intreq & (1 << INT_BLIT) != 0,
+        ));
+    }
+
+    {
         // The disk works on its own time: a command reads busy until its
         // moment comes, the memory a read is filling holds the old bytes
         // until then, and the new ones after.

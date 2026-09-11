@@ -424,6 +424,16 @@ the chip works, and other tasks run meanwhile - four task switches during one
 full-screen fill, measured. See *The blitter becomes a real asynchronous
 device* in docs/drivers.md.
 
+**Done: a chain, and a cost that is bandwidth.** The chip walks descriptors,
+so a blit is queued by linking it onto the last one, and a task waits only
+when all eight of its descriptors are in flight. The cost counts memory
+traffic - bursts, partial words at the ends of rows, a second pass over the
+destination for XOR, AND, OR and ADD - instead of a flat byte a cycle. A
+full-screen composite pass went from 2,310,890 cycles to 783,454, and it no
+longer waits on the chip: 750,016 of those cycles are the processor issuing
+it. The next thing to make faster there is the region arithmetic, not the
+blitter.
+
 ## Records cost about nine percent of code space
 
 `defrecord` emits a getter and a setter function per field, so that an accessor
