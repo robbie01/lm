@@ -1,7 +1,7 @@
-//! `lmdev` — the test bench and the tools for looking inside things.
+//! `lmdev`: the test bench and the tools for looking inside images.
 //!
-//! Nothing here is needed to run a machine or to build one. It is here to
-//! answer questions about whether either of them is right.
+//! Nothing here is needed to run a machine or to build one. These commands
+//! check and inspect both.
 
 use clap::{Parser, Subcommand};
 
@@ -28,8 +28,7 @@ enum Cmd {
 
     /// Assemble the same program in Lisp and in Rust, and compare byte for byte
     ///
-    /// Two independent readings of the RISC-V manual agreeing is evidence.
-    /// One encoding agreeing with itself is not.
+    /// The Rust encoders are an independent reading of the RISC-V manual.
     Asm,
 
     /// End-to-end compiler tests: source in, machine code out, run, compare
@@ -40,9 +39,6 @@ enum Cmd {
     },
 
     /// Name resolution: what a package can see, and what pkg:name reaches
-    ///
-    /// Two implementations of what a name means agreeing is evidence; one
-    /// agreeing with itself is not.
     Readers,
 
     /// Run every suite
@@ -53,8 +49,7 @@ enum Cmd {
 
     /// Compile and run one expression, and print what it evaluated to
     ///
-    /// Builds the standard library first, so this is slow to start and exact
-    /// about what the compiler actually does with a form.
+    /// Builds the standard library first, so it is slow to start.
     Eval {
         /// Expressions to compile and run
         #[arg(required = true)]
@@ -82,7 +77,7 @@ enum Cmd {
         json: bool,
     },
 
-    /// A prompt on the bootstrap interpreter, for poking at the compiler
+    /// A prompt on the bootstrap interpreter
     ///
     /// This is the build-time Lisp, not the machine's own: it runs on the host
     /// and evaluates over the target heap.

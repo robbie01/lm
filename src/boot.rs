@@ -58,9 +58,8 @@ pub fn boot(o: &Options) -> i32 {
         }
     }
 
-    // A script is typed at the console as if a person had typed it; the
-    // machine cannot tell the difference, which is what makes it a usable
-    // test harness.
+    // A script is fed to the console as typed input; the machine cannot
+    // distinguish it from a person typing.
     if let Some(s) = &o.script {
         m.uart.feed(s.as_bytes());
     }
@@ -82,7 +81,16 @@ pub fn boot(o: &Options) -> i32 {
     if o.fnprof {
         m.fnprof = Some(Box::default());
     }
-    if std::env::var("LM_WATCH_S2").is_ok() {
+    // The debugging watches, enabled only from the environment.
+    let hex = |k: &str| {
+        std::env::var(k).ok().and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+    };
+    m.watch_hi = hex("LM_WATCH_HI");
+    m.watch_addr = hex("LM_WATCH_ADDR").map(|lo| {
+        let len = std::env::var("LM_WATCH_LEN").ok().and_then(|s| s.parse().ok()).unwrap_or(128);
+        (lo, len)
+    });
+    if std::env::var_os("LM_WATCH_S2").is_some() || m.watch_hi.is_some() || m.watch_addr.is_some() {
         m.table = &crate::cpu::WATCH_TABLE;
     }
 
@@ -93,14 +101,10 @@ pub fn boot(o: &Options) -> i32 {
     let secs = t.elapsed().as_secs_f64();
 
     if o.trace_exit {
-        // `cycles` is the machine's clock. It counts the instructions run, but
-        // also the time an idle machine skips over and the cycles the devices
-        // charge, so dividing it by the wall clock gave figures like 6,500
-        // MIPS for a workbench that was mostly waiting for the next frame.
-        // What the emulator actually did is `executed`.
-        // And the rate is over the time the emulator was running, not the time
-        // it spent asleep keeping a window's idle machine in step with the
-        // wall clock.
+        // `cycles` is the machine's clock: instructions run, plus the time an
+        // idle machine skips over and the cycles devices charge. `executed`
+        // is the work. The MIPS rate is `executed` over the time the emulator
+        // ran, excluding time spent asleep pacing an idle windowed machine.
         let clock = m.cycles as f64 / crate::dev::TIMER_HZ as f64;
         let waiting = m.cycles.saturating_sub(m.executed);
         let running = (secs - m.slept).max(1e-6);
@@ -128,8 +132,8 @@ pub fn boot(o: &Options) -> i32 {
         }
     }
     if let Some(path) = &o.screenshot {
-        // Whatever the display was showing when the machine stopped, as a
-        // plain PPM: enough to check that a demo drew what it meant to.
+        // The display contents when the machine stopped, written as a binary
+        // PPM.
         let (w, h) = (m.gfx.width as usize, m.gfx.height as usize);
         let ramp = m.ramp;
         let len = m.ramlen as usize;

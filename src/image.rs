@@ -1,14 +1,13 @@
 //! Image files: a snapshot of the machine's memory.
 //!
-//! An image is not a program, it is a heap. It holds the symbols, the compiled
-//! code, the boot list and whatever the system happened to have built by the
-//! time it was written, all at the addresses they will occupy again when it is
-//! loaded - which is exactly why nothing in the object memory may move.
+//! An image is a heap, not a program. It holds the symbols, the compiled
+//! code, the boot list and whatever else the system had built when it was
+//! written, at the addresses they occupy again when loaded. Nothing in the
+//! object memory may move for this reason.
 //!
-//! The file is a list of non-empty 4 KiB pages. Most of what a running machine
-//! owns is zero: stacks, the mark bitmap, unfilled heap. Skipping zero pages
-//! turns a 128 MiB address space into a file the size of what is actually in
-//! it.
+//! The file is a list of non-empty 4 KiB pages. Most of a running machine's
+//! memory is zero: stacks, the mark bitmap, unfilled heap. Skipping zero
+//! pages keeps the file the size of its contents.
 
 use crate::mach::Machine;
 use crate::map::*;
@@ -17,9 +16,9 @@ use std::io::{Read, Write};
 pub const MAGIC: &[u8; 8] = b"LMIMAGE1";
 pub const PAGE: u32 = 4096;
 
-/// The regions worth saving, as (base, end-pointer-global) pairs. Anything
-/// outside them - the mark bitmap, the free area above the heap - is
-/// reconstructed rather than stored.
+/// The regions saved, as (base, end-pointer global) pairs. Everything outside
+/// them (the mark bitmap, the free area above the heap) is reconstructed at
+/// load rather than stored.
 fn regions(m: &Machine) -> Vec<(u32, u32)> {
     vec![
         (0, 0x1000),                    // nil cell, globals, object bins

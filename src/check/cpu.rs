@@ -1,6 +1,6 @@
 //! Processor conformance tests. Each case assembles a small program, runs it,
-//! and checks a register or a memory word. The point is to catch decode bugs
-//! before anything is built on top of the core.
+//! and checks a register or a memory word. They catch decode bugs before
+//! anything is built on top of the core.
 
 use crate::mach::*;
 use crate::map::*;
@@ -43,8 +43,8 @@ fn go(code: &[u32]) -> Box<Machine> {
     li32(&mut tail, T0, MMIO_BASE);
     tail.push(sw(ZERO, T0, 0));
     emit(&mut m, end, &tail);
-    // Somewhere for an unexpected trap to go. A case that faults should fail
-    // its assertion, not vanish into a handler that is not there.
+    // A handler for an unexpected trap. A case that faults fails its
+    // assertion rather than jumping to a missing handler.
     let mut stub = vec![];
     li32(&mut stub, T0, MMIO_BASE);
     stub.push(addi(T1, ZERO, 1));
@@ -109,10 +109,8 @@ fn cases() -> Vec<Case> {
     c("flt signed", two(-1, 1, flt), A0, 1);
     c("feq", two(5, 5, feq), A0, 1);
     c("feq not", two(5, 4, feq), A0, 0);
-    // Wrapping is what the software sequences always did, and string-hash
-    // depends on it.
-    // 3 * 2^29 does not fit in thirty-one bits. Wrapping is what the software
-    // sequence always did, and `string-hash` depends on it.
+    // 3 * 2^29 does not fit in thirty-one bits. fmul wraps, and `string-hash`
+    // depends on that.
     {
         let mut v = vec![addi(A1, ZERO, 7)];
         li32(&mut v, A2, (1u32 << 30) | 1);
@@ -752,9 +750,9 @@ fn cases() -> Vec<Case> {
         v
     };
     c("car", pair(vec![car(A0, A1)]), A0, 111);
-    // car and cdr are offsets 0 and 4 of the same instruction now, and the
-    // offset is general: a slot access off an object is the same opcode with
-    // funct3 saying "object" instead of "pair".
+    // car and cdr are offsets 0 and 4 of the same instruction, and the offset
+    // is general: a slot access off an object is the same opcode with funct3
+    // saying "object" instead of "pair".
     c("lref at 4", pair(vec![lref(A0, A1, 4)]), A0, 222);
     c(
         "sref at 4",
@@ -787,9 +785,8 @@ fn cases() -> Vec<Case> {
         A0,
         99,
     );
-    // nil is the word 0 and is a legal pair, so this must not trap - and its
-    // cell holds zero, so car of nil is nil. This used to store a 7 there
-    // first, to have something to see; nothing may store there now.
+    // nil is the word 0 and is a legal pair, so this must not trap. The cell
+    // at address 0 holds zero, so car of nil is nil.
     c(
         "car of nil",
         vec![addi(A0, ZERO, 7), car(A0, ZERO)],
@@ -840,8 +837,8 @@ pub fn run_all() -> bool {
         extra.push(("mepc points at the fault", m.mepc == BASE + 8));
     }
 
-    // The whole point of custom-2: an operand that is not a number is a trap
-    // naming the value, not a silently fabricated pointer.
+    // custom-2: an operand that is not a number is a trap naming the value,
+    // not a fabricated pointer.
     {
         let trap = |body: Vec<u32>| -> (u32, u32) {
             let mut m = Machine::new();
@@ -859,8 +856,8 @@ pub fn run_all() -> bool {
             run::run(&mut m, 100);
             (m.x[A1 as usize], m.x[A2 as usize])
         };
-        // 0x3004 looks like an object pointer; adding to it used to make a
-        // pointer of a different kind.
+        // 0x3004 looks like an object pointer; adding to it must trap rather
+        // than produce another pointer.
         let mut body = vec![];
         li32(&mut body, A3, 0x3004);
         body.push(addi(A4, ZERO, 5));
@@ -881,7 +878,7 @@ pub fn run_all() -> bool {
         let (cause, _) = trap(vec![addi(A3, ZERO, 11), addi(A4, ZERO, 1), fdiv(A0, A3, A4)]);
         extra.push(("fdiv by zero traps", cause == C_DIVZERO));
 
-        // The checking forms exist even though nothing emits them yet.
+        // The overflow-checking forms, which the compiler does not yet emit.
         let mut big = vec![];
         li32(&mut big, A3, ((1u32 << 30) - 1) * 2 + 1);
         big.push(addi(A4, ZERO, 3));
@@ -920,9 +917,9 @@ pub fn run_all() -> bool {
         let (cause, _) = trap(vec![addi(A3, ZERO, 77), sref(A3, ZERO, 0)]);
         extra.push(("a store through nil still traps", cause == C_TYPE));
 
-        // And so does a plain store into nil's cell, car or cdr - see
-        // `do_store`. The inline allocator is plain stores, and one that had
-        // lost its run used to write its pair there without a sound.
+        // A plain store into nil's cell, car or cdr, also faults; see
+        // `do_store`. The inline allocator uses plain stores, so an allocator
+        // that has lost its run cannot write a pair there.
         let (cause, tval) = trap(vec![addi(A3, ZERO, 7), sw(A3, ZERO, 0)]);
         extra.push(("a raw store to nil's car faults", cause == C_SFAULT && tval == 0));
         let (cause, tval) = trap(vec![addi(A3, ZERO, 7), sw(A3, ZERO, 4)]);
@@ -1001,8 +998,7 @@ pub fn run_all() -> bool {
 
     {
         // A pair instruction handed something that is not a pair traps with
-        // the offending value in mtval, which is what makes the report at the
-        // other end able to say what the value was.
+        // the offending value in mtval, so the report can name the value.
         let mut m = Machine::new();
         let mut code = vec![];
         li32(&mut code, A0, 0x2000);
@@ -1181,8 +1177,8 @@ pub fn run_all() -> bool {
 
     {
         // The stack limit: moving sp below it faults, with sp left as it was
-        // and where it would have gone in mtval - but only with interrupts
-        // on, so a trap handler or a critical section can use the reserve.
+        // and the target in mtval. The check applies only with interrupts on,
+        // so a trap handler or a critical section can use the reserve.
         let limit_run = |mie: bool, drop: i32| {
             let mut m = Machine::new();
             let mut code = vec![];
@@ -1220,9 +1216,9 @@ pub fn run_all() -> bool {
     }
 
     {
-        // The disk works on its own time: a command reads busy until its
-        // moment comes, the memory a read is filling holds the old bytes
-        // until then, and the new ones after.
+        // The disk completes asynchronously: status reads busy until the
+        // command completes, and the memory a read fills holds the old bytes
+        // until then and the new ones after.
         let path = std::env::temp_dir().join(format!("lm-check-disk-{}.img", std::process::id()));
         let mut m = Machine::new();
         let attached = m.disk.attach(path.to_str().unwrap()).is_ok();

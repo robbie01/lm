@@ -6,10 +6,9 @@
 //! builds is already in the form the machine expects: there is no separate
 //! "host object" world and no conversion step.
 //!
-//! There are exactly nine special forms. Everything else - let*, cond, case,
-//! and, or, when, unless, do, dolist, defun, quasiquote - is a macro written
-//! in Lisp, so the interpreter and the compiler cannot disagree about the
-//! language.
+//! There are nine special forms. Everything else (let*, cond, case, and, or,
+//! when, unless, do, dolist, defun, quasiquote) is a macro written in Lisp,
+//! so the interpreter and the compiler cannot disagree about the language.
 
 #![allow(dead_code)]
 
@@ -39,7 +38,10 @@ pub struct Prof {
     samples: u64,
 }
 
-pub const T_PRIM: u32 = 9; // slot0 raw primitive index, slot1 name symbol
+/// A primitive, which exists only in the forge: slot 0 the index into `PRIMS`,
+/// slot 1 the name. Type 11 is above every type the machine has, so a
+/// primitive can never be mistaken for a bignum or a code object.
+pub const T_PRIM: u32 = 11;
 
 pub struct LErr {
     pub msg: String,
@@ -104,21 +106,19 @@ pub struct Lisp<'a> {
     /// cell belongs to the machine: it is where `compile-top` installs the
     /// compiled closure that native code will call. If the two shared a slot,
     /// compiling `map` would immediately make `map` uncallable by the compiler
-    /// that is still running - and the compiler is written in Lisp, so it
-    /// would saw off the branch it is sitting on. Keeping the interpreter's
-    /// bindings out here lets the whole library be compiled while the
-    /// interpreted definitions carry on working.
+    /// that is still running. Keeping the interpreter's bindings out here
+    /// lets the whole library be compiled while the interpreted definitions
+    /// carry on working.
+    ///
     /// Keyed by name rather than by symbol. The bootstrap reader has one flat
-    /// namespace - that is the whole point of it - while the sources it reads
-    /// are divided into packages, so the same function is `hw:dev-addr` to the
-    /// compiler and plain `dev-addr` here. The interpreter has to find it
-    /// under the name the compiler asks for.
-    // Indexed by the symbol's own identity - see `Heap::sym_index`. These
-    // were maps keyed by the symbol's *name*, which meant that every global
-    // reference in the build allocated a String out of the machine's heap and
-    // then hashed it, and a macro check did it twice. It is the hottest thing
-    // the forge does: the build is the compiler interpreted, and the compiler
-    // is mostly calls to named functions.
+    /// namespace, while the sources it reads are divided into packages, so
+    /// the same function is `hw:dev-addr` to the compiler and plain
+    /// `dev-addr` here. The interpreter has to find it under the name the
+    /// compiler asks for.
+    // Indexed by the name id (see `Heap::name_id`), so a global reference is
+    // one index. The build is the compiler interpreted, and the compiler is
+    // mostly calls to named functions, so this is the hottest lookup in the
+    // forge.
     pub globals: Vec<Option<V>>,
     /// Build-time macros, kept out of the symbols' function cells for the same
     /// reason as `globals`: the function cell is where `compile-top` puts the
@@ -133,6 +133,8 @@ pub struct Lisp<'a> {
     /// that has never been bound cannot be found in a frame, so a reference
     /// to it goes straight to the globals.
     pub lexbound: Vec<bool>,
+    /// Names `gensym` has handed out.
+    pub gensym_count: u32,
 }
 
 impl Prof {
@@ -162,9 +164,9 @@ pub struct Frame {
 pub type Env = Option<Rc<Frame>>;
 
 /// A frame's bindings. Nearly every frame holds a handful, so those live in
-/// the frame itself, and only one that outgrows that - a long `let`, or
-/// internal defines piling up - moves them to a vector. A call used to cost
-/// two allocations, the frame and a vector for its bindings; now it is one.
+/// the frame itself, and only one that outgrows that (a long `let`, or
+/// internal defines piling up) moves them to a vector. A call then costs one
+/// allocation, the frame.
 const VARS_INLINE: usize = 6;
 
 pub enum Vars {
@@ -248,6 +250,7 @@ impl<'a> Lisp<'a> {
             envs: Vec::new(),
             prof: Prof::from_env(),
             lexbound: Vec::new(),
+            gensym_count: 0,
         };
         let ts = l.h.intern("t");
         l.set_global(ts, tt);
@@ -256,17 +259,13 @@ impl<'a> Lisp<'a> {
     }
 
     // ------------------------------------------------------------ environment
-    // Environments live on the Rust side, not in the Lisp heap.
+    // Environments live on the Rust side, not in the Lisp heap: the heap has
+    // no collector during the build, and every call makes a frame that dies
+    // when the call returns. Reference-counted frames cost the emulated
+    // machine nothing and go away on their own.
     //
-    // They used to be alists of conses, and that turned out to dominate
-    // build-time allocation: every call to every function in the compiler
-    // built a frame that died the moment the call returned, and the heap has
-    // no collector during the build. Reference-counted frames cost the
-    // emulated machine nothing and go away on their own.
-    // By reference down the chain rather than by clone: every variable
-    // reference in the build walks this, and cloning bumped a refcount per
-    // frame on the way for no reason - the frames are alive because `env`
-    // holds them.
+    // The chain is walked by reference rather than by clone: the frames are
+    // alive because `env` holds them.
     fn lookup(&self, sym: V, env: &Env) -> Option<V> {
         let mut e = env.as_ref();
         while let Some(f) = e {
@@ -305,15 +304,15 @@ impl<'a> Lisp<'a> {
     }
 
     /// Could this symbol be in a frame? Only if some frame has bound it. The
-    /// compiler is mostly calls to global functions, and each of those used to
-    /// search every enclosing frame for its name before trying the globals.
+    /// compiler is mostly calls to global functions, and this saves each of
+    /// them a search of every enclosing frame.
     fn maybe_lexical(&self, sym: V) -> bool {
         let i = self.h.sym_index(sym);
         i < self.lexbound.len() && self.lexbound[i]
     }
 
     /// Everything that puts a name in a frame says so here first. Two symbols
-    /// that share an identity - which a symbol made without one would - only
+    /// that share an identity (which a symbol made without one would) only
     /// make the test say "maybe" more often, never "no" when it should not.
     fn mark_lexical(&mut self, sym: V) {
         if !self.h.is_symbol(sym) {
@@ -804,9 +803,9 @@ impl<'a> Lisp<'a> {
     /// Run everything but the last form of a body, and hand the last one back
     /// for the caller to continue with in tail position.
     ///
-    /// The obvious way to do this is to build `(begin . body)` and loop on
-    /// that, and it costs one pair per call. The forge has no collector, so
-    /// pairs spent are pairs gone - and the interpreter reads and compiles the
+    /// Building `(begin . body)` and looping on that would cost one pair per
+    /// call. The forge has no collector, so
+    /// pairs spent are pairs gone, and the interpreter reads and compiles the
     /// whole system, which is millions of calls. This does the same thing and
     /// allocates nothing, on either side: it walks the list where it lies
     /// rather than copying it into a vector first.
@@ -1203,6 +1202,38 @@ impl<'a> Lisp<'a> {
                     (v >> ((-s) & 31)) as i32
                 })
             }
+            // The bit maps, popcount, and min/max on numbers of either kind: what
+            // the compiler open-codes, so that the same source runs interpreted.
+            Prim::BitRef => {
+                need!(2);
+                let base = n!(0) as u32;
+                let i = n!(1) as u32;
+                let w = self.h.m.peek32(base.wrapping_add((i >> 5) << 2));
+                self.bool((w >> (i & 31)) & 1 != 0)
+            }
+            Prim::BitSetX => {
+                need!(2);
+                let base = n!(0) as u32;
+                let i = n!(1) as u32;
+                let at = base.wrapping_add((i >> 5) << 2);
+                let w = self.h.m.peek32(at);
+                self.h.m.poke32(at, w | (1 << (i & 31)));
+                NIL
+            }
+            Prim::Popcount => {
+                need!(1);
+                fix((n!(0) as u32).count_ones() as i32)
+            }
+            Prim::Min => {
+                need!(2);
+                let c = self.cmp2(a, name)?;
+                if c <= 0 { a[0] } else { a[1] }
+            }
+            Prim::Max => {
+                need!(2);
+                let c = self.cmp2(a, name)?;
+                if c >= 0 { a[0] } else { a[1] }
+            }
 
             // ---- identity and type ----
             Prim::EqP => {
@@ -1256,6 +1287,10 @@ impl<'a> Lisp<'a> {
             Prim::ObjectP => {
                 need!(1);
                 self.bool(is_obj(a[0]))
+            }
+            Prim::RecordP => {
+                need!(1);
+                self.bool(self.h.is_type(a[0], T_RECORD))
             }
 
             // ---- raw object access ----
@@ -1317,12 +1352,6 @@ impl<'a> Lisp<'a> {
                 self.h.m.poke32(n!(0) as u32, n!(1) as u32);
                 a[1]
             }
-            Prim::Ld32u => {
-                // Read a word as an unsigned value split across two fixnums is
-                // overkill; the heap never needs the top bit at build time.
-                need!(1);
-                fix((self.h.m.peek32(n!(0) as u32) & 0x7fff_ffff) as i32)
-            }
             // Read and write a word without retagging, for moving tagged
             // values through raw addresses.
             Prim::LdWord => {
@@ -1335,16 +1364,19 @@ impl<'a> Lisp<'a> {
                 a[1]
             }
             // At build time there is no machine stack to scan, and no
-            // collector to scan it; an empty range keeps the shared source
-            // honest without pretending otherwise.
+            // collector to scan it, so the range is empty.
             Prim::StackPointer => fix(0),
             Prim::FramePointer => fix(0),
-            Prim::WaitForInput => NIL,
+            Prim::WaitForInterrupt => NIL,
             Prim::Ecall => NIL,
             Prim::SyncConsRun => NIL,
             Prim::ReloadConsRun => NIL,
-            Prim::SetContext => NIL,
-            Prim::EnableTimer => NIL,
+            Prim::SetContextX => NIL,
+            Prim::EnableInterruptLines => NIL,
+            Prim::ThisTask => NIL,
+            Prim::SetThisTaskX => NIL,
+            Prim::SetStackLimitX => NIL,
+            Prim::StackLimit => fix(0),
             Prim::Cycles => fix(0),
             Prim::Disable => NIL,
             Prim::RestoreInterrupts => NIL,
@@ -1370,15 +1402,6 @@ impl<'a> Lisp<'a> {
             Prim::AllocPool => {
                 need!(1);
                 fix(self.h.alloc_pool(n!(0) as u32) as i32)
-            }
-            Prim::Global => {
-                need!(1);
-                fix(self.h.m.peek32(n!(0) as u32) as i32)
-            }
-            Prim::SetGlobalX => {
-                need!(2);
-                self.h.m.poke32(n!(0) as u32, n!(1) as u32);
-                a[1]
             }
 
             // ---- strings, vectors, bytes ----
@@ -1627,11 +1650,12 @@ impl<'a> Lisp<'a> {
                 let m = self.is_macro(a[0]);
                 self.bool(m)
             }
+            // Uninterned, like the machine.s own: a temporary that only the
+            // code mentioning it can reach.
             Prim::Gensym => {
-                let n = self.h.g(LG_GCCOUNT);
-                self.h.set_g(LG_GCCOUNT, n + 1);
-                let nm = format!("g{n}");
-                self.h.intern(&nm)
+                let n = self.gensym_count;
+                self.gensym_count += 1;
+                self.h.make_symbol(&format!("g{n}"))
             }
             Prim::Eval => {
                 need!(1);
@@ -1656,10 +1680,7 @@ impl<'a> Lisp<'a> {
 
 // Every primitive, once. The same list makes the table the interpreter
 // installs from and the enum `call_prim` dispatches on, so the two cannot
-// disagree about which number is which.
-//
-// Dispatch used to match the name as a string: a comparison per arm, per
-// call, and a build makes seventy million calls. An enum match is a jump.
+// disagree about which number is which. An enum match is a jump.
 macro_rules! prims {
     ($($id:ident $name:literal $arity:literal;)*) => {
         #[derive(Clone, Copy)]
@@ -1710,6 +1731,12 @@ prims! {
     FloatP             "%float?" 1;
     BignumP            "%bignum?" 1;
     ObjectP            "%object?" 1;
+    RecordP            "%record?" 1;
+    BitRef             "%bit-ref" 2;
+    BitSetX            "%bit-set!" 2;
+    Popcount           "%popcount" 1;
+    Min                "%min" 2;
+    Max                "%max" 2;
     AllocObj           "%alloc-obj" 2;
     ObjType            "%obj-type" 1;
     ObjLen             "%obj-len" 1;
@@ -1723,17 +1750,20 @@ prims! {
     StByteX            "%st-byte!" 2;
     StHalfX            "%st-half!" 2;
     StFixnumX          "%st-fixnum!" 2;
-    Ld32u              "%ld32u" 1;
     LdWord             "%ld-word" 1;
     StWordX            "%st-word!" 2;
     StackPointer       "%stack-pointer" 0;
     FramePointer       "%frame-pointer" 0;
-    WaitForInput       "%wait-for-input" 0;
+    WaitForInterrupt   "%wait-for-interrupt" 0;
     Ecall              "%ecall" 1;
     SyncConsRun        "%sync-cons-run" 0;
     ReloadConsRun      "%reload-cons-run" 0;
-    SetContext         "%set-context" 1;
-    EnableTimer        "%enable-timer" 0;
+    SetContextX        "%set-context!" 1;
+    EnableInterruptLines "%enable-interrupt-lines" 0;
+    ThisTask           "%this-task" 0;
+    SetThisTaskX       "%set-this-task!" 1;
+    SetStackLimitX     "%set-stack-limit!" 1;
+    StackLimit         "%stack-limit" 0;
     Cycles             "%cycles" 0;
     Disable            "%disable" 0;
     RestoreInterrupts  "%restore-interrupts" 1;
@@ -1744,8 +1774,6 @@ prims! {
     FromAddr           "%from-addr" 1;
     AllocCode          "%alloc-code" 1;
     AllocPool          "%alloc-pool" 1;
-    Global             "%global" 1;
-    SetGlobalX         "%set-global!" 2;
     MakeString         "%make-string" 1;
     StringLength       "%string-length" 1;
     StringRef          "%string-ref" 2;

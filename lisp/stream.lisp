@@ -1,33 +1,23 @@
 ;;; stream.lisp - where characters come from and go.
 ;;;
-;;; Both halves of the machine's I/O rest on this: the reader takes characters
-;;; from the current stream and the printer puts them there, so the same code
-;;; serves the serial console, a window, and a source file the forge hands
-;;; over as a string. It is a file of its own because the reader needs it and
-;;; the reader has to be up before the printer is.
+;;; The reader takes characters from the current input stream and the printer
+;;; puts them on the current output stream, so the same code serves the serial
+;;; console, a window and a string. A stream is three closures: put a
+;;; character, take one or answer nil, and block until one might be there.
 
 (in-package lm)
 
-;; ---------------------------------------------------------------- streams
-;; A stream is three closures: put a character, take one or answer nil, and
-;; block until there might be one. The printer was always written against the
-;; first of those; giving the reader the same shape is what lets a REPL run in
-;; a window as readily as on the serial line.
-;;
-;; They are three globals rather than one object because every character read
-;; and written goes through them, and because that makes the default - nil,
-;; meaning the serial port - free. What makes them per task is the scheduler,
-;; which saves them into the outgoing task and loads the incoming one's, the
-;; same way it does the registers.
+;; The current streams are three globals rather than one object because every
+;; character read or written goes through them, and because nil, the raw
+;; serial line, is then free. The scheduler makes them per task by swapping
+;; the running task's fluid bindings (see macros.lisp and exec.lisp).
 (define *out* nil)
 (define *in* nil)
-;; How to wait for a character - not Exec's `wait`, which blocks a task on
-;; signals. A stream that has no answer falls back on the machine's.
+;; How to wait for input. Not Exec's `wait`, which blocks on signals: a stream
+;; with no answer falls back on halting the processor until an interrupt.
 (define *await* nil)
 
-;; A character, not its number: `get-char` gives one back, and a pair of
-;; primitives that disagree about that is a `%int->char` at every call site
-;; and a wrong one somewhere.
+;; The raw serial line takes and gives characters, not their codes.
 (define (out-char c) (%st-fixnum! uart-data (%char->int c)))
 
 (define (uart-char)
@@ -41,25 +31,18 @@
 (define (get-char)
   (if *in* (%funcall *in*) (uart-char)))
 
-;; Give the machine to somebody else until input might have arrived.
+;; Give the processor away until input might have arrived.
 (define (await-char)
-  (if *await* (%funcall *await*) (%wait-for-input)))
+  (if *await* (%funcall *await*) (%wait-for-interrupt)))
 
-;; Slot 0 is the tag, so a stream says what it is.
-(define stream-slots 4)
-(define st-put 1)
-(define st-get 2)
-(define st-await 3)
+(defrecord stream put get await)
 
 (define (make-stream put get await)
-  (let ((s (make-record stream-slots 'stream)))
-    (%record-set! s st-put put)
-    (%record-set! s st-get get)
-    (%record-set! s st-await await)
+  (let ((s (stream-alloc)))
+    (set-stream-put! s put)
+    (set-stream-get! s get)
+    (set-stream-await! s await)
     s))
-(define (stream-put s) (%record-ref s st-put))
-(define (stream-get s) (%record-ref s st-get))
-(define (stream-await s) (%record-ref s st-await))
 
 (define (current-stream) (make-stream *out* *in* *await*))
 
@@ -69,9 +52,8 @@
   (set! *await* (stream-await s))
   s)
 
-;; The raw serial line, named so it can be switched back to. The console
-;; proper - whole lines, and a prompt that sleeps - is console.driver's: see
-;; console.lisp.
+;; The raw serial line as a stream, for switching back to. The console proper
+;; is console.driver's: see console.lisp.
 (define (serial-stream) (make-stream nil nil nil))
 
 (define (emit-str s)
@@ -84,12 +66,11 @@
 (define (newline) (emit-ch #\newline) nil)
 (define (space) (emit-ch #\space) nil)
 
-;; Collect output into a string instead of sending it anywhere.
+;; Run the thunk with output collected into a string. A fluid binding, so that
+;; an error inside leaves `*out*` for the prompt's restart to put back, rather
+;; than pointing at a dead accumulator for good.
 (define (with-output-to-string thunk)
-  (let ((acc nil) (saved *out*))
-    (set! *out* (lambda (c) (set! acc (%cons c acc))))
-    (%funcall thunk)
-    (set! *out* saved)
+  (let ((acc nil))
+    (fluid-let ((*out* (lambda (c) (set! acc (%cons c acc)))))
+      (%funcall thunk))
     (list->string (reverse acc))))
-
-;; ---------------------------------------------------------------- printing

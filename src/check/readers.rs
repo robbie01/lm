@@ -1,16 +1,10 @@
 //! Conformance tests for the reader.
 //!
-//! There used to be two readers - one in Rust for the bootstrap, one in Lisp
-//! for the machine - and this file compared them, because two implementations
-//! of what a name means had to agree exactly or a symbol read at build time
-//! would not be the symbol read at run time.
-//!
-//! There is one now. `lisp/read.lisp` reads everything, including itself, and
-//! the bootstrap reader in Rust knows only how to make a list. So what is left
-//! to check is not agreement but behaviour: that a bare name finds what its
-//! package can see, that `pkg:name` reaches an export and `pkg::name` reaches
-//! past the interface, and that asking for something a package does not export
-//! is an error rather than a fresh symbol.
+//! `lisp/read.lisp` reads everything, including itself; the bootstrap reader
+//! in Rust knows only how to make a list. These cases check name resolution:
+//! a bare name finds what its package can see, `pkg:name` reaches an export,
+//! `pkg::name` reaches past the interface, and asking for something a package
+//! does not export is an error rather than a fresh symbol.
 
 use crate::forge::hostlisp::Lisp;
 use crate::forge::{boot_host, write_layout};
@@ -39,14 +33,13 @@ const CASES: &[(&str, &str, &str)] = &[
     ("user", "lm:car", "(\"lm\" \"car\")"),
     ("user", "wb::draw-char", "(\"wb\" \"draw-char\")"),
     ("gc", "wb::title-height", "(\"wb\" \"title-height\")"),
-    // A name nobody has becomes one of the reader's own package's - and the
-    // same name read in two packages is two symbols, which is the whole point
-    // of having packages at all.
+    // A name no package has is interned in the reader's current package, so
+    // the same name read in two packages is two symbols.
     ("user", "a-name-of-its-own", "(\"user\" \"a-name-of-its-own\")"),
     ("wb", "a-name-of-its-own", "(\"wb\" \"a-name-of-its-own\")"),
 ];
 
-/// Text that must be refused rather than quietly interned.
+/// Text that must be refused rather than interned.
 const ERRORS: &[(&str, &str)] = &[
     // Private, so one colon is not enough.
     ("user", "wb:shell-putc"),

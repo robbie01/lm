@@ -1,13 +1,12 @@
 //! The bench: everything that checks the machine rather than being part of it.
 //!
-//! Each of these answers a different question. `cpu` asks whether the
-//! processor matches the manual. `asm` asks whether the Lisp assembler and an
-//! independent Rust encoder agree — two readings of the same specification
-//! agreeing is evidence, one reading agreeing with itself is not. `compiler`
-//! asks whether source goes in and the right answer comes out the far end,
-//! having been through the reader, the macro expander, the compiler, the
-//! assembler, the object memory and the processor. `inspect` does not ask
-//! anything; it shows you what is in an image.
+//! `cpu` checks the processor against the manual. `asm` checks that the Lisp
+//! assembler and an independent Rust encoder produce the same bytes.
+//! `compiler` checks that source compiled and run on the machine gives the
+//! expected answer, through the reader, macro expander, compiler, assembler,
+//! object memory and processor. `readers` checks name resolution. `inspect`
+//! reports what is in an image, and `reach` reports what each package can
+//! reach in one.
 
 pub mod asm;
 pub mod compiler;

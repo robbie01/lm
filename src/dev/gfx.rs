@@ -3,7 +3,7 @@
 //! Vertical blank is derived from the retired-instruction count rather than
 //! from host wall time, so a program that draws on every vblank produces the
 //! exact same frames on every run. The host window is refreshed on those same
-//! boundaries, throttled to whatever the host can actually keep up with.
+//! boundaries, throttled to the rate the host can sustain.
 
 use crate::dev::TIMER_HZ;
 use crate::map::{CHIP_SIZE, INT_VBLANK};
@@ -47,8 +47,8 @@ pub struct Gfx {
     pub force: bool,
 }
 
-/// Something that can put a frame in front of a human. Keeps the window
-/// toolkit out of the device model so headless runs need no display at all.
+/// A frame sink. Keeps the window toolkit out of the device model, so
+/// headless runs need no display.
 pub trait Present {
     fn show(&mut self, buf: &[u32], w: usize, h: usize) -> bool;
     fn size(&self) -> (u32, u32);

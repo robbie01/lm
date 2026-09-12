@@ -1,6 +1,6 @@
-//! The outer loop. It hands the threaded core a quantum of fuel bounded by the
-//! next thing that wants attention - a timer compare, a vertical blank, or a
-//! host service interval - so interrupts land on an exact cycle and the whole
+//! The outer loop. It hands the threaded core a quantum of fuel bounded by
+//! the next pending event: a timer compare, a vertical blank, or a host
+//! service interval. Interrupts therefore land on an exact cycle and the
 //! machine stays reproducible.
 
 use crate::cpu;
@@ -9,7 +9,7 @@ use crate::dev::TIMER_HZ;
 use crate::mach::*;
 use crate::map::*;
 
-/// How long the core may run before the host gets a look in.
+/// Maximum instructions the core runs before host devices are serviced.
 const HOST_SLICE: u64 = 200_000;
 
 pub fn vbl_period() -> u64 {
@@ -34,7 +34,7 @@ pub fn service(m: &mut Machine) {
 fn vblank(m: &mut Machine) {
     m.gfx.vcount = m.gfx.vcount.wrapping_add(1);
     m.gfx.next_vbl = m.gfx.next_vbl.wrapping_add(vbl_period());
-    // Catch up if the host stalled us badly.
+    // If the next vblank is already past, reschedule it from now.
     if m.gfx.next_vbl <= m.cycles {
         m.gfx.next_vbl = m.cycles + vbl_period();
     }
@@ -55,17 +55,17 @@ fn vblank(m: &mut Machine) {
     }
 }
 
-/// Nothing to run: skip forward to whatever wakes us next.
+/// Nothing to run: advance the clock to the next event.
 fn idle(m: &mut Machine) {
-    // A running blit or disk command is an event too: an idle machine
-    // fast-forwards to it rather than past it.
+    // A running blit or disk command is an event too; the idle machine
+    // advances to it, not past it.
     let mut wake = m.gfx.next_vbl.min(m.mtimecmp).min(crate::dev::due(m));
     if m.intreq & m.intena != 0 {
         return; // an interrupt is already waiting
     }
     if wake == u64::MAX {
-        // No scheduled event at all. Only the host can break the tie, so give
-        // the CPU back rather than melting it.
+        // No scheduled event. Only host input can wake the machine, so sleep
+        // briefly instead of spinning.
         std::thread::sleep(std::time::Duration::from_millis(1));
         service(m);
         wake = m.cycles + 10_000;
@@ -80,25 +80,21 @@ fn idle(m: &mut Machine) {
 
 /// Keep a machine with a window in step with the wall clock while it idles.
 ///
-/// A machine waiting for its next frame should wait for it. Without this an
-/// idle workbench ran its sixty frames a second as fast as the host could go -
-/// hundreds of machine seconds a second, every animation and every allocation
-/// done a hundred times over - and the window showed whichever frame it
-/// happened to catch.
+/// A machine waiting for its next frame sleeps until that frame is due in
+/// wall time, so animations run at their intended rate.
 ///
-/// Only idle time is paced. A busy machine runs as fast as the host can take
-/// it, and when it next idles it is lined up with the wall clock afresh rather
-/// than made to wait for the time it got ahead. Nothing here touches the
-/// machine's own clock, so a run is exactly as deterministic as it was: only
-/// the wall clock waits.
+/// Only idle time is paced. A busy machine runs as fast as the host allows,
+/// and when it next idles it is realigned with the wall clock rather than
+/// made to wait out the time it got ahead. The machine's own clock is not
+/// touched, so determinism is unaffected; only the wall clock waits.
 fn pace(m: &mut Machine, wake: u64) {
     use std::time::{Duration, Instant};
     let now = Instant::now();
     let hz = TIMER_HZ as f64;
     let (mut at, mut base) = m.pace.unwrap_or((now, m.cycles));
-    // Where the machine's clock stands against the wall clock. More than a
-    // few frames either way - a long computation, the host looking elsewhere -
-    // and the two are lined up again, not one made to catch the other up.
+    // The machine clock's lead over the wall clock. If it is more than a few
+    // frames either way (a long computation, a stalled host), the two are
+    // realigned rather than one made to catch up.
     let lead = (m.cycles - base) as f64 / hz - now.duration_since(at).as_secs_f64();
     if lead.abs() > 0.05 {
         at = now;
@@ -125,8 +121,8 @@ pub fn run(m: &mut Machine, budget: u64) -> Stop {
             continue;
         }
         service(m);
-        // The blitter and the disk finish on their own schedule, and this is
-        // the moment after every slice at which the machine looks.
+        // The blitter and the disk complete on their own schedule; they are
+        // polled here at the start of every slice.
         let now = m.cycles;
         crate::dev::poll(m, now);
         m.refresh_mip();
@@ -138,13 +134,12 @@ pub fn run(m: &mut Machine, budget: u64) -> Stop {
             .min(left)
             .min(m.fuel_to_timer().max(1))
             // End the slice when a running blit or disk command is due, so
-            // that it lands on time rather than whenever the next timer
-            // happens to come round.
+            // that its completion lands on time.
             .min(crate::dev::due(m).saturating_sub(m.cycles).max(1))
             .min(m.gfx.next_vbl.saturating_sub(m.cycles).max(1))
-            // A profile wants short slices, each mostly one function. It
-            // changes nothing the machine can see: every event still lands on
-            // its own cycle.
+            // Function profiling wants short slices, each mostly one function.
+            // The machine cannot observe this; every event still lands on its
+            // own cycle.
             .min(if m.fnprof.is_some() { crate::prof::FNPROF_SLICE } else { u64::MAX })
             .min(u32::MAX as u64) as u32;
         if q == 0 {
@@ -164,11 +159,9 @@ pub fn run(m: &mut Machine, budget: u64) -> Stop {
             p.sample(m, used);
             m.fnprof = Some(p);
         }
-        // And again as soon as the clock has moved, not only at the top of the
-        // next round: a run that ends here - its budget spent, or halted -
-        // would otherwise stop with a transfer that was due before now never
-        // having landed. The state of the machine at the moment it stops has
-        // to include everything that finished before that moment.
+        // Poll again now that the clock has moved. A run that ends here, with
+        // its budget spent or halted, must include every transfer that was
+        // due before it stopped.
         let now = m.cycles;
         crate::dev::poll(m, now);
 
@@ -178,9 +171,8 @@ pub fn run(m: &mut Machine, budget: u64) -> Stop {
                 let (c, t, e) = m.trap;
                 m.enter_trap(c, t, e);
                 // Taking a trap costs a cycle. The faulting instruction
-                // retired nothing, so without this a handler that faults on
-                // its own first instruction makes no progress at all and the
-                // outer loop spins on a budget that never goes down.
+                // retired nothing, so this keeps a handler that faults on its
+                // first instruction from spinning on an unchanging budget.
                 m.cycles = m.cycles.wrapping_add(1);
                 left = left.saturating_sub(1);
             }

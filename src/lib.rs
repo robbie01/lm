@@ -2,21 +2,20 @@
 #![allow(incomplete_features)]
 #![allow(clippy::needless_range_loop)]
 
-//! LM — a Lisp machine.
+//! LM, a Lisp machine.
 //!
-//! Three things live here, and they are deliberately separable:
+//! The crate has three separable parts:
 //!
-//!   - **the machine** — the RV32IMC core, its memory, its custom chips, and
-//!     the image format. This is what a booted system needs and nothing more.
-//!   - **the forge** ([`forge`]) — a bootstrap Lisp interpreter that exists
-//!     only to run the compiler, which is written in Lisp, so that it can
-//!     compile itself into an image. Needed to *build* a machine, never to
-//!     *run* one.
-//!   - **the bench** ([`check`]) — conformance tests, a differential test for
-//!     the assembler, end-to-end compiler tests, and tools for looking inside
-//!     an image.
+//!   - the machine: the RV32IMC core, its memory, its custom chips, and the
+//!     image format. This is everything a booted system needs.
+//!   - the forge ([`forge`]): a bootstrap Lisp interpreter that runs the
+//!     compiler, which is written in Lisp, so that the compiler can compile
+//!     itself into an image. Needed to build a machine, not to run one.
+//!   - the bench ([`check`]): conformance tests, a differential test for the
+//!     assembler, end-to-end compiler tests, and tools for inspecting an
+//!     image.
 //!
-//! The three binaries follow the same seam: `lm` boots, `lmforge` builds,
+//! The three binaries follow the same split: `lm` boots, `lmforge` builds,
 //! `lmdev` checks.
 
 // ---- the machine ----

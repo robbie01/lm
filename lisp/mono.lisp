@@ -1,17 +1,14 @@
 ;;; mono.lisp - the terminal face.
 ;;;
-;;; Five columns wide and seven tall in an eight by eight cell, which leaves a
-;;; column and a row of gap and makes the advance six pixels. Each row is five
-;;; bits with the leftmost column in bit four, so a glyph is eight small
+;;; Five columns wide and seven tall in an eight by eight cell, which leaves
+;;; a column and a row of gap and makes the advance six pixels. Each row is
+;;; five bits with the leftmost column in bit four, so a glyph is eight small
 ;;; numbers and the whole font is legible in the source.
 ;;;
-;;; The interface is set in Charcoal, which is proportional; a shell is a grid
-;;; of cells and wants a face where every character is the same width. That is
-;;; the same division Mac OS made between Chicago and Monaco, and for the same
-;;; reason.
+;;; The interface is set in Charcoal, which is proportional; a shell is a
+;;; grid of cells and wants a face where every character is the same width.
 ;;;
-;;; The list is unpacked into a byte vector at startup and then dropped: it is
-;;; there to be read, not to be indexed.
+;;; The list is unpacked into a byte vector at startup and then dropped.
 
 (in-package wb)
 
@@ -118,8 +115,7 @@
     ( 0  0  8 21  2  0  0  0)  ; ~
 ))
 
-;; Unpacked: eight bytes a glyph, indexed by character code minus font-first.
-
+;; Unpacked: eight bytes a glyph, indexed by character code minus mono-first.
 (define *mono* nil)
 
 (define (mono-init)
@@ -133,13 +129,12 @@
           (set! j (%+ j 1))))
       (set! i (%+ i 1)))
     (set! *mono* b)
-    ;; The readable form has done its job; let the collector have it back.
     (set! *mono-rows* nil)
     b))
 
+;; The five bits of one row of one glyph, or nothing for a character the
+;; face does not have.
 (define (mono-row ch row)
-  ;; The five bits of one row of one glyph, or nothing for a character the
-  ;; face does not have.
   (let ((i (%- (%char->int ch) mono-first)))
     (if (%null? *mono*)
         0
@@ -148,18 +143,21 @@
             (let ((k (%+ (%* i mono-cell) row)))
               (if (%< k (bytes-length *mono*)) (bytes-ref *mono* k) 0))))))
 
-;; Straight into the bitmap, and clipped to the rastport's region as well as
-;; to the bitmap, for the same reason `draw-char` is.
-;; `bg` is a colour, or nil to leave what is already there.
+;; Straight into the bitmap, clipped to the rastport's region and to the
+;; bitmap. One wait for the blitter per glyph, after the background fill has
+;; been issued, and then plain stores. `bg` is a colour, or nil to leave what
+;; is already there.
 (define (draw-mono-char rp x y ch fg bg)
   (check-colour fg)
   (let ((bmp (rp-bitmap rp))
         (px (%+ x (rp-origin-x rp)))
         (py (%+ y (rp-origin-y rp))))
     (if bg (fill-rect rp x y mono-advance mono-height bg) nil)
+    (blit-sync)
     (dolist (cr (rp-region rp))
       (mono-rows ch px py fg bmp
-                 (rect-x cr) (rect-y cr) (rect-x2 cr) (rect-y2 cr)))
+                 (max2 (rect-x cr) 0) (max2 (rect-y cr) 0)
+                 (min2 (rect-x2 cr) (bm-w bmp)) (min2 (rect-y2 cr) (bm-h bmp))))
     nil))
 
 (define (mono-rows ch px py fg bmp x0 y0 x1 y1)
@@ -167,12 +165,12 @@
     (while (%< row mono-cell)
       (let ((gy (%+ py row)))
         (if (if (%>= gy y0) (%< gy y1) nil)
-            (let ((bits (mono-row ch row)) (col 0))
+            (let ((bits (mono-row ch row)) (col 0) (addr (bm-at bmp px gy)))
               (while (%< col 5)
                 (let ((gx (%+ px col)))
                   (if (if (%>= gx x0) (%< gx x1) nil)
                       (if (%= 1 (%logand (%lsh bits (%- col 4)) 1))
-                          (bm-plot bmp gx gy fg)
+                          (%st-byte! (%+ addr col) fg)
                           nil)
                       nil))
                 (set! col (%+ col 1))))

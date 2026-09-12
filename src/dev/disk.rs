@@ -1,14 +1,13 @@
-//! Block storage, backed by a host file. This is how a live heap gets written
-//! back out as an image: the Lisp side hands over an address and a block
+//! Block storage, backed by a host file. A live heap is written out as an
+//! image through this device: the Lisp side hands over an address and a block
 //! range, and the bytes land on the host.
 //!
 //! A command takes time. Writing `D_CMD` latches the command and marks the
 //! controller busy until `now + cost`; the transfer happens in one go when
 //! that moment arrives, the way a blit does. Until then the memory a read is
-//! filling still holds what it held before, and the memory a write is taking
-//! from can still be changed under it - which on hardware would be a torn
-//! block and here is the newer data. Either is wrong in a way you notice if
-//! you forget to wait, which an instantaneous disk never was.
+//! filling holds what it held before, and the memory a write takes from can
+//! still be changed under it. On hardware that would be a torn block; here it
+//! is the newer data. A driver that does not wait sees wrong data.
 
 use crate::mach::Machine;
 use crate::map::INT_DISK;
@@ -127,10 +126,10 @@ pub fn command(m: &mut Machine, reg: u32, v: u32) {
     }
 
     // One command at a time. A command that arrives while one is running
-    // waits for it, the way a store to a single-buffered controller stalls
-    // on the bus: time moves on to when the running one finishes, and it
-    // finishes. The driver waits on the status first so this never happens;
-    // it is here so that forgetting is slow rather than wrong.
+    // waits for it, the way a store to a single-buffered controller stalls on
+    // the bus: time moves on to when the running command finishes, and it
+    // finishes. The driver waits on the status first, so this path is not
+    // normally taken; a driver that does not wait is slow rather than wrong.
     if m.disk.busy {
         let due = m.disk.busy_until;
         if due > m.now {
@@ -148,9 +147,9 @@ pub fn command(m: &mut Machine, reg: u32, v: u32) {
         count: m.disk.count,
     };
     // A rate a real controller might manage, plus a fixed cost for getting
-    // started. It is no longer charged to whoever issued the command: time
-    // passes while the controller works, and the machine gets on with
-    // something else.
+    // started. The cost is charged to the controller's own clock, not to the
+    // task that issued the command: time passes while the controller works,
+    // and other tasks run in the meantime.
     let cost = match v {
         CMD_READ | CMD_WRITE => (c.count as u64) * BLOCK as u64 / 4 + 200,
         _ => 200,
@@ -161,14 +160,17 @@ pub fn command(m: &mut Machine, reg: u32, v: u32) {
     m.disk.status = STATUS_BUSY;
 }
 
-/// The latched command, all of it, now. Answers its status.
+/// Perform the whole latched command and return its status.
 fn perform(m: &mut Machine, c: Cmd) -> u32 {
     let n = (c.count as usize) * BLOCK as usize;
     let off = (c.block as u64) * BLOCK as u64;
     if m.disk.file.is_none() {
         return 1;
     }
-    if !m.in_ram(c.addr, n as u32) && (c.op == CMD_READ || c.op == CMD_WRITE) {
+    // Checked in 64 bits: the count comes from the guest, and a large one
+    // wraps a 32-bit extent back into range.
+    let transfer = c.op == CMD_READ || c.op == CMD_WRITE;
+    if transfer && c.addr as u64 + n as u64 > m.ramlen as u64 {
         return 2;
     }
     // Split the machine borrow: the file and the RAM live in the same struct
@@ -208,8 +210,8 @@ fn perform(m: &mut Machine, c: Cmd) -> u32 {
     }
 }
 
-/// The running command's time has come: move the bytes, post the result, and
-/// raise the interrupt if it was asked for.
+/// Complete the running command: move the bytes, post the result, and raise
+/// the interrupt if it was asked for.
 fn finish(m: &mut Machine) {
     let c = m.disk.cmd;
     m.disk.busy = false;
@@ -219,9 +221,9 @@ fn finish(m: &mut Machine) {
     }
 }
 
-/// Finish the running command if its time has come. Called from everywhere
-/// that can observe the controller - a status read, and each host slice - so
-/// completion is never early and never later than the next look.
+/// Finish the running command if it is due by `now`. Called from each point
+/// that can observe the controller (a status read, and each host slice), so
+/// completion is never early and never later than the next observation.
 pub fn poll(m: &mut Machine, now: u64) {
     if m.disk.busy && now >= m.disk.busy_until {
         finish(m);
@@ -237,9 +239,8 @@ pub fn due(m: &Machine) -> u64 {
     }
 }
 
-/// The machine has stopped. A write still in flight is finished rather than
-/// dropped: the file is the one part of the machine that outlives the run,
-/// and this is the disk's version of flushing the console on the way out.
+/// Called when the machine has stopped. A command still in flight is finished
+/// rather than dropped, because the file outlives the run.
 pub fn settle(m: &mut Machine) {
     if m.disk.busy {
         finish(m);

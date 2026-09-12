@@ -12,7 +12,7 @@
 ;;; 128..131 are the command symbol, the menu check, the submenu triangle and
 ;;; the diamond, which Virtue does not carry.
 ;;;
-;;; Regenerate rather than edit: the atlases live in ~/platinum/assets/fonts.
+;;; Regenerated from the atlases in ~/platinum/assets/fonts.
 
 (in-package wb)
 
@@ -149,7 +149,6 @@
   (set! *font-advs* (font-bytes *font-adv*))
   (set! *font-lefts* (font-bytes *font-left*))
   (set! *font-inks* (font-bytes *font-ink*))
-  ;; The readable forms have done their job; let the collector have them back.
   (set! *font-rows* nil)
   (set! *font-adv* nil)
   (set! *font-left* nil)
@@ -185,26 +184,20 @@
     w))
 
 ;; A glyph, straight into the bitmap: going through the blitter for each run
-;; costs more in setup than the pixels are worth. `bg` below zero leaves what
-;; is there, which is what drawing over pinstripes needs.
-;;
-;; It clips to the rastport's region as well as to the bitmap. That used to be
-;; only the bitmap, which was harmless as long as every caller happened to be
-;; drawing inside its own window - and stopped being harmless the moment the
-;; compositor started drawing the desktop through a rastport clipped to the
-;; damage, where the menu bar's text was written whether or not the damage
-;; reached it.
+;; would cost more in setup than the pixels are worth. One wait for the
+;; blitter per glyph, after the background fill has been issued, and then
+;; plain stores. Clipped to the rastport's region and to the bitmap.
 (define (glyph-rows i ox py ink fg bmp x0 y0 x1 y1)
   (let ((row 0))
     (while (%< row font-height)
       (let ((gy (%+ py row)))
         (if (if (%>= gy y0) (%< gy y1) nil)
-            (let ((bits (font-bits i row)) (col 0))
+            (let ((bits (font-bits i row)) (col 0) (addr (bm-at bmp ox gy)))
               (while (%< col ink)
                 (let ((gx (%+ ox col)))
                   (if (if (%>= gx x0) (%< gx x1) nil)
                       (if (%= 1 (%logand (%lsh bits (%- col 15)) 1))
-                          (bm-plot bmp gx gy fg)
+                          (%st-byte! (%+ addr col) fg)
                           nil)
                       nil))
                 (set! col (%+ col 1))))
@@ -213,7 +206,7 @@
     nil))
 
 ;; `bg` is a colour to fill the cell with first, or nil to leave what is
-;; there - which is what drawing over pinstripes needs.
+;; there, which is what drawing over pinstripes needs. Answers the advance.
 (define (draw-char rp x y ch fg bg)
   (check-colour fg)
   (let ((i (font-index ch)))
@@ -223,11 +216,13 @@
               (px (%+ x (rp-origin-x rp)))
               (py (%+ y (rp-origin-y rp))))
           (if bg (fill-rect rp x y (font-adv-of i) font-height bg) nil)
+          (blit-sync)
           (let ((ink (font-ink-of i))
                 (ox (%+ px (font-left-of i))))
             (dolist (cr (rp-region rp))
               (glyph-rows i ox py ink fg bmp
-                          (rect-x cr) (rect-y cr) (rect-x2 cr) (rect-y2 cr))))
+                          (max2 (rect-x cr) 0) (max2 (rect-y cr) 0)
+                          (min2 (rect-x2 cr) (bm-w bmp)) (min2 (rect-y2 cr) (bm-h bmp)))))
           (font-adv-of i)))))
 
 (define (draw-text rp x y s fg bg)

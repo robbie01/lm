@@ -1,24 +1,18 @@
-//! What the machine actually executed.
+//! Dynamic instruction counts: what the machine executed.
 //!
-//! A static count of an image says which instructions the compiler *emitted*;
-//! it says nothing about which ones run, and the two distributions are not
-//! the same - a prologue is emitted once per function and executed once per
-//! call. This is the other half: one counter per dispatch slot, bumped in the
-//! threaded core's `next!`, plus a handful of extra slots for the breakdowns
-//! a token cannot give (which pair operation, which indexed form, which of
-//! the standard bit-manipulation extensions).
+//! A static count of an image says which instructions the compiler emitted,
+//! not which ones run; a prologue is emitted once per function and executed
+//! once per call. This module keeps one counter per dispatch slot, bumped by
+//! the counting dispatch table (`cpu::PROF_TABLE`), plus extra slots for
+//! breakdowns a token alone cannot give: which pair operation, which indexed
+//! form, which standard bit-manipulation extension.
 //!
-//! It is behind the `isaprof` feature, so an ordinary build does not carry
-//! the increment at all:
+//! Counting is enabled at run time by `--isaprof`. It is a second dispatch
+//! table, so an ordinary run carries no increment.
 //!
-//!     cargo build --release --features isaprof
-//!     lm kick.img --stats --script '...'
-//!
-//! The total here is smaller than the instruction count `--stats` prints,
-//! and the difference is real rather than a miscount: `m.cycles` is the
-//! machine's timebase, and a machine that parks on `wfi` has its clock moved
-//! forward to the next interrupt without executing anything. This counts
-//! instructions; that counts time.
+//! The total here is smaller than `m.cycles`. `m.cycles` is the timebase, and
+//! a machine parked on `wfi` has its clock moved forward to the next interrupt
+//! without executing anything. This counts instructions; that counts time.
 
 pub const SLOTS: usize = 152;
 
@@ -29,10 +23,9 @@ pub const ZBA: usize = 80;
 pub const ZBB: usize = 81;
 pub const ZBS: usize = 82;
 pub const ZICOND: usize = 83;
-/// Where a load or a store went. The whole register-allocator question is
-/// how big these are: a frame slot and a spill are a value the machine had
-/// in a register and put in memory because the collector has to be able to
-/// find it.
+/// Where a load or a store went. Frame slots and spills hold values the
+/// machine had in a register and wrote to memory so the collector can find
+/// them; their count measures what a register allocator would save.
 pub const LD_FRAME: usize = 84;
 pub const LD_SPILL: usize = 85;
 pub const LD_LIT: usize = 86;
@@ -41,7 +34,7 @@ pub const ST_FRAME: usize = 88;
 pub const ST_SPILL: usize = 89;
 pub const ST_OTHER: usize = 90;
 
-// ---- the two questions a peephole and a leaf-frame rule turn on ----
+// ---- redundant loads and leaf calls ----
 /// A frame or spill load of a value that is already sitting in a register,
 /// established in this same straight-line run of instructions.
 pub const LD_REDUNDANT: usize = 91;
@@ -51,9 +44,9 @@ pub const LD_REDUNDANT_ADJ: usize = 92;
 pub const CALLS: usize = 93;
 pub const LEAF_CALLS: usize = 94;
 pub const LEAF_INS: usize = 95;
-/// A branch whose operand was put in a register by the instruction just
-/// before it - which is what comparing against a written-down constant looks
-/// like, since RISC-V has no compare-immediate-and-branch.
+/// A branch whose operand was put in a register by the instruction before it.
+/// That is how a comparison against a constant is spelled, since RISC-V has
+/// no compare-immediate-and-branch.
 pub const LI_BRANCH: usize = 96;
 pub const LI_TOTAL: usize = 97;
 /// Instructions that exist only because a value carries a tag: the `addi -1`
@@ -72,8 +65,8 @@ pub const FIX0: usize = 104;   // + funct3, funct7 0x00
 pub const FIX1: usize = 112;   // + funct3, funct7 0x01
 pub const TAGD: usize = 120;   // + funct3
 
-/// The bookkeeping those four need. Not counters: the state a basic block and
-/// a call stack are tracked with.
+/// Tracking state for the breakdown counters: the current basic block and a
+/// shadow call stack.
 pub struct Watch {
     /// For each register, the address it currently mirrors, and the block it
     /// was established in. A register written by anything else is invalidated
@@ -82,7 +75,7 @@ pub struct Watch {
     pub gen: [u32; 32],
     pub block: u32,
     /// The pc of the last store and the address it went to, for the adjacent
-    /// store-then-reload case a peephole would catch with no analysis at all.
+    /// store-then-reload case.
     pub st_pc: u32,
     pub st_addr: u32,
     /// The last `li`, for the compare-against-a-constant question.
@@ -98,13 +91,11 @@ pub struct Watch {
     pub entry_ins: [u64; 512],
     pub entry_pc: [u32; 512],
     /// Per entry point: how many times it was entered, and whether the
-    /// *function* ever calls anything in any of its activations.
+    /// function ever calls anything in any of its activations.
     ///
-    /// The distinction matters and I got it wrong the first time. A recursive
-    /// function's base case is an activation that calls nothing, but the
-    /// function still needs a frame, because its other activations do. Only a
-    /// function that never calls anything, in any activation, can do without
-    /// one.
+    /// A recursive function's base case is an activation that calls nothing,
+    /// but the function still needs a frame, because its other activations
+    /// do. Only a function that never calls anything can omit its frame.
     pub funcs: std::collections::HashMap<u32, (u64, bool)>,
 }
 
@@ -293,9 +284,9 @@ pub fn report(prof: &[u64; SLOTS]) -> String {
             }
         }
     }
-    // Where the memory traffic went. Frame slots and spills together are the
-    // measure of what a register allocator would be worth - they are values
-    // the compiler had in a register and wrote to memory anyway.
+    // Where the memory traffic went. Frame slots and spills together measure
+    // what a register allocator would save: values the compiler had in a
+    // register and wrote to memory.
     let mem: u64 = prof[LD_FRAME..=ST_OTHER].iter().sum();
     if mem > 0 {
         out.push_str(&format!(
@@ -351,7 +342,7 @@ branches on a constant put in a register the instruction before: {} ({:.1}% of a
         prof[LI_TOTAL]
     ));
 
-    // What a basic-block peephole and a leaf-frame rule are each worth.
+    // Counts that measure a basic-block peephole and a leaf-frame rule.
     out.push_str(&format!(
         "
 frame/spill loads of a value already in a register: {} ({:.1}% of all instructions)
@@ -389,17 +380,15 @@ frame/spill loads of a value already in a register: {} ({:.1}% of all instructio
 
 /// Where the time goes, by function.
 ///
-/// The histogram above says which instructions run; this says whose. With
-/// `--fnprof` the outer loop hands the core slices of under a thousand
-/// instructions and charges each one to the function the machine is standing
-/// in - the code object every Lisp frame keeps in s1 - and once to every
-/// function on the frame chain above it. The first is where the time was
-/// spent, the second what it was spent on behalf of.
+/// With `--fnprof` the outer loop hands the core slices of under a thousand
+/// instructions. Each slice is charged to the function the machine is in
+/// (the code object every Lisp frame keeps in s1) and once to every function
+/// on the frame chain above it. The first is own time; the second is
+/// inclusive time.
 ///
-/// A leaf that never sets up a frame of its own is charged to its caller,
-/// which is also who a backtrace would name. Names are read the first time a
-/// code object is seen, so one freed and reused during the run keeps the name
-/// it had first.
+/// A leaf that sets up no frame of its own is charged to its caller, as a
+/// backtrace would name it. Names are read the first time a code object is
+/// seen, so one freed and reused during the run keeps its first name.
 #[derive(Default)]
 pub struct FnProf {
     own: std::collections::HashMap<u32, u64>,

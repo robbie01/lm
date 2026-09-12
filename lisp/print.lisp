@@ -1,17 +1,15 @@
 ;;; print.lisp - the printer.
 ;;;
-;;; Everything here is compiled into the image. It is what the REPL prints
-;;; with, and it is written against the "put one character" half of a stream,
-;;; so the same printer serves the serial console, a string, and a window.
+;;; Compiled into the image; what the prompt prints with. Written against the
+;;; "put one character" half of a stream, so it serves the serial console, a
+;;; string and a window alike.
 
 (in-package lm)
 
 ;; ---------------------------------------------------------------- names
-;; Every compiled function carries its name in its code object, which is what
-;; lets a printed function and a backtrace line both say who they are. These
-;; emit rather than build a string, so that reporting an error allocates
-;; nothing: a handler that conses is a handler that can fail while explaining
-;; a failure.
+;; A compiled function carries its name in its code object, so a printed
+;; function and a backtrace line say the same thing. These emit rather than
+;; build a string: reporting an error must not allocate.
 (define (code-object? v)
   (if (%object? v)
       (if (%>= (%addr-of v) obj-base)
@@ -19,9 +17,9 @@
           nil)
       nil))
 
+;; A symbol for a named function; (lambda . home) for one that never had a
+;; name, so an anonymous frame still says where it came from.
 (define (emit-name n)
-  ;; A symbol for a named function; (lambda . home) for one that never had a
-  ;; name, so that even an anonymous frame says where it came from.
   (cond ((%null? n) (emit-str "anonymous"))
         ((%cons? n) (emit-str "lambda in ") (emit-name (%cdr n)))
         ((%symbol? n) (emit-str (%symbol-name n)))
@@ -30,16 +28,19 @@
 (define (emit-code-label c)
   (if (code-object? c) (emit-name (%slot c code-name)) (emit-str "?")))
 
-;; Short if the package we are in would read this name back as this symbol,
-;; and qualified otherwise - with two colons for one that was never exported,
-;; which is the reader's own spelling for reaching past an interface.
+;; Bare if the current package would read the name back as this symbol,
+;; qualified otherwise, with two colons for one that was never exported. An
+;; uninterned symbol prints as #:name.
 (define (print-symbol x)
   (let ((name (%symbol-name x)))
     (if (%eq? (find-visible (current-package) name) x)
         (emit-str name)
         (let ((p (symbol-package x)))
-          (emit-str (if p (package-name p) "?"))
-          (emit-str (if (symbol-exported? x) ":" "::"))
+          (if p
+              (begin
+                (emit-str (package-name p))
+                (emit-str (if (symbol-exported? x) ":" "::")))
+              (emit-str "#:"))
           (emit-str name)))))
 
 (define (write-char-name c)
@@ -85,27 +86,17 @@
         (emit-str "#<bytes ")
         (emit-str (number->string (%obj-len x)))
         (emit-ch #\>))
+       ((%= ty t-float) (emit-str "#<float>"))
        ((%= ty t-record)
         (cond
          ((package? x)
           (emit-str "#<package ") (emit-str (package-name x)) (emit-ch #\>))
-         ;; An instance is a tag and a version followed by whatever it holds,
-         ;; and what it holds is frequently the window it is drawn in, which
-         ;; holds the instance back. Printing the name is the useful half and
-         ;; the half that terminates.
-         ((if (%>= (%obj-len x) 2)
-              (if (%symbol? (%slot x 0)) (%fixnum? (%slot x 1)) nil)
-              nil)
-          (emit-ch #\#) (emit-ch #\<)
-          (emit-str (%symbol-name (%slot x 0)))
-          (emit-ch #\>))
          (else (print-record x quoted depth))))
        (else (emit-str "#<object>")))))
    (else (emit-str "#<immediate>"))))
 
+;; (quote x) prints as 'x.
 (define (print-list x quoted depth)
-  ;; (quote x) reads better as 'x, and the compiler prints a lot of quoted
-  ;; forms when something goes wrong.
   (if (if (%eq? (%car x) 'quote) (if (%cons? (%cdr x)) (%null? (cddr x)) nil) nil)
       (begin (emit-ch #\') (print-obj (cadr x) quoted (%+ depth 1)))
       (begin
@@ -136,15 +127,12 @@
       (set! i (%+ i 1))))
   (emit-ch #\)))
 
+;; A record at top level prints every slot. Inside something else it prints as
+;; its type: records point at each other, a task at its parent, every node
+;; at its neighbours, and following them would print the whole kernel.
 (define (print-record r quoted depth)
   (emit-str "#[")
   (if (%> depth 0)
-      ;; Inside something else, a record is its type and no more. Records
-      ;; point at each other - a task at its parent and the parent at its
-      ;; children, every node at its neighbours on a list - so printing what
-      ;; each one holds walks the whole kernel, thirty-two levels deep, which
-      ;; is what the prompt did the first time somebody printed a task: pages
-      ;; of brackets, and then an error.
       (begin
         (if (%> (%obj-len r) 0) (print-obj (%slot r 0) quoted (%+ depth 1)) nil)
         (emit-str " ..."))
@@ -164,8 +152,9 @@
 (define (display-to-string x) (with-output-to-string (lambda () (display x))))
 
 ;; ---------------------------------------------------------------- errors
-;; No condition system yet: an error prints what it knows and hands control to
-;; the error hook, which the REPL sets to something that unwinds.
+;; There is no condition system. An error prints what it knows and traps, and
+;; the trap handler prints a backtrace and restarts the prompt, or ends the
+;; task.
 (define (error . args)
   (emit-str "error: ")
   (let ((first t))
@@ -174,7 +163,7 @@
       (if (%string? a) (emit-str a) (write a))))
   (newline)
   (let ((h (%ld-word lg-errhandler)))
-    (if h (%funcall h args) (%halt 1))))
+    (if h (%funcall h args) (%halt exit-error))))
 
 (define (warn . args)
   (emit-str "warning: ")
@@ -184,14 +173,14 @@
 ;; ---------------------------------------------------------------- gensym
 (define *gensym-count* 0)
 
+;; An uninterned symbol, so a macro's temporaries do not accumulate in the
+;; obarray. Reading and bumping the counter is one act, or two tasks could
+;; make two symbols with one name.
 (define (gensym-1)
-  ;; The counter is what makes the name unique, so reading and bumping it is
-  ;; one act: two tasks that both read the old value make two symbols with the
-  ;; same name, which is the one thing a gensym must never be.
   (let ((n (without-interrupts
              (set! *gensym-count* (%+ *gensym-count* 1))
              *gensym-count*)))
-    (intern-string (string-append "g" (number->string n)))))
+    (make-symbol (string-append "g" (number->string n)))))
 
 ;; ---------------------------------------------------------------- clock
 (define (cycles) (%cycles))

@@ -1,8 +1,7 @@
-//! `lm` — boot a Lisp machine image.
+//! `lm`: boot a Lisp machine image.
 //!
-//! This is the runtime, and only the runtime. It knows how to load an image
-//! and let it run; it does not know how to build one, and does not carry the
-//! bootstrap interpreter or the test bench around with it.
+//! The runtime only. It loads an image and runs it; it does not build images
+//! and does not include the bootstrap interpreter or the test bench.
 
 use clap::Parser;
 use lm::boot;
@@ -77,16 +76,15 @@ struct Cli {
     trace_traps: bool,
 }
 
-/// `\n` in a script is a newline, so that a script can be typed on one line -
-/// except inside a character literal. `#\n` is the character n and
-/// `#\newline` is the newline character, and both used to arrive cut in two:
-/// a `#`, a line break, and the rest of the name as a symbol.
+/// `\n` in a script is a newline, so a script can be typed on one line. The
+/// character after `#\` is left alone, so `#\n` stays the character n and
+/// `#\newline` stays the newline character.
 fn unescape_script(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut it = s.chars().peekable();
     while let Some(c) = it.next() {
         match c {
-            // `#\` and the character after it, whatever it is, as they are.
+            // `#\` and the character after it are copied unchanged.
             '#' if it.peek() == Some(&'\\') => {
                 out.push('#');
                 out.extend(it.next());
@@ -108,7 +106,10 @@ fn main() -> std::process::ExitCode {
         image: cli.image,
         window: !cli.no_window,
         scale: cli.scale,
-        script: cli.script.map(|s| unescape_script(&s)),
+        // A newline is appended: the reader needs a delimiter after the last
+        // token, and a script ending in `bye` without one would wait for ever.
+        script: cli.script.map(|s| unescape_script(&s) + "
+"),
         interactive: !cli.batch,
         budget: cli.budget.unwrap_or(u64::MAX),
         disk: cli.disk,

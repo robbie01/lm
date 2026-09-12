@@ -2,35 +2,25 @@
 ;;;
 ;;; A bignum is an object of type `t-bignum`: slot 0 is the sign, 0 for
 ;;; positive and 1 for negative, and the slots after it are the magnitude as
-;;; raw 32-bit limbs, least significant first. That is the machine's own word,
-;;; so a one-limb bignum is exactly a machine word with a sign on it, and
-;;; `peek` can hand back any word there is.
+;;; raw 32-bit limbs, least significant first.
 ;;;
-;;; Two invariants, and everything here depends on both:
+;;; Two invariants, which everything here depends on:
 ;;;
-;;;   - The top limb is never zero, and the magnitude is never zero. Zero is
-;;;     the fixnum 0 and nothing else.
-;;;   - A value that fits in a fixnum *is* a fixnum. Every operation here ends
-;;;     by demoting, which is what keeps `eq?` working on small numbers and
-;;;     what makes `(%fixnum? n)` a complete test for "small".
+;;;   - The top limb is never zero and the magnitude is never zero. Zero is
+;;;     the fixnum 0.
+;;;   - A value that fits a fixnum is a fixnum. Every operation ends by
+;;;     demoting, so `eq?` works on small numbers and `%fixnum?` is a complete
+;;;     test for "small".
 ;;;
-;;; ---------------------------------------------------------------- halves
+;;; The arithmetic works sixteen bits at a time. A fixnum has thirty-one bits
+;;; and a limb thirty-two, so no Lisp value can hold a limb; a half is the
+;;; widest piece that can. A sum of two halves and a carry is eighteen bits,
+;;; and a product of two halves is thirty-two, so the product is taken in two
+;;; pieces: `%mulhi16` for the top half and a wrapping `%*` for the bottom.
 ;;;
-;;; The arithmetic works sixteen bits at a time, not thirty-two, and this is
-;;; the one thing worth understanding before reading any of it.
-;;;
-;;; A fixnum has thirty-one bits. A limb has thirty-two, so no Lisp variable
-;;; can hold one - the moment a limb is loaded into a value it has to be
-;;; narrower than the storage it came from. Sixteen is the width that works:
-;;; a sum of two halves and a carry is eighteen bits, and a product of two
-;;; halves is thirty-two, which is one bit too wide - so the product is taken
-;;; in two pieces, `%mulhi16` for the top half and a wrapping `%*` for the
-;;; bottom. Everything else stays comfortably inside a fixnum.
-;;;
-;;; The machine is little-endian, so half `2i` of the magnitude is the low
-;;; sixteen bits of limb `i` and half `2i+1` is the high sixteen. Halves are
-;;; therefore just a finer-grained view of the same array, in the same order,
-;;; and nothing has to be repacked to move between the two.
+;;; The machine is little-endian, so half 2i of the magnitude is the low
+;;; sixteen bits of limb i and half 2i+1 the high sixteen: halves are a finer
+;;; view of the same array, in the same order.
 
 (in-package lm)
 
@@ -39,8 +29,8 @@
 (define bn-hbase 65536)
 
 ;; The largest fixnum is 2^30 - 1 and the smallest is -2^30, so a magnitude of
-;; 2^30 fits only if it is negative. That asymmetry shows up once, in
-;; `bn-finish`, and nowhere else.
+;; 2^30 fits only when it is negative. That asymmetry shows up once, in
+;; `bn-finish`.
 (define bn-fix-hi 16384)          ; the high half of 2^30
 
 ;; ---------------------------------------------------------------- layout
@@ -49,8 +39,8 @@
 (defsubst (bn-mag b) (%+ (%addr-of b) 4))
 (defsubst (bn-sign b) (%ld-fixnum (%addr-of b)))
 
-;; A magnitude is passed around as the address of its first limb plus a count
-;; of significant halves, so a loop hoists the address out once.
+;; A magnitude is passed as the address of its first limb plus a count of
+;; significant halves.
 (defsubst (mag-half p i) (%ld-half (%+ p (%lsh i 1))))
 (defsubst (mag-set! p i v) (%st-half! (%+ p (%lsh i 1)) v))
 
@@ -72,8 +62,8 @@
 
 ;; ---------------------------------------------------------------- finishing
 ;; Every operation builds its result at the largest size it could need and
-;; ends here, which applies both invariants at once: demote to a fixnum if it
-;; fits, and otherwise hand back an object of exactly the right length.
+;; ends here: demote to a fixnum if it fits, otherwise an object of exactly
+;; the right length.
 (define (bn-finish b nsig)
   (let ((sign (bn-sign b)))
     (cond
@@ -85,9 +75,8 @@
                 t
                 ;; exactly 2^30, which is a fixnum only as a negative
                 (if (%= h1 bn-fix-hi) (if (%= h0 0) (%= sign 1) nil) nil))
-            ;; `%*` and `%+` wrap, and wrapping is exactly right here: for the
-            ;; one magnitude that only fits as a negative, 2^30 wraps to -2^30
-            ;; and negating it again leaves it there.
+            ;; Wrapping arithmetic is right here: 2^30 wraps to -2^30, and
+            ;; negating it again leaves it there.
             (let ((v (%+ h0 (%* h1 bn-hbase))))
               (if (%= sign 1) (%- 0 v) v))
             (bn-shrink b nsig))))
@@ -107,12 +96,8 @@
           r))))
 
 ;; ---------------------------------------------------------------- promotion
-;; A fixnum as a one-limb magnitude.
-;;
-;; The most negative fixnum is written out rather than negated: its magnitude
-;; is 2^30, which is one more than the largest fixnum, so `(%- 0 x)` has
-;; nowhere to put the answer and wraps straight back to x. Every other fixnum
-;; negates into range.
+;; A fixnum as a one-limb magnitude. The most negative fixnum is written out
+;; rather than negated: its magnitude is 2^30, and `(%- 0 x)` wraps back to x.
 (define bn-most-negative -1073741824)
 
 (define (bn-of x)
@@ -131,15 +116,14 @@
       (mag-set! (bn-mag b) 1 (%lsh m (%- 0 bn-hbits)))
       b))))
 
-;; Significant halves of a value that may be either kind.
+;; Significant halves of a value of either kind.
 (define (num-sig x)
   (if (%bignum? x)
       (mag-sig (bn-mag x) (bn-halves x))
       2))
 
 ;; ---------------------------------------------------------------- magnitudes
-;; All four take addresses and significant half counts, and none of them looks
-;; at a sign.
+;; These take addresses and significant half counts and never look at a sign.
 
 (define (mag-cmp pa na pb nb)
   (cond ((%< na nb) -1)
@@ -167,7 +151,7 @@
         (begin (mag-set! pr n c) (%+ n 1))
         n)))
 
-;; a minus b, and the caller has already established that a is the larger.
+;; a minus b, where the caller has established that a is the larger.
 (define (mag-sub! pr pa na pb nb)
   (let ((i 0) (bor 0))
     (while (%< i na)
@@ -179,10 +163,9 @@
       (set! i (%+ i 1)))
     (mag-sig pr na)))
 
-;; Schoolbook, into a destination that starts as zero and has room for na+nb
-;; halves. The carry stays below 2^16 throughout: a row contributes at most
-;; (B-1)^2, and adding the running digit and the carry to that keeps the total
-;; under B^2, which is what a two-digit result means.
+;; Schoolbook, into a destination that starts as zero with room for na+nb
+;; halves. The carry stays below 2^16: a row contributes at most (B-1)^2, and
+;; adding the running digit and the carry keeps the total under B^2.
 (define (mag-mul! pr pa na pb nb)
   (let ((j 0))
     (while (%< j nb)
@@ -199,7 +182,6 @@
                   (mag-set! pr k (%logand t bn-hmask))
                   (set! c (%+ hi (%lsh t (%- 0 bn-hbits)))))
                 (set! i (%+ i 1)))
-              ;; and whatever is left over, up the rest of the destination
               (let ((k (%+ na j)))
                 (while (%> c 0)
                   (let ((t (%+ (mag-half pr k) c)))
@@ -211,7 +193,7 @@
 
 ;; ---------------------------------------------------------------- division
 ;; Divide a magnitude in place by a small number and answer the remainder.
-;; `d` must be under 2^14: the running value is `r * 2^16 + half`, and with r
+;; `d` must be under 2^14: the running value is r * 2^16 + half, and with r
 ;; below d that stays inside a fixnum exactly while d does.
 (define bn-small-max 16384)
 
@@ -224,7 +206,7 @@
         (set! r (%mod cur d))))
     r))
 
-;; Shift a magnitude left one bit, in place, over `n` halves. Answers the bit
+;; Shift a magnitude left one bit in place over `n` halves; answers the bit
 ;; shifted out.
 (define (mag-shl1! p n)
   (let ((i 0) (c 0))
@@ -235,23 +217,18 @@
       (set! i (%+ i 1)))
     c))
 
-;; Long division, a bit at a time. Slower than a digit-at-a-time method and
-;; very much simpler: the estimate step of the usual algorithm needs to divide
-;; a thirty-two bit value by a sixteen bit one, and thirty-two bits is the one
-;; width this machine cannot hold in a value.
-;;
-;; `pq` gets the quotient over `na` halves and `pr` the remainder over `nb+1`;
-;; both start zeroed. Answers nothing - the caller normalises both.
+;; Long division a bit at a time. A digit-at-a-time method needs to divide a
+;; thirty-two bit value by a sixteen bit one, and thirty-two bits is the width
+;; a Lisp value cannot hold. `pq` gets the quotient over `na` halves and `pr`
+;; the remainder over nb+1; both start zeroed, and the caller normalises them.
 (define (mag-divmod! pq pr pa na pb nb)
   (let ((bit (%- (%* na bn-hbits) 1)))
     (while (%>= bit 0)
-      ;; remainder <- remainder*2 + the next bit of the dividend
       (mag-shl1! pr (%+ nb 1))
       (let* ((h (%lsh bit (%- 0 4)))
              (k (%logand bit 15))
              (v (%logand (%lsh (mag-half pa h) (%- 0 k)) 1)))
         (if (%= v 1) (mag-set! pr 0 (%logior (mag-half pr 0) 1)) nil))
-      ;; and take out one copy of the divisor if it goes
       (if (%>= (mag-cmp pr (mag-sig pr (%+ nb 1)) pb nb) 0)
           (begin
             (mag-sub! pr pr (%+ nb 1) pb nb)
@@ -262,20 +239,18 @@
       (set! bit (%- bit 1)))))
 
 ;; ---------------------------------------------------------------- generic
-;; The entry points. Each takes fixnums or bignums in any combination and
-;; answers whichever kind the result belongs in.
+;; The entry points take fixnums or bignums in any combination and answer
+;; whichever kind the result belongs in.
 
 (define (bn-add-mag x y sign)
-  ;; magnitudes added, with a sign decided by the caller
   (let* ((bx (bn-of x)) (by (bn-of y))
          (nx (mag-sig (bn-mag bx) (bn-halves bx)))
          (ny (mag-sig (bn-mag by) (bn-halves by)))
          (r (bn-alloc-halves (%+ (if (%> nx ny) nx ny) 1) sign)))
     (bn-finish r (mag-add! (bn-mag r) (bn-mag bx) nx (bn-mag by) ny))))
 
+;; Larger minus smaller, with the sign given; the caller has compared them.
 (define (bn-sub-mag x y sign)
-  ;; magnitudes subtracted, larger minus smaller, sign as given; the caller
-  ;; has compared them already
   (let* ((bx (bn-of x)) (by (bn-of y))
          (nx (mag-sig (bn-mag bx) (bn-halves bx)))
          (ny (mag-sig (bn-mag by) (bn-halves by)))
@@ -311,9 +286,8 @@
              (mag-set! q i (mag-half p i))
              (set! i (%+ i 1)))
            (bn-finish r n)))
-        ;; The one fixnum whose negation is not a fixnum. It cannot be written
-        ;; as a literal here either - the reader would have the same problem -
-        ;; so +2^30 is built out of its halves.
+        ;; The one fixnum whose negation is not a fixnum: 2^30, built out of
+        ;; its halves because the reader could not write it either.
         ((%= x bn-most-negative)
          (let ((b (bn-alloc 1 0)))
            (mag-set! (bn-mag b) 0 0)
@@ -344,8 +318,8 @@
 
 (define (generic-zero? x) (if (%bignum? x) nil (%= x 0)))
 
-;; Quotient truncated toward zero, and a remainder with the dividend's sign -
-;; the same rule the fixnum instructions follow.
+;; Quotient truncated toward zero and a remainder with the dividend's sign,
+;; the rule the fixnum instructions follow.
 (define (generic-divmod x y want-rem)
   (let* ((bx (bn-of x)) (by (bn-of y))
          (nx (mag-sig (bn-mag bx) (bn-halves bx)))
@@ -353,8 +327,8 @@
     (if (%= ny 0)
         (error "division by zero")
         (if (%< (mag-cmp (bn-mag bx) nx (bn-mag by) ny) 0)
-            ;; the divisor is larger, so the quotient is zero and the
-            ;; remainder is the dividend
+            ;; the divisor is larger: the quotient is zero and the remainder
+            ;; is the dividend
             (if want-rem x 0)
             (let ((q (bn-alloc-halves nx (if (%= (bn-sign bx) (bn-sign by)) 0 1)))
                   (r (bn-alloc-halves (%+ ny 1) (bn-sign bx))))
@@ -367,8 +341,8 @@
 (define (generic-remainder x y) (generic-divmod x y t))
 
 ;; ---------------------------------------------------------------- printing
-;; Four decimal digits at a time, because ten thousand is the largest round
-;; number under the small-divisor limit.
+;; Four decimal digits at a time: ten thousand is the largest round number
+;; under the small-divisor limit.
 (define bn-decimal-chunk 10000)
 
 (define (bignum->string b)
@@ -408,18 +382,16 @@
   (%= 0 (%logand (mag-half (bn-mag b) 0) 1)))
 
 ;; ---------------------------------------------------------------- shifting
-;; Two to the k, as a value. One bit set in one half, and `bn-finish` demotes
-;; it if it turns out to be small.
+;; Two to the k, as a value.
 (define (bn-two-to k)
   (let* ((nh (%+ (%/ k bn-hbits) 1))
          (b (bn-alloc-halves nh 0)))
     (mag-set! (bn-mag b) (%/ k bn-hbits) (%lsh 1 (%mod k bn-hbits)))
     (bn-finish b (mag-sig (bn-mag b) nh))))
 
-;; `ash` shifts arithmetically, which means the answer is floored rather than
-;; truncated: -1 shifted right by anything is still -1. `generic-quotient`
+;; `ash` floors: -1 shifted right by anything is still -1. `generic-quotient`
 ;; truncates, so a negative value with something shifted off the end is one
-;; too high and gets corrected.
+;; too high and is corrected.
 (define (generic-ash x k)
   (cond
    ((%= k 0) x)
@@ -432,11 +404,10 @@
           q)))))
 
 ;; ---------------------------------------------------------------- words
-;; The low thirty-two bits of a bignum, written at `a` as two halves. This is
-;; what `poke` needs for a value too big for a fixnum, and it cannot be
-;; spelled with a mask: masking is a bitwise operation and bignums have none
-;; yet. It stores rather than answering so that nothing is allocated - `poke`
-;; is called from inside the collector.
+;; The low thirty-two bits of a bignum, written at `a` as two halves: what
+;; `poke` needs for a value too big for a fixnum. It stores rather than
+;; answering so that nothing is allocated; `poke` is called from inside the
+;; collector.
 (define (bignum-poke-word a b)
   (let ((n (mag-sig (bn-mag b) (bn-halves b))))
     (if (%> n 2)
@@ -444,7 +415,7 @@
         (let ((h0 (mag-half (bn-mag b) 0))
               (h1 (if (%> n 1) (mag-half (bn-mag b) 1) 0)))
           (if (%= (bn-sign b) 1)
-              ;; negate in two's complement, sixteen bits at a time
+              ;; two's complement, sixteen bits at a time
               (begin
                 (%st-half! a (%logand (%- 0 h0) bn-hmask))
                 (%st-half! (%+ a 2)
@@ -456,17 +427,10 @@
 
 ;; ---------------------------------------------------------------- halves in
 ;; A machine word, given as its two halves, as a number of the right kind.
-;;
-;; These build the bignum rather than reaching it through `+` and `*`, and
-;; that is not an optimisation. Widening is a *trap*, and a trap cannot nest:
-;; the stub saves the whole register file into the one context block that
-;; `mscratch` names, so a second trap taken inside the handler would overwrite
-;; the first one's registers. `peek` is called from interrupt servers - the
-;; scheduler reads the timer from inside the trap handler every quantum - so
-;; nothing on that path may widen by trapping.
+;; Built directly rather than through `+` and `*`, which would widen through a
+;; trap for every word with its top bits set.
 (define (halves->unsigned lo hi)
   (if (%< hi bn-fix-hi)
-      ;; the whole word fits a fixnum
       (%+ lo (%* hi 65536))
       (let ((b (bn-alloc 1 0)))
         (mag-set! (bn-mag b) 0 lo)

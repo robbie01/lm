@@ -8,8 +8,8 @@
 //!     the pointer  bits 27..16 y, bits 15..4 x, bits 3..0 the button
 //!     the wheel    bits 11..0  the step
 //!
-//! Mouse position is a register rather than an event, since polling it is what
-//! a pointer actually wants.
+//! Mouse position is a register rather than an event, because a pointer polls
+//! it.
 
 use std::collections::VecDeque;
 
@@ -21,8 +21,7 @@ pub const I_BUTTONS: u32 = 0x10; // bit0 left, bit1 right, bit2 middle
 pub const I_CTRL: u32 = 0x14; // bit0: raise INT_INPUT when an event arrives
 pub const I_MODS: u32 = 0x18; // bit0 shift, bit1 ctrl, bit2 alt
 /// w: queue this word as an event, as though it had come from the keyboard.
-/// A loopback, which is what lets a test drive the input path end to end
-/// without a window or a person.
+/// A loopback: a test can drive the input path end to end without a window.
 pub const I_INJECT: u32 = 0x1c;
 
 pub const EV_KEYDOWN: u32 = 1;
@@ -57,10 +56,9 @@ impl Input {
         self.push_word((kind << 28) | ((ascii & 0xff) << 20) | ((code & 0xff) << 12) | (payload & 0xfff));
     }
 
-    /// A pointer event, carrying where it happened. The position registers
-    /// say where the pointer is now, which for an event taken off the queue
-    /// late - the machine was busy - is somewhere else: every click of a busy
-    /// second used to land wherever the pointer had got to by the end of it.
+    /// A pointer event, carrying the position where it happened. The position
+    /// registers give the current position, which differs from the event's
+    /// when the event is taken off the queue late.
     pub fn push_mouse(&mut self, kind: u32, x: u32, y: u32, button: u32) {
         self.push_word((kind << 28) | ((y & 0xfff) << 16) | ((x & 0xfff) << 4) | (button & 0xf));
     }

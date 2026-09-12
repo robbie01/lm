@@ -18,19 +18,18 @@ pub const C_LFAULT: u32 = 5;
 pub const C_SALIGN: u32 = 6;
 pub const C_SFAULT: u32 = 7;
 pub const C_ECALL: u32 = 11;
-/// Wrong type handed to an instruction that checks one. RISC-V leaves causes
-/// 24 through 31 to the implementation, which is where a machine that knows
-/// what a pair is should put this. `mtval` carries the offending value.
+/// Wrong type handed to an instruction that checks one. RISC-V reserves
+/// causes 24 through 31 for the implementation. `mtval` carries the
+/// offending value.
 pub const C_TYPE: u32 = 24;
 /// An index outside the object it was applied to. `mtval` carries the index.
 pub const C_RANGE: u32 = 25;
-/// A fixnum result that will not fit in thirty-one bits. Nothing emits the
-/// checking forms yet - `string-hash` multiplies its way past 2^30 on purpose
-/// - but the instructions are here, because an operation that cannot notice
-/// it overflowed is one bignums can never be retrofitted onto.
+/// A fixnum result that does not fit in thirty-one bits. `+`, `-` and `*` emit
+/// the trapping forms; the handler widens the operation to a bignum and
+/// resumes after the instruction.
 pub const C_OVER: u32 = 26;
-/// Division by zero, which the base ISA defines as returning -1 and this
-/// machine would rather say out loud.
+/// Division by zero in a checked fixnum instruction. The base ISA's own
+/// division returns -1; the fixnum forms trap instead.
 pub const C_DIVZERO: u32 = 27;
 /// The stack pointer was moved below `stklim`. mtval holds where it would have
 /// gone; sp itself is left as it was.
@@ -39,16 +38,26 @@ pub const C_STACK: u32 = 28;
 /// Zero means no limit.
 pub const CSR_STKLIM: u32 = 0x7c0;
 
-/// What `a7` carries when compiled code raises an ecall on purpose. The
-/// compiler emits these, `sys.lisp` reports them and the test bench names
-/// them, so they are generated into `layout.lisp` rather than written down
-/// three times and kept in step by hand.
+/// What `a7` carries when compiled code raises an ecall. The compiler emits
+/// these, `sys.lisp` reports them and the test bench names them, so they are
+/// generated into `layout.lisp` rather than written three times.
 pub const E_ARITY: u32 = 1;
-pub const E_TYPE: u32 = 2;
 pub const E_OOM: u32 = 3;
 pub const E_ERROR: u32 = 4;
 pub const E_RESCHEDULE: u32 = 5;
 pub const E_RECORD: u32 = 6;
+
+/// Exit codes the machine halts with. Shared with the Lisp side through
+/// layout.lisp.
+pub const EXIT_OK: u32 = 0;
+pub const EXIT_ERROR: u32 = 1;
+pub const EXIT_OOM: u32 = 3;
+pub const EXIT_GC_STACK: u32 = 4;
+pub const EXIT_GC_CORRUPT: u32 = 5;
+pub const EXIT_TRAP_SPIRAL: u32 = 9;
+/// What `lmforge rebuild --check` halts with when everything compiled and
+/// collected. Distinct from every failure code above.
+pub const EXIT_CHECK_PASSED: u32 = 42;
 
 pub const IRQ_SOFT: u32 = 3; // machine software interrupt
 pub const IRQ_TIMER: u32 = 7;
@@ -69,7 +78,7 @@ pub enum Stop {
     Fuel = 0,
     /// A synchronous trap is pending in `m.trap`.
     Trap = 1,
-    /// wfi: idle until an interrupt shows up.
+    /// wfi: idle until an interrupt arrives.
     Wfi = 2,
     /// The SYS device was told to power down.
     Halt = 3,
@@ -94,13 +103,12 @@ pub struct Machine {
     pub mcause: u32,
     pub mtval: u32,
 
-    /// Retired instruction count. Doubles as the machine timebase, which makes
-    /// the whole system deterministic: same image, same schedule, every run.
+    /// Retired instruction count, also the machine timebase. Timing is
+    /// therefore deterministic: same image, same schedule, every run.
     pub cycles: u64,
-    /// Instructions actually executed. `cycles` also counts the time an idle
-    /// machine skips over and the stalls the devices charge for their memory
-    /// traffic, which makes it a clock rather than a measure of work. This is
-    /// the work.
+    /// Instructions executed. `cycles` also counts the time an idle
+    /// machine skips over and the stalls devices charge for memory traffic,
+    /// so it is a clock; this is a measure of work.
     pub executed: u64,
     /// Real-time pacing, for a machine with a window: the wall time and the
     /// cycle count it was last lined up with, and how long it has slept to
@@ -111,23 +119,26 @@ pub struct Machine {
 
     /// Dynamic instruction histogram. Slots 0..63 are dispatch tokens; the
     /// rest break down what a token alone cannot say. See `prof::NAMES`.
-    /// Instruction counters. Present always, filled only when `prof_on` is
-    /// set - `--isaprof` on the command line - so that measuring the machine
-    /// does not need a different build of it.
+    /// Always present, filled only when `prof_on` is set by `--isaprof`, so
+    /// profiling needs no separate build.
     pub prof: Box<[u64; crate::prof::SLOTS]>,
     pub watch: Box<crate::prof::Watch>,
     pub prof_on: bool,
     /// Samples of which function the machine is in, taken only with
     /// `--fnprof`. See `prof::FnProf`.
     pub fnprof: Option<Box<crate::prof::FnProf>>,
-    /// Which dispatch table the core is using: the plain one, or the one that
-    /// counts on the way past.
+    /// Which dispatch table the core is using: the plain one, or the
+    /// counting one.
     pub table: &'static [crate::cpu::Handler; 64],
-    /// Where the machine was one instruction ago, and what it was about to
-    /// run. Filled only when the s2 watch is installed; see `cpu::watch_hook`.
+    /// The pc and instruction word one instruction ago. Filled only when the
+    /// watch table is installed; see `cpu::watch_hook`.
     pub watch_prev: u32,
     pub watch_prev_w: u32,
     pub watch_fired: bool,
+    /// The store watches: an address range, and a word whose top half is
+    /// wanted. Set from the environment at boot; see `cpu::watch_hook`.
+    pub watch_addr: Option<(u32, u32)>,
+    pub watch_hi: Option<u32>,
 
     // --- custom chips ---
     pub intreq: u32,
@@ -141,10 +152,9 @@ pub struct Machine {
     pub halted: bool,
     pub exit_code: u32,
     /// Name indices for the build: `sym_name_id` maps a symbol's identity to a
-    /// dense index for its *name*, and `name_ids` hands those out. Only the
-    /// forge fills these - the machine itself never looks at them - and they
-    /// are what the build's global and macro tables are indexed by. See
-    /// `Heap::name_id`.
+    /// dense index for its name, and `name_ids` allocates those indices. Only
+    /// the forge fills them; the machine never reads them. The build's global
+    /// and macro tables are indexed by them. See `Heap::name_id`.
     pub sym_name_id: Vec<u32>,
     pub name_ids: std::collections::HashMap<String, u32>,
 
@@ -195,6 +205,8 @@ impl Machine {
             watch_prev: 0,
             watch_prev_w: 0,
             watch_fired: false,
+            watch_addr: None,
+            watch_hi: None,
             intreq: 0,
             intena: 0,
             uart: Uart::new(),
@@ -223,11 +235,10 @@ impl Machine {
     // -------------------------------------------------------------- raw access
     #[inline(always)]
     pub fn in_ram(&self, a: u32, sz: u32) -> bool {
-        // Written as a subtraction rather than `a + sz <= ramlen`, because
-        // that addition wraps for an address near the top of the space and
-        // would then wave through a load at, say, 0xFFFFFFFF - which is a
-        // segfault in the host, not a fault in the guest. `ramlen` is far
-        // larger than any access size, so this subtraction cannot underflow.
+        // A subtraction rather than `a + sz <= ramlen`: the addition wraps for
+        // an address near the top of the space and would accept a load at
+        // 0xFFFFFFFF, which is a host segfault. `ramlen` exceeds every access
+        // size, so the subtraction cannot underflow.
         a <= self.ramlen - sz
     }
 
@@ -380,14 +391,14 @@ impl Machine {
         self.mstatus & MSTATUS_MIE != 0 && (self.mie & self.mip) != 0
     }
 
-    /// Whether moving the stack pointer down to `sp` is allowed. The limit is
-    /// a stack-limit register of the kind ARMv8-M has: a frame allocated
-    /// below it faults rather than landing on whatever memory is underneath.
+    /// Whether moving the stack pointer down to `sp` is allowed. The limit
+    /// works like the ARMv8-M stack-limit register: a frame allocated below
+    /// it faults rather than overwriting the memory underneath.
     ///
-    /// Enforced only with interrupts on. Code running with them off - the
+    /// Enforced only with interrupts on. Code running with them off (the
     /// trap handler on its own stack, the collector, the kernel's critical
-    /// sections - may use the reserve below the limit, because it can be
-    /// entered with the stack nearly full and has to finish what it started.
+    /// sections) may use the reserve below the limit. Such code can be
+    /// entered with the stack nearly full and must run to completion.
     #[inline]
     pub fn stack_ok(&self, sp: u32) -> bool {
         sp >= self.stklim || self.mstatus & MSTATUS_MIE == 0

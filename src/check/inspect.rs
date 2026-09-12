@@ -55,20 +55,19 @@ pub fn run(path: &str, names: &[String]) -> i32 {
         }
     }
 
-    // The invariant that makes everything movable: no instruction anywhere in
-    // code space may materialise an address in the heap. Data is reached only
-    // through the literal vector, so a `lui` whose immediate lands in cons or
-    // object space would be a pointer the collector cannot find or update.
+    // Invariant: no instruction in code space materialises a heap address.
+    // Data is reached only through the literal vector, so a `lui` whose
+    // immediate lands in cons or object space would be a pointer the
+    // collector cannot find or update.
     {
         let lo = h.g(LG_CODE_PTR);
         let mut baked = Vec::new();
         let mut a = CODE_BASE;
         while a + 4 <= lo {
             let w = h.ld(a);
-            // Walk instruction by instruction. Stepping two bytes at a time
-            // used to be harmless because everything was four-byte aligned;
-            // now that the compiler emits compressed forms, a misaligned
-            // window can look exactly like a `lui` of a heap address.
+            // Walk instruction by instruction. The compiler emits compressed
+            // forms, so a misaligned four-byte window can look like a `lui`
+            // of a heap address.
             if w & 3 != 3 {
                 a += 2;
                 continue;
@@ -86,8 +85,7 @@ pub fn run(path: &str, names: &[String]) -> i32 {
                 {
                     v = v.wrapping_add(((nx as i32) >> 20) as u32);
                 } else if nx & 3 == 1 && (nx >> 13) & 7 == 0 && (nx >> 7) & 31 == rd {
-                    // ...or the same addi in its compressed form, which is
-                    // what the low half of a fixnum constant looks like now.
+                    // The same addi in its compressed form, c.addi rd, imm.
                     let i = (((nx >> 2) & 0x1f) | ((nx >> 7) & 0x20)) as i32;
                     v = v.wrapping_add(if i >= 32 { i - 64 } else { i } as u32);
                 }

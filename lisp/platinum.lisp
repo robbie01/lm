@@ -1,16 +1,11 @@
 ;;; platinum.lisp - the Mac OS 8/9 appearance.
 ;;;
-;;; Ported from ~/platinum, a pixel-for-pixel recreation in Rust whose values
-;;; were measured off Mac OS 9.0 screenshots. Platinum is drawn almost
-;;; entirely from a sixteen-step grey ramp - 0x11 apart, so grey n is 0x11*n -
-;;; with one lavender accent and a blue-grey desktop, which is why it survives
-;;; the trip to an eight-bit palette intact: the whole appearance is
-;;; twenty-two colours.
-;;;
-;;; They go at the top of the palette rather than the bottom. The low sixteen
-;;; are the machine's named colours and the middle is a grey ramp the demos
-;;; draw gradients out of; taking either would have made this file a change to
-;;; everything that ever plotted a pixel.
+;;; Ported from ~/platinum, a recreation in Rust whose values were measured
+;;; off Mac OS 9.0 screenshots. Platinum is drawn almost entirely from a
+;;; sixteen-step grey ramp, 0x11 apart, with one lavender accent and a
+;;; blue-grey desktop: twenty-two colours in all, which go at the top of the
+;;; palette. The low sixteen entries are the machine's named colours and the
+;;; middle is a grey ramp the demos draw gradients out of.
 
 (in-package wb)
 
@@ -44,8 +39,7 @@
 (define pt-desktop-dark (%+ pt-base 21))
 
 (define (platinum-palette)
-  ;; Sixteen greys, then the accents - as one request to the display driver
-  ;; rather than twenty-two.
+  ;; Sixteen greys, then the accents, as one request to the display driver.
   (let ((pairs (list (%cons pt-lav-light (rgb 204 204 255))
                      (%cons pt-lav (rgb 153 153 255))
                      (%cons pt-lav-dark (rgb 102 102 204))
@@ -72,9 +66,9 @@
 (define pt-menubar-first-x 9)
 
 ;; ---------------------------------------------------------------- bevels
-;; A raised strip is a white line along its top and left and a #99 line along
-;; its bottom and right. Everything in Platinum that looks like an edge is one
-;; of these; the rest is deciding which rectangle to put it round.
+;; A raised strip is a white line along its top and left and a #99 line
+;; along its bottom and right. Everything in Platinum that looks like an edge
+;; is one of these.
 (define (pt-hline rp x y w c) (fill-rect rp x y w 1 c))
 (define (pt-vline rp x y h c) (fill-rect rp x y 1 h c))
 
@@ -98,8 +92,7 @@
 
 ;; ---------------------------------------------------------------- pinstripes
 ;; Rows 4..15 of the title bar, white on even rows and #777 on odd, with a gap
-;; cut around each box and around the title. The cuts are what make it read as
-;; Platinum rather than as a striped rectangle.
+;; cut around each box and around the title.
 (define (pt-stripes rp x y w cuts)
   (let ((row 0))
     (while (%< row 12)

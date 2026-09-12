@@ -9,10 +9,7 @@
 //! None of that applies here. The forge is not made of Lisp objects, and by
 //! the time this runs the heap has stopped: the machine is not executing, no
 //! task holds a register, and the only things that name an object are places
-//! this file can enumerate. So the one thing the machine cannot do to itself,
-//! the forge can do to it on the way out - which is the whole of the argument
-//! for doing it here, and the reason it is worth having even though the
-//! machine will one day want to do it alone.
+//! this file can enumerate.
 //!
 //! Liveness is not recomputed. `gc-for-image` has already run a full
 //! collection with the machine's own root set, which knows about task stacks
@@ -44,8 +41,8 @@ fn block_size(hdr: u32) -> u32 {
 }
 
 /// The global slots that hold a tagged Lisp value. Every other slot holds a
-/// raw address or a count, and rewriting one would be a bug - which is why
-/// this is a list and not a scan of the whole global block.
+/// raw address or a count, and rewriting one would be a bug, so this is a
+/// list and not a scan of the whole global block.
 const TAGGED_GLOBALS: &[u32] = &[
     LG_SYMLIST,
     LG_OBARRAY,
@@ -152,8 +149,8 @@ pub fn compact_objects(h: &mut Heap, verbose: bool) -> Result<Stats, String> {
 
     // Anything the Exec pool names must stay where it is: those words are raw,
     // so a match may be a coincidence, and a coincidence must not be rewritten.
-    // The code registry is the exception - it is a real array of real object
-    // pointers, and it is rewritten exactly, below.
+    // The code registry is the exception: it is an array of object pointers,
+    // and it is rewritten exactly, below.
     let reg = h.g(LG_CODEREG);
     let reg_end = if reg != 0 { reg + h.g(LG_CODEREGN) * 4 } else { 0 };
     let mut pinned = vec![false; n];
@@ -191,7 +188,7 @@ pub fn compact_objects(h: &mut Heap, verbose: bool) -> Result<Stats, String> {
     let mut p = lo;
     let mut moved = 0;
     let mut used = 0;
-    // Where every live block lands, in ascending destination order - which is
+    // Where every live block lands, in ascending destination order, which is
     // also ascending source order, because sliding cannot reorder anything.
     let mut placed: Vec<(u32, u32)> = Vec::new();
     while p < hi {
@@ -252,7 +249,7 @@ pub fn compact_objects(h: &mut Heap, verbose: bool) -> Result<Stats, String> {
         p += sz;
     }
     // The code registry lives in the pool and holds tagged code objects. It is
-    // not a root - a code object is kept alive by the closure that names it -
+    // not a root (a code object is kept alive by the closure that names it),
     // but it is read after every collection, so a stale entry here is a wild
     // pointer at the next sweep.
     let mut a = reg;
@@ -291,7 +288,7 @@ pub fn compact_objects(h: &mut Heap, verbose: bool) -> Result<Stats, String> {
     //
     // With no pins there is one hole, above everything, and it is the tail.
     // With a pin holding the top up there are holes underneath it too, and
-    // they are worth blanking for exactly the same reason.
+    // they are blanked for the same reason.
     for b in 0..OBJ_BIN_COUNT {
         h.st(OBJ_BINS + b * 4, 0);
     }
@@ -327,7 +324,6 @@ pub fn compact_objects(h: &mut Heap, verbose: bool) -> Result<Stats, String> {
         a += 4;
     }
     h.set_g(LG_OBJ_PTR, free);
-    h.set_g(LG_OBJ_FREE, 0);
     h.set_g(LG_OBJFREEN, freed);
 
     let stats = Stats { before: hi - lo, after: free - lo, used, moved, pinned: npinned };
@@ -354,8 +350,8 @@ pub struct CodeStats {
 }
 
 /// A fresh image's pool holds nothing a booting machine reads. Below the code
-/// registry is the forge's scratch - trap frames, the trap stack, the boot
-/// stack - which is written before it is read; and the registry is live only
+/// registry is the forge's scratch (trap frames, the trap stack, the boot
+/// stack), which is written before it is read; and the registry is live only
 /// as far as its count. What is left in them is stale words from the machine
 /// that wrote the image, and a stale word that looks like a pointer pins an
 /// object where it is.
@@ -394,8 +390,8 @@ fn blank_fresh_pool(h: &mut Heap) {
 /// Two things stay exactly where they are: the reset stub at the base, and
 /// the refill and trap stubs, which the forge assembles one after the other
 /// and which are not objects at all. Everything else that is not a live code
-/// object is garbage - dead code the collector freed, and the odd few bytes an
-/// allocation did not bother to hand back.
+/// object is garbage: dead code the collector freed, and the odd few bytes an
+/// allocation did not hand back.
 pub fn compact_code(h: &mut Heap, verbose: bool) -> Result<CodeStats, String> {
     let lo = CODE_BASE;
     let hi = h.g(LG_CODE_PTR);
@@ -562,9 +558,10 @@ pub fn compact_code(h: &mut Heap, verbose: bool) -> Result<CodeStats, String> {
 /// object space ends up pinned. It is still correct, and it is still most of
 /// the file.
 ///
-/// A fresh image - what `rebuild` makes, which boots through its kickstart and
-/// resumes nothing - can have more done to it: the pool's scratch is blanked,
-/// so that nothing in it pins anything, and code space is slid down as well.
+/// A fresh image, which `rebuild` makes and which boots through its kickstart
+/// and resumes nothing, can have more done to it: the pool's scratch is
+/// blanked, so that nothing in it pins anything, and code space is slid down
+/// as well.
 pub fn compact_image(from: &str, out: &str, verbose: bool, fresh: bool) -> i32 {
     let mut m = crate::mach::Machine::new();
     let loaded = match crate::image::load(&mut m, from) {

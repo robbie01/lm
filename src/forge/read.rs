@@ -2,12 +2,12 @@
 //!
 //! It knows how to make a list, a string, a number and a symbol. It does not
 //! know what a package is, what `pkg:name` means, or that `in-package` is
-//! anything but a call - all of that lives in `lisp/read.lisp`, in one copy,
+//! anything but a call. All of that lives in `lisp/read.lisp`, in one copy,
 //! and this reader exists only to get far enough to run it.
 //!
 //! Everything it interns lands in one package, so the handful of names the
-//! bootstrap has to agree with the real reader about - the special forms, the
-//! intrinsics, `t` - are the same objects either way.
+//! bootstrap has to agree with the real reader about (the special forms, the
+//! intrinsics, `t`) are the same objects either way.
 
 use crate::heap::*;
 use num_bigint::BigInt;

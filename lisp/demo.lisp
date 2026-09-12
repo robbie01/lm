@@ -1,30 +1,20 @@
 ;;; demo.lisp - things to type at the prompt.
 ;;;
-;;; These ship inside the kickstart, the way a ROM ships with what it needs.
-;;; Between them they lean on every part of the machine: preemptive tasks
-;;; sharing one framebuffer with no locking because they only ever touch their
-;;; own pixels, the blitter for the parts that move whole rectangles, the
-;;; vertical blank for timing, and the compiler itself for the last one.
+;;; These ship inside the kickstart. Between them they use every part of the
+;;; machine: preemptive tasks drawing into their own windows, the blitter for
+;;; the parts that move whole rectangles, the vertical blank for timing, the
+;;; kernel's ports and mutexes, the drivers, and the compiler itself.
 
 (in-package user)
-
 
 (define (screen)
   (if *screen*
       *screen*
       (open-screen screen-width screen-height)))
 
-;; There used to be a `wait-vblank` here that polled the frame counter with
-;; the processor asleep in between. It was the same symbol as Exec's - this
-;; package uses exec - so defining it replaced the kernel's for every task,
-;; the compositor included, and every task that meant to sleep until the next
-;; frame spun instead. Exec's is the one now: a signal from the vertical blank.
-
 ;; ---------------------------------------------------------------- balls
 ;; One task per ball, all of them drawing into one window. They coordinate
-;; about nothing, which is exactly the Amiga bargain - a single address space,
-;; nothing in the way, and it is on you not to draw over each other - except
-;; that now the worst they can do is spoil their own window.
+;; about nothing: the worst they can do is spoil their own window.
 (define (ball-task win colour seed)
   (let ((bw (win-inner-w win)) (bh (win-inner-h win)))
     (lambda ()
@@ -37,9 +27,8 @@
           (win-fill win x y r r pt-white)
           (set! x (%+ x dx))
           (set! y (%+ y dy))
-          ;; Turn round *and* step back inside. Flipping the direction without
-          ;; correcting the position leaves the ball one column out, and one
-          ;; column out is inside the window frame, which it then paints over.
+          ;; Turn round and step back inside, or the ball is one column out,
+          ;; which is inside the window frame.
           (if (%< x 0) (begin (set! x 0) (set! dx (%- 0 dx))) nil)
           (if (%> x (%- bw r)) (begin (set! x (%- bw r)) (set! dx (%- 0 dx))) nil)
           (if (%< y 0) (begin (set! y 0) (set! dy (%- 0 dy))) nil)
@@ -60,10 +49,9 @@
     win))
 
 ;; ---------------------------------------------------------------- mandelbrot
-;; Fixed point with twelve fractional bits. A fixnum holds thirty bits, and
-;; the intermediate products here reach twenty-eight, which is the whole
-;; reason the escape radius is checked against four rather than something
-;; more generous.
+;; Fixed point with twelve fractional bits. A fixnum holds thirty bits and
+;; the intermediate products here reach twenty-eight, which is why the escape
+;; radius is checked against four rather than something more generous.
 (define fp-bits 12)
 (define fp-one 4096)
 
@@ -80,9 +68,9 @@
               (set! i (%+ i 1))))))
     i))
 
+;; A window of its own, and a row of it handed over every sixteen, so the
+;; picture appears in bands.
 (define (mandelbrot . opts)
-  ;; A window of its own, and a row of it handed over every sixteen: the
-  ;; picture appears in bands rather than after a long silence.
   (let* ((limit (if (%cons? opts) (%car opts) 40))
          (win (make-demo-window 420 320 "Mandelbrot"))
          (bw (win-inner-w win))
@@ -104,8 +92,9 @@
     win))
 
 ;; ---------------------------------------------------------------- life
-;; Conway's life, straight on the framebuffer: the screen is the board, which
-;; is only reasonable because reading a pixel back is a load like any other.
+;; Conway's life. The window's own bitmap is the board: a cell is alive if
+;; it is black, and the counting is done against a back buffer so that every
+;; cell sees the same generation.
 (define *life-back* nil)
 
 (define *life-win* nil)
@@ -129,15 +118,10 @@
         (set! y (%+ y 1)))))
   'seeded)
 
+;; Direct loads and stores into the bitmap, so the blitter's work on it has
+;; to have landed first: the window was filled by a blit, and a blit is not
+;; done when it returns.
 (define (life-step)
-  ;; The window's own bitmap is the board, which is only reasonable because
-  ;; reading a pixel back is a load like any other. A cell is alive if it is
-  ;; black; the counting is done against the back buffer so that every cell
-  ;; sees the same generation.
-  ;;
-  ;; Direct loads and stores into the bitmap, so the blitter's work on it has
-  ;; to have landed first - the window was filled by a blit, and a blit is not
-  ;; done when it returns.
   (blit-sync)
   (let ((y 1)
         (w *life-w*)
@@ -186,8 +170,7 @@
     *life-win*))
 
 ;; ---------------------------------------------------------------- self-test
-;; The most convincing thing the machine can do is compile something while you
-;; watch, so this does exactly that and times it.
+;; Compile a function on the machine, time it, and run it.
 (define (selftest)
   (emit-str "compiling a function on the machine...\n")
   (let ((t0 (%cycles)))
@@ -200,12 +183,12 @@
     (emit-str " cycles\n"))
   (let ((t1 (%cycles)))
     (emit-str "  (ackermann 2 6) = ")
-    (write (ackermann 2 6))
+    (write (funcall 'ackermann 2 6))
     (emit-str " in ")
     (emit-str (number->string (%- (%cycles) t1)))
     (emit-str " cycles\n"))
   (emit-str "  code space now ")
-  (emit-str (number->string (%lsh (%- (%global lg-code-ptr) code-base) -10)))
+  (emit-str (number->string (%lsh (%- (%ld-fixnum lg-code-ptr) code-base) -10)))
   (emit-str "k\n")
   'ok)
 
@@ -221,21 +204,20 @@
   (emit-str "  (workbench)            windows, with a shell in each\n")
   (emit-str "  (new-shell)            another shell window\n")
   (emit-str "  (eyes)                 xeyes; call it more than once\n")
-  (emit-str "  (balls 6)              six tasks, one framebuffer\n")
+  (emit-str "  (balls 6)              six tasks, one window\n")
   (emit-str "  (mandelbrot)           fixed point, straight to the bitmap\n")
   (emit-str "  (life 200)             life, with the blitter for the copy\n")
-  (emit-str "  (tasks)                what is running; preemption is already on\n")
+  (emit-str "  (numbers) (words) (nesting) (talking) (locking) (blitting)\n")
+  (emit-str "  (devices) (drivers)    check one part of the machine each\n")
   (emit-str "  (save-image)           write this machine to the disk\n")
   (emit-str "  bye                    stop the machine\n")
   nil)
 
-
 ;; ---------------------------------------------------------------- numbers
-;; What `(numbers)` checks is that arithmetic is one thing rather than two.
-;; A fixnum that outgrows thirty-one bits becomes a bignum, a bignum that
-;; shrinks back becomes a fixnum again, and nothing in between has to be asked
-;; which it is holding - so the interesting cases here are the boundaries, and
-;; the one number whose magnitude is not a number.
+;; `(numbers)` checks that arithmetic is one thing rather than two. A fixnum
+;; that outgrows thirty-one bits becomes a bignum, a bignum that shrinks back
+;; becomes a fixnum again, and nothing in between has to be asked which it is
+;; holding, so the cases here are the boundaries.
 (define (num-check name got want)
   (if (equal? got want)
       nil
@@ -281,13 +263,12 @@
   (princ "numbers: done (nothing above = all correct)")
   (newline))
 
-
 ;; ---------------------------------------------------------------- words
 ;; `(words)` checks the other half of the number question: a location holds
 ;; thirty-two bits and a fixnum has thirty-one, so reading one has to say
 ;; which number it means. `peek` reads a word unsigned, `peek-signed` reads
 ;; the same word signed, and `poke` takes either and stores the low
-;; thirty-two bits - so a word read one way goes back unchanged.
+;; thirty-two bits, so a word read one way goes back unchanged.
 (define (words)
   (let ((p (alloc-pool 32)))
     ;; a word with its top bit set, built out of halves so nothing has to
@@ -309,24 +290,19 @@
     (num-check 'one-past-signed (peek-signed p) 1073741824)
     (poke p 2147483648)
     (num-check 'round-trip (peek p) 2147483648)
-    ;; and the raw forms still say what they always said: the low thirty-one
-    ;; bits, sign extended, in one instruction
+    ;; and the raw form: the low thirty-one bits, sign extended, in one
+    ;; instruction
     (poke p 12345)
     (num-check 'raw-load (%ld-fixnum p) 12345)
     (free-pool p))
   (princ "words: done (nothing above = all correct)")
   (newline))
 
-
 ;; ---------------------------------------------------------------- nesting
-;; A trap taken while the trap handler is already running.
-;;
-;; The server below runs from the vertical blank, which means it runs inside
-;; the handler, and its arithmetic outgrows a fixnum - which widens through
-;; the trap handler, so it is itself a trap. That is a trap inside a trap, and
-;; until the stub kept a stack of save areas it overwrote the registers of the
-;; one already in progress and the machine died somewhere else entirely a
-;; second later.
+;; A trap taken while the trap handler is already running. The server below
+;; runs from the vertical blank, which means it runs inside the handler, and
+;; its arithmetic outgrows a fixnum, which widens through the trap handler:
+;; a trap inside a trap.
 (define *nest-hits* 0)
 (define *nest-last* 0)
 (define *nest-int* nil)
@@ -345,7 +321,7 @@
             0))
     (exec::add-int-server int-vblank *nest-int*)
     (while (%< *nest-hits* n) (wait-vblank))
-    (exec::rem-int-server int-vblank *nest-int*)
+    (exec::remove-int-server int-vblank *nest-int*)
     (num-check 'nested-result *nest-last*
                (* 1000000 (+ 1000000 *nest-hits*)))
     (num-check 'depth-unwound (peek lg-trapdepth) 0)
@@ -353,15 +329,10 @@
     (princ " traps taken inside the trap handler, all of them survived")
     (newline)))
 
-
 ;; ---------------------------------------------------------------- talking
-;; `(talking)` exercises the way tasks are meant to reach anything they do not
-;; own: by sending it a message.
-;;
-;; There is no device registry here and no `OpenDevice`. A driver is a task
-;; with a port, and it is reached by naming the symbol that holds it - which
-;; is the one thing a Lisp machine gets for free and an Amiga had to build a
-;; string-keyed table for.
+;; `(talking)` exercises the way tasks reach anything they do not own: by
+;; sending it a message. There is no device registry: a driver is a task with
+;; a port, reached by naming the symbol that holds it.
 (define *talk-server* nil)
 
 (define (talking)
@@ -381,22 +352,22 @@
     (num-check 'request-again (request p (list 'add 10 20)) 30)
 
     ;; Select. A task has one blocker, so listening in two places is one
-    ;; `wait` over both masks rather than a poll over either.
-    (let ((a (create-port nil 0))
-          (b (create-port nil 0)))
+    ;; `wait` over both masks.
+    (let ((a (make-port nil 0))
+          (b (make-port nil 0)))
       (spawn "sender" 0 (lambda () (wait-vblank)
-                                   (put-msg b (create-message 'from-b nil))))
+                                   (put-message b (make-message 'from-b nil))))
       (let ((hit (wait-ports (list a b))))
         (num-check 'select-b (eq? hit b) t)
-        (num-check 'select-body (message-body (get-msg hit)) 'from-b))
-      (put-msg a (create-message 'from-a nil))
+        (num-check 'select-body (message-body (get-message hit)) 'from-b))
+      (put-message a (make-message 'from-a nil))
       (let ((hit (wait-ports (list a b))))
         (num-check 'select-a (eq? hit a) t)
-        (num-check 'select-body-a (message-body (get-msg hit)) 'from-a))
+        (num-check 'select-body-a (message-body (get-message hit)) 'from-a))
       (delete-port a)
       (delete-port b))
 
-    ;; Dependent tasks. A child dies with its parent, so a server that fans
+    ;; Dependent tasks. A child ends with its parent, so a server that fans
     ;; work out does not have to remember what it started.
     (let ((me (this-task)) (parent nil))
       (set! parent
@@ -408,21 +379,19 @@
                 (wait 131072))))
       (wait 65536)
       (num-check 'children (length (task-children parent)) 2)
-      (rem-task parent)
+      (remove-task parent)
       (num-check 'children-gone (find-task "kid-one") nil))
 
-    ;; And the rule that closes the bug this all started from: an interrupt
-    ;; server does not draw.
+    ;; An interrupt server does not draw: this is a task.
     (num-check 'blitter-is-task-context
                (if hw::*in-interrupt* 'in-interrupt 'task) 'task))
   (princ "talking: done (nothing above = all correct)")
   (newline))
 
-
 ;; ---------------------------------------------------------------- locking
-;; `(locking)` checks the rules about waiting and the mutex, which are two
-;; halves of one decision: a critical section never sleeps, and shared data
-;; that has to be waited for is guarded by a lock that belongs to somebody.
+;; `(locking)` checks the rules about waiting and the mutex: a critical
+;; section never sleeps, and shared data that has to be waited for is guarded
+;; by a lock that belongs to somebody.
 ;;
 ;; What should be an error is tried in a task of its own, which ends when the
 ;; error comes. Checking that the task ended, and what it left behind, is how
@@ -455,8 +424,8 @@
       (num-check 'still-mine (eq? (mutex-owner m) me) t))
     (mutex-unlock m)
 
-    ;; Nothing sleeps with interrupts off, and the machine carries on: the task
-    ;; that tried ends, and the interrupts come back on.
+    ;; Nothing sleeps with interrupts off, and the machine carries on: the
+    ;; task that tried ends, and the interrupts come back on.
     (let ((a (lk-try "sleeper" (lambda () (without-interrupts (wait-vblank)))))
           (b (lk-try "yielder" (lambda () (without-interrupts (reschedule)))))
           (c (lk-try "locker" (lambda () (without-interrupts (mutex-lock m))))))
@@ -477,8 +446,8 @@
       (num-check 'waiter-got-it got t)
       (num-check 'waiter-let-go (mutex-owner m) nil))
 
-    ;; Abandoned by an error inside with-mutex: the next owner is told, through
-    ;; the repair, which with-mutex runs before its own body.
+    ;; Abandoned by an error inside with-mutex: the next owner is told,
+    ;; through the repair, which with-mutex runs before its own body.
     (let* ((repaired nil)
            (r (make-mutex "repairable" (lambda (x) (set! repaired t))))
            (dier (lk-try "dier" (lambda () (with-mutex r (car 5))))))
@@ -488,7 +457,7 @@
       (num-check 'told-once (mutex-lock r) t)
       (mutex-unlock r))
 
-    ;; And by a task that simply ended holding it.
+    ;; And by a task that ended holding it.
     (let ((q (make-mutex "quitter")))
       (lk-try "quitter" (lambda () (mutex-lock q)))
       (num-check 'ended-holding-it (mutex-lock q) 'abandoned)
@@ -507,9 +476,9 @@
       (num-check 'taker-ended-holding-it (mutex-lock h) 'abandoned)
       (mutex-unlock h))
 
-    ;; A circle is an error, not a hang. `one` holds m1 and waits for m2; `two`
-    ;; holds m2 and asks for m1, and is refused. What `two` held goes to `one`,
-    ;; abandoned, and `one` finishes.
+    ;; A circle is an error, not a hang. `one` holds m1 and waits for m2;
+    ;; `two` holds m2 and asks for m1, and is refused. What `two` held goes
+    ;; to `one`, abandoned, and `one` finishes.
     (let* ((m1 (make-mutex "m1"))
            (m2 (make-mutex "m2"))
            (one (add-task "one" 0 (lambda ()
@@ -543,34 +512,33 @@
   (princ "locking: done (nothing above = all correct)")
   (newline))
 
-
 ;; ---------------------------------------------------------------- blitting
-;; `(blitting)` checks that the blitter is really asynchronous, and that
-;; waiting for it means what it says. The second group is the one that
-;; matters: two blits in a row through one task's command block, which is
-;; what every drawing task does and what the collector does to clear its maps.
+;; `(blitting)` checks that the blitter is asynchronous, and that waiting for
+;; it means what it says: two blits in a row through one task's descriptors
+;; is what every drawing task does and what the collector does to clear its
+;; maps.
 (define (blitting)
   (let* ((a (alloc-bitmap 256 256))
          (b (alloc-bitmap 256 256))
          (pa (%addr-of (bm-pixels a)))
          (pb (%addr-of (bm-pixels b))))
     ;; A blit is not done when it returns: read too early and you see the
-    ;; old pixel, which is what real hardware would give you too.
+    ;; old pixel.
     (%st-byte! pa 7)
     (bm-fill-rect a 0 0 256 256 42)
     (num-check 'not-landed-yet (%ld-byte pa) 7)
     (blit-sync)
     (num-check 'landed-after-sync (%ld-byte pa) 42)
-    ;; Back to back through one block. The second commit waits for the
-    ;; first, and the first one's write-back must not mark the second done.
+    ;; Back to back. The second commit waits for the first, and the first
+    ;; one's write-back must not mark the second done.
     (%st-byte! pb 9)
     (bm-fill-rect a 0 0 256 256 1)
     (bm-fill-rect b 0 0 256 256 2)
     (blit-sync)
     (num-check 'second-of-two-landed (%ld-byte pb) 2)
     (num-check 'first-of-two-landed (%ld-byte pa) 1)
-    ;; And a big one does not hold the machine up while it runs: the commit
-    ;; is a few hundred cycles, and the transfer happens while others run.
+    ;; A big one does not hold the machine up while it runs: the commit is a
+    ;; few hundred cycles, and the transfer happens while others run.
     (let ((big (alloc-bitmap 1024 768)))
       (blit-drain)
       (let ((t0 (%cycles)))
@@ -578,9 +546,8 @@
         (num-check 'big-commit-is-quick (%< (%- (%cycles) t0) 10000) t))
       (blit-sync)
       (num-check 'big-landed (%ld-byte (%addr-of (bm-pixels big))) 5))
-    ;; A chain: a blit queued behind a big one does not wait for it. Its
-    ;; commit is a few hundred cycles, not the big one's two hundred thousand
-    ;; - the chip gets to it by itself - and the two land in order.
+    ;; A chain: a blit queued behind a big one does not wait for it, and the
+    ;; two land in order.
     (let ((big (alloc-bitmap 1024 768)) (small (alloc-bitmap 16 16)))
       (blit-drain)
       (bm-fill-rect big 0 0 1024 768 6)
@@ -608,11 +575,10 @@
   (princ "blitting: done (nothing above = all correct)")
   (newline))
 
-
 ;; ---------------------------------------------------------------- devices
-;; `(devices)` checks device ownership. A device is a value: holding it is the
-;; permission, a claimed one refuses every task but its owner, and a task that
-;; dies gives back what it held.
+;; `(devices)` checks device ownership. A device is a value: holding it is
+;; the permission, a claimed one refuses every task but its owner, and a task
+;; that ends gives back what it held.
 (define *dev-probe* nil)
 
 (define (devices)
@@ -644,25 +610,24 @@
   (princ "devices: done (nothing above = all correct)")
   (newline))
 
-
 ;; ---------------------------------------------------------------- drivers
 ;; `(drivers)` checks the driver model end to end, on the disk and the
 ;; keyboard: one task holds each device and every other task asks it, a
 ;; transfer lets the machine run while it happens, every listener hears every
-;; event, and a server that fails or dies answers its callers instead of
-;; leaving them blocked. The transfers need a disk - start the
-;; machine with --disk FILE; a scratch file will do.
+;; event, and a server that fails or ends answers its callers instead of
+;; leaving them blocked. The transfers need a disk: start the machine with
+;; --disk FILE; a scratch file will do.
 (define *drv-probe* nil)
 (define *drv-count* 0)
 (define *drv-stuck* nil)
 
 ;; A request that hands back whatever came back, failure or not, instead of
-;; raising on a failure the way `request` does - so that a check can look.
+;; raising on a failure the way `request` does.
 (define (raw-request port body)
   (let* ((r (reply-port))
-         (m (create-message body r)))
-    (put-msg port m)
-    (while (%null? (get-msg r)) (wait (port-signal r)))
+         (m (make-message body r)))
+    (put-message port m)
+    (while (%null? (get-message r)) (wait (port-signal r)))
     (message-body m)))
 
 (define (bytes-same? a b)
@@ -702,10 +667,9 @@
               (num-check 'a-big-write (disk-write 100 256 big) 0)
               (num-check 'the-driver-slept-through-it (%> *disk-sleeps* sleeps) t)
               (num-check 'another-task-ran-meanwhile (%> *drv-count* 0) t)
-              (rem-task counter))))))
+              (remove-task counter))))))
   ;; The keyboard and mouse. The driver is the one reader, and every
-  ;; subscriber gets every event - which two tasks reading the chip could
-  ;; never have, because reading an event is what takes it.
+  ;; subscriber gets every event.
   (num-check 'input-driver-running (input-driver-running?) t)
   (num-check 'input-held-by-its-driver
              (%eq? (device-owner *input*) (server-task *input-driver*)) t)
@@ -720,9 +684,9 @@
       (num-check 'and-so-does-the-other (equal? ea eb) t))
     (input-unlisten a)
     (input-unlisten b))
-  ;; The display. The driver holds the chip, the frame clock is a signal again
-  ;; rather than a poll, and a task whose blit is still running sleeps until
-  ;; the blitter wakes it.
+  ;; The display. The driver holds the chip, the frame clock is a signal,
+  ;; and a task whose blit is still running sleeps until the blitter wakes
+  ;; it.
   (num-check 'gfx-driver-running (gfx-driver-running?) t)
   (num-check 'gfx-held-by-its-driver
              (%eq? (device-owner *gfx*) (server-task *gfx-driver*)) t)
@@ -744,8 +708,8 @@
                           (if (eq? body 'break) (error "fragile: asked to fail") body)))))
     (num-check 'a-failing-handler-answers (failure? (raw-request (server-port s) 'break)) t)
     (num-check 'and-the-server-carries-on (raw-request (server-port s) 'hello) 'hello)
-    (rem-task (server-task s)))
-  ;; A server that dies with a caller waiting: the caller hears, and so does
+    (remove-task (server-task s)))
+  ;; A server that ends with a caller waiting: the caller hears, and so does
   ;; anybody who asks after.
   (let* ((me (this-task))
          (sig (exec::alloc-signal me))
@@ -757,15 +721,15 @@
                         (set! *drv-probe* (raw-request (server-port s) 'hello))
                         (signal me sig)))
     (while (%null? *drv-stuck*) (reschedule))
-    (rem-task (server-task s))
+    (remove-task (server-task s))
     (wait sig)
     (num-check 'a-caller-hears-when-its-server-dies (failure? *drv-probe*) t)
     (num-check 'and-a-dead-server-answers-at-once
                (failure? (raw-request (server-port s) 'again)) t)
     (exec::free-signal me sig))
-  ;; A driver that dies gives its device back, and the next one takes it.
+  ;; A driver that ends gives its device back, and the next one takes it.
   (let ((old *disk-driver*))
-    (rem-task (server-task old))
+    (remove-task (server-task old))
     (num-check 'a-dead-driver-gives-the-disk-back (device-owner *disk*) nil)
     (num-check 'and-is-not-running (disk-driver-running?) nil)
     (num-check 'with-no-driver-a-call-goes-direct (number? (disk-size)) t)

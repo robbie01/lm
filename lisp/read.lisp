@@ -1,14 +1,10 @@
 ;;; read.lisp - the reader.
 ;;;
-;;; There is one of these. The forge used to carry a second reader written in
-;;; Rust that had to agree with this one about what a name means - the same
-;;; hash, the same package rules, the same treatment of pkg:name - and every
-;;; change to either had to be made twice. Now the bootstrap brings this one
-;;; up on a minimal interpreter and reads everything, itself included, with
-;;; it; what is left in Rust is a reader that knows only how to make a list.
-;;;
-;;; Characters come from the current stream, so the same code reads the serial
-;;; console, a window, and a source file the forge hands over as a string.
+;;; The one reader: the forge brings it up on the bootstrap interpreter and
+;;; reads everything with it from then on, itself included, so a name means
+;;; the same thing at build time and at run time. Characters come from the
+;;; current stream, so the same code reads the serial console, a window, and
+;;; a source file the forge hands over as a string.
 
 (in-package lm)
 
@@ -19,9 +15,8 @@
       (let ((c *peeked*)) (set! *peeked* nil) c)
       (get-char)))
 
-;; Reading from a console never ends: when there is nothing there yet, wait.
-;; Reading from a string does end, and then a character that is not coming has
-;; to be admitted to rather than waited for.
+;; Reading from a console never ends: when nothing is there yet, wait. Reading
+;; from a string does end, and then a character that is not coming is nil.
 (define *eof-ok* nil)
 
 (define (wait-char)
@@ -33,10 +28,8 @@
           nil))
     c))
 
-;; The next character, left where it is. Nearly always the stream has one
-;; ready, and then this asks it once instead of going the long way round
-;; through `wait-char`, which is four calls a character. The long way is still
-;; there for a console with nothing typed yet.
+;; The next character, left where it is. The stream usually has one ready, and
+;; then this asks once rather than going through `wait-char`.
 (define (peek-char)
   (if *peeked*
       *peeked*
@@ -44,13 +37,9 @@
         (set! *peeked* (if c c (wait-char)))
         *peeked*)))
 
+;; End of input ends a token as a space does. Whitespace is never above the
+;; space character, so a letter is settled by one comparison.
 (define (delimiter? c)
-  ;; End of input ends a token as surely as a space does. On a console that
-  ;; never happens; on a string it happens at the last character, and a reader
-  ;; that did not know it would keep asking for a character that is not coming.
-  ;;
-  ;; Whitespace is never above the space character, so most of a token - its
-  ;; letters - is settled by one comparison without asking char-whitespace?.
   (if (%null? c)
       t
       (if (%> (%char->int c) 32)
@@ -65,12 +54,9 @@
       (let ((c (peek-char)))
         (cond
          ((%null? c) (set! go nil))
-         ;; A peeked character is taken by forgetting it, which is all that
-         ;; `wait-char` would have done with it.
+         ;; A peeked character is taken by forgetting it.
          ((if (%eq? c #\space) t (char-whitespace? c)) (set! *peeked* nil))
          ((%eq? c #\;)
-          ;; To the end of the line. Nothing is peeked in here, so the stream
-          ;; is asked directly, and the long way only when it has nothing yet.
           (set! *peeked* nil)
           (let ((going t))
             (while going
@@ -97,6 +83,14 @@
      ((%eq? c #\") (wait-char) (read-string-literal))
      ((%eq? c #\#) (wait-char) (read-hash))
      (else (read-atom)))))
+
+;; A form at top level. The two pieces of state below describe the form being
+;; read, and an error inside a form leaves them where the error found them;
+;; starting a new one puts them back.
+(define (read-toplevel)
+  (set! *read-raw* nil)
+  (set! *read-depth* 0)
+  (read-form))
 
 (define (read-list)
   (let ((acc nil) (go t) (tail nil) (outer-raw *read-raw*))
@@ -129,9 +123,9 @@
     (set! *read-depth* (%- *read-depth* 1))
     (revappend acc tail)))
 
+;; A lone dot is the dotted-pair marker; a dot that starts a token is part of
+;; a symbol.
 (define (dot-follows?)
-  ;; A lone dot is the dotted-pair marker; a dot that starts a token is part
-  ;; of a symbol.
   (wait-char)
   (let ((c (peek-char)))
     (if (delimiter? c)
@@ -156,8 +150,7 @@
          (else (set! acc (%cons c acc)) (set! n (%+ n 1))))))
     (reversed->string acc n)))
 
-;; n characters, collected last first, as a string - filled from the end, so
-;; that they need not be reversed into a second list on the way.
+;; n characters collected last first, as a string, filled from the end.
 (define (reversed->string acc n)
   (let ((s (make-string-n n)))
     (while (%cons? acc)
@@ -174,6 +167,7 @@
      ((%eq? c #\t) t)
      ((%eq? c #\f) nil)
      ((%eq? c #\x) (string->number-radix (read-token) 16))
+     ((%eq? c #\o) (string->number-radix (read-token) 8))
      ((%eq? c #\b) (string->number-radix (read-token) 2))
      (else (error "unknown # syntax")))))
 
@@ -203,16 +197,15 @@
     (reversed->string acc n)))
 
 ;; Inside a defpackage or in-package form the names are the names of packages
-;; that may not exist yet, so they are read as names and not as symbols -
-;; interning them would put them in whatever package happens to be current,
-;; which is exactly the wrong one. Only the outermost form counts: a define of
-;; defpackage is a definition of it, not a use.
+;; that may not exist yet, so they are read as strings and not interned into
+;; whatever package happens to be current. Only the outermost form counts: a
+;; define of defpackage is a definition of it, not a use.
 (define *read-raw* nil)
 (define *read-depth* 0)
 
+;; pkg:name is the exported symbol of that name in that package; pkg::name is
+;; any symbol of that name there, interned if there is none.
 (define (token->symbol tok)
-  ;; pkg:name is the exported symbol of that name in that package; pkg::name
-  ;; is any symbol of that name, interning one if there is none.
   (let ((i (string-index tok #\:)))
     (if (if i (%> i 0) nil)
         (let* ((internal (if (%< (%+ i 1) (%string-length tok))
@@ -239,6 +232,8 @@
                     ((string=? tok "nil") nil)
                     (else (token->symbol tok))))))))
 
+;; Promoting, like `string->number`: a literal wider than a fixnum reads as a
+;; bignum in every radix.
 (define (string->number-radix s radix)
   (let ((i 0) (n (%string-length s)) (acc 0) (neg nil))
     (if (%> n 0)
@@ -251,29 +246,25 @@
                       ((if (%>= c 65) (%<= c 70) nil) (%- c 55))
                       (else 99))))
         (if (%>= d radix) (error "bad digit in" s) nil)
-        (set! acc (%+ (%* acc radix) d))
+        (set! acc (+ (* acc radix) d))
         (set! i (%+ i 1))))
-    (if neg (%- 0 acc) acc)))
+    (if neg (- 0 acc) acc)))
 
 ;; ---------------------------------------------------------------- strings
-;; Reading a source file is reading a stream that happens to be a string. The
-;; forge hands whole files over this way, which is how the machine's reader
-;; came to be the only reader there is.
+;; A source file is a stream that happens to be a string.
 (define (string-stream s)
   (let ((i 0) (n (%string-length s)))
     (make-stream
      (lambda (c) nil)
+     ;; No `let`: in the forge's interpreter a let is a frame, and this runs
+     ;; once per character of every file the forge reads.
      (lambda ()
-       ;; No let: in the forge's interpreter a let is a frame, and this runs
-       ;; once for every character of every file the forge reads.
        (if (%< i n)
            (begin (set! i (%+ i 1)) (%string-ref s (%- i 1)))
            nil))
      (lambda () nil))))
 
 (define (with-input-from-string s thunk)
-  ;; Three places given other values for as long as the thunk runs, which is
-  ;; what a fluid binding is for. This used to save and restore them by hand.
   (let ((in (string-stream s)))
     (fluid-let ((*out* (stream-put in))
                 (*in* (stream-get in))
@@ -282,20 +273,10 @@
                 (*eof-ok* t))
       (%funcall thunk))))
 
-;; A file says which package it is in, and everything after that line has to be
-;; read in it - so the reader has to act on these two as it goes rather than
-;; wait for somebody to evaluate them. Reading a whole file and evaluating it
-;; afterwards, which is what the forge does, would otherwise read the whole
-;; thing in whatever package the previous file left behind.
-;;
-;; They are matched by name, because the symbol they are spelled with is
-;; whatever the package being left behind happened to have.
-;; The real package forms. They are macros so that their arguments are names
-;; rather than expressions, whichever reader read them - the bootstrap reader
-;; hands over symbols and this one hands over strings, and a macro can quote
-;; either without evaluating it. They live here, with the reader, because they
-;; are read-time business and because this is the first file that runs after
-;; the forge has something to allocate a package with.
+;; The real package forms. Macros, so that their arguments are names rather
+;; than expressions whichever reader read them: the bootstrap reader hands
+;; over symbols and this one strings. The reader acts on them as it goes,
+;; because everything after one in a file is read in the package it names.
 (defmacro in-package (name) (list 'set-package-by-name (list 'quote name)))
 (defmacro defpackage words (list 'define-package-by-name (list 'quote words)))
 
@@ -309,9 +290,8 @@
         ((form-head-named? f "defpackage") (define-package-by-name (%cdr f)))
         (else nil)))
 
-;; Reading a form at a time, so that what a form does can affect how the next
-;; one is read. That is not a nicety: an export list has to be read in the
-;; package it exports from, and the form that says so is the one before it.
+;; A form at a time, so that what a form does can affect how the next one is
+;; read: an export list has to be read in the package it exports from.
 (define *reader-eof* (%cons 'eof nil))
 (define *reader-saved* nil)
 
@@ -334,12 +314,10 @@
   (skip-space)
   (if (%null? (peek-char))
       *reader-eof*
-      (let ((f (read-form))) (act-on-package-form f) f)))
+      (let ((f (read-toplevel))) (act-on-package-form f) f)))
 
+;; Every form in the text, in order.
 (define (read-forms-from-string s)
-  ;; Every form in the text, in order. Reading stops at the end rather than
-  ;; waiting for more, which is the only difference between a file and a
-  ;; console.
   (start-reading-string s)
   (let ((acc nil) (go t))
     (while go
@@ -349,4 +327,4 @@
     (reverse acc)))
 
 (define (read-from-string s)
-  (with-input-from-string s (lambda () (read-form))))
+  (with-input-from-string s (lambda () (read-toplevel))))

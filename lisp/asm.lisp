@@ -1,14 +1,11 @@
-;;; asm.lisp - an RV32IM assembler, in Lisp.
+;;; asm.lisp - an RV32IMC assembler.
 ;;;
-;;; This is the real assembler: the same code runs under the bootstrap
-;;; interpreter while the image is being built, and again as compiled native
-;;; code inside the running machine, which is what lets the image compile new
-;;; Lisp for itself.
+;;; The forge's interpreter runs this while the image is built, and the
+;;; compiled copy in the image runs it when the machine compiles for itself.
 ;;;
-;;; Instructions are assembled a halfword at a time. That is not an aesthetic
-;;; choice: a fixnum holds 31 bits, so a whole 32-bit instruction word does not
-;;; fit in one, and every encoder here builds a low half and a high half. Only
-;;; rs1 straddles the boundary, at bit 15.
+;;; Instructions are assembled a halfword at a time: a fixnum holds 31 bits,
+;;; so a whole instruction word does not fit in one. Every encoder builds a
+;;; low half and a high half. Only rs1 straddles the boundary, at bit 15.
 
 (in-package asm)
 
@@ -22,8 +19,8 @@
 (define $s8 24)  (define $s9 25) (define $s10 26) (define $s11 27)
 (define $t3 28)  (define $t4 29) (define $t5 30) (define $t6 31)
 
-;; gp is the cons bump pointer and tp is its limit; see the comment on
-;; `i-cons` below. Nothing else may use them.
+;; gp is the cons bump pointer and tp its limit, for the life of the machine.
+;; Nothing else may use them.
 (define $consp $gp)
 (define $consend $tp)
 
@@ -41,48 +38,25 @@
 (define csr-cycleh   #xc80)
 
 ;; ---------------------------------------------------------------- the buffer
-;; An assembler is a 6-slot vector:
-;;   0 bytes    the growable output buffer
-;;   1 len      bytes used
-;;   2 labels   alist of (name . byte-offset)
-;;   3 fixups   reversed list of pending relocations
-;;   4 origin   address the code will live at, once known
-;;   5 literals objects the code refers to, kept alive by the code object
-
-;; The assembler's own state.
-(defrecord (assembler asi) buf len labels fixups origin literals nlits)
+;; buf is the output buffer and len the bytes of it used. labels is an alist
+;; of (name . byte-offset). fixups is the list of pending relocations, newest
+;; first. origin is the address the code was placed at. literals is the list
+;; of heap objects the code refers to, newest first, and nlits its length.
+(defrecord (assembler asm) buf len labels fixups origin literals nlits)
 
 (define (make-assembler)
-  (let ((a (asi-alloc)))
-    (set-asi-buf! a (make-bytes-n 512))
-    (set-asi-len! a 0)
-    (set-asi-origin! a 0)
-    (set-asi-nlits! a 0)
+  (let ((a (asm-alloc)))
+    (set-asm-buf! a (make-bytes-n 512))
+    (set-asm-len! a 0)
+    (set-asm-origin! a 0)
+    (set-asm-nlits! a 0)
     a))
 
-(define (asm-buf a) (asi-buf a))
-(define (asm-set-buf! a v) (set-asi-buf! a v))
-(define (asm-len a) (asi-len a))
-(define (asm-set-len! a v) (set-asi-len! a v))
-(define (asm-labels a) (asi-labels a))
-(define (asm-set-labels! a v) (set-asi-labels! a v))
-(define (asm-fixups a) (asi-fixups a))
-(define (asm-set-fixups! a v) (set-asi-fixups! a v))
-(define (asm-origin a) (asi-origin a))
-(define (asm-set-origin! a v) (set-asi-origin! a v))
-(define (asm-literals a) (asi-literals a))
-(define (asm-set-literals! a v) (set-asi-literals! a v))
-(define (asm-nlits a) (asi-nlits a))
-(define (asm-set-nlits! a v) (set-asi-nlits! a v))
-
+;; Record a heap object the code refers to, and answer its slot in the code
+;; object. Code holds no object addresses: it loads an object from the code
+;; object's literal vector, so the collector can move the object by updating
+;; one word. A repeated object shares a slot.
 (define (asm-literal a obj)
-  ;; Record a heap object the code refers to, and answer the slot it will
-  ;; occupy in the code object. Code does not contain addresses any more, it
-  ;; contains offsets into this vector, which is what lets the collector move
-  ;; the object without touching a single instruction.
-  ;;
-  ;; Repeats share a slot. A function that mentions the same symbol ten times
-  ;; gets one word and one load offset, not ten.
   (let ((lits (asm-literals a))
         (n (asm-nlits a))
         (found nil)
@@ -96,15 +70,13 @@
     (if found
         found
         (begin
-          (asm-set-literals! a (%cons obj lits))
-          (asm-set-nlits! a (%+ n 1))
+          (set-asm-literals! a (%cons obj lits))
+          (set-asm-nlits! a (%+ n 1))
           n))))
 
-;; Byte offset of literal `i` from the code object pointer, which is what the
-;; s1 register holds while a compiled function is running.
+;; Byte offset of literal i from the code object pointer, which s1 holds
+;; while a compiled function runs.
 (define (literal-offset i) (%* 4 (%+ code-lits i)))
-
-(define (literal-count a) (asm-nlits a))
 
 (define (asm-grow a need)
   (let ((buf (asm-buf a)))
@@ -115,27 +87,18 @@
             (while (%< i len)
               (%bytes-set! nb i (%bytes-ref buf i))
               (set! i (%+ i 1)))
-            (asm-set-buf! a nb)))
+            (set-asm-buf! a nb)))
         nil)))
 
-(define (asm-byte a b)
-  (let ((len (asm-len a)))
-    (asm-grow a (%+ len 1))
-    (%bytes-set! (asm-buf a) len (%logand b 255))
-    (asm-set-len! a (%+ len 1))))
-
-;; Two bytes, or four, with room made once. These used to be calls to
-;; `asm-byte`, so every byte of code the compiler made went through it one at
-;; a time: a length, a growth check and a store, per byte.
 (define (asm-half a h)
   (let ((len (asm-len a)))
     (asm-grow a (%+ len 2))
     (let ((buf (asm-buf a)))
       (%bytes-set! buf len (%logand h 255))
       (%bytes-set! buf (%+ len 1) (%logand (%lsh h -8) 255)))
-    (asm-set-len! a (%+ len 2))))
+    (set-asm-len! a (%+ len 2))))
 
-;; Emit one 32-bit instruction, low half first.
+;; One 32-bit instruction, low half first.
 (define (asm-word a lo hi)
   (let ((len (asm-len a)))
     (asm-grow a (%+ len 4))
@@ -144,19 +107,11 @@
       (%bytes-set! buf (%+ len 1) (%logand (%lsh lo -8) 255))
       (%bytes-set! buf (%+ len 2) (%logand hi 255))
       (%bytes-set! buf (%+ len 3) (%logand (%lsh hi -8) 255)))
-    (asm-set-len! a (%+ len 4))))
-
-;; Overwrite an already-emitted instruction, for fixups.
-(define (asm-patch a off lo hi)
-  (let ((buf (asm-buf a)))
-    (%bytes-set! buf off (%logand lo 255))
-    (%bytes-set! buf (%+ off 1) (%logand (%lsh lo -8) 255))
-    (%bytes-set! buf (%+ off 2) (%logand hi 255))
-    (%bytes-set! buf (%+ off 3) (%logand (%lsh hi -8) 255))))
+    (set-asm-len! a (%+ len 4))))
 
 ;; ---------------------------------------------------------------- labels
 (define (asm-label a name)
-  (asm-set-labels! a (%cons (%cons name (asm-len a)) (asm-labels a)))
+  (set-asm-labels! a (%cons (%cons name (asm-len a)) (asm-labels a)))
   name)
 
 (define (asm-label-offset a name)
@@ -164,19 +119,17 @@
     (if p (%cdr p) (error "assembler: undefined label" name))))
 
 (define (asm-fixup a kind . rest)
-  (asm-set-fixups! a (%cons (%cons kind (%cons (asm-len a) rest))
-                           (asm-fixups a))))
+  (set-asm-fixups! a (%cons (%cons kind (%cons (asm-len a) rest))
+                            (asm-fixups a))))
 
-;; A label only has to be itself: it is found again with `assq` and nothing
-;; else, so any object that is not eq to another will do. It used to be an
-;; interned symbol, which lasts for ever, and every image carried one for
-;; every branch the compiler had ever made - eight thousand of them. A fresh
-;; string is garbage once its function is placed, and still reads as a name
-;; in an "undefined label" message.
-(define gensym-counter 0)
+;; A label is found again with `assq` and nothing else, so any object that is
+;; eq only to itself will do. A fresh string is garbage once the function is
+;; placed, where an interned symbol would stay in the obarray for ever, and
+;; it still reads as a name in an "undefined label" message.
+(define *label-count* 0)
 (define (asm-gensym-label prefix)
-  (set! gensym-counter (%+ gensym-counter 1))
-  (string-append prefix (number->string gensym-counter)))
+  (set! *label-count* (%+ *label-count* 1))
+  (string-append prefix (number->string *label-count*)))
 
 ;; ---------------------------------------------------------------- encoders
 ;; Field positions in a 32-bit instruction, and which half each lands in:
@@ -195,21 +148,22 @@
 (define (i-r a f7 rd rs1 rs2 f3 op)
   (asm-word a (enc-lo rs1 f3 rd op) (enc-hi f7 rs2 rs1)))
 
+;; imm[11:0] occupies bits 20..31, which is high bits 4..15.
 (define (i-i a rd rs1 imm f3 op)
-  ;; imm[11:0] occupies bits 20..31, that is high bits 4..15.
   (asm-word a
             (enc-lo rs1 f3 rd op)
             (%logior (%lsh (%logand imm #xfff) 4) (%lsh (%logand rs1 31) -1))))
 
+;; imm[4:0] in bits 7..11, imm[11:5] in bits 25..31 (high 9..15).
 (define (i-s a rs1 rs2 imm f3 op)
-  ;; imm[4:0] -> bits 7..11, imm[11:5] -> bits 25..31 (high 9..15)
   (asm-word a
             (enc-lo rs1 f3 (%logand imm 31) op)
             (%logior (%lsh (%logand (%lsh imm -5) 127) 9)
                      (%logior (%lsh (%logand rs2 31) 4) (%lsh (%logand rs1 31) -1)))))
 
+;; imm[11] in bit 7, imm[4:1] in bits 8..11, imm[10:5] in bits 25..30,
+;; imm[12] in bit 31.
 (define (i-b a rs1 rs2 imm f3 op)
-  ;; imm[11]->bit7, imm[4:1]->bits 8..11, imm[10:5]->bits 25..30, imm[12]->bit31
   (let ((rd-field (%logior (%logand (%lsh imm -11) 1)
                            (%lsh (%logand (%lsh imm -1) 15) 1)))
         (f7-field (%logior (%logand (%lsh imm -5) 63)
@@ -219,16 +173,16 @@
               (%logior (%lsh f7-field 9)
                        (%logior (%lsh (%logand rs2 31) 4) (%lsh (%logand rs1 31) -1))))))
 
+;; imm20 occupies bits 12..31: the low half takes its bits 0..3.
 (define (i-u a rd imm20 op)
-  ;; imm20 occupies bits 12..31: low half takes its bits 0..3.
   (asm-word a
             (%logior (%lsh (%logand imm20 15) 12)
                      (%logior (%lsh (%logand rd 31) 7) op))
             (%logand (%lsh imm20 -4) #xffff)))
 
+;; imm[19:12] in bits 12..19, imm[11] in bit 20, imm[10:1] in bits 21..30,
+;; imm[20] in bit 31, assembled as a U-type field.
 (define (enc-j a rd imm op)
-  ;; imm[19:12]->bits 12..19, imm[11]->bit 20, imm[10:1]->bits 21..30,
-  ;; imm[20]->bit 31. Written as a U-type field for convenience.
   (let ((f (%logior (%logand (%lsh imm -12) 255)
                     (%logior (%lsh (%logand (%lsh imm -11) 1) 8)
                              (%logior (%lsh (%logand (%lsh imm -1) 1023) 9)
@@ -246,12 +200,16 @@
 (define op-jalr  #x67)
 (define op-jal   #x6f)
 (define op-sys   #x73)
-;; custom-0. The processor checks the tag as it forms the address, so a slot
-;; access that is handed something else traps instead of loading rubbish.
+;; custom-0: a word load or store that checks the tag of its base register as
+;; it forms the address.
 (define op-pair  #x0b)
 ;; custom-1: indexed access. funct7 carries the type the object has to be, so
 ;; one instruction checks the tag, the type, the index and the bound.
 (define op-index #x2b)
+;; custom-2: fixnum arithmetic with both operands checked.
+(define op-fixnum #x5b)
+;; custom-3: a fixnum against a constant, and memory through a tagged address.
+(define op-tagged #x7b)
 
 (define (i-lui a rd imm20)   (i-u a rd imm20 op-lui))
 (define (i-auipc a rd imm20) (i-u a rd imm20 op-auipc))
@@ -292,22 +250,17 @@
 (define (i-rem a rd rs1 rs2)    (i-r a 1 rd rs1 rs2 6 op-reg))
 (define (i-remu a rd rs1 rs2)   (i-r a 1 rd rs1 rs2 7 op-reg))
 
-(define (i-lb a rd rs1 off)  (i-i a rd rs1 off 0 op-load))
-(define (i-lh a rd rs1 off)  (i-i a rd rs1 off 1 op-load))
 ;; ---------------------------------------------------------------- compressed
-;; The core has decoded sixteen-bit instructions since the day it was written
-;; and nothing ever emitted one. Forty-four per cent of the image turns out to
-;; fit, so the emitters below reach for a short form when there is one.
+;; The emitters below use a sixteen-bit form when there is one. Only forms
+;; whose encoding does not depend on a distance are compressed, so no
+;; relaxation pass is needed: shortening an instruction can only shorten the
+;; branches around it, and branch offsets are patched from recorded positions
+;; after the layout is final. Jumps and branches with an immediate target are
+;; always wide.
 ;;
-;; Only forms whose encoding does not depend on a distance are compressed. That
-;; is what makes this safe with no relaxation pass: shortening an instruction
-;; can only shorten the branches around it, and branch offsets are patched from
-;; recorded positions after the layout is final. Jumps and branches with an
-;; immediate target are therefore left alone.
-;;
-;; The other rule is that anything re-emitted later at a recorded offset - the
-;; two halves of `la`, and the one instruction in the prologue that says how big
-;; the frame is - must keep its width. Those use the `-w` emitters below.
+;; Anything re-emitted later at a recorded offset, the two halves of `la`
+;; and the instruction in a prologue that sizes the frame, has to keep its
+;; width. Those use the `-w` emitters.
 (define (c-imm6? v) (if (%>= v -32) (%< v 32) nil))
 (define (c-reg? r) (if (%>= r 8) (%<= r 15) nil))
 (define (c-word-off? o hi)
@@ -346,9 +299,12 @@
 (define (i-c-lw a rd rs1 off) (c-mem a #x4000 rd rs1 off))
 (define (i-c-sw a rs2 rs1 off) (c-mem a #xc000 rs2 rs1 off))
 
-;; ---- the wide forms, for the two places that patch themselves ----
+;; The wide form, for the places that patch themselves.
 (define (i-addi-w a rd rs1 imm) (i-i a rd rs1 imm 0 op-imm))
 
+;; ---------------------------------------------------------------- memory
+(define (i-lb a rd rs1 off)  (i-i a rd rs1 off 0 op-load))
+(define (i-lh a rd rs1 off)  (i-i a rd rs1 off 1 op-load))
 (define (i-lw a rd rs1 off)
   (cond
    ((if (%= rs1 $sp) (if (%> rd 0) (c-word-off? off 256) nil) nil)
@@ -373,9 +329,9 @@
    ((if (%= off 0) (if (%> rs1 0) (%= rd $ra) nil) nil) (i-c-jalr a rs1))
    (else (i-i a rd rs1 off 0 op-jalr))))
 
-;; custom-0 is RV32I's load and store with the width field spent on the check.
-;; Always a word; funct3 says what the base register has to be; the offset says
-;; which slot. car and cdr are offsets 0 and 4 of the same instruction.
+;; custom-0 is a word load and a word store with funct3 saying what the base
+;; register has to be and the offset saying which slot. car and cdr are
+;; offsets 0 and 4 of the same instruction.
 (define (i-lref a rd rs1 off)  (i-i a rd rs1 off 0 op-pair))
 (define (i-lobj a rd rs1 off)  (i-i a rd rs1 off 1 op-pair))
 (define (i-sref a rs2 rs1 off) (i-s a rs1 rs2 off 4 op-pair))
@@ -386,25 +342,19 @@
 (define (i-set-car a rs2 rs1) (i-sref a rs2 rs1 0))
 (define (i-set-cdr a rs2 rs1) (i-sref a rs2 rs1 4))
 
-;; rd, object, index - and for the stores rd is the value being written.
+;; rd, object, index; for the stores rd is the value written.
 (define (i-ldx a rd obj idx ty)  (i-r a ty rd obj idx 0 op-index))
 (define (i-stx a val obj idx ty) (i-r a ty val obj idx 1 op-index))
 (define (i-ldxb a rd obj idx ty)  (i-r a ty rd obj idx 2 op-index))
 (define (i-stxb a val obj idx ty) (i-r a ty val obj idx 3 op-index))
-;; The same four with a constant index, which is what a record field, a
-;; closure slot and an instance tag always are. The index goes in the rs2
-;; field, as an untagged 0..31, the way slli has always kept its shift there.
+;; The same four with a constant index of 0..31 in the rs2 field, the way
+;; slli keeps its shift amount there.
 (define (i-ldxi a rd obj i ty)  (i-r a ty rd obj i 4 op-index))
 (define (i-stxi a val obj i ty) (i-r a ty val obj i 5 op-index))
 (define (i-ldxbi a rd obj i ty)  (i-r a ty rd obj i 6 op-index))
 (define (i-stxbi a val obj i ty) (i-r a ty val obj i 7 op-index))
 
-;; custom-2: fixnum arithmetic. Both operands are checked, which is the check
-;; the machine never had - (+ "abc" 2) used to make a cons out of a string.
-(define op-fixnum #x5b)
-;; custom-3: a fixnum against a constant, and memory through a tagged address.
-(define op-tagged #x7b)
-
+;; ---------------------------------------------------------------- fixnums
 (define (i-fadd a rd rs1 rs2) (i-r a #x00 rd rs1 rs2 0 op-fixnum))
 (define (i-fsub a rd rs1 rs2) (i-r a #x00 rd rs1 rs2 1 op-fixnum))
 (define (i-fmul a rd rs1 rs2) (i-r a #x00 rd rs1 rs2 2 op-fixnum))
@@ -413,33 +363,35 @@
 (define (i-fand a rd rs1 rs2) (i-r a #x00 rd rs1 rs2 5 op-fixnum))
 (define (i-for a rd rs1 rs2)  (i-r a #x00 rd rs1 rs2 6 op-fixnum))
 (define (i-fxor a rd rs1 rs2) (i-r a #x00 rd rs1 rs2 7 op-fixnum))
-;; The same three, trapping on a result that will not fit in thirty-one bits.
-;; Nothing emits them yet: string-hash multiplies past 2^30 on purpose, and
-;; what should happen there is a question about bignums, not about encoding.
+;; The same three, trapping on a result that does not fit in 31 bits. The
+;; trap handler widens the operation into a bignum and resumes.
 (define (i-faddo a rd rs1 rs2) (i-r a #x20 rd rs1 rs2 0 op-fixnum))
 (define (i-fsubo a rd rs1 rs2) (i-r a #x20 rd rs1 rs2 1 op-fixnum))
 (define (i-fmulo a rd rs1 rs2) (i-r a #x20 rd rs1 rs2 2 op-fixnum))
 (define (i-fsll a rd rs1 rs2)  (i-r a #x01 rd rs1 rs2 0 op-fixnum))
 (define (i-fsrl a rd rs1 rs2)  (i-r a #x01 rd rs1 rs2 1 op-fixnum))
 (define (i-fsra a rd rs1 rs2)  (i-r a #x01 rd rs1 rs2 2 op-fixnum))
+;; The comparisons leave a raw 0 or 1 in rd, the way slt does.
 (define (i-flt a rd rs1 rs2)   (i-r a #x01 rd rs1 rs2 3 op-fixnum))
 (define (i-fltu a rd rs1 rs2)  (i-r a #x01 rd rs1 rs2 4 op-fixnum))
 (define (i-feq a rd rs1 rs2)   (i-r a #x01 rd rs1 rs2 5 op-fixnum))
 
+;; A fixnum against a constant: the instruction doubles the immediate, so the
+;; immediate is the constant itself.
 (define (i-faddi a rd rs1 imm) (i-i a rd rs1 imm 0 op-tagged))
 (define (i-fandi a rd rs1 imm) (i-i a rd rs1 imm 1 op-tagged))
 (define (i-fori a rd rs1 imm)  (i-i a rd rs1 imm 2 op-tagged))
 ;; kind 0 left, 1 right logical, 2 right arithmetic.
 (define (i-fshi a rd rs1 kind sh)
   (i-i a rd rs1 (%logior (%lsh kind 5) sh) 3 op-tagged))
+;; Memory through a tagged address: the address in rs1 is a fixnum, and a
+;; loaded value comes back as one.
 (define (i-tlw a rd rs1 off) (i-i a rd rs1 off 4 op-tagged))
 (define (i-tlb a rd rs1 off) (i-i a rd rs1 off 5 op-tagged))
 (define (i-tsw a rs2 rs1 off) (i-s a rs1 rs2 off 6 op-tagged))
 (define (i-tsb a rs2 rs1 off) (i-s a rs1 rs2 off 7 op-tagged))
 
-;; ---- B extension: Zba, Zbb, Zbs; and Zicond ----
-;; Ratified RISC-V rather than ours. Taking these first is what stops the
-;; custom opcodes growing to cover ground the committee already covered.
+;; ---------------------------------------------------------------- Zba Zbb Zbs Zicond
 (define (i-sh1add a rd rs1 rs2) (i-r a #x10 rd rs1 rs2 2 op-reg))
 (define (i-sh2add a rd rs1 rs2) (i-r a #x10 rd rs1 rs2 4 op-reg))
 (define (i-sh3add a rd rs1 rs2) (i-r a #x10 rd rs1 rs2 6 op-reg))
@@ -469,10 +421,11 @@
 (define (i-zexth a rd rs1)      (i-r a #x04 rd rs1 0 4 op-reg))
 (define (i-rev8 a rd rs1)       (i-r a #x34 rd rs1 #x18 5 op-imm))
 (define (i-orcb a rd rs1)       (i-r a #x14 rd rs1 7 5 op-imm))
-;; rd <- (rs2 = 0) ? 0 : rs1, and its opposite. A branchless select on a
-;; machine with no flags register.
+;; rd <- (rs2 = 0) ? 0 : rs1, and its opposite: a select with no branch.
 (define (i-czero-eqz a rd rs1 rs2) (i-r a #x07 rd rs1 rs2 5 op-reg))
 (define (i-czero-nez a rd rs1 rs2) (i-r a #x07 rd rs1 rs2 7 op-reg))
+
+;; ---------------------------------------------------------------- system
 (define (i-ret a) (i-jalr a $zero $ra 0))
 (define (i-jr a rs) (i-jalr a $zero rs 0))
 (define (i-call-reg a rs) (i-jalr a $ra rs 0))
@@ -497,9 +450,10 @@
 (define (i-snez a rd rs) (i-sltu a rd $zero rs))
 
 (define (fits12? n) (if (%>= n -2048) (%< n 2048) nil))
+(define (sign12 n) (if (%>= n 2048) (%- n 4096) n))
 
-;; Load a 32-bit constant. Addresses are signed throughout, so a value with the
-;; top bit set arrives here as a negative number and encodes identically.
+;; Load a 32-bit constant. Addresses are signed throughout, so a value with
+;; the top bit set arrives as a negative number and encodes the same way.
 (define (i-li a rd v)
   (if (fits12? v)
       (i-addi a rd $zero v)
@@ -509,46 +463,31 @@
         (i-lui a rd hi)
         (if (%= lo-signed 0) nil (i-addi a rd rd lo-signed)))))
 
-
-;; Materialise the tagged form of a fixnum, that is 2v+1.
-;;
-;; This cannot go through i-li, because 2v+1 does not fit in a fixnum once
-;; |v| reaches 2^29 - the compiler would be asking the assembler to represent
-;; the very value it cannot represent. So the lui and addi fields are computed
-;; from v directly and 2v+1 is never formed. Getting this wrong is quiet and
-;; expensive: a miscompiled mask silently changes a hash, and a hash that
-;; disagrees with the one the forge used means every symbol interns twice.
+;; Load the tagged form of a fixnum, 2v+1. This cannot go through i-li,
+;; because 2v+1 does not fit in a fixnum once |v| reaches 2^29, so the lui and
+;; addi fields are computed from v and 2v+1 is never formed.
 (define (i-li-fixnum a rd v)
   (if (if (%>= v -1024) (%< v 1024) nil)
       (i-addi a rd $zero (%+ (%* 2 v) 1))
       (let* ((lo (%logand (%+ (%* 2 (%logand v 2047)) 1) 4095))
              (lo-signed (if (%>= lo 2048) (%- lo 4096) lo))
-             ;; 2v+1-lo-signed is 2(v+k), and divisible by 4096, so the high
-             ;; field is (v+k)/2048 with nothing overflowing on the way.
+             ;; 2v+1-lo-signed is 2(v+k) and divisible by 4096, so the high
+             ;; field is (v+k)/2048, with nothing overflowing on the way.
              (k (%/ (%- 1 lo-signed) 2))
              (hi (%logand (%/ (%+ v k) 2048) #xfffff)))
         (i-lui a rd hi)
         (if (%= lo-signed 0) nil (i-addi a rd rd lo-signed)))))
 
-;; Load or store at an arbitrary absolute address, via a scratch register.
-(define (i-lw-abs a rd addr scratch)
-  (if (fits12? addr)
-      (i-lw a rd $zero addr)
-      (begin (i-li a scratch (%- addr (%logand addr #xfff)))
-             (i-lw a rd scratch (sign12 (%logand addr #xfff))))))
-
+;; Store at an absolute address, through a scratch register.
 (define (i-sw-abs a rs addr scratch)
   (if (fits12? addr)
       (i-sw a rs $zero addr)
       (begin (i-li a scratch (%- addr (%logand addr #xfff)))
              (i-sw a rs scratch (sign12 (%logand addr #xfff))))))
 
-(define (sign12 n) (if (%>= n 2048) (%- n 4096) n))
-
 ;; ---------------------------------------------------------------- branches
 ;; Label-relative forms record a fixup and are patched once every label is
 ;; placed. Sizes never change, so one pass of patching is enough.
-
 (define (i-branch a f3 rs1 rs2 label)
   (asm-fixup a 'b f3 rs1 rs2 label)
   (i-b a rs1 rs2 0 f3 op-br))
@@ -572,16 +511,15 @@
   (asm-fixup a 'jal rd label)
   (enc-j a rd 0 op-jal))
 
-;; Address of a label, as auipc + addi. Always two instructions so that
-;; offsets stay stable.
+;; The address of a label, as auipc and addi. Both halves stay wide:
+;; `asm-resolve` rewinds to this offset and writes them again.
 (define (i-la a rd label)
-  ;; Both halves stay wide: `asm-resolve` rewinds to this offset and writes
-  ;; them again, and it has to write the same number of bytes.
   (asm-fixup a 'la rd label)
   (i-auipc a rd 0)
   (i-addi-w a rd rd 0))
 
 ;; ---------------------------------------------------------------- resolution
+;; Each fixup is re-encoded in place by pointing the emitter at the patch site.
 (define (asm-resolve a)
   (let ((fixups (reverse (asm-fixups a))))
     (dolist (f fixups)
@@ -597,10 +535,9 @@
             (if (if (%>= delta -4096) (%< delta 4096) nil)
                 nil
                 (error "assembler: branch out of range" label delta))
-            ;; Re-encode in place by pointing the emitter at the patch site.
-            (asm-set-len! a off)
+            (set-asm-len! a off)
             (i-b a rs1 rs2 delta f3 op-br)
-            (asm-set-len! a save)))
+            (set-asm-len! a save)))
          ((%eq? kind 'jal)
           (let* ((rd (%car rest)) (label (cadr rest))
                  (delta (%- (asm-label-offset a label) off))
@@ -608,9 +545,9 @@
             (if (if (%>= delta -1048576) (%< delta 1048576) nil)
                 nil
                 (error "assembler: jump out of range" label delta))
-            (asm-set-len! a off)
+            (set-asm-len! a off)
             (enc-j a rd delta op-jal)
-            (asm-set-len! a save)))
+            (set-asm-len! a save)))
          ((%eq? kind 'la)
           (let* ((rd (%car rest)) (label (cadr rest))
                  (delta (%- (asm-label-offset a label) off))
@@ -618,25 +555,18 @@
                  (lo-signed (if (%>= lo 2048) (%- lo 4096) lo))
                  (hi (%logand (%lsh (%- delta lo-signed) -12) #xfffff))
                  (save (asm-len a)))
-            (asm-set-len! a off)
+            (set-asm-len! a off)
             (i-auipc a rd hi)
             (i-addi-w a rd rd lo-signed)
-            (asm-set-len! a save)))
+            (set-asm-len! a save)))
          (else (error "assembler: unknown fixup" kind)))))
-    (asm-set-fixups! a nil)
+    (set-asm-fixups! a nil)
     a))
 
 ;; ---------------------------------------------------------------- placement
-;; Copy the assembled bytes into code space and hand back the entry address.
-;; Code space never moves and is never compacted, so the address baked into a
-;; closure stays valid for the life of the image.
-(define (asm-place-at a addr)
-  ;; Write the assembled bytes to an address that was reserved earlier. The
-  ;; reset stub needs this: it has to sit at the base of code space, because
-  ;; that is where the processor starts, but it cannot be assembled until the
-  ;; things it refers to have addresses.
-  (asm-set-origin! a addr)
-  (asm-resolve a)
+;; Code space is never compacted, so the address a function is placed at is
+;; good for the life of the image.
+(define (asm-copy-out a addr)
   (let ((len (asm-len a))
         (buf (asm-buf a))
         (i 0))
@@ -645,37 +575,35 @@
       (set! i (%+ i 1)))
     addr))
 
+;; Place at an address reserved earlier. The reset stub is assembled last,
+;; because it refers to everything else, but has to sit at the base of code
+;; space, where the processor starts.
+(define (asm-place-at a addr)
+  (set-asm-origin! a addr)
+  (asm-resolve a)
+  (asm-copy-out a addr))
+
 (define (asm-place a)
   (asm-resolve a)
-  (let* ((len (asm-len a))
-         (addr (alloc-code len))
-         (buf (asm-buf a))
-         (i 0))
-    (while (%< i len)
-      (%st-byte! (%+ addr i) (%bytes-ref buf i))
-      (set! i (%+ i 1)))
-    (asm-set-origin! a addr)
-    addr))
+  (let ((addr (alloc-code (asm-len a))))
+    (set-asm-origin! a addr)
+    (asm-copy-out a addr)))
 
-;; Turn the assembler's output into a heap object, so the collector can see
-;; both the machine code and every literal the code refers to.
+;; The assembled code as a heap object, which is how the collector sees both
+;; the machine code and every literal it refers to. The literals list is
+;; newest first, so it fills the vector from the far end. The name is what a
+;; backtrace prints: every frame saves its caller's code object.
 (define (asm-code-object a name)
-  ;; The literals list is in reverse, so it fills the vector from the far end.
   (let* ((n (asm-nlits a))
          (v (alloc-object t-code (%+ code-lits n)))
          (i (%- (%+ code-lits n) 1)))
-    (%st-fixnum! (%addr-of v) (asm-origin a))          ; raw entry address
+    (%st-fixnum! (%addr-of v) (asm-origin a))       ; raw entry address
     (%st-fixnum! (%+ (%addr-of v) 4) (asm-len a))   ; raw byte length
-    ;; Who this is. Every frame has its code object in s1 and saves its
-    ;; caller's, so this one word is what turns the frame chain into a
-    ;; backtrace.
     (%set-slot! v code-name name)
     (dolist (l (asm-literals a))
       (%set-slot! v i l)
       (set! i (%- i 1)))
-    ;; The collector finds code through this, not by scanning code space,
-    ;; which has no headers to walk.
+    ;; Code space has no headers to walk, so the collector finds code through
+    ;; the registry.
     (register-code v)
     v))
-
-(define (code-object-entry v) (%addr-of (%ld-word (%addr-of v))))

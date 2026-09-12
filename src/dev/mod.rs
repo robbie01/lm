@@ -73,7 +73,7 @@ pub fn read(m: &mut Machine, a: u32, f: u32) -> u32 {
         DEV_GFX => m.gfx.read(reg),
         DEV_INPUT => m.input.read(reg),
         DEV_BLIT => {
-            // A look at the chip is a moment at which it can have finished.
+            // A status read is a point at which the transfer can have finished.
             if reg == blit::B_STATUS {
                 let now = m.now;
                 blit::poll(m, now);
@@ -81,7 +81,7 @@ pub fn read(m: &mut Machine, a: u32, f: u32) -> u32 {
             m.blit.read(reg)
         }
         DEV_DISK => {
-            // The same for the disk: looking is a moment it can have finished.
+            // A status read is a point at which the command can have finished.
             if reg == disk::D_STATUS {
                 let now = m.now;
                 disk::poll(m, now);
@@ -104,8 +104,8 @@ pub fn read(m: &mut Machine, a: u32, f: u32) -> u32 {
 pub fn write(m: &mut Machine, a: u32, f: u32, v: u32) {
     let dev = dev_of(a);
     let reg = a & 0xffc;
-    // Sub-word writes are only meaningful for the byte-oriented ports; for
-    // everything else the low lane is what counts.
+    // Sub-word writes are only meaningful for the byte-oriented ports; every
+    // other register takes the low lane.
     let v = match f {
         0 => v & 0xff,
         1 => v & 0xffff,
@@ -141,14 +141,14 @@ pub fn write(m: &mut Machine, a: u32, f: u32, v: u32) {
     }
 }
 
-/// Finish whatever the chips that work on their own time - the blitter and
-/// the disk - have finished by `now`.
+/// Finish whatever the asynchronous chips (the blitter and the disk) have
+/// finished by `now`.
 pub fn poll(m: &mut Machine, now: u64) {
     blit::poll(m, now);
     disk::poll(m, now);
 }
 
-/// The next moment one of them finishes, or never.
+/// The next moment either chip finishes, or never.
 pub fn due(m: &Machine) -> u64 {
     blit::due(m).min(disk::due(m))
 }

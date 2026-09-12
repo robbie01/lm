@@ -2,9 +2,9 @@
 //! lines, all on 8-bit chunky data.
 //!
 //! The chip is asynchronous and walks a chain of descriptors in memory. A
-//! transfer takes as long as its memory traffic would on the target - see
-//! `cost` - and when one finishes the chip goes on to the next descriptor by
-//! itself. That keeps the deterministic timebase honest.
+//! transfer takes as long as its memory traffic would take on the target (see
+//! `cost`). When one finishes the chip goes on to the next descriptor by
+//! itself. Transfer times are part of the deterministic timebase.
 
 use crate::mach::Machine;
 use crate::map::INT_BLIT;
@@ -25,24 +25,23 @@ pub const B_Y1: u32 = 0x30;
 pub const B_CTRL: u32 = 0x34; // raise INT_BLIT: bit0 when the chain runs dry, bit1 after every descriptor
 pub const CTRL_DRAINED: u32 = 1;
 pub const CTRL_EACH: u32 = 2;
-/// Write the address of a command block; the chip fetches its own parameters
-/// and runs. One store, so programming the blitter is atomic without anybody
-/// holding anything off - provided the block belongs to whoever filled it,
-/// which is the caller's business and not the chip's.
+/// Write the address of a command block; the chip fetches its parameters
+/// from the block and runs. Programming the blitter is one store, so it is
+/// atomic with interrupts enabled. The block must belong to the task that
+/// filled it.
 ///
 ///     0 src   1 dst   2 w      3 h
 ///     4 smod  5 dmod  6 val    7 op
 ///     8 x0    9 y0   10 x1    11 y1
 ///    12 status        13 next
 ///
-/// `status` is written back to zero by the chip when the command finishes.
-/// That is how the task that filled a block finds out its own pixels have
-/// landed, by reading its own memory - rather than by waiting for the chip to
-/// go idle, which means waiting behind everybody else's transfers too.
+/// The chip writes `status` back to zero when the command finishes. A task
+/// polls its own block to learn that its transfer is done, instead of waiting
+/// for the chip to go idle behind other tasks' transfers.
 ///
 /// `next` links the chain: when the chip finishes a descriptor it goes on to
-/// the one `next` names, and stops at zero. So a queue of blits is a list in
-/// memory, and adding one is a store into the last one's link.
+/// the one `next` names, and stops at zero. A queue of blits is a list in
+/// memory; adding one is a store into the last one's link.
 pub const B_LIST: u32 = 0x38;
 pub const LIST_WORDS: u32 = 14;
 pub const LIST_STATUS: u32 = 12;
@@ -50,24 +49,24 @@ pub const LIST_NEXT: u32 = 13;
 
 // ---------------------------------------------------------------- cost
 // What a transfer costs, in the machine's own cycles. On the target a blit is
-// memory traffic and nothing else, so traffic is what is counted:
+// memory traffic only, so memory traffic is what is counted:
 //
-//  - The bus moves BUS_BYTES a cycle once a burst is going, and opening one at
-//    a new address costs BURST_SETUP. Every row is a new address.
+//  - The bus moves BUS_BYTES a cycle once a burst is going, and opening a
+//    burst at a new address costs BURST_SETUP. Every row is a new address.
 //  - A row that starts or ends part way through a bus word still moves the
 //    whole word.
 //  - Copies read the source and write the destination. XOR, AND, OR and ADD
-//    read the destination too, before they write it, so they move it twice.
-//    MASK does not: skipping the transparent bytes is what byte enables on a
-//    write are for.
+//    read the destination before they write it, so they move it twice.
+//    MASK does not: transparent bytes are skipped with write byte enables.
 //  - A line is a byte at a time, each at a new address.
-//  - A descriptor is fetched - fourteen words - and its status written back.
+//  - A descriptor fetch is fourteen words, plus one word of status written
+//    back.
 //
 // The numbers assume a 32-bit path to memory at the machine's nominal clock:
-// eighty megabytes a second at twenty million cycles, which is HyperRAM once
-// the processor has had its share. They are guesses, to be replaced by
-// measurements from the real part, and they live here so that replacing them
-// is a two-line change.
+// eighty megabytes a second at twenty million cycles, which is HyperRAM after
+// the processor's share. They are estimates, to be replaced by measurements
+// from the real part. They are kept here so that replacing them is a two-line
+// change.
 pub const BUS_BYTES: u64 = 4;
 pub const BURST_SETUP: u64 = 4;
 
@@ -96,23 +95,18 @@ pub struct Regs {
     pub y1: u32,
 }
 
-/// Two banks. Writes land in `pending`; writing the op register copies the
-/// whole of it into `live` and starts the transfer.
+/// Two register banks. Writes land in `pending`; writing the op register
+/// copies the whole bank into `live` and starts the transfer.
 ///
-/// That is not decoration. A blit takes six or seven register writes to set
-/// up, and an interrupt arriving between two of them used to find the chip
-/// half-programmed - a vblank server that blits inside somebody else's setup
-/// drew a line across the screen once, and the fix was to wrap every blit in
-/// the machine in a critical section. A shadow bank makes the command atomic
-/// in the chip instead, which is how real hardware avoids the same problem,
-/// and every one of those critical sections goes away.
+/// A blit takes six or seven register writes to set up. The shadow bank makes
+/// the command atomic in the chip, so an interrupt between two writes cannot
+/// start a half-programmed transfer, and callers need no critical section.
 ///
 /// A transfer takes time. Committing one latches it and marks the chip busy
 /// until `busy_until`; the pixels move in one go when that moment arrives.
-/// Until then the destination holds exactly what it held before, which is
-/// what makes a missing wait visible: read too early and you see the old
-/// picture. Real hardware would show a torn one. Either is wrong in a way you
-/// notice, which an instantaneous chip - the previous model - never was.
+/// Until then the destination holds what it held before. Code that reads the
+/// destination without waiting sees the old picture. Real hardware would show
+/// a torn one.
 pub struct Blitter {
     pub live: Regs,
     pub pending: Regs,
@@ -183,12 +177,11 @@ pub fn command(m: &mut Machine, reg: u32, v: u32) {
         }
     }
     // One chain at a time. A commit that arrives while the chip is busy waits
-    // for everything it has - the running transfer and whatever is linked
-    // behind it - the way a store to a single-channel DMA engine stalls on the
-    // bus. Software links onto the chain instead, and starts the chip only
-    // when it is idle, so this does not happen; it is here so that getting
-    // that wrong is slow rather than wrong. The count is for a chain that
-    // links back into itself, which would otherwise stall for ever.
+    // for the running transfer and everything linked behind it, the way a
+    // store to a single-channel DMA engine stalls on the bus. Software links
+    // onto the chain and starts the chip only when it is idle, so this path is
+    // not normally taken; a driver that commits early is slow rather than
+    // wrong. The count bounds a chain that links back into itself.
     let mut left = 1u32 << 20;
     while m.blit.busy && left > 0 {
         let due = m.blit.busy_until;
@@ -203,8 +196,8 @@ pub fn command(m: &mut Machine, reg: u32, v: u32) {
     m.blit.busy = false;
     let at = m.now;
     if reg == B_LIST {
-        // A descriptor: the chip reads its own parameters, in one go, so
-        // there is nothing for an interrupt to land in the middle of.
+        // A descriptor: the chip reads all its parameters from memory in one
+        // go, so an interrupt cannot land between them.
         start_block(m, v, at);
     } else {
         // The op write is the commit: everything programmed since the last
@@ -242,13 +235,12 @@ fn start_block(m: &mut Machine, block: u32, at: u64) -> bool {
     true
 }
 
-/// `live` holds a transfer: check it if asked to, cost it, and mark the chip
-/// busy until it is done. Nothing moves yet - see `finish`.
+/// Start the transfer in `live`: check it if the guard is on, cost it, and
+/// mark the chip busy until it is done. Nothing moves yet; see `finish`.
 ///
-/// The cost is not charged to whoever committed. It used to be added to the
-/// cycle counter inside the store, so a full-screen fill held every interrupt
-/// off for more than two frames. Now time passes while the chip works, and
-/// whoever else is ready runs in the meantime.
+/// The cost is charged to the chip's own clock, not to the task that
+/// committed the transfer. Time passes while the chip works, and other tasks
+/// run in the meantime.
 fn begin(m: &mut Machine, op: u32, block: u32, at: u64) {
     if guard_on() {
         guard(m, op);
@@ -315,7 +307,7 @@ fn guard(m: &Machine, v: u32) {
     }
 }
 
-/// The transfer that was latched into `live`, all of it, now.
+/// Perform the whole transfer latched in `live`.
 fn perform(m: &mut Machine) {
     let v = m.blit.op;
     let (src, dst, w, h, smod, dmod, val) = {
@@ -328,7 +320,13 @@ fn perform(m: &mut Machine) {
     } else {
         let ramlen = m.ramlen as usize;
         let ram = m.ram_mut();
-        for y in 0..h {
+        // Rows run bottom-up when the destination lies above the source, so
+        // an overlapping copy within one bitmap (a scroll down) never reads a
+        // row it has already overwritten. The per-byte direction below does
+        // the same for overlap within a row.
+        let descending = v != OP_FILL && dst > src;
+        for k in 0..h {
+            let y = if descending { h - 1 - k } else { k };
             let so = (src as usize).wrapping_add((y as usize).wrapping_mul(smod as usize));
             let dofs = (dst as usize).wrapping_add((y as usize).wrapping_mul(dmod as usize));
             if dofs >= ramlen || dofs + w as usize > ramlen {
@@ -373,21 +371,19 @@ fn perform(m: &mut Machine) {
 
 }
 
-/// The running transfer's time has come: move the pixels, mark the block
-/// done, and raise the interrupt if it was asked for.
+/// Complete the running transfer: move the pixels, mark the block done, and
+/// raise the interrupt if it was asked for.
 ///
-/// The copy happens here, at the end, rather than at the commit. That is the
-/// point of the whole model: between the two the destination still holds its
-/// old contents, so code that reads pixels it has only just asked the chip to
-/// write sees the wrong ones - loudly, and every time, rather than only on
-/// hardware.
+/// The copy happens here, at the end, not at the commit. Between the two the
+/// destination holds its old contents, so code that reads pixels before the
+/// transfer is due sees the old ones every time, not only on hardware.
 ///
-/// Then on down the chain. The link is read before the status is written:
-/// once the status word says done, the descriptor is its owner's again - it
-/// can be refilled, link and all - so a link read afterwards would sometimes
-/// be the owner's next command rather than the chain's. The interrupt comes
-/// when the chain runs dry, or after every descriptor, as the control
-/// register asks.
+/// Then the chip goes on down the chain. The link is read before the status
+/// is written: once the status word says done, the descriptor belongs to its
+/// owner again and may be refilled, link included. A link read after the
+/// status write could be the owner's next command instead of the chain's.
+/// The interrupt is raised when the chain runs dry, or after every
+/// descriptor, as the control register selects.
 fn finish(m: &mut Machine) {
     perform(m);
     m.blit.busy = false;
@@ -401,14 +397,14 @@ fn finish(m: &mut Machine) {
         0
     };
     // The control register as it is now, not as it was when this descriptor
-    // started: a task that has just asked to be woken has to be woken by the
-    // transfer that was already running when it asked.
+    // started: a task that enables the interrupt while a transfer is running
+    // is woken by that transfer.
     let ctrl = m.blit.pending.ctrl;
     if ctrl & CTRL_EACH != 0 {
         m.raise(INT_BLIT);
     }
-    // From the moment this one finished, not from whenever somebody looked,
-    // so a chain costs the same however often it is polled.
+    // Measured from when this descriptor finished, not from when the status
+    // was read, so a chain costs the same however often it is polled.
     if start_block(m, next, done_at) {
         return;
     }
@@ -417,10 +413,10 @@ fn finish(m: &mut Machine) {
     }
 }
 
-/// Finish whatever is due. Called from everywhere that can observe the chip -
-/// a status read, and each host slice - so completion is never early and
-/// never later than the next look; and in a loop, because by the time
-/// somebody looks several descriptors down a chain may be due.
+/// Finish every transfer that is due by `now`. Called from each point that
+/// can observe the chip (a status read, and each host slice), so completion
+/// is never early and never later than the next observation. Loops because
+/// several descriptors down a chain may be due by then.
 pub fn poll(m: &mut Machine, now: u64) {
     while m.blit.busy && now >= m.blit.busy_until {
         finish(m);
@@ -438,11 +434,11 @@ pub fn due(m: &Machine) -> u64 {
 
 #[allow(clippy::too_many_arguments)]
 // ---------------------------------------------------------------- guard
-// A blit may only ever write to a bitmap, and every bitmap is either pool
-// memory or the collector's scratch above `fast-base`. Code space, cons space
-// and object space are never a legitimate destination, so a blit that names
-// one is writing pixels over the machine - which is what turns up later as a
-// jump into a word of colour bytes a long way from the blit that did it.
+// A blit may only write to a bitmap, and every bitmap is either pool memory
+// or the collector's scratch above `fast-base`. Code space, cons space and
+// object space are never a legitimate destination. A blit that names one
+// writes pixels over the machine, and the fault shows up later as a jump into
+// colour bytes far from the blit that wrote them.
 //
 // Off unless LM_BLIT_GUARD is set.
 fn guard_on() -> bool {
@@ -451,9 +447,9 @@ fn guard_on() -> bool {
     *ON.get_or_init(|| std::env::var("LM_BLIT_GUARD").is_ok())
 }
 
-/// Report any blit whose destination covers this address. Set LM_BLIT_WATCH to
-/// a hex address - a context block, say - and the blit that scribbles it names
-/// itself, with the pc that programmed it.
+/// Report any blit whose destination covers this address. Set LM_BLIT_WATCH
+/// to a hex address, such as a context block, and each blit that writes it is
+/// reported with the pc that programmed it.
 fn watch_addr() -> Option<u32> {
     use std::sync::OnceLock;
     static A: OnceLock<Option<u32>> = OnceLock::new();
@@ -464,11 +460,11 @@ fn watch_addr() -> Option<u32> {
     })
 }
 
-/// The pool is a run of blocks, each `[size][tag-or-link][payload...]`, but it
-/// starts with blocks the forge handed out before the machine ran that carry
-/// no header at all. So the chain cannot be walked from `pool-base`: find
-/// where it starts by trying each eight-byte offset until walking sizes from
-/// there lands exactly on the bump pointer.
+/// The pool is a run of blocks, each `[size][tag-or-link][payload...]`, but
+/// it starts with headerless blocks the forge handed out before the machine
+/// ran. The chain cannot be walked from `pool-base`. Its start is found by
+/// trying each eight-byte offset until walking sizes from there lands exactly
+/// on the bump pointer.
 fn pool_chain_start(m: &Machine) -> Option<u32> {
     use crate::map::{LG_POOLPTR, POOL_BASE};
     let top = m.peek32(LG_POOLPTR);

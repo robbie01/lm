@@ -11,8 +11,7 @@ pub struct HostWindow {
     last_mouse: (u32, u32),
     last_buttons: u32,
     /// The size of the last frame shown. The window shows that frame
-    /// stretched to fit, so this is what a pointer position has to be turned
-    /// back into.
+    /// stretched to fit, so pointer positions are converted back into it.
     frame: (usize, usize),
 }
 
@@ -45,15 +44,13 @@ impl HostWindow {
     /// fit without changing its shape and centres it, with bars down the sides
     /// or across the top and bottom.
     ///
-    /// minifb reports the pointer in the window's own units and leaves the
-    /// rest to us - its source says as much - so a click on something drawn at
-    /// (300, 30) in a 1024 by 768 frame arrives, in a 640 by 400 window, as
-    /// about (209, 15). Without this every click lands somewhere else, which
-    /// is why raising, dragging and closing windows did nothing.
+    /// minifb reports the pointer in the window's own units. A click on a
+    /// point drawn at (300, 30) in a 1024 by 768 frame arrives, in a 640 by
+    /// 400 window, as about (209, 15).
     ///
     /// The unscaled position and `get_size` are in the same units on every
-    /// platform - pixels on Windows, points on macOS - and a ratio of like to
-    /// like is all the arithmetic needs.
+    /// platform (pixels on Windows, points on macOS), so the arithmetic is a
+    /// ratio of like to like.
     fn to_frame(&self, x: f32, y: f32) -> (u32, u32) {
         let (fw, fh) = (self.frame.0 as f32, self.frame.1 as f32);
         let (ww, wh) = self.win.get_size();

@@ -1,17 +1,16 @@
 //! Differential test for the Lisp assembler.
 //!
-//! The same instruction sequence is written twice - once in Lisp, once with
-//! the Rust encoders - and the two byte streams must match exactly. The
-//! duplication is the point: two independent encodings of the RISC-V manual
-//! agreeing is real evidence, one encoding agreeing with itself is not.
+//! The same instruction sequence is written twice, once in Lisp and once with
+//! the Rust encoders, and the two byte streams must match exactly. The two
+//! encoders are independent readings of the RISC-V manual.
 
 use crate::forge::boot_host;
 use crate::forge::hostlisp::Lisp;
 use crate::mach::Machine;
 use crate::rvenc::*;
 
-/// The Lisp half. Leaves the placed address in the global `*asm-start*` and
-/// the length in `*asm-len*`.
+/// The Lisp half. Leaves the buffer in the global `*asm-buf*` and the length
+/// in `*asm-len*`.
 const LISP_SIDE: &str = r#"
 (in-package asm)
 (define a (make-assembler))
@@ -284,7 +283,7 @@ fn rust_side() -> Vec<u8> {
     let here = w.len(); // index of the first branch
     let n_after = 9; // beq bne bltu back: blt bge bgeu j jal, then la(2) nop
     let _ = n_after;
-    // Lay the rest out explicitly so the offsets are obvious.
+    // The rest is laid out with explicit indices.
     // indices: here+0 beq, +1 bne, +2 bltu, +3 blt(back=+3), +4 bge, +5 bgeu,
     //          +6 j, +7 jal, +8..+9 la, +10 nop, +11 fwd: ret
     let back = (here + 3) as i32;
@@ -304,15 +303,14 @@ fn rust_side() -> Vec<u8> {
     let lo = if lo >= 2048 { lo - 4096 } else { lo };
     let hi = ((d - lo) >> 12) & 0xfffff;
     w.push(auipc(A0, hi as u32));
-    // `la` patches itself later and so keeps its width on both sides.
+    // `la` is patched after placement, so both sides leave its addi wide.
     let la_addi = w.len();
     w.push(addi(A0, A0, lo));
     w.push(addi(ZERO, ZERO, 0)); // nop
     w.push(jalr(ZERO, RA, 0)); // fwd: ret
 
     // The Lisp side compresses as it emits; this side builds wide instructions
-    // and compresses at the end. Two routes to the same bytes, which is the
-    // point of having two encoders.
+    // and compresses at the end.
     let mut out = Vec::with_capacity(w.len() * 4);
     for (i, x) in w.into_iter().enumerate() {
         let c = if i == la_addi { x } else { compress(x) };
@@ -352,8 +350,8 @@ pub fn run() -> bool {
         );
         return false;
     }
-    // Instruction by instruction, because they are not all the same length any
-    // more: a halfword whose low two bits are not both set is a compressed one.
+    // Compared instruction by instruction, since lengths vary: a halfword whose
+    // low two bits are not both set is a compressed instruction.
     let mut bad = 0;
     let mut n = 0;
     let mut i = 0;

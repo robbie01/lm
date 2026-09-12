@@ -1,27 +1,24 @@
 ;;; console.lisp - console.driver: the serial line, for everything but
 ;;; emergencies.
 ;;;
-;;; There are two ways to the serial port, on purpose. The raw one -
-;;; `uart-string` and friends in runtime.lisp, and a stream of nil - writes the
-;;; registers directly. It works before Exec exists, inside a trap handler, and
-;;; with the scheduler in pieces, and it is what the collector and the panic
-;;; path use: a device you can only reach by asking a task is useless in
-;;; exactly the situations you most need it. AmigaOS drew the same line,
-;;; between serial.device and kprintf.
+;;; There are two ways to the serial port. The raw one, `uart-string` and its
+;;; relatives in runtime.lisp and a stream of nil, writes the registers
+;;; directly. It works before Exec exists, inside a trap handler, and with
+;;; the scheduler in pieces, and it is what the collector and the fault
+;;; reports use.
 ;;;
 ;;; This is the other one: a task that owns the ordinary console. It writes
 ;;; whole lines, so two tasks printing at once do not interleave inside one;
-;;; and it owns the receive side, so a prompt waiting for a key is asleep on a
-;;; port instead of spinning on the chip.
+;;; and it owns the receive side, so a prompt waiting for a key is asleep on
+;;; a port instead of spinning on the chip.
 ;;;
 ;;;   (write string)    put a string on the line, whole
 ;;;   (read port)       send what is typed to this port from now on, a string
-;;;                     per burst - one key, or a whole pasted page
+;;;                     per burst: one key, or a whole pasted page
 ;;;
-;;; The raw functions do not ask the driver and are not refused by it. That is
-;;; the exception the plan made for this device, and it is why the driver's
-;;; claim on `*serial*` is bookkeeping - it says who is reading the line - and
-;;; not a lock.
+;;; The raw functions do not ask the driver and are not refused by it. The
+;;; driver's claim on `*serial*` says who is reading the line; it is not a
+;;; lock.
 
 (in-package console)
 
@@ -42,7 +39,7 @@
 
 ;; The chip raises its line while bytes are waiting, so the interrupt server
 ;; masks it and wakes the driver, and the driver turns it back on once the
-;; queue is empty - the same arrangement as the keyboard.
+;; queue is empty, the same arrangement as the keyboard.
 (define (console-poll)
   (let ((s (take-typed)))
     (if s
@@ -53,17 +50,11 @@
   (int-enable int-uart)
   nil)
 
-;; Everything waiting, as one string - or as much of it as fits in a chunk, if
-;; a great deal is waiting. The rest stays in the chip, which raises its line
-;; again as soon as `console-poll` turns it back on, and arrives as the next
-;; string.
-;;
-;; Read into a buffer the driver keeps, and copied out at the length it came
-;; to. It used to be a list of characters, reversed and then made into a
-;; string: two pairs a character. For a key that is nothing. For a rebuild,
-;; which types a megabyte of source in one burst, it was twenty megabytes of
-;; pairs - and a collection that came along part way through found a million
-;; of them alive, and spent more time on them than the whole rebuild took.
+;; Everything waiting, as one string, or as much of it as fits in a chunk.
+;; The rest stays in the chip, which raises its line again as soon as
+;; `console-poll` turns it back on, and arrives as the next string. Read
+;; into a buffer the driver keeps and copied out at the length it came to,
+;; so that a pasted megabyte of source does not become a list of characters.
 (define typed-max 4096)
 (define *typed* nil)
 
@@ -82,7 +73,7 @@
             (set! i (%+ i 1)))
           s))))
 
-;; Running exactly when it holds the line - see `disk-driver-running?`.
+;; Running exactly when it holds the line; see `disk-driver-running?`.
 (define (console-driver-running?)
   (if *console-driver*
       (%eq? (device-owner *serial*) (server-task *console-driver*))
@@ -98,8 +89,7 @@
                                   (lambda (d) (int-disable int-uart) (notify port))
                                   nil)))
         (detach-task task)
-        ;; Nobody to send to yet, and after a resume the old reader belonged
-        ;; to the Exec before this one.
+        ;; After a resume the old reader belonged to the Exec before this one.
         (set! *reader* nil)
         (set! *unread* nil)
         (claim-device-for *serial* task)
@@ -108,12 +98,12 @@
         (add-int-server int-uart int)
         (on-task-end task (lambda ()
                             (serial-interrupts! nil)
-                            (rem-int-server int-uart int)))
+                            (remove-int-server int-uart int)))
         (set! *console-driver* s)
         s)))
 
-;; Started with the others, and the task that brought Exec up - the prompt on
-;; the serial line - is switched over to it: Exec is started by that task, so
+;; Started with the others, and the task that brought Exec up, the prompt on
+;; the serial line, is switched over to it: Exec is started by that task, so
 ;; this runs in it.
 (add-resident "console.driver"
               (lambda ()
@@ -122,15 +112,14 @@
 
 ;; ---------------------------------------------------------------- the stream
 ;; What the prompt on the serial line uses. Output collects into a line and
-;; goes to the driver whole; input comes from the driver a burst at a time and
-;; is handed out a character at a time.
+;; goes to the driver whole; input comes from the driver a burst at a time
+;; and is handed out a character at a time.
 ;;
-;; Wherever asking a task is impossible - in a trap handler, with interrupts
-;; off, before the driver is up - or would give away a critical section the
-;; caller is holding, output falls back on the raw line, after sending
-;; whatever it had collected, so that nothing comes out of order. And it sends
-;; what it has collected before it waits for input: a prompt that is still in
-;; a buffer is a prompt nobody sees.
+;; Wherever asking a task is impossible, in a trap handler, with interrupts
+;; off, before the driver is up, output falls back on the raw line, after
+;; sending whatever it had collected, so that nothing comes out of order. It
+;; sends what it has collected before it waits for input: a prompt that is
+;; still in a buffer is a prompt nobody sees.
 (define line-max 200)
 
 (define (console-port)
@@ -138,16 +127,10 @@
 
 ;; Whether a line can go to the driver. Handing it over is a request, and a
 ;; request waits for its answer, so this is as much a question about where it
-;; is being asked from as about the driver: not from a trap handler or an
-;; interrupt server, where there is no task to wait, and not with interrupts
-;; off, where waiting is an error - see `sleep-check` - and a print is the
-;; last thing that should be one, since it is what somebody adds to find out
-;; what a section is doing. There, the line goes out raw, the way the
-;; collector's do.
-;;
-;; While there was a Forbid, a print inside one got through this and asked,
-;; and the driver never ran to answer: `(without-preemption (print "hi"))`
-;; spun for ever where `(without-interrupts (print "hi"))` printed.
+;; is asked from as about the driver: not from a trap handler or an interrupt
+;; server, where there is no task to wait, and not with interrupts off, where
+;; waiting is an error and a print is the last thing that should be one.
+;; There, the line goes out raw.
 (define (can-ask?)
   (if (console-driver-running?)
       (if (%= 0 (%ld-fixnum lg-trapdepth))
@@ -158,8 +141,7 @@
 ;; Whether a read can. The same, except that a critical section is no bar
 ;; here: the driver owns the receive side, so while it is up there is no raw
 ;; way to wait for a key, and a read that has to wait inside a section is
-;; refused by `wait` itself - an error that says where it is, rather than the
-;; hang it used to be.
+;; refused by `wait` itself.
 (define (can-listen?)
   (if (console-driver-running?)
       (if (%= 0 (%ld-fixnum lg-trapdepth)) (if *in-interrupt* nil t) nil)
@@ -178,13 +160,13 @@
                    (if (can-ask?) (request (console-port) (list 'write s)) (uart-string s)))
                  nil)))
           (listen
-           ;; Ask for the input the first time it is wanted rather than when the
-           ;; stream is made: Exec makes it before interrupts are on, and asking
-           ;; means waiting for an answer.
+           ;; Ask for the input the first time it is wanted rather than when
+           ;; the stream is made: Exec makes it before interrupts are on, and
+           ;; asking means waiting for an answer.
            (lambda ()
              (if (if port nil (can-listen?))
                  (begin
-                   (set! port (create-port nil 0))
+                   (set! port (make-port nil 0))
                    (request (console-port) (list 'read port)))
                  nil))))
       (make-stream
@@ -205,18 +187,18 @@
              (let ((c (%string-ref in pos)))
                (set! pos (%+ pos 1))
                c)
-             (let ((m (if port (get-msg port) nil)))
+             (let ((m (if port (get-message port) nil)))
                (if m
                    (begin
                      (set! in (message-body m))
                      (set! pos 1)
                      (%string-ref in 0))
-                   ;; With no driver the line is anybody's, and the raw read is
-                   ;; the only read there is.
+                   ;; With no driver the line is anybody's, and the raw read
+                   ;; is the only read there is.
                    (if (console-driver-running?) nil (uart-char))))))
        (lambda ()
          (%funcall flush)
          (%funcall listen)
          (if (if port (can-listen?) nil)
              (wait (port-signal port))
-             (%wait-for-input)))))))
+             (%wait-for-interrupt)))))))

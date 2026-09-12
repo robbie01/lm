@@ -3,8 +3,8 @@
 //!   0000_0000  ..  0000_0007   the nil cell. nil is the word 0, which is also
 //!                              a valid cons whose car and cdr are nil, so car
 //!                              and cdr need no null check and `null?` is one
-//!                              `beqz`. This is why AbsSysBase sits at 8 and
-//!                              not at 4 the way a real Amiga has it.
+//!                              `beqz`. AbsSysBase therefore sits at 8, not at
+//!                              4 as on the Amiga.
 //!   0000_0008                  AbsSysBase -> ExecBase
 //!   0000_0100  ..  0000_01FF   Lisp global block, reachable as `lw t,0x100(x0)`
 //!   0000_1000  ..              trap vectors and the exception stub
@@ -15,8 +15,8 @@
 //!   0E00_0000  ..  0FFF_FFFF   unclaimed: mark bitmap, mark stack, buffers
 //!   F000_0000  ..              custom chips
 //!
-//! One flat shared address space, no MMU: every task can see every byte, which
-//! is what makes Exec-style message passing by pointer legal.
+//! One flat shared address space, no MMU: every task sees every byte, so
+//! Exec-style message passing by pointer is legal.
 
 pub const RAM_BASE: u32 = 0x0000_0000;
 pub const CHIP_SIZE: u32 = 128 << 20;
@@ -99,31 +99,21 @@ globals! {
     LG_CODE_PTR   = 0x10, "code-ptr";    // bump pointer, code space
     LG_CODE_END   = 0x14, "code-end";
     LG_CONS_FREE  = 0x18, "cons-free";   // free list head, cons space
-    LG_OBJ_FREE   = 0x1c, "obj-free";    // free list head, object space
     LG_OBARRAY    = 0x20, "obarray";     // vector of symbol buckets
-    LG_MARKBASE   = 0x24, "markbase";    // mark bitmap, 1 bit per 8 heap bytes
     LG_GCCOUNT    = 0x28, "gccount";
-    LG_GCTHRESH   = 0x2c, "gcthresh";    // free words below which a gc is due
     LG_STACKTOP   = 0x34, "stacktop";    // top of the boot stack
     LG_STACKBOT   = 0x38, "stackbot";
     LG_TOPLEVEL   = 0x3c, "toplevel";    // closure the kickstart enters
     LG_POOLPTR    = 0x40, "poolptr";     // Exec pool bump pointer
     LG_POOLEND    = 0x44, "poolend";
     LG_ROOTS      = 0x48, "roots";       // vector of extra gc roots
-    LG_NROOTS     = 0x4c, "nroots";
     LG_ERRHANDLER = 0x50, "errhandler";  // closure called on a lisp error
     LG_TRAPSAVE   = 0x54, "trapsave";    // scratch for the exception stub
-    LG_FEATURES   = 0x58, "features";
     LG_SYMLIST    = 0x5c, "symlist";     // every interned symbol, for the gc
-    LG_GCLOCK     = 0x60, "gclock";      // non-zero: collection is forbidden
-    LG_ALLOCED    = 0x64, "alloced";     // bytes handed out since the last gc
     LG_IMGENTRY   = 0x68, "imgentry";    // entry point recorded in the image
-    LG_IMGVERSION = 0x6c, "imgversion";
     LG_CONSFREEN  = 0x70, "cons-free-n"; // cells on the cons free list
     LG_OBJFREEN   = 0x74, "obj-free-n";
-    LG_TRACE      = 0x78, "trace";
     LG_GCHOOK     = 0x7c, "gchook";      // raw code address: replenish cons space
-    LG_OBJHOOK    = 0x80, "objhook";     // raw code address: allocate an object
     LG_TRAPHOOK   = 0x84, "traphook";    // closure called from the trap stub
     LG_BOOTLIST   = 0x88, "bootlist";    // thunks the kickstart runs in order
     LG_CONS_RUN   = 0x8c, "cons-run";     // start of the run being bumped

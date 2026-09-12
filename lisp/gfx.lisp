@@ -1,29 +1,28 @@
 ;;; gfx.lisp - gfx.driver: the task that owns the display.
 ;;;
-;;; What it owns is the display chip: where the picture comes from, how big it
-;;; is, the palette, and whether the chip raises the vertical blank. Those are
-;;; set rarely and matter to everybody, which is what a driver is for. What
-;;; it does not own is drawing. A blit costs the task that issues it about 850
-;;; cycles and a message about 9,700, so tasks go on linking their own blitter
-;;; descriptors, and the driver's part in blitting is waking them when their
-;;; pixels have landed.
+;;; What it owns is the display chip: where the picture comes from, how big
+;;; it is, the palette, and whether the chip raises the vertical blank. Those
+;;; are set rarely and matter to everybody. What it does not own is drawing:
+;;; a blit costs the task that issues it about 850 cycles and a message about
+;;; 9,700, so tasks link their own blitter descriptors, and the driver's part
+;;; in blitting is waking them when their pixels have landed.
 ;;;
 ;;; What anybody may ask it:
 ;;;
 ;;;   (screen w h)       a new screen bitmap, shown; answers the bitmap
-;;;   (show)             show the screen there already is - after a resume,
+;;;   (show)             show the screen there already is: after a resume,
 ;;;                      when the bitmap survived and the chip did not
 ;;;   (colours pairs)    palette entries, as (index . rgb) pairs
 ;;;   (present)          put the frame in front of the viewer now
 ;;;
-;;; The screen bitmap itself is not the driver's secret: `*screen*` is a value
-;;; anybody may draw into with the blitter, which is what compositing is.
+;;; The screen bitmap is `*screen*`, which anybody may draw into with the
+;;; blitter; that is what compositing is.
 
 (in-package gfx)
 
 (define *gfx-driver* nil)
 
-;; How many times a task has gone to sleep waiting for its blits. Only
+;; How many times a task has gone to sleep waiting for its blits.
 ;; `(drivers)` reads it.
 (define *blit-sleeps* 0)
 
@@ -48,8 +47,8 @@
         (set! *screen-rp* (make-bitmap-rastport b))
         b)))
 
+;; Sixteen readable colours, then a grey ramp over the rest.
 (define (default-palette)
-  ;; Sixteen readable colours, then a grey ramp over the rest.
   (let ((i 0)
         (first (list (rgb 0 0 0) (rgb 255 255 255) (rgb 200 40 40) (rgb 40 200 60)
                      (rgb 60 100 230) (rgb 230 200 40) (rgb 220 120 30)
@@ -64,7 +63,7 @@
         (gfx-colour! i (rgb v v v)))
       (set! i (%+ i 1)))))
 
-;; Running exactly when it holds the device - see `disk-driver-running?`.
+;; Running exactly when it holds the device; see `disk-driver-running?`.
 (define (gfx-driver-running?)
   (if *gfx-driver*
       (%eq? (device-owner *gfx*) (server-task *gfx-driver*))
@@ -78,18 +77,17 @@
              (int (make-interrupt "blit" 0 (lambda (d) (blit-server d)) nil)))
         (detach-task task)
         ;; The frame clock first, while the device is still anybody's: Exec's
-        ;; vblank server is already installed, and waits on a chip that has
+        ;; vblank server is already installed and waits on a chip that has
         ;; been told to raise it.
         (gfx-vblank-irq! t)
         (claim-device-for *gfx* task)
-        ;; A driver that starts has nobody asleep on it yet. After a resume the
-        ;; list would name tasks of the Exec before this one.
+        ;; After a resume the list names tasks of the Exec before this one.
         (set! *blit-waiters* nil)
         (add-int-server int-blit int)
         (set-blit-sleep! (lambda (d) (blit-sleep d)))
         (on-task-end task (lambda ()
                             (set-blit-sleep! nil)
-                            (rem-int-server int-blit int)))
+                            (remove-int-server int-blit int)))
         (set! *gfx-driver* s)
         s)))
 
@@ -103,8 +101,7 @@
 ;; again, so a machine nobody is waiting on takes no interrupts for it.
 ;;
 ;; The server allocates nothing and removes nothing: it only signals. Each
-;; sleeper takes itself off the list when it wakes, in its own task, where
-;; allocating is allowed.
+;; sleeper takes itself off the list when it wakes, in its own task.
 (define *blit-waiters* nil)   ; (task . descriptor), newest first
 
 (define (blit-server data)
@@ -115,10 +112,9 @@
       (set! p (%cdr p))))
   nil)
 
-;; Only asked from a task with interrupts on. Wherever sleeping is not allowed
-;; `blit-wait-block` spins on the chip instead - it finishes by itself, and
-;; reading its status is what lets it be seen to - which is the way WaitBlit
-;; always waited, and why a section may draw.
+;; Only asked from a task with interrupts on. Wherever sleeping is not
+;; allowed, `blit-wait-descriptor` spins on the chip instead, which is why a
+;; critical section may draw.
 (define (blit-sleep d)
   (let ((me (this-task)))
         (set! *blit-sleeps* (%+ *blit-sleeps* 1))
@@ -143,7 +139,7 @@
 ;; ---------------------------------------------------------------- clients
 ;; Every call goes to the driver while one holds the display, and is done on
 ;; the spot while none does: before Exec is up, during a rebuild, or between
-;; a driver dying and the next one starting.
+;; a driver ending and the next one starting.
 (define (gfx-port)
   (if *gfx-driver* (server-port *gfx-driver*) (error "gfx: there is no driver")))
 
@@ -156,6 +152,5 @@
 (define (set-colours pairs) (ask (list 'colours pairs)))
 (define (screen-sync) (ask (list 'present)))
 
-;; Frames since Exec started, from the vertical blank server: a variable, not
-;; the chip's counter, so counting frames asks nobody anything.
+;; Frames since Exec started, counted by the vertical blank server.
 (define (vblank-count) *vblank-count*)

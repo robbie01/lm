@@ -1,8 +1,8 @@
 //! End to end compiler tests: compile a Lisp expression to RISC-V, run it on
 //! the machine, print what came back.
 //!
-//! This is the only test that proves the whole chain - reader, macro expander,
-//! compiler, assembler, object memory, processor - agrees with itself.
+//! This test covers the whole chain: reader, macro expander, compiler,
+//! assembler, object memory and processor.
 
 use crate::forge::{boot_host, write_layout};
 use crate::heap::*;
@@ -12,7 +12,7 @@ use crate::map::*;
 use crate::run;
 use crate::rvenc::*;
 
-/// Somewhere harmless to leave the answer and the fault report.
+/// Scratch words for the answer and the fault report.
 const RESULT: u32 = 0x0000_0C00;
 const FAULT: u32 = 0x0000_0C10;
 const STACK_TOP: u32 = 0x0100_0000; // top of the exec pool, below code space
@@ -47,7 +47,7 @@ fn trap_stub(m: &mut Machine, at: u32) {
 /// collects yet, so it reports and stops; the collector replaces this later.
 fn cons_stub(m: &mut Machine, at: u32) {
     let mut c = Vec::new();
-    c.push(addi(A7, ZERO, 3)); // trap-oom
+    c.push(addi(A7, ZERO, 3)); // ecall-oom
     c.push(ecall());
     c.push(jalr(ZERO, RA, 0));
     put(m, at, &c);
@@ -146,14 +146,13 @@ fn cases() -> Vec<Case> {
         // ---- indexed access, checked in the instruction ----
         Case("(%vector-ref (vector 5 6 7) 2)", "7"),
         Case("(%vector-length (vector 5 6 7))", "3"),
-        // The index is what makes these worth asserting: it comes back in
-        // mtval exactly as the instruction saw it, tag and all.
+        // The index comes back in mtval as the instruction saw it, tag and all.
         Case("(%vector-ref (vector 5 6 7) 3)", "TRAP: out of range: 0x7"),
         Case("(%vector-ref (vector 5 6 7) -1)", "TRAP: out of range: 0xffffffff"),
         Case("(%string-ref \"abc\" 3)", "TRAP: out of range: 0x7"),
         Case("(%bytes-ref (make-bytes 2) 2)", "TRAP: out of range: 0x5"),
-        // A string is an object, so this is the type check rather than the
-        // tag check doing the work.
+        // A string is an object, so the type check fires here rather than the
+        // tag check.
         Case("(%vector-ref \"abc\" 0)", "TRAP: wrong type"),
         // ---- hash tables, keyed by identity ----
         Case(
@@ -182,8 +181,8 @@ fn cases() -> Vec<Case> {
             "(let ((tb (make-table)) (i 0)) (while (< i 200) (table-set! tb i (* i i))              (set! i (+ i 1))) (list (table-count tb) (table-ref tb 199)              (table-ref tb 0) (> (table-capacity tb) 200)))",
             "(200 39601 0 t)",
         ),
-        // Identities are handed out in interning order, so this pins the
-        // order rather than the number; it moves when the sources do.
+        // Identities are handed out in interning order, so this checks the
+        // order rather than a number that changes with the sources.
         Case("(< (symbol-index 'car) (symbol-index 'workbench))", "t"),
         Case("(eq? (symbol-package 'car) (find-package \"lm\"))", "t"),
 
@@ -195,8 +194,8 @@ fn cases() -> Vec<Case> {
         Case("(length (hw:rect-subtract (hw:rect 0 0 100 100) (hw:rect 40 40 20 20)))", "4"),
         Case("(hw:rect-subtract (hw:rect 0 0 10 10) (hw:rect 0 0 10 10))", "nil"),
         Case("(hw:rect-subtract (hw:rect 0 0 10 10) (hw:rect 50 50 1 1))", "(#[rect 0 0 10 10])"),
-        // The area has to add up: subtracting a rectangle removes exactly its
-        // own area and no more, which is the property the whole thing rests on.
+        // Subtracting a rectangle removes exactly its overlapping area and no
+        // more.
         Case(
             "(hw:region-area (hw:region-subtract (list (hw:rect 0 0 640 400))              (list (hw:rect 10 10 100 100))))",
             "246000",
@@ -216,9 +215,8 @@ fn cases() -> Vec<Case> {
         ),
         Case("(eyes:eyes? (eyes:make-eyes))", "t"),
         Case("(eyes:eyes? (vector 1 2))", "nil"),
-        // An accessor checks which record it has, not merely that it has one:
-        // a rastport where a pair of eyes was wanted is a trap and not a
-        // plausible-looking number out of the middle of somebody else.
+        // An accessor checks which record type it has, not merely that it has
+        // a record: a rastport passed where eyes are wanted traps.
         Case("(eyes:eyes-rad (current-stream))", "TRAP: wrong record"),
         Case("(eyes:eyes-rad 7)", "TRAP: wrong type: 0xf"),
         Case("(eyes:eyes-rad nil)", "TRAP: wrong type: 0x0"),
@@ -349,8 +347,8 @@ fn cases() -> Vec<Case> {
             "(list (apply + 1 2 3 4 5 6 7 8 9 '(10)) (apply list 1 2 3 4 5 6 7 8 9 '(10 11)))",
             "(55 (1 2 3 4 5 6 7 8 9 10 11))",
         ),
-        // A call through apply or funcall in tail position is still a tail
-        // call: the bottom of a thousand of them is where the bottom of one is.
+        // A call through apply or funcall in tail position is a tail call: the
+        // stack pointer after a thousand of them equals the pointer after one.
         Case(
             "(define (down n) (if (%= n 0) (%stack-pointer) (apply down (list (%- n 1))))) (let ((sp (down 1))) (%= sp (down 1000)))",
             "t",
@@ -359,7 +357,7 @@ fn cases() -> Vec<Case> {
             "(define (down n) (if (%= n 0) (%stack-pointer) (funcall 'down (%- n 1)))) (let ((sp (down 1))) (%= sp (down 1000)))",
             "t",
         ),
-        // A list that does not end in nil is caught, not run off the end of.
+        // An improper list is caught rather than walked off the end.
         Case("(apply list 1 '(2 . 3))", "TRAP: wrong type: 0x7"),
         // ---- strings built at run time exercise object allocation ----
         Case(
@@ -373,8 +371,8 @@ fn cases() -> Vec<Case> {
 /// Compile `src` as a zero-argument function and run it. Returns the printed
 /// result, or a description of the fault.
 pub fn run_one(l: &mut Lisp, src: &str) -> String {
-    // Read the source, compile every form but the last as a definition, and
-    // wrap the last one in a thunk we can call.
+    // Read the source, compile every form but the last at top level, and wrap
+    // the last one in a thunk to call.
     let script = format!(
         r#"(let* ((forms (read-forms-from-string {src:?}))
                   (n (length forms))
@@ -393,7 +391,7 @@ pub fn run_one(l: &mut Lisp, src: &str) -> String {
         return "COMPILE ERROR: no entry".into();
     }
 
-    // Lay down the support stubs and the trampoline, then let it rip.
+    // Lay down the support stubs and the trampoline, then run.
     let trap = l.h.alloc_code(96);
     let cons = l.h.alloc_code(32);
     let tramp = l.h.alloc_code(128);
@@ -417,9 +415,8 @@ pub fn run_one(l: &mut Lisp, src: &str) -> String {
         let epc = l.h.m.peek32(FAULT + 4);
         let tval = l.h.m.peek32(FAULT + 8);
         let a7 = l.h.m.peek32(FAULT + 12);
-        // A wrong-type trap is reported without the pc: the value is the
-        // whole diagnosis, and leaving the address out is what lets a test
-        // say exactly what it expects.
+        // A wrong-type trap is reported without the pc, so a test can state
+        // the expected value exactly.
         if cause == C_TYPE {
             return format!("TRAP: wrong type: {tval:#x}");
         }
@@ -445,8 +442,7 @@ pub fn run_one(l: &mut Lisp, src: &str) -> String {
     l.h.write(v)
 }
 
-/// Compile and run one expression against a freshly built library. This is
-/// the quickest way to ask the compiler what it actually does with a form.
+/// Compile and run one expression against a freshly built library.
 pub fn eval_one(exprs: &[String]) -> i32 {
     write_layout();
     let mut m = Machine::new();
@@ -480,8 +476,7 @@ pub fn run_all(verbose: bool) -> bool {
         return false;
     }
     // Compile the standard library to native code before testing anything
-    // that calls into it. This is the same step the real build performs, and
-    // it is itself the first serious exercise of the compiler.
+    // that calls into it. This is the same step the build performs.
     let t = std::time::Instant::now();
     let script: String = crate::forge::SYSTEM
         .iter()
@@ -497,16 +492,16 @@ pub fn run_all(verbose: bool) -> bool {
         t.elapsed().as_secs_f64(),
         l.h.g(LG_CODE_PTR) - CODE_BASE
     );
-    // The image installs the allocator from `kickstart`, and nothing here
-    // runs kickstart; without this the first test to make a vector would call
-    // through an empty hook.
+    // The image installs the allocator from `kickstart`, which does not run
+    // here. Without this the first test to make a vector would call through
+    // an empty hook.
     let r = run_one(&mut l, "(gc:install-allocator)");
     if r != "nil" {
         println!("installing the allocator: {r}");
         return false;
     }
-    // Anything compiled code will call that nothing ever defined shows up
-    // here rather than as a wild jump at run time.
+    // A global that compiled code calls but nothing defines is reported here
+    // rather than as a wild jump at run time.
     if let Ok(v) = l.eval_string("(undefined-globals)", "<ctest>") {
         if v != NIL {
             println!("undefined globals: {}", l.h.write(v));
@@ -523,8 +518,8 @@ pub fn run_all(verbose: bool) -> bool {
         }
         let got = run_one(&mut l, src);
         // A trap whose value is a heap address cannot be spelled out, since
-        // the address depends on everything compiled before it; asserting the
-        // prefix says which check fired, which is the part under test.
+        // the address depends on everything compiled before it. Matching the
+        // prefix checks which trap fired.
         if got == want || (want.starts_with("TRAP:") && got.starts_with(want)) {
             pass += 1;
         } else {

@@ -1,11 +1,8 @@
 ;;; input.lisp - input.driver: the task that owns the keyboard and mouse.
 ;;;
-;;; The chip keeps one queue of raw event words, and reading one takes it. So
-;;; however many tasks listened, only whichever read first saw each event -
-;;; which is why only one task ever listened, and why that task decoded every
-;;; kind of event in one loop. The driver is now the one reader. It takes each
-;;; event off the chip, turns it into a list that says what happened, and sends
-;;; a copy to every subscriber:
+;;; The chip keeps one queue of raw event words, and reading one takes it, so
+;;; the driver is the one reader. It takes each event off the chip, turns it
+;;; into a list that says what happened, and sends it to every subscriber:
 ;;;
 ;;;   (key down ascii code mods)    ascii is 0 for a key that has none
 ;;;   (key up ascii code mods)
@@ -14,18 +11,18 @@
 ;;;   (button up n x y)
 ;;;   (wheel delta x y)
 ;;;
-;;; A subscriber reads its port like any other port. What anybody may ask the
-;;; driver:
+;;; A subscriber reads its port like any other port. What anybody may ask
+;;; the driver:
 ;;;
 ;;;   (subscribe port)       every event from now on arrives there
 ;;;   (unsubscribe port)
 ;;;   (inject kind ascii code payload)
-;;;                          an event as though the keyboard had sent it: a
-;;;                          loopback, so that a test can drive all of this
+;;;                          an event as though the keyboard had sent it, so
+;;;                          that a test can drive all of this
 ;;;
 ;;; Where the pointer is right now is not a message. The driver keeps it in
 ;;; three variables, updated with each event it takes, and anybody may read
-;;; them: a pointer wants the latest position, not a history of them.
+;;; them.
 
 (in-package input)
 
@@ -43,12 +40,10 @@
 (define ev-wheel 6)
 
 ;; ---------------------------------------------------------------- the driver
-;; The chip raises its line for as long as it has events. So the interrupt
+;; The chip raises its line for as long as it has events. The interrupt
 ;; server masks the line and wakes the driver, and the driver turns the line
-;; back on once it has emptied the queue - anything that arrives in between
-;; raises it again straight away. Masking is what makes a level-triggered
-;; device behave: a server that only woke somebody would be entered again the
-;; moment it returned.
+;; back on once it has emptied the queue; anything that arrived in between
+;; raises it again at once.
 (define (input-poll)
   (let ((e (input-take)))
     (while e
@@ -66,10 +61,8 @@
           ((%= kind ev-wheel)
            (list 'wheel (wheel-delta (%logand lo 4095)) *mouse-x* *mouse-y*))
           ((if (%>= kind ev-mousemove) (%<= kind ev-buttonup) nil)
-           ;; A pointer event says where it happened. This used to read the
-           ;; position registers instead, which say where the pointer is now -
-           ;; so a click taken off the queue late, while the machine was busy,
-           ;; landed wherever the pointer had got to since.
+           ;; A pointer event says where it happened, which is not where the
+           ;; pointer is now if the event was taken off the queue late.
            (let ((x (%lsh lo -4)) (y (%logand hi 4095)) (b (%logand lo 15)))
              (set! *mouse-x* x)
              (set! *mouse-y* y)
@@ -86,8 +79,7 @@
 (define (wheel-delta p) (if (%>= p 2048) (%- p 4096) p))
 
 ;; One list, sent to everybody: nobody changes an event. A subscriber whose
-;; task has ended is dropped rather than sent to - the message would only be
-;; answered with a failure, and there is nobody to hear that either.
+;; task has ended is dropped.
 (define (publish ev)
   (let ((dead nil))
     (dolist (p *subscribers*)
@@ -113,7 +105,7 @@
            t)
           (else (error "input.driver: no such request:" op)))))
 
-;; Running exactly when it holds the device - see `disk-driver-running?`.
+;; Running exactly when it holds the device; see `disk-driver-running?`.
 (define (input-driver-running?)
   (if *input-driver*
       (%eq? (device-owner *input*) (server-task *input-driver*))
@@ -129,15 +121,14 @@
                                   (lambda (d) (int-disable int-input) (notify port))
                                   nil)))
         (detach-task task)
-        ;; A driver that starts has nobody to tell yet. After a resume the old
-        ;; list would name the ports of tasks that belonged to the Exec before
-        ;; this one, and sending to one would wake a task this Exec never made.
+        ;; After a resume the old list names the ports of tasks that belonged
+        ;; to the Exec before this one.
         (set! *subscribers* nil)
         (input-interrupts! t)
         (claim-device-for *input* task)
         (server-poll! s (lambda () (input-poll)))
         (add-int-server int-input int)
-        (on-task-end task (lambda () (rem-int-server int-input int)))
+        (on-task-end task (lambda () (remove-int-server int-input int)))
         (set! *input-driver* s)
         s)))
 
@@ -150,7 +141,7 @@
 ;; A port that every event arrives on from now on, as a message whose body is
 ;; the event.
 (define (input-listen)
-  (let ((port (create-port nil 0)))
+  (let ((port (make-port nil 0)))
     (request (driver-port) (list 'subscribe port))
     port))
 
@@ -161,17 +152,17 @@
 
 ;; The next event on a port, sleeping until there is one.
 (define (next-input port)
-  (let ((m (get-msg port)))
+  (let ((m (get-message port)))
     (while (%null? m)
       (wait (port-signal port))
-      (set! m (get-msg port)))
+      (set! m (get-message port)))
     (message-body m)))
 
 (define (inject-input kind ascii code payload)
   (request (driver-port) (list 'inject kind ascii code payload)))
 
-;; Where the pointer is, as of the last event the driver took - or straight
-;; from the chip, while no driver holds it.
+;; Where the pointer is, as of the last event the driver took, or straight
+;; from the chip while no driver holds it.
 (define (mouse-x) (if (device-usable? *input*) (input-mouse-x) *mouse-x*))
 (define (mouse-y) (if (device-usable? *input*) (input-mouse-y) *mouse-y*))
 (define (mouse-buttons) (if (device-usable? *input*) (input-buttons) *mouse-buttons*))

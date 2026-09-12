@@ -1,10 +1,9 @@
 ;;; compile.lisp - Lisp to native RISC-V.
 ;;;
-;;; The same source runs twice. At build time the bootstrap interpreter runs it
-;;; to compile the whole system - this file included - into the image. After
-;;; that the image contains a compiled copy of this compiler, so the machine
-;;; can compile new Lisp for itself at the REPL. There is only ever one
-;;; compiler.
+;;; The same source runs twice. At build time the forge's interpreter runs it
+;;; to compile the whole system, this file included, into the image. The
+;;; image then holds a compiled copy of the compiler, which is what compiles
+;;; forms typed at a prompt and what a rebuild uses.
 ;;;
 ;;; Calling convention
 ;;;   a0..a7   arguments 0..7; arguments 8 and up are pushed by the caller so
@@ -14,8 +13,8 @@
 ;;;   a0       the result
 ;;;   gp       cons-space bump pointer      } dedicated for the life of the
 ;;;   tp       cons-space limit             } machine; allocation is inline
-;;;
-;;;   s1       the running function's literal vector, that is its code object
+;;;   s1       the running function's code object, which holds its literals
+;;;   s2       the running task
 ;;;
 ;;; Frame
 ;;;   s0 + 0        argument 8, if there is one
@@ -27,26 +26,18 @@
 ;;;   sp            below all of that; temporaries are pushed under it
 ;;;
 ;;; Only one instruction in the prologue depends on the frame size, so the
-;;; frame is sized after the body is emitted and that single word is patched.
-;;;
-;;; Self-calls
-;;;   A call to the name the function is being compiled under reuses the
-;;;   closure already in this frame and jumps to a label past its own arity
-;;;   check: two instructions instead of five, and no indirect jump. See
-;;;   self-call? for the conditions, and note the trade - redefining a
-;;;   function does not reach the calls already inside it.
+;;; frame is sized after the body is emitted and that word is patched.
 ;;;
 ;;; Every word between sp and s0-12 inclusive is a tagged Lisp value: locals,
 ;;; spilled temporaries, pushed arguments, the closure. Only the saved ra and
-;;; the frame link are raw, and they are at fixed offsets. That uniformity is
-;;; what lets the collector walk a stack precisely with no stack maps at all.
+;;; the frame link are raw, at fixed offsets. That is what lets the collector
+;;; walk a stack precisely with no stack maps.
 ;;;
 ;;; Pairs
 ;;;   car, cdr, set-car! and set-cdr! are single instructions in the custom-0
-;;;   opcode space rather than loads and stores, because the processor can
-;;;   check the tag while it forms the address and so the check costs nothing.
-;;;   Anything that is not a pair traps with the offending value in mtval, and
-;;;   sys.lisp turns that into a sentence naming the value.
+;;;   opcode space. The processor checks the tag as it forms the address, and
+;;;   anything that is not a pair traps with the value in mtval, which
+;;;   sys.lisp turns into a sentence naming it.
 
 (in-package compiler)
 
@@ -56,26 +47,21 @@
 (define lit-slot -16)
 
 ;; ---------------------------------------------------------------- leaves
-;; A function that calls nothing needs none of the frame it builds. It cannot
-;; be returned into, so `ra` survives; nothing can collect while it runs, so
-;; the closure need not be findable on a stack; and its locals cannot be
-;; clobbered by a callee, so they can stay in registers and never be stored at
-;; all. About seven functions in ten are leaves, and they take a bit over half
-;; the calls, so this is the largest single piece of the frame protocol.
+;; A function that calls nothing needs none of the frame it would build. It
+;; cannot be returned into, so ra survives; nothing can collect while it
+;; runs, so its closure need not be findable on the stack; and no callee can
+;; clobber its locals, so they stay in registers. About seven functions in
+;; ten are leaves.
 ;;
-;; s3..s10 hold a leaf's locals and s11 holds its caller's literal vector.
+;; s3..s10 hold a leaf's locals and s11 holds its caller's code object.
 ;; Nothing else in the machine touches those nine registers, so a leaf saves
-;; and restores none of them: there is nothing there to preserve.
+;; and restores none of them.
 (define (local-reg n) (%+ $s3 n))
 (define leaf-locals 8)
 (define $lit-save $s11)
 
-;; ---------------------------------------------------------------- ecall codes
-
 ;; ---------------------------------------------------------------- context
-;; What the compiler knows while it is compiling one function. This was a
-;; vector of thirteen numbered slots and a comment block to say which was
-;; which, which is fine until you add a fourteenth and have to count.
+;; What the compiler knows while it compiles one function.
 (defrecord (context cx)
   asm env nlocals maxlocals free boxed name framefix outer nparams
   self-label self-arity leaf)
@@ -93,9 +79,8 @@
 
 (define (cx-alloc-local c)
   (let ((n (cx-nlocals c)))
-    ;; The pre-pass bounds this before deciding a function is a leaf, so
-    ;; reaching here means the bound was wrong rather than that the function
-    ;; is unusual.
+    ;; The pre-pass bounds the local count before it decides a function is a
+    ;; leaf, so reaching here means the bound was wrong.
     (if (cx-leaf c)
         (if (%>= n leaf-locals) (error "compile: leaf out of registers" (cx-name c)) nil)
         nil)
@@ -109,14 +94,14 @@
 (define (cx-lookup c sym) (assq sym (cx-env c)))
 
 ;; ---------------------------------------------------------------- expansion
-;; Macros are gone before anything looks at the tree, so the analysis passes
-;; below only ever see the nine special forms.
+;; Macros are expanded before anything looks at the tree, so the analysis
+;; passes below only see the special forms.
+;;
+;; `macro-form?` and `expand-macro` are the two places where the compiler
+;; depends on which side of the bootstrap it is running on: in the forge the
+;; macros live in the interpreter, on the machine in the symbols' function
+;; cells.
 (define (macroexpand form)
-  ;; macro-form? and expand-macro are the two places where the compiler has to
-  ;; know which side of the bootstrap it is running on. While the forge is
-  ;; building the image the macros live in the interpreter; once the image is
-  ;; running they live in the symbols' function cells. Everything else about
-  ;; the compiler is identical either way.
   (let ((go t))
     (while go
       (if (macro-form? form)
@@ -150,7 +135,7 @@
       form))
 
 ;; ---------------------------------------------------------------- analysis
-;; Which variables does this form assign to?
+;; The variables a form assigns to.
 (define (assigned-vars form acc)
   (if (%cons? form)
       (let ((h (%car form)))
@@ -163,9 +148,9 @@
           acc)))
       acc))
 
-;; Which variables appear free inside a nested lambda? Those are the ones a
-;; closure will capture, and a captured variable that is also assigned has to
-;; live in a box rather than in a stack slot.
+;; The variables that appear free inside a nested lambda. A closure captures
+;; those, and a captured variable that is also assigned has to live in a box
+;; rather than in a stack slot.
 (define (captured-vars form acc)
   (if (%cons? form)
       (let ((h (%car form)))
@@ -178,7 +163,7 @@
           acc)))
       acc))
 
-;; Free variables of a form, given a list of names already bound.
+;; The free variables of a form, given the names already bound.
 (define (free-vars form bound)
   (cond
    ((%symbol? form) (if (memq form bound) nil (list form)))
@@ -209,8 +194,8 @@
           (dolist (x form) (set! acc (append2 (free-vars x bound) acc)))
           acc)))))))
 
+;; Parameter lists are (a b), (a . rest) or (a &rest r).
 (define (param-names params)
-  ;; Accepts (a b), (a . rest), and (a &rest r).
   (let ((acc nil))
     (while (%cons? params)
       (let ((p (%car params)))
@@ -219,8 +204,8 @@
     (if (%symbol? params) (set! acc (%cons params acc)) nil)
     (reverse acc)))
 
+;; How many arguments must be supplied.
 (define (param-required params)
-  ;; How many arguments must be supplied.
   (let ((n 0))
     (while (%cons? params)
       (if (%eq? (%car params) '&rest)
@@ -228,8 +213,8 @@
           (begin (set! n (%+ n 1)) (set! params (%cdr params)))))
     n))
 
+;; The rest parameter, or nil for a fixed count.
 (define (param-rest params)
-  ;; The rest parameter, or nil if the function takes a fixed count.
   (let ((r nil))
     (while (%cons? params)
       (if (%eq? (%car params) '&rest)
@@ -239,24 +224,15 @@
     r))
 
 ;; ---------------------------------------------------------------- constants
-(define (self-evaluating? x)
-  (if (%null? x) t
-      (if (%fixnum? x) t
-          (if (%char? x) t
-              (if (%string? x) t
-                  (if (%vector? x) t (%float? x)))))))
-
 (define (emit-const c v reg)
   (let ((a (cx-asm c)))
     (cond
      ((%null? v) (i-mv a reg $zero))
      ((%fixnum? v) (i-li-fixnum a reg v))
      ((%char? v) (i-li a reg (%logior (%lsh (%char->int v) 8) 2)))
-     (else
-      ;; A heap object. Its address is never written into the instruction
-      ;; stream - the code loads it from the literal vector instead, so the
-      ;; collector can move the object and only has to update one word.
-      (emit-literal c v reg)))))
+     ;; A heap object is loaded from the code object's literal vector, so the
+     ;; collector can move it and update one word.
+     (else (emit-literal c v reg)))))
 
 (define (emit-literal c v reg)
   (let* ((a (cx-asm c))
@@ -267,19 +243,16 @@
     (i-lw a reg $s1 off)))
 
 ;; ---------------------------------------------------------------- records
-;; The shape of a record and the functions that go with it are in macros.lisp,
+;; The shape of a record and its accessor functions come from macros.lisp,
 ;; because the interpreter needs them too. What is here is the open-coding: a
-;; call to one of those accessors becomes four instructions and no call, with
-;; the tag check the function does written out inline.
+;; call to an accessor becomes the tag check and one indexed instruction.
 ;;
-;; The check is three of the four: load slot 0, compare it with the type this
-;; code was compiled against, branch. The tag it wanted is left in t3 and the
-;; value it did not like is still in a0, so the trap can name both ends rather
-;; than give an address.
+;; The check loads slot 0, compares it with the type this code was compiled
+;; against, and branches. The tag it wanted is left in t3 and the value it
+;; was given is still in a0, so the trap can name both.
 ;;
-;; An `open` record - one others are built on - has no check to make. The
-;; indexed load still refuses anything that is not a record, which is exactly
-;; what the hand-numbered `%record-ref` did and all a list walker can ask for.
+;; An `open` record, one others are built on, has no check: the indexed load
+;; still refuses anything that is not a record.
 (define (emit-record-check c type open)
   (let ((a (cx-asm c)))
     (if open
@@ -288,7 +261,7 @@
           (i-ldxi a $t2 $a0 0 t-record)
           (emit-literal c type $t3)
           (i-beq a $t2 $t3 ok)
-          (i-li a $a7 trap-record)
+          (i-li a $a7 ecall-record)
           (i-ecall a)
           (asm-label a ok)))))
 
@@ -325,8 +298,8 @@
   (let ((p (cx-lookup c sym)))
     (if p (%cdr p) (list 'global sym))))
 
-;; A local is a frame slot, or - in a leaf - a register, and these three are
-;; the only places that know which.
+;; A local is a frame slot, or in a leaf a register. These three are the only
+;; places that know which.
 (define (load-local c n reg)
   (if (cx-leaf c)
       (i-mv (cx-asm c) reg (local-reg n))
@@ -337,11 +310,9 @@
       (i-mv (cx-asm c) (local-reg n) reg)
       (i-sw (cx-asm c) reg $s0 (local-off n))))
 
-;; Where this function's closure is. A framed function saved it at s0-12 and
-;; has to load it back; a leaf still has it in t0, because a leaf calls nothing
-;; and nothing else in a body touches t0. So a captured variable costs a leaf
-;; one instruction rather than two - and, more to the point, a function that
-;; captures can be a leaf at all.
+;; Where this function's closure is. A framed function saved it at s0-12; a
+;; leaf still has it in t0, because a leaf calls nothing and nothing else in
+;; a body touches t0.
 (define (closure-reg c scratch)
   (if (cx-leaf c)
       $t0
@@ -359,22 +330,17 @@
      ((%eq? kind 'boxed-free)
       (i-lobj a reg (closure-reg c $t6) (%* 4 (%+ clo-free (cadr loc))))
       (i-lref a reg reg 0))
-     ;; One instruction, off the register that says which instance is running.
      (else
       (let ((sym (cadr loc)))
         (note-global-ref sym)
         (emit-literal c sym $t6)
         (i-lw a reg $t6 (%* 4 sym-value)))))))
 
-;; Every global the compiler emits a reference to gets recorded, so the build
-;; can report a name that compiled code will call but that nothing defines.
-;; Without this the symptom is a jump to a nonsense address minutes later,
-;; with nothing left to point at.
+;; Every global the compiler emits a reference to while the name is still
+;; unbound is recorded, so a build can report a name compiled code will call
+;; but nothing defines.
 (define *global-refs* nil)
-;; Only a name that has no value yet can end up in `undefined-globals`, so only
-;; those are kept. The rest - nearly every reference, a call to something
-;; already defined - used to be looked for in the whole list first, and that
-;; made this the hottest function in a build.
+
 (define (note-global-ref sym)
   (if (%eq? (%symbol-value sym) *unbound*)
       (if (memq sym *global-refs*)
@@ -385,9 +351,9 @@
 (define (undefined-globals)
   (filter (lambda (s) (%eq? (%symbol-value s) *unbound*)) *global-refs*))
 
-;; Load a location's storage cell without following a box. Capturing a boxed
-;; variable has to grab the box itself: the closure and the frame have to go
-;; on sharing one cell, which is the entire point of boxing it.
+;; A location's storage cell, without following a box. Capturing a boxed
+;; variable takes the box itself, so that the closure and the frame go on
+;; sharing one cell.
 (define (emit-load-cell c loc reg)
   (let ((a (cx-asm c)) (kind (%car loc)))
     (cond
@@ -421,15 +387,14 @@
         (i-sw a reg $t6 (%* 4 sym-value)))))))
 
 ;; ---------------------------------------------------------------- allocation
-;; Inline cons. gp is the bump pointer and tp the limit, both held in registers
-;; for the life of the machine, so a fresh pair costs four instructions on the
-;; fast path plus one well-predicted branch.
+;; Inline cons. gp is the bump pointer and tp the limit, so a fresh pair costs
+;; four instructions on the fast path and one branch.
+;;
+;; `live` is a bitmask of the argument registers holding values that must
+;; survive a collection. It goes into t5 on the slow path only, and the
+;; refill stub stores it where the collector can read it, so the stack walker
+;; takes exactly the live registers and ignores the rest.
 (define (emit-cons c car-reg cdr-reg dst . live)
-  ;; `live` is a bitmask of the argument registers holding values that must
-  ;; survive a collection. It is written into t5 on the slow path only, and
-  ;; the stub stores it where the collector can read it: that is what lets the
-  ;; stack walker take exactly the live registers and ignore the rest, rather
-  ;; than guessing at sixteen saved words.
   (let ((a (cx-asm c))
         (ok (asm-gensym-label "cons"))
         (mask (if (%cons? live) (%car live) 3)))
@@ -444,11 +409,12 @@
     (i-addi a $gp $gp 8)))
 
 ;; ---------------------------------------------------------------- booleans
-;; A comparison that is not immediately branched on has to make a value.
-;; Turning the 0/1 from slt into nil/t branchlessly is cheaper than jumping.
+;; A test that is not branched on at once has to make a value. The raw 0 or 1
+;; a comparison leaves becomes nil or t without a branch.
+
+;; True when a0 is a heap object whose header type is `type`. The tag check
+;; comes first: reading a header off a fixnum would fault.
 (define (emit-type-test c type)
-  ;; True when a0 is a heap object whose header type is `type`. The tag check
-  ;; has to come first: reading a header off a fixnum would fault.
   (let ((a (cx-asm c)) (no (asm-gensym-label "nt")))
     (i-andi a $t2 $a0 7)
     (i-addi a $t2 $t2 -4)
@@ -461,12 +427,10 @@
     (asm-label a no)
     (emit-bool-from-flag c $t3 $a0)))
 
+;; The literal 't is resolved when this file is read, so it is the one symbol
+;; the source means whatever package is current at compile time. czero.eqz
+;; keeps it when the flag is set and gives zero, which is nil, when not.
 (define (emit-bool-from-flag c flag-reg dst)
-  ;; 't rather than (intern-string "t"): the symbol has to be the one this
-  ;; source means, resolved once when this file was read, not whichever one
-  ;; the package that happens to be current would give us at compile time.
-  ;; czero.eqz is a select with no branch and no flags register: t stays t
-  ;; when the flag is set, and becomes zero - which is nil - when it is not.
   (let ((a (cx-asm c)) (tsym 't))
     (emit-literal c tsym dst)
     (i-czero-eqz a dst dst flag-reg)))
@@ -475,29 +439,24 @@
 (define (emit-prologue c nreq variadic)
   (let ((a (cx-asm c)) (ok (asm-gensym-label "arity")))
     ;; Arity is checked before the frame exists, so a bad call cannot corrupt
-    ;; anything on the way to the diagnostic.
+    ;; anything on the way to the report.
     (i-li a $t2 nreq)
     (if variadic (i-bge a $t1 $t2 ok) (i-beq a $t1 $t2 ok))
-    (i-li a $a7 trap-arity)
+    (i-li a $a7 ecall-arity)
     (i-ecall a)
     (asm-label a ok)
-    ;; A leaf builds nothing at all. It keeps its caller's literal vector in
-    ;; s11 and picks up its own, and that is the whole of its prologue: sp
-    ;; does not move, s0 still names the caller's frame, ra is in no danger
-    ;; because nothing here will overwrite it, and its locals are registers
-    ;; nothing else in the machine uses.
+    ;; A leaf builds nothing: it keeps its caller's code object in s11 and
+    ;; picks up its own. sp does not move, s0 still names the caller's frame,
+    ;; and ra survives because nothing here overwrites it.
     (if (cx-leaf c)
         (begin
           (i-mv a $lit-save $s1)
           (i-lobj a $s1 $t0 (%* 4 clo-code)))
         (begin
-          ;; A function calling itself by name knows the answer to every
-          ;; question the general call sequence asks: which closure (the one
-          ;; it is running), how many arguments (the right number, or this
-          ;; would not compile), and where the code is (here). So it jumps
-          ;; straight in, past the check it would only be proving to itself.
-          ;; Variadic functions are left alone, because the rest-list code
-          ;; downstream reads the count out of t1.
+          ;; A call by a function to its own name can skip the check above:
+          ;; the closure is the one in this frame and the count is known to
+          ;; be right. Variadic functions are left alone, because the
+          ;; rest-list code reads the count out of t1.
           (if variadic
               nil
               (begin (set-cx-self-label! c ok) (set-cx-self-arity! c nreq)))
@@ -509,9 +468,9 @@
           (i-sw a $t0 $t3 -12)
           (i-sw a $s1 $t3 -16)
           (i-mv a $s0 $t3)
-          ;; Point s1 at this function's own literal vector, which lives in
-          ;; the code object hanging off the closure. Every constant, symbol
-          ;; and inner code object the body mentions is one load from here.
+          ;; s1 is this function's own code object, hanging off the closure.
+          ;; Every constant, symbol and inner code object the body mentions
+          ;; is one load from there.
           (i-lobj a $s1 $t0 (%* 4 clo-code))))))
 
 (define (emit-epilogue c)
@@ -525,17 +484,15 @@
           (i-mv a $sp $s0)
           (i-mv a $s0 $t3)))))
 
+;; Once every local is known: size the frame and patch the prologue. A leaf
+;; has no frame, and instead has its assumption checked.
 (define (finish-frame c)
-  ;; Now that every local is known, size the frame and patch the single
-  ;; instruction in the prologue that mentions it. A leaf has no frame and
-  ;; nothing to patch - but it does have an assumption to check.
   (if (cx-leaf c) (check-leaf c) (size-frame c)))
 
-;; The pre-pass decides leaf-ness from the source, and a source pre-pass can
-;; be wrong. This looks at what actually came out: if anything in a leaf's own
-;; code writes ra, then ra does not survive after all and the function would
-;; return to the wrong place. A build failure is the right outcome; a silent
-;; miscompile of the return address is the worst one in the machine.
+;; The pre-pass decides leaf-ness from the source, and could be wrong. This
+;; reads the code that came out: if anything in a leaf's own code writes ra,
+;; the function would return to the wrong place, and a build failure is the
+;; right outcome.
 (define (check-leaf c)
   (let* ((a (cx-asm c))
          (buf (asm-buf a))
@@ -560,7 +517,7 @@
                       (error "compile: a leaf that calls" (cx-name c))
                       nil)
                   nil)
-              ;; and c.jal, which nothing emits but which would be a call
+              ;; c.jal, which nothing emits
               (if (%= #x2001 (%logand lo #xe003))
                   (error "compile: a leaf that calls" (cx-name c))
                   nil)
@@ -569,30 +526,26 @@
 
 (define (size-frame c)
   (let* ((a (cx-asm c))
-         ;; +15 rather than +7: round up to eight and leave one spare word
-         ;; below the last local, so a stray store cannot reach the caller.
+         ;; Rounded up to eight with one spare word below the last local, so
+         ;; a stray store cannot reach the caller.
          (frame (%logand (%+ (%+ frame-fixed (%* 4 (cx-maxlocals c))) 15) -8))
          (off (cx-framefix c))
          (save (asm-len a)))
     (if (%> frame 2000) (error "compile: frame too large in" (cx-name c)) nil)
-    (asm-set-len! a off)
+    (set-asm-len! a off)
     (i-addi-w a $sp $sp (%- 0 frame))
-    (asm-set-len! a save)
+    (set-asm-len! a save)
     frame))
 
 ;; ---------------------------------------------------------------- intrinsics
-;; Everything the compiler knows about a name lives on the symbol, in the
-;; function slot, as (intrinsic . aliases):
+;; What the compiler knows about a name lives on the symbol, in the function
+;; slot, as (intrinsic . aliases):
 ;;
 ;;   intrinsic   (arity . emitter), or nil
 ;;   aliases     ((nargs . target-symbol) ...)
 ;;
-;; The emitter is handed the context with the arguments already in a0, a1,
-;; and leaves the result in a0.
-;;
-;; This used to be two lists, ninety entries between them, walked at every
-;; call site the compiler looked at. A symbol is a unique object with four
-;; slots and two of them spare, so the answer was already one load away.
+;; The emitter is handed the context with the arguments in a0, a1, ... and
+;; leaves the result in a0.
 (define (compile-info sym) (%symbol-function sym))
 
 (define *inline-syms* nil)   ; every symbol carrying one, so setup can reset
@@ -606,11 +559,10 @@
           (set! *inline-syms* (%cons sym *inline-syms*))
           new))))
 
+;; The (arity . emitter) to open-code a call with, or nil. A symbol that is
+;; itself an intrinsic wins, and an arity mismatch there is an error; an
+;; ordinary name is open-coded only at the argument count its alias names.
 (define (inline-entry sym nargs)
-  ;; The (arity . emitter) to open-code this call with, or nil. A symbol that
-  ;; is itself an intrinsic wins outright, and an arity mismatch there is an
-  ;; error rather than a silent call; an ordinary name only open-codes at the
-  ;; argument count its alias was declared for.
   (let ((ci (compile-info sym)))
     (if (%cons? ci)
         (if (%car ci)
@@ -619,21 +571,16 @@
               (if p (%car (compile-info (%cdr p))) nil)))
         nil)))
 
-;; Ordinary names that mean an intrinsic when called with the right number of
-;; arguments. Without this, (< i n) in a loop calls the variadic `<`, which
-;; conses a rest list on every iteration just to compare two numbers - the
-;; single biggest cost in normal-looking Lisp.
+;; Ordinary names that mean an intrinsic at the right argument count, so
+;; that (< i n) in a loop is one instruction rather than a call to the
+;; variadic `<`. Redefining one of these does not affect code already
+;; compiled against it.
 ;;
-;; The price is that redefining one of these does not affect code already
-;; compiled against it, which is the usual bargain for an open-coded operator.
+;; `+`, `-` and `*` are the trapping forms, so two-argument arithmetic
+;; promotes to a bignum the way the variadic ones do. `ash` has no alias:
+;; `%ash` takes the shift count modulo 32, which is wrong for (ash 1 100).
+;; `peek` and `poke` have none: a tagged load drops bit 31.
 (define *inline-aliases*
-  ;; A quoted literal rather than a call to `list`: it is data, and building
-  ;; it with a call would need more arguments than the calling convention
-  ;; passes in registers.
-  ;; `+`, `-` and `*` are the trapping forms, so two-argument arithmetic
-  ;; promotes exactly the way the variadic ones do. `number?` is *not* here
-  ;; any more: it used to mean `%fixnum?`, which stopped being the same
-  ;; question the moment a number could also be a bignum.
   '((+ 2 %+o) (- 2 %-o) (* 2 %*o) (/ 2 %/) (mod 2 %mod) (rem 2 %rem)
     (= 2 %=) (< 2 %<) (> 2 %>) (<= 2 %<=) (>= 2 %>=)
     (eq? 2 %eq?) (null? 1 %null?)
@@ -650,23 +597,9 @@
     (bytes-length 1 %bytes-length)
     (char->integer 1 %char->int) (integer->char 1 %int->char)
     (logand 2 %logand) (logior 2 %logior) (logxor 2 %logxor)
-    ;; `ash` is not an alias any more. `%ash` is one instruction and takes the
-    ;; shift count modulo thirty-two, which is the machine's rule and the
-    ;; right one for a primitive - but it made `(ash 1 100)` answer 16, and a
-    ;; quietly wrong answer is worse than a slow one. `lsh` keeps the alias:
-    ;; it is the raw logical shift, and nothing about a bignum is raw.
     (lognot 1 %lognot) (lsh 2 %lsh)
-    ;; `peek` and `poke` are not aliases any more - a tagged load tags, and
-    ;; tagging drops bit 31, so `(peek a)` of a word with its top bit set was
-    ;; a silent wrong answer. `%ld-fixnum` and `%st-fixnum!` are still the raw
-    ;; one-instruction forms, and still the right thing for an address.
     (peek8 1 %ld-byte) (poke8 2 %st-byte!)
     (min 2 %min) (max 2 %max) (min2 2 %min) (max2 2 %max)))
-
-
-(define (emit-load-addr c reg)
-  ;; a0 holds a tagged fixnum address; leave the raw address in reg.
-  (i-srai (cx-asm c) reg $a0 1))
 
 (define (definline name arity fn)
   (%set-car! (compile-info! name) (%cons arity fn)))
@@ -676,26 +609,15 @@
     (%set-cdr! ci (%cons (%cons nargs target) (%cdr ci)))))
 
 ;; ---------------------------------------------------------------- constant argument
-;; A second operand that is written down rather than computed needs no
-;; register to hold it and no instruction to put it there - and for the
-;; shifts it needs no run-time decision about which way to go, which is what
-;; the general form spends most of its ten instructions and two branches on.
-;;
-;; This matters most in the collector, where a bitmap index is
-;; `(%lsh (%- p gc-heap-lo) -3)`: three operators, every one of them with a
-;; constant, and every one of them paying for a register it did not need.
-;;
-;; Entries are (name fits? emitter); the emitter is handed the compiler and
-;; the untagged constant, with the first argument already in a0.
+;; A second operand that is written down needs no register and no instruction
+;; to load it, and a shift by a written-down amount needs no run-time choice
+;; of direction. Entries are (name fits? emitter); the emitter is handed the
+;; context and the constant, with the first argument in a0.
 (define *const-arg* nil)
 
-;; The bound is on the constant, not on the doubled constant: a fixnum is
-;; thirty-one bits, so testing 2k for range would itself overflow and wrap a
-;; large constant round into a small one. 2k and 2k+1 both fit a twelve-bit
-;; signed immediate exactly when k is in [-1024, 1023].
-;; The immediate is the constant itself now rather than the tagged constant,
-;; so the range is the instruction's twelve signed bits - and negating it for
-;; a subtraction has to stay inside them too.
+;; The custom-3 immediate is the constant itself, doubled by the instruction,
+;; so the range is the twelve signed bits of the field, and the negation a
+;; subtraction uses has to fit as well.
 (define (fits-tagged-imm? k) (if (%>= k -2047) (%< k 2048) nil))
 (define (shift-amount? k) (if (%> k -32) (%< k 32) nil))
 
@@ -713,20 +635,16 @@
   (%funcall (caddr e) c (cadr args))
   (if tail (emit-return c) nil))
 
-;; A tagged fixnum is 2n+1, so adding the constant k means adding 2k: the two
-;; tag bits cancel and the correcting `addi` the general form needs disappears
-;; along with the `li`.
 (define (emit-add-const c k) (i-faddi (cx-asm c) $a0 $a0 k))
 (define (emit-sub-const c k) (i-faddi (cx-asm c) $a0 $a0 (%- 0 k)))
-;; and / or keep the low bit set when both sides have it, so the constant
-;; goes in tagged and the answer comes out tagged. (xor does not, which is
-;; why it is not here: it would need the correcting `ori` back again.)
+;; and and or keep the tag bit when both sides have it, so the constant goes
+;; in tagged and the answer comes out tagged. xor would need a correcting
+;; ori, so it is not here.
 (define (emit-and-const c k) (i-fandi (cx-asm c) $a0 $a0 k))
 (define (emit-or-const c k) (i-fori (cx-asm c) $a0 $a0 k))
 
+;; One instruction, which does its own untagging and retagging.
 (define (emit-shift-const c k arith)
-  ;; One instruction: the direction is known here, so nothing branches, and
-  ;; the instruction does its own untagging and retagging.
   (let ((a (cx-asm c)))
     (if (%= k 0)
         nil
@@ -747,13 +665,10 @@
               (list '%ash shift-amount? emit-ash-const))))
 
 ;; ---------------------------------------------------------------- constant index
-;; An index that is written down rather than computed - which is every record
-;; field and every closure slot - does not need a
-;; register to hold it or an instruction to put it there. The immediate form
-;; of the custom-1 opcode carries indices 0 to 31 in the instruction itself.
-;;
-;; Entries are (name type store?), and the index is always the second
-;; argument, for the load and the store both.
+;; An index that is written down, which every record field and closure slot
+;; is, goes in the instruction: the immediate form of custom-1 carries
+;; indices 0 to 31. Entries are (name type store?); the index is the second
+;; argument for the load and the store both.
 (define *indexed-imm* nil)
 
 (define (indexed-imm-entry h args)
@@ -773,7 +688,6 @@
         (i (cadr args)))
     (if (caddr e)
         (begin
-          ;; The object and the value; the index is in the instruction.
           (compile-args c (list (%car args) (caddr args)) 2)
           (i-stxi a $a1 $a0 i ty)
           (i-mv a $a0 $a1))
@@ -782,10 +696,9 @@
           (i-ldxi a $a0 $a0 i ty)))
     (if tail (emit-return c) nil)))
 
+;; This runs once in the forge and again on the machine, so it starts by
+;; clearing every emitter it left on a symbol before.
 (define (setup-intrinsics)
-  ;; Start from clean: this runs once in the forge and again on the machine,
-  ;; and a stale emitter left on a symbol would be a compiler that quietly
-  ;; disagrees with itself.
   (dolist (s *inline-syms*) (%set-symbol-function! s nil))
   (set! *inline-syms* nil)
   (set! *indexed-imm*
@@ -795,8 +708,7 @@
   (setup-const-arg)
 
   ;; ---- pairs ----
-  ;; One instruction each, and the tag is checked on the way past: these are
-  ;; the custom-0 opcodes, not plain loads and stores.
+  ;; One custom-0 instruction each, with the tag checked on the way past.
   (definline '%car 1 (lambda (c) (i-car (cx-asm c) $a0 $a0)))
   (definline '%cdr 1 (lambda (c) (i-cdr (cx-asm c) $a0 $a0)))
   (definline '%set-car! 2
@@ -806,29 +718,23 @@
   (definline '%cons 2 (lambda (c) (emit-cons c $a0 $a1 $a0)))
 
   ;; ---- fixnum arithmetic ----
-  ;; One checked instruction each. These used to be two to five unchecked
-  ;; ones, and the check is the point: (+ "abc" 2) returned a *cons*, because
-  ;; a string is an object pointer with its low three bits equal to four,
-  ;; adding a tagged two adds four, and four plus four is the pair tag. A
-  ;; pointer into the middle of a string, fabricated with one addition, and
-  ;; car would read it.
+  ;; One checked instruction each. The operands are checked to be fixnums,
+  ;; and the trap handler widens an operation with a bignum in it.
   (definline '%+ 2 (lambda (c) (i-fadd (cx-asm c) $a0 $a0 $a1)))
   (definline '%- 2 (lambda (c) (i-fsub (cx-asm c) $a0 $a0 $a1)))
   (definline '%* 2 (lambda (c) (i-fmul (cx-asm c) $a0 $a0 $a1)))
-  ;; The same three, but they trap rather than wrap when the answer does not
-  ;; fit. This is what `+`, `-` and `*` are made of, and the trap handler
-  ;; widens the operation into a bignum and resumes - so the cost of an
-  ;; integer that fits is still one instruction, and nothing on the fast path
-  ;; asks any questions.
+  ;; The same three, trapping rather than wrapping when the answer does not
+  ;; fit. `+`, `-` and `*` are made of these: the trap handler widens the
+  ;; operation into a bignum and resumes, so an integer that fits costs one
+  ;; instruction.
   (definline '%+o 2 (lambda (c) (i-faddo (cx-asm c) $a0 $a0 $a1)))
   (definline '%-o 2 (lambda (c) (i-fsubo (cx-asm c) $a0 $a0 $a1)))
   (definline '%*o 2 (lambda (c) (i-fmulo (cx-asm c) $a0 $a0 $a1)))
   (definline '%/ 2 (lambda (c) (i-fdiv (cx-asm c) $a0 $a0 $a1)))
   (definline '%rem 2 (lambda (c) (i-frem (cx-asm c) $a0 $a0 $a1)))
+  ;; Euclidean: the sign of the result follows the divisor.
   (definline '%mod 2
     (lambda (c)
-      ;; Euclidean: the sign of the result follows the divisor. Tagging keeps
-      ;; the sign, so the test is the one it always was.
       (let ((a (cx-asm c)) (done (asm-gensym-label "mod")))
         (i-frem a $t2 $a0 $a1)
         (i-li a $t3 1)                  ; the fixnum zero
@@ -849,9 +755,8 @@
         (i-li a $t2 -1)                 ; the fixnum -1 is also the word -1
         (i-fxor a $a0 $a0 $t2))))
 
-  ;; A shift whose direction is only known at run time still needs its branch.
-  ;; What it no longer needs is untagging both sides and retagging the answer.
-  ;; A shift by a written-down amount is one instruction; see emit-shift-const.
+  ;; A shift whose direction is only known at run time branches on it. A
+  ;; shift by a written-down amount is one instruction; see emit-shift-const.
   (definline '%ash 2
     (lambda (c)
       (let ((a (cx-asm c)) (right (asm-gensym-label "ash"))
@@ -878,18 +783,14 @@
         (asm-label a done))))
 
   ;; ---- comparisons producing a value ----
+  ;; `%eq?` compares identity on values of any kind. The numeric comparisons
+  ;; check their operands and widen through the trap handler.
   (definline '%eq? 2
     (lambda (c)
       (let ((a (cx-asm c)))
         (i-sub a $t2 $a0 $a1)
         (i-seqz a $t2 $t2)
         (emit-bool-from-flag c $t2 $a0))))
-  ;; Checked, and no dearer than the unchecked slt they replace: a fixnum is
-  ;; 2n+1, so the order is the same order either way.
-  ;;
-  ;; %eq? above is deliberately not one of these. It compares identity, on
-  ;; values of any kind at all, and asking it for two numbers would be asking
-  ;; it the wrong question.
   (definline '%< 2
     (lambda (c)
       (let ((a (cx-asm c)))
@@ -929,9 +830,9 @@
       (let ((a (cx-asm c)))
         (i-andi a $t2 $a0 1)
         (emit-bool-from-flag c $t2 $a0))))
+  ;; a cons is a non-nil word with the low three bits clear
   (definline '%cons? 1
     (lambda (c)
-      ;; a cons is a non-nil word with the low three bits clear
       (let ((a (cx-asm c)))
         (i-andi a $t2 $a0 7)
         (i-seqz a $t2 $t2)
@@ -953,7 +854,7 @@
         (i-seqz a $t2 $t2)
         (emit-bool-from-flag c $t2 $a0))))
 
-  ;; A predicate for one object type: a heap object whose header says so.
+  ;; A heap object whose header says so.
   (definline '%string? 1 (lambda (c) (emit-type-test c t-string)))
   (definline '%vector? 1 (lambda (c) (emit-type-test c t-vector)))
   (definline '%bytes? 1 (lambda (c) (emit-type-test c t-bytes)))
@@ -978,19 +879,16 @@
         (i-srli a $t2 $t2 8)
         (i-slli a $a0 $t2 1)
         (i-ori a $a0 $a0 1))))
-  ;; One instruction, and it checks the tag, the index and the bound. Type 0
-  ;; means any object at all: a slot is a slot, whatever is holding it.
+  ;; One instruction that checks the tag, the index and the bound. Type 0
+  ;; means any object: a slot is a slot, whatever holds it. That is right for
+  ;; the few places that reach into a symbol, a closure or a code object by
+  ;; index; anything that knows it holds a record says so with `%record-ref`.
   (definline '%slot 2
     (lambda (c) (i-ldx (cx-asm c) $a0 $a0 $a1 0)))
   (definline '%set-slot! 3
     (lambda (c)
       (i-stx (cx-asm c) $a2 $a0 $a1 0)
       (i-mv (cx-asm c) $a0 $a2)))
-  ;; A record, and only a record. `%slot` above will take any object at all,
-  ;; which is right for the handful of places that reach into a symbol, a
-  ;; closure or a code object by index - and wrong everywhere else, because it
-  ;; means `(win-get "abc" 1)` reads a string's bytes back as a window's y
-  ;; coordinate. Anything that knows it is holding a record says so.
   (definline '%record-ref 2
     (lambda (c) (i-ldx (cx-asm c) $a0 $a0 $a1 t-record)))
   (definline '%record-set! 3
@@ -998,8 +896,7 @@
       (i-stx (cx-asm c) $a2 $a0 $a1 t-record)
       (i-mv (cx-asm c) $a0 $a2)))
 
-  ;; These name the type they require, so (vector-ref "abc" 0) is a trap and
-  ;; not a plausible-looking word out of the middle of a string.
+  ;; These name the type they require, so (vector-ref "abc" 0) traps.
   (definline '%vector-ref 2
     (lambda (c) (i-ldx (cx-asm c) $a0 $a0 $a1 t-vector)))
   (definline '%vector-set! 3
@@ -1067,9 +964,8 @@
         (i-ori a $a0 $a0 2))))
 
   ;; ---- raw memory ----
-  ;; A word or a byte at a tagged address. This was four instructions - strip
-  ;; the tag off the address, load, shift the word up, put a tag back on - and
-  ;; the collector's inner loops are made of little else.
+  ;; A word or a byte at an address held as a fixnum. The loaded word comes
+  ;; back as a fixnum, so bit 31 is lost; `%ld-word` keeps the word as it is.
   (definline '%ld-byte 1 (lambda (c) (i-tlb (cx-asm c) $a0 $a0 0)))
   (definline '%ld-half 1
     (lambda (c)
@@ -1094,8 +990,8 @@
     (lambda (c)
       (i-tsw (cx-asm c) $a1 $a0 0)
       (i-mv (cx-asm c) $a0 $a1)))
-  ;; Read and write a slot without retagging, for moving raw tagged words
-  ;; around, and for reaching the machine's registers from Lisp.
+  ;; A word read or written without retagging, for moving tagged words
+  ;; around and for reaching the machine's saved registers.
   (definline '%ld-word 1
     (lambda (c)
       (let ((a (cx-asm c)))
@@ -1114,31 +1010,10 @@
         (i-ori a $a0 $a0 1))))
   (definline '%from-addr 1
     (lambda (c) (i-srai (cx-asm c) $a0 $a0 1)))
-  (definline '%global 1
-    (lambda (c)
-      (let ((a (cx-asm c)))
-        (i-srai a $t2 $a0 1)
-        (i-lw a $t2 $t2 0)
-        (i-slli a $a0 $t2 1)
-        (i-ori a $a0 $a0 1))))
-  (definline '%set-global! 2
-    (lambda (c)
-      (let ((a (cx-asm c)))
-        (i-srai a $t2 $a0 1)
-        (i-srai a $t3 $a1 1)
-        (i-sw a $t3 $t2 0)
-        (i-mv a $a0 $a1))))
 
   ;; ---- min and max ----
-  ;; A fixnum is 2n+1, which preserves signed order, so these are right on
-  ;; tagged values without untagging either side and retagging the answer.
-  ;; A tagged fixnum keeps its order under a plain signed compare, so these
-  ;; used to be the bare `min` and `max` - one instruction, and no check. A
-  ;; bignum is a pointer, and comparing one of those as a number compares
-  ;; where it happens to live. So the comparison is `flt`, which checks its
-  ;; operands and widens through the trap handler when it has to, and the
-  ;; choice is made with two conditional zeroes and an or - still branchless,
-  ;; and now right for both kinds of number.
+  ;; The comparison is `flt`, which checks its operands and widens through the
+  ;; trap handler, and the choice is two conditional zeroes and an or.
   (definline '%min 2
     (lambda (c)
       (let ((a (cx-asm c)))
@@ -1155,14 +1030,9 @@
         (i-or a $a0 $a0 $t3))))
 
   ;; The top sixteen bits of the product of two sixteen-bit numbers. The
-  ;; bignum kernel works in halves because a fixnum has thirty-one bits, and a
-  ;; product of two halves has thirty-two - one too many - so it is taken in
-  ;; two pieces: the bottom half comes out of an ordinary wrapping `%*`, which
-  ;; keeps its low bits exactly, and the top half comes from here.
-  ;;
-  ;; No new instruction: this is the base `mul`, which the machine has had all
-  ;; along and which nothing else emits, because every other multiply in the
-  ;; system is a fixnum one.
+  ;; bignum kernel works in halves: a product of two halves has thirty-two
+  ;; bits, one more than a fixnum, so the bottom half comes from a wrapping
+  ;; `%*` and the top half from here. This is the base `mul`.
   (definline '%mulhi16 2
     (lambda (c)
       (let ((a (cx-asm c)))
@@ -1182,15 +1052,11 @@
         (i-slli a $a0 $t2 1)
         (i-ori a $a0 $a0 1))))
 
-  ;; A bit array at a raw address, indexed by bit number. The collector's mark
-  ;; and pin maps are the customers, and between them they are the busiest
-  ;; code in the system - a mark test was a call, four shifts and a mask.
-  ;;
-  ;; The map is addressed a word at a time rather than a byte at a time, which
-  ;; is what makes the low five bits of the index land exactly where `bext`
-  ;; and `bset` look for them. Same bits either way on a little-endian
-  ;; machine: bit i of the word at (i >> 5) is bit i & 7 of the byte at
-  ;; (i >> 3), so the blitter can still clear a map by the byte.
+  ;; A bit array at a raw address, indexed by bit number: the collector's mark
+  ;; and pin maps. The map is addressed a word at a time, which puts the low
+  ;; five bits of the index where `bext` and `bset` look for them. On a
+  ;; little-endian machine bit i of the word at (i >> 5) is bit i & 7 of the
+  ;; byte at (i >> 3), so the blitter can still clear a map by the byte.
   (definline '%bit-ref 2
     (lambda (c)
       (let ((a (cx-asm c)))
@@ -1218,12 +1084,11 @@
     (lambda (c) (i-lobj (cx-asm c) $a0 $a0 (%* 4 sym-name))))
   (definline '%symbol-value 1
     (lambda (c) (i-lobj (cx-asm c) $a0 $a0 (%* 4 sym-value))))
-  ;; What a reference to this name would see, and how to change it. On the
-  ;; machine that is the symbol's value cell and nothing else, so these two
-  ;; are `%symbol-value` again. They are spelled apart because the bootstrap
-  ;; interpreter keeps its globals in a map of its own and its symbols' cells
-  ;; hold the compiled definitions bound for the image - two worlds in one
-  ;; heap, and a fluid binding has to land in the one doing the reading.
+  ;; What a reference to this name sees, and how to change it. On the machine
+  ;; that is the symbol's value cell, so these are `%symbol-value` again. They
+  ;; are spelled apart because the forge's interpreter keeps its own globals
+  ;; in a map of its own, and a fluid binding has to land in the world doing
+  ;; the reading.
   (definline '%fluid-value 1
     (lambda (c) (i-lobj (cx-asm c) $a0 $a0 (%* 4 sym-value))))
   (definline '%set-fluid-value! 2
@@ -1254,31 +1119,30 @@
       (i-mv (cx-asm c) $a0 $a1)))
 
   ;; ---- machine ----
-  ;; The collector needs to know where the stack currently is, so it can scan
-  ;; from there upwards for anything that looks like a pointer.
-  ;; Which task is running. Dedicated for the life of the machine, like the
-  ;; cons pointers, and swapped by the context switch for nothing, because the
-  ;; trap stub was already saving all thirty two registers - so Exec needs no
-  ;; variable for it, and a task's own state is one instruction away wherever
-  ;; it is standing. It is nil before there is an Exec to have tasks.
+  ;; Which task is running: s2, dedicated for the life of the machine like the
+  ;; cons pointers, and switched with the rest of the registers. It is nil
+  ;; before there is an Exec.
   (definline '%this-task 0 (lambda (c) (i-mv (cx-asm c) $a0 $s2)))
   (definline '%set-this-task! 1
     (lambda (c) (i-mv (cx-asm c) $s2 $a0)))
 
+  ;; The stack pointer and the frame pointer, as fixnums. Between them they
+  ;; are the whole root-finding interface the collector needs.
   (definline '%stack-pointer 0
     (lambda (c)
       (let ((a (cx-asm c)))
         (i-slli a $a0 $sp 1)
         (i-ori a $a0 $a0 1))))
+  (definline '%frame-pointer 0
+    (lambda (c)
+      (let ((a (cx-asm c)))
+        (i-slli a $a0 $s0 1)
+        (i-ori a $a0 $a0 1))))
 
-  ;; Write the cons allocator's current run back to memory. gp and tp are the
-  ;; live bump pointer and its limit; anything that wants to look at the heap
-  ;; from outside - saving an image, mostly - has to see them there.
-  ;;
-  ;; It deliberately leaves lg-cons-ptr alone. That is the high water mark,
-  ;; the highest address ever handed out, and gp is only how far the current
-  ;; run has got: lowering the mark to gp would leave every live pair above it
-  ;; out of the saved image, and out of the collector's sweep.
+  ;; Write the cons allocator's current run to memory, for anything that
+  ;; looks at the heap from outside, such as saving an image. lg-cons-ptr is
+  ;; left alone: it is the high-water mark, and gp is only how far the current
+  ;; run has got.
   (definline '%sync-cons-run 0
     (lambda (c)
       (let ((a (cx-asm c)))
@@ -1286,9 +1150,8 @@
         (i-sw a $tp $zero lg-cons-run-end)
         (i-mv a $a0 $zero))))
 
-  ;; Reload the cons allocator's run from memory. The compactor has to call
-  ;; this: gp and tp are live registers describing a region of the old heap,
-  ;; and after everything has slid down they describe nothing.
+  ;; Reload the run from memory. The compactor needs this: after everything
+  ;; has moved, gp and tp describe a region of the old heap.
   (definline '%reload-cons-run 0
     (lambda (c)
       (let ((a (cx-asm c)))
@@ -1296,9 +1159,9 @@
         (i-lw a $tp $zero lg-cons-run-end)
         (i-mv a $a0 $zero))))
 
-  ;; Raise a synchronous trap with a reason in a7. This is how a task asks to
-  ;; be rescheduled: the switch has to happen inside the trap handler, where
-  ;; the whole register set has already been saved.
+  ;; A synchronous trap with a reason in a7. This is how a task asks to be
+  ;; rescheduled: the switch happens inside the trap handler, where the whole
+  ;; register set is already saved.
   (definline '%ecall 1
     (lambda (c)
       (let ((a (cx-asm c)))
@@ -1307,43 +1170,31 @@
         (i-mv a $a0 $zero))))
 
   ;; Point mscratch at a register context. The trap stub restores from
-  ;; whatever mscratch names on its way out, so this one instruction is the
-  ;; entire context switch.
-  (definline '%set-context 1
+  ;; whatever mscratch names on its way out, so this is the context switch.
+  (definline '%set-context! 1
     (lambda (c)
       (let ((a (cx-asm c)))
         (i-srai a $t2 $a0 1)
         (i-csrrw a $zero csr-mscratch $t2)
         (i-mv a $a0 $zero))))
 
-  ;; Let the timer and the chips interrupt us.
-  (definline '%enable-timer 0
+  ;; Let the timer, the chips and software interrupts through.
+  (definline '%enable-interrupt-lines 0
     (lambda (c)
       (let ((a (cx-asm c)))
         (i-li a $t2 2184)              ; MTIE | MEIE | MSIE
         (i-csrrs a $zero csr-mie $t2)
         (i-mv a $a0 $zero))))
 
-  ;; Stop the processor until something interrupts it. The console reader
-  ;; uses this rather than spinning, so an idle machine costs nothing.
-  (definline '%wait-for-input 0
+  ;; Stop the processor until something interrupts it.
+  (definline '%wait-for-interrupt 0
     (lambda (c)
       (let ((a (cx-asm c)))
         (i-wfi a)
         (i-mv a $a0 $zero))))
 
-  ;; The retired-instruction count, narrowed to thirty bits so that it is a
-  ;; fixnum. Differences up to 2^30 cycles - about a second of machine time -
-  ;; come out right, which is what timing anything actually needs.
-  ;; The frame pointer, so the collector can start walking the chain. Paired
-  ;; with %stack-pointer, these two are the entire root-finding interface the
-  ;; compiler has to provide.
-  (definline '%frame-pointer 0
-    (lambda (c)
-      (let ((a (cx-asm c)))
-        (i-slli a $a0 $s0 1)
-        (i-ori a $a0 $a0 1))))
-
+  ;; The cycle counter, narrowed to thirty bits so that it is a fixnum.
+  ;; Differences up to 2^30 cycles come out right.
   (definline '%cycles 0
     (lambda (c)
       (let ((a (cx-asm c)))
@@ -1354,8 +1205,7 @@
         (i-ori a $a0 $a0 1))))
 
   ;; The lowest address the stack pointer may reach before the processor
-  ;; faults - see `task-stack-limit` in exec.lisp. An address held as a
-  ;; fixnum, the way a task record holds the bounds of its stack.
+  ;; faults; see `task-stack-limit` in exec.lisp. An address held as a fixnum.
   (definline '%set-stack-limit! 1
     (lambda (c)
       (let ((a (cx-asm c)))
@@ -1374,12 +1224,9 @@
         (i-srai a $t2 $a0 1)
         (i-li a $t3 mmio-base)
         (i-sw a $t2 $t3 0))))
-  ;; Turning interrupts off answers whether they were on, because the
-  ;; instruction that does it computes that for free and the only question is
-  ;; whether the answer is kept. Keeping it is what makes a critical section
-  ;; nestable without a counter anybody has to agree about: every caller puts
-  ;; back what it found, and nobody can turn interrupts on underneath somebody
-  ;; who wanted them off.
+  ;; Turning interrupts off answers whether they were on, which is what makes
+  ;; a critical section nestable without a counter: every caller puts back
+  ;; what it found.
   (definline '%disable 0
     (lambda (c)
       (let ((a (cx-asm c)))
@@ -1388,9 +1235,8 @@
         (i-andi a $a0 $a0 1)
         (i-slli a $a0 $a0 1)
         (i-ori a $a0 $a0 1))))
-  ;; Put them back the way `%disable` found them. Branchless: the saved fixnum
-  ;; becomes the MIE bit or zero, and setting no bits is a write of what was
-  ;; already there.
+  ;; Put them back the way `%disable` found them. The saved fixnum becomes
+  ;; the MIE bit or zero, and setting no bits changes nothing.
   (definline '%restore-interrupts 1
     (lambda (c)
       (let ((a (cx-asm c)))
@@ -1399,50 +1245,34 @@
         (i-csrrs a $zero csr-mstatus $a0)
         (i-mv a $a0 $zero))))
   ;; A trap returns through mret, which puts back the interrupt state the
-  ;; faulting code had. An error abandons that code, so it must not inherit its
-  ;; critical section: this sets the bit mret will restore from. The immediate
-  ;; form of the CSR instructions only carries five bits and this one is bit
-  ;; seven, so it goes through a register.
+  ;; faulting code had. An error abandons that code and must not inherit its
+  ;; critical section, so this sets the bit mret restores from. The immediate
+  ;; form of the CSR instructions carries five bits and this is bit seven, so
+  ;; it goes through a register.
   (definline '%enable-after-trap 0
     (lambda (c)
       (let ((a (cx-asm c)))
         (i-li a $t2 128)
         (i-csrrs a $zero csr-mstatus $t2)
         (i-mv a $a0 $zero))))
-  ;; Unconditional, for the two places that are establishing a state rather
-  ;; than restoring one: the kernel starting up, and an error unwinding to a
-  ;; prompt with no idea what it interrupted.
+  ;; Unconditional, for the places that establish a state rather than
+  ;; restore one: the kernel starting up, and a task that ends.
   (definline '%enable 0
     (lambda (c)
       (let ((a (cx-asm c)))
         (i-csrrsi a $zero csr-mstatus 8)
         (i-mv a $a0 $zero))))
 
-  ;; And the ordinary names that mean one of the above at the right argument
-  ;; count. These hang off the same slot, so a call site asks one question.
   (dolist (e *inline-aliases*)
     (defalias (%car e) (cadr e) (caddr e)))
   nil)
 
-;; `blt reg, zero` is spelled out because there is no bltz pseudo-op above.
-(define (i-bltz-helper a rs label) (i-blt a rs $zero label))
-
 ;; ---------------------------------------------------------------- branches
-;; A comparison feeding an `if` never builds a value: it becomes the branch.
-(define *branch-ops*
-  '((%< . lt) (%> . gt) (%<= . le) (%>= . ge)
-    (%= . eq) (%eq? . eq) (%null? . null) (%cons? . nil)))
+;; A test feeding an `if` or a `while` never builds a value: it becomes the
+;; branch.
 
-;; A type test asks about the tag bits, and in a test position the answer
-;; only has to steer a branch. Building the answer first costs seven or eight
-;; instructions - mask, two set-if-zeros, an and, a literal load and a
-;; conditional move - and then throws it away on a `beqz`. Branching on the
-;; tag directly is two or three.
-;;
-;; These three are the ones that matter: `%cons?` and `%object?` are how every
-;; walk over the heap decides what it is looking at, and `%fixnum?` is the
-;; first question most of the arithmetic asks. The collector asks them a
-;; million times in a collection, and `car` asks one every time it is called.
+;; A type test in a test position branches on the tag bits directly, in two
+;; or three instructions, rather than building t or nil and testing that.
 (define (fusable-type-test? form)
   (if (%cons? form)
       (if (%= 1 (length (%cdr form)))
@@ -1460,7 +1290,9 @@
                 nil)))
       nil))
 
-;; Emit code that jumps to `label` when the test is FALSE.
+;; Jump to `label` when the test is false. The numeric comparisons go through
+;; `flt` and `feq`, which check their operands and widen for bignums, and
+;; then branch on the flag; `%eq?` is identity and branches directly.
 (define (emit-test-jump-false c form label)
   (let ((a (cx-asm c)))
     (cond
@@ -1491,10 +1323,11 @@
             (begin
               (compile-args c args 2)
               (cond
-               ((%eq? op '%<) (i-bge a $a0 $a1 label))
-               ((%eq? op '%>) (i-bge a $a1 $a0 label))
-               ((%eq? op '%<=) (i-blt a $a1 $a0 label))
-               ((%eq? op '%>=) (i-blt a $a0 $a1 label))
+               ((%eq? op '%<) (i-flt a $t2 $a0 $a1) (i-beqz a $t2 label))
+               ((%eq? op '%>) (i-flt a $t2 $a1 $a0) (i-beqz a $t2 label))
+               ((%eq? op '%<=) (i-flt a $t2 $a1 $a0) (i-bnez a $t2 label))
+               ((%eq? op '%>=) (i-flt a $t2 $a0 $a1) (i-bnez a $t2 label))
+               ((%eq? op '%=) (i-feq a $t2 $a0 $a1) (i-beqz a $t2 label))
                (else (i-bne a $a0 $a1 label)))))))
      (else
       (compile-expr c form nil)
@@ -1502,8 +1335,8 @@
 
 ;; ---------------------------------------------------------------- arguments
 ;; Simple arguments go straight to their register. Anything that can run code
-;; is evaluated first and parked on the stack, so evaluation order is still
-;; left to right.
+;; is evaluated first and parked on the stack, so evaluation order is left to
+;; right.
 (define (simple-arg? c form)
   (cond
    ((%null? form) t)
@@ -1515,8 +1348,8 @@
    ((%cons? form) (%eq? (%car form) 'quote))
    (else t)))
 
+;; Leaves argument i in register a{i}.
 (define (compile-args c args n)
-  ;; Leaves argument i in register a{i}.
   (let ((a (cx-asm c)) (plan nil) (pushed 0) (i 0))
     ;; pass one: evaluate and park the complicated ones
     (dolist (x args)
@@ -1529,7 +1362,7 @@
             (set! plan (%cons (%cons 'stack pushed) plan))
             (set! pushed (%+ pushed 1)))))
     (set! plan (reverse plan))
-    ;; pass two: the parked values first, while sp still points at them
+    ;; pass two: the parked values, while sp still points at them
     (set! i 0)
     (dolist (p plan)
       (if (%eq? (%car p) 'stack)
@@ -1554,32 +1387,40 @@
    (else (emit-const c form reg))))
 
 ;; ---------------------------------------------------------------- calls
+;; Arguments nine and up are pushed, so that argument eight lands at 0(sp) on
+;; entry and the callee finds the rest above it. A tail call cannot do that,
+;; because its epilogue moves the stack out from under them.
 (define (compile-call c form tail)
   (let* ((a (cx-asm c))
          (op (%car form))
          (args (%cdr form))
          (n (length args)))
-    ;; Arguments nine and up are pushed, so that argument eight lands at 0(sp)
-    ;; on entry and the callee finds the rest above it. A tail call cannot do
-    ;; that, because its epilogue moves the stack out from under them.
     (if (%> n 8)
         (if tail
             (begin (compile-call c form nil) (emit-return c))
             (compile-call-many c form))
         (compile-call-few c form tail))))
 
+;; More than eight arguments. The operator, if it needs evaluating, goes on
+;; the stack first. Every argument is then evaluated left to right onto the
+;; stack; the first eight are lifted into registers and the rest are left
+;; where they are, reversed so that argument eight sits at 0(sp). The
+;; callee's frame pointer is the stack pointer it was entered with, so it
+;; reads argument 8+j at 4j(s0).
 (define (compile-call-many c form)
-  ;; More than eight arguments. All of them are evaluated left to right onto
-  ;; the stack; the first eight are then lifted into registers and the rest
-  ;; are left where they are, reversed so that argument eight sits at 0(sp).
-  ;; The callee's frame pointer is the stack pointer it was entered with, so
-  ;; it reads argument 8+j at 4j(s0) without knowing how it got there.
   (let* ((a (cx-asm c))
          (op (%car form))
          (args (%cdr form))
          (n (length args))
          (extra (%- n 8))
+         (op-on-stack (if (%symbol? op) nil t))
          (i 0))
+    (if op-on-stack
+        (begin
+          (compile-expr c op nil)
+          (i-addi a $sp $sp -4)
+          (i-sw a $a0 $sp 0))
+        nil)
     (dolist (x args)
       (compile-expr c x nil)
       (i-addi a $sp $sp -4)
@@ -1588,7 +1429,7 @@
     (while (%< i 8)
       (i-lw a (%+ $a0 i) $sp (%* 4 (%- (%- n 1) i)))
       (set! i (%+ i 1)))
-    ;; Reverse the overflow block in place: it currently runs backwards.
+    ;; Reverse the overflow block in place.
     (set! i 0)
     (while (%< i (%/ extra 2))
       (let ((lo (%* 4 i)) (hi (%* 4 (%- (%- extra 1) i))))
@@ -1597,18 +1438,19 @@
         (i-sw a $t4 $sp lo)
         (i-sw a $t3 $sp hi))
       (set! i (%+ i 1)))
-    (emit-load c (resolve c op) $t0)
+    (if op-on-stack
+        (i-lw a $t0 $sp (%* 4 n))
+        (emit-load c (resolve c op) $t0))
     (i-li a $t1 n)
     (i-ldxi a $t2 $t0 clo-entry t-closure)
     (i-call-reg a $t2)
-    (i-addi a $sp $sp (%* 4 n))))
+    (i-addi a $sp $sp (%* 4 (if op-on-stack (%+ n 1) n)))))
 
 ;; A call is a self-call when the operator is this function's own name, that
-;; name still means the global it was defined as, and the argument count is
-;; the one the prologue was built for. The price is that redefining a function
-;; does not reach the calls already inside it - the same bargain the open
-;; coded primitives make, and the same one every Lisp that compiles at all
-;; ends up making somewhere.
+;; name is not shadowed by a local, and the argument count is the one the
+;; prologue was built for. It reuses the closure in this frame and jumps past
+;; the arity check. Redefining a function does not reach the self-calls
+;; already inside it.
 (define (self-call? c op n)
   (if (%symbol? op)
       (if (%eq? op (cx-name c))
@@ -1634,8 +1476,6 @@
             (set! op-on-stack t)))
       (compile-args c args n)
       (if (self-call? c op n)
-          ;; Two instructions and a direct branch: the closure is the one in
-          ;; this frame, and the target is a label in this very buffer.
           (begin
             (i-lw a $t0 $s0 clo-slot)
             (if tail
@@ -1646,11 +1486,9 @@
                 (begin (i-lw a $t0 $sp 0) (i-addi a $sp $sp 4))
                 (emit-load c (resolve c op) $t0))
             (i-li a $t1 n)
-            ;; The entry point is slot 0 of a closure, and loading it with the
-            ;; immediate-index opcode says so: same instruction as the plain
-            ;; `lw` it replaces, except that calling a number, a string or nil
-            ;; now faults with a diagnostic instead of jumping to whatever the
-            ;; first word of the thing happened to be.
+            ;; The entry point is slot 0 of a closure, loaded with the
+            ;; immediate-index instruction so that calling anything that is
+            ;; not a closure traps with a report.
             (if tail
                 (begin
                   (emit-epilogue c)
@@ -1660,19 +1498,15 @@
                   (i-ldxi a $t2 $t0 clo-entry t-closure)
                   (i-call-reg a $t2))))))))
 
-;; (%apply f list) calls f with the elements of the list as its arguments,
-;; however many there are. That is what apply needs, and no expression can
-;; say it, because the argument registers cannot be indexed.
-;;
+;; (%apply f list) calls f with the elements of the list as its arguments.
 ;; Up to eight it is an ordinary call, and a tail call in tail position. Past
 ;; eight the rest go on the stack, argument 8+j at 4j(sp), as
-;; compile-call-many leaves them - except that how far the stack moves is only
+;; compile-call-many leaves them, except that how far the stack moves is only
 ;; known at run time. So the stack pointer to come back to waits in a local,
 ;; tagged as a fixnum so the collector passes over it. The space is cleared
 ;; before it is filled, because the collector reads every word of a frame as
-;; a value.
-;;
-;; A list that does not end in nil stops at the count, on the typed cdr.
+;; a value. A list that does not end in nil stops at the count, on the typed
+;; cdr.
 (define (compile-apply c args tail)
   (if (%= (length args) 2) nil (error "compile: %apply takes a function and a list"))
   (compile-args c args 2)
@@ -1776,21 +1610,17 @@
          ((%eq? h 'set!) (compile-set c form tail))
          ((%eq? h 'define) (compile-inner-define c form tail))
 
+         ;; An anonymous function is named (lambda . home), so a backtrace can
+         ;; say where it came from.
          ((%eq? h 'lambda)
-          ;; An anonymous function still belongs somewhere, and a backtrace
-          ;; that says "lambda in fill-rect" is worth the one pair this costs.
           (compile-closure c (cadr form) (cddr form)
                            (%cons 'lambda (cx-name c)))
           (if tail (emit-return c) nil))
 
-         ;; (%funcall f a b) is just a call whose operator happens to be an
-         ;; expression, so it compiles to the ordinary call sequence rather
-         ;; than to a call to something named %funcall.
+         ;; (%funcall f a b) is a call whose operator is an expression.
          ((%eq? h '%funcall) (compile-call c (%cdr form) tail))
 
-         ;; (%apply f list) is the same call with its arguments in a list,
-         ;; which takes a loop to lay out. It is a call to the leaf test too,
-         ;; which is why it is here and not among the open-coded operators.
+         ;; (%apply f list) is the same call with its arguments in a list.
          ((%eq? h '%apply) (compile-apply c (%cdr form) tail))
 
          ;; ---- an operator whose second argument is written down ----
@@ -1851,13 +1681,13 @@
           (set! forms (%cdr forms)))
         (compile-expr c (%car forms) tail))))
 
+;; Initialisers all see the outer scope, so `let` binds in parallel.
 (define (compile-let c form tail)
   (let* ((binds (cadr form))
          (body (cddr form))
          (saved-env (cx-env c))
          (saved-n (cx-nlocals c))
          (slots nil))
-    ;; Initialisers all see the outer scope, so `let` binds in parallel.
     (dolist (b binds)
       (compile-expr c (cadr b) nil)
       (let ((slot (cx-alloc-local c)))
@@ -1869,18 +1699,18 @@
     (set-cx-env! c saved-env)
     (set-cx-nlocals! c saved-n)))
 
+;; A variable that an inner lambda captures and that something assigns lives
+;; in a box, so the closure and the frame see one value.
 (define (box-or-plain c sym slot)
-  ;; A variable that an inner lambda captures and that something assigns has
-  ;; to live in a box, or the closure and the frame would see different values.
   (if (memq sym (cx-boxed c))
       (begin
         (emit-make-box c slot)
         (list 'boxed-local slot))
       (list 'local slot)))
 
+;; Replace the slot's value with a one-cell box holding it. Never reached in
+;; a leaf: boxing is a cons, and anything that conses is not one.
 (define (emit-make-box c slot)
-  ;; Replace the slot's value with a one-cell box holding it. Never reached in
-  ;; a leaf: boxing is a cons, and anything that conses is not one.
   (let ((a (cx-asm c)))
     (load-local c slot $a2)
     (emit-cons c $a2 $zero $a2 4)
@@ -1904,8 +1734,8 @@
     (emit-store c (resolve c name) $a0)
     (if tail (emit-return c) nil)))
 
+;; An internal define makes a new local in the current frame.
 (define (compile-inner-define c form tail)
-  ;; An internal define makes a new local in the current frame.
   (if (%cons? (cadr form))
       (let ((name (caadr form)))
         (compile-closure c (cdadr form) (cddr form) name)
@@ -1920,15 +1750,16 @@
   (if tail (emit-return c) nil))
 
 ;; ---------------------------------------------------------------- lambdas
-;; An inner lambda is compiled into its own block of code. At the point the
-;; lambda form appears, the enclosing function emits the few instructions that
-;; build a closure and copy the captured values into it.
+;; An inner lambda is compiled into its own code object. Where the lambda
+;; form appears, the enclosing function emits the instructions that build a
+;; closure and copy the captured values into it. The inner function is named
+;; by its code object, so nothing here mentions a code address.
 (define (compile-closure c params body name)
   (let* ((a (cx-asm c))
          (free (filter (lambda (s) (cx-lookup c s))
                        (dedup (free-vars (%cons 'lambda (%cons params body)) nil))))
          ;; A captured variable that lives in a box stays boxed inside the
-         ;; closure, so the inner function must know which of its free
+         ;; closure, so the inner function has to know which of its free
          ;; variables to dereference.
          (free-boxed (map (lambda (s) (boxed-location? (resolve c s))) free))
          (entry-and-code (compile-function params body name free free-boxed))
@@ -1936,9 +1767,6 @@
          (code (%cdr entry-and-code))
          (nfree (length free))
          (i 0))
-    ;; The inner function is named by its code object, which carries its own
-    ;; entry address. Nothing here mentions a code address, so the inner code
-    ;; can be moved later without patching this call site.
     (emit-literal c code $a0)
     (i-li a $a1 (%logior (%lsh nfree 1) 1))
     (emit-load c (list 'global 'make-closure) $t0)
@@ -1958,7 +1786,7 @@
 
 ;; ---------------------------------------------------------------- leaf test
 ;; Three things put a jal or a jalr into a function's own code: an ordinary
-;; call, the allocator's slow path - so anything that conses - and building a
+;; call, the allocator's slow path, so anything that conses, and building a
 ;; closure. Anything this walk does not recognise counts as a call, so it is
 ;; only ever wrong in the safe direction, and `check-leaf` reads the bytes
 ;; afterwards in case it is wrong in the other one.
@@ -1989,8 +1817,8 @@
          ((%symbol? h)
           ;; An open-coded operator is a leaf if its arguments are. A name the
           ;; body binds shadows any intrinsic of the same name and makes an
-          ;; ordinary call of it; and cons is open-coded but its slow path
-          ;; calls the collector.
+          ;; ordinary call of it; cons is open-coded but its slow path calls
+          ;; the collector.
           (cond
            ((memq h bound) nil)
            ((memq h '(%cons cons)) nil)
@@ -1999,10 +1827,9 @@
          (else nil)))
       t))
 
-;; Every name the body binds, which is two questions at once: which names
-;; shadow an intrinsic, and how many locals there could be. A leaf's locals
-;; are eight registers and no more, and this over-counts (bindings in sibling
-;; scopes share a slot at compile time) which is the safe way round.
+;; Every name the body binds, which answers two questions: which names shadow
+;; an intrinsic, and how many locals there could be. This over-counts, since
+;; bindings in sibling scopes share a slot, which is the safe direction.
 (define (bound-names form acc)
   (if (%cons? form)
       (let ((h (%car form)))
@@ -2023,10 +1850,10 @@
           acc)))
       acc))
 
+;; Not variadic, because the rest list is a cons. Nothing boxed, because a
+;; box is a cons. Locals within the eight registers. And nothing in the body
+;; that can call. Captured variables are fine: they are read through t0.
 (define (leaf-function? c forms names rest free)
-  ;; Not variadic, because the rest list is a cons. Nothing boxed, because a
-  ;; box is a cons. Locals within the eight registers. And nothing in the body
-  ;; that can call. Captured variables are fine: they are read through t0.
   (if rest
       nil
       (if (%cons? (cx-boxed c))
@@ -2047,24 +1874,20 @@
          (assigned (assigned-vars (%cons 'begin expanded) nil))
          (captured (captured-vars (%cons 'begin expanded) nil))
          (i 0))
-    ;; Decide up front which variables need boxes.
+    ;; Which variables need boxes, and whether this is a leaf, both have to
+    ;; be known before a word is emitted.
     (set-cx-boxed! c (filter (lambda (s) (memq s captured)) (dedup assigned)))
-    ;; And whether this is a leaf, which decides the whole shape of the frame
-    ;; and where its locals live, so it has to be known before a word is
-    ;; emitted.
     (set-cx-leaf! c (leaf-function? c expanded names rest free))
     (emit-prologue c nreq (if rest t nil))
-    ;; Parameters land in the first local slots.
+    ;; Parameters land in the first local slots. The first eight arrive in
+    ;; registers; the rest were pushed by the caller and sit above the frame
+    ;; pointer, argument 8+j at 4j(s0). A leaf never has nine parameters,
+    ;; because that is nine locals.
     (set! i 0)
     (dolist (p names)
       (if (%eq? p rest)
           nil
           (let ((slot (cx-alloc-local c)))
-            ;; The first eight arrive in registers; the rest were pushed by
-            ;; the caller and sit above the frame pointer, argument 8+j at
-            ;; 4j(s0).
-            ;; A leaf never gets here with i >= 8: nine parameters is nine
-            ;; locals, and eight is all the registers set aside for them.
             (if (%< i 8)
                 (store-local c slot (%+ $a0 i))
                 (begin
@@ -2140,10 +1963,9 @@
     (i-sw a $a2 $s0 (local-off slot))))
 
 ;; ---------------------------------------------------------------- top level
-;; A function definition is installed straight away, at compile time. Anything
-;; else becomes a thunk on the boot list, which the kickstart runs in order
-;; when the image starts - that is what makes the image a snapshot of a
-;; running system rather than a pile of code.
+;; A function definition is installed at compile time. Anything else becomes
+;; a thunk on the boot list, which the kickstart runs in order when the image
+;; starts.
 (define *boot-thunks* nil)
 
 (define (add-boot-thunk form)
@@ -2153,13 +1975,13 @@
     clo))
 
 ;; ---------------------------------------------------------------- the image
-;; Where a definition goes. Ordinarily that is this machine: `define` puts the
-;; function in its symbol, and the next form can call it. A fresh rebuild
-;; compiles the sources a second time for an image of their own - see
-;; `genesis` in sys.lisp - and while it does, *image* is a table of what that
-;; image will hold in each symbol, and this machine goes on running the
-;; definitions it already has. The forge keeps its interpreter's definitions
-;; apart from the image's in the same way.
+;; Where a definition goes. Ordinarily that is this machine: `define` puts
+;; the function in its symbol, and the next form can call it. A fresh rebuild
+;; compiles the sources a second time for an image of their own (`genesis` in
+;; sys.lisp), and while it does, *image* is a table of what that image will
+;; hold in each symbol, and this machine goes on running the definitions it
+;; has. The forge keeps its interpreter's definitions apart from the image's
+;; in the same way.
 (define *image* nil)
 
 ;; symbol -> #(value function macro?), made the first time the image gives the
@@ -2192,10 +2014,9 @@
         (%set-symbol-flags! sym (%logior (%symbol-flags sym) sym-macro))))
   expander)
 
-;; A macro expander takes the form's argument list as a single argument and
-;; picks it apart itself. The obvious alternative - call it with one argument
-;; per element - runs into the calling convention at eight, which is a strange
-;; place for a cond to stop working.
+;; A macro expander takes the form's argument list as one argument and picks
+;; it apart itself, so the calling convention's limit of eight register
+;; arguments does not apply to macros.
 (define (macro-binder params var body)
   (if (%symbol? params)
       (%cons 'let (%cons (list (list params var)) body))
@@ -2203,7 +2024,7 @@
         (while (%cons? p)
           (if (%symbol? (%car p))
               nil
-              (error "defmacro: this parameter list is too clever" params))
+              (error "defmacro: a parameter must be a symbol" params))
           (set! binds (append binds (list (list (%car p) (list 'car path)))))
           (set! path (list 'cdr path))
           (set! p (%cdr p)))
@@ -2213,9 +2034,8 @@
         (%cons 'let* (%cons binds body)))))
 
 ;; `defrecord` is a macro, so that the interpreter has one to expand. Here it
-;; has to be caught before expansion: the compiler wants the shape registered
-;; before the rest of the file is read and the accessors open-coded, not just
-;; the definitions the expansion would give it.
+;; is caught before expansion: the compiler registers the shape so that the
+;; accessors are open-coded from here on.
 (define (compile-top form)
   (if (if (%cons? form) (%eq? (%car form) 'defrecord) nil)
       (compile-defrecord form)
@@ -2234,16 +2054,15 @@
                 (image-set-value! name clo)
                 name)
               ;; A variable definition is given its value now, because code
-              ;; compiled later in the same build will read it as a constant,
-              ;; and the initialiser is also recorded so that a booting image
-              ;; re-runs it in source order.
+              ;; compiled later in the same build reads it as a constant, and
+              ;; the initialiser is recorded so that a booting image runs it
+              ;; again in source order.
               ;;
-              ;; `(define name)` with nothing to run is a declaration and not
-              ;; a definition: it names the variable, leaves any value already
-              ;; there alone, and puts nothing on the boot list. That is what
-              ;; a cell somebody installs into can be spelled as - the machine
-              ;; recompiling its own sources walks over its own `define`s, and
-              ;; must not knock out the allocator it is allocating through.
+              ;; `(define name)` with no initialiser is a declaration: it
+              ;; names the variable, leaves any value already there alone,
+              ;; and puts nothing on the boot list. A machine recompiling its
+              ;; own sources must not knock out the allocator it is
+              ;; allocating through.
               (let ((name (cadr form)))
                 (if (%cons? (cddr form))
                     (let ((expr (caddr form)))
@@ -2254,8 +2073,8 @@
                         nil))
                 name)))
          ;; A macro is needed twice: by the compiler running now, and by the
-         ;; machine's own compiler once the image boots. So it is registered
-         ;; with whatever expander is in charge here, and compiled into the
+         ;; machine's compiler once the image boots. It is registered with
+         ;; whatever expander is in charge here, and compiled into the
          ;; function cell where the other one will look for it.
          ((%eq? h 'defmacro)
           (register-macro form)
@@ -2274,12 +2093,9 @@
          (else (top-level-form form))))
       (top-level-form form)))
 
-(define (field-name spec) (if (%cons? spec) (%car spec) spec))
-(define (field-init spec) (if (%cons? spec) (cadr spec) nil))
-
 ;; The same expansion the interpreter's macro uses, compiled rather than
-;; evaluated - and the shape registered on the way past, both here and, by the
-;; form left in the boot list, in the machine that boots from this.
+;; evaluated, with the shape registered on the way past, both here and, by
+;; the form left on the boot list, in the machine that boots from this.
 (define (compile-defrecord form)
   (let* ((forms (record-forms form))
          (head (cadr form))
@@ -2290,22 +2106,9 @@
     (dolist (f forms) (compile-top f))
     type))
 
-(define (derived-name base suffix)
-  (intern-in (current-package)
-             (string-append (%symbol-name base) suffix)))
-
-(define (derived-name2 prefix base suffix)
-  (intern-in (current-package)
-             (string-append prefix (string-append (%symbol-name base) suffix))))
-
-(define (compile-file-forms forms)
-  (dolist (f forms) (compile-top f))
-  (length forms))
-
 (setup-intrinsics)
 
-;; From here on a record's accessors are open-coded as they are declared. The
-;; shapes that were declared before this line - the collector's, the chips',
-;; the assembler's, and this file's own - get done in one pass now.
+;; From here on a record's accessors are open-coded as the record is
+;; declared. The shapes declared before this line get done now.
 (set! *record-inline-hook* (lambda (s) (install-record-inlines! s)))
 (dolist (s *record-shapes*) (install-record-inlines! s))

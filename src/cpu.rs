@@ -1,19 +1,18 @@
 //! Token-threaded RV32IMC core.
 //!
-//! The "token" is the opcode itself: no predecode pass, no translation cache,
-//! nothing to invalidate when the Lisp compiler writes fresh code into the
-//! heap and jumps to it. A 64-entry table is indexed straight off the encoded
-//! instruction:
+//! The token is the opcode itself. There is no predecode pass and no
+//! translation cache, so nothing needs invalidating when the Lisp compiler
+//! writes fresh code into the heap and jumps to it. A 64-entry table is
+//! indexed directly off the encoded instruction:
 //!
 //!     16-bit forms   tok = (op[1:0] << 3) | funct3       ->  0 .. 23
 //!     32-bit forms   tok = 32 + opcode[6:2]              -> 32 .. 63
 //!
-//! Every handler ends by expanding `next!`, which re-does the fetch, the
-//! token computation and the indirect jump *in place* before an explicit tail
-//! call. That replication is the whole point: each opcode gets its own branch
-//! site, so the predictor learns per-opcode successor patterns instead of
-//! thrashing on one shared dispatch. `become` guarantees the jump is a real
-//! `jmp`, so a program can run forever in constant stack.
+//! Every handler ends by expanding `next!`, which repeats the fetch, the
+//! token computation and the indirect jump in place before an explicit tail
+//! call. Each opcode therefore has its own branch site, and the predictor
+//! learns per-opcode successor patterns rather than one shared dispatch.
+//! `become` guarantees a real `jmp`, so a program runs in constant stack.
 
 use crate::dev;
 use crate::mach::*;
@@ -57,8 +56,7 @@ fn w_(m: &mut Machine, i: u32, v: u32) {
     }
 }
 
-/// orc.b: every byte that has any bit set becomes 0xff. The only Zbb
-/// operation with no one-liner in Rust.
+/// orc.b: every byte that has any bit set becomes 0xff.
 #[inline(always)]
 fn orc_b(a: u32) -> u32 {
     let mut v = 0u32;
@@ -166,9 +164,9 @@ macro_rules! next {
     }};
 }
 
-/// Entry into the threaded core. `become` demands that caller and callee
-/// share a signature, so the entry stub wears the handler shape too and
-/// ignores the instruction word it is handed.
+/// Entry into the threaded core. `become` requires caller and callee to
+/// share a signature, so the entry stub has the handler signature and
+/// ignores the instruction word.
 fn enter(m: &mut Machine, _w: u32, pc: u32, fuel: u32) -> Stop {
     next!(m, pc, fuel)
 }
@@ -226,20 +224,20 @@ fn op_jal(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     next!(m, pc.wrapping_add(imm_j(w)), fuel - 1)
 }
 
-/// A shadow call stack, to answer one question: how many activations return
-/// without having called anything? Those are the ones whose frame - eight
-/// instructions to build and six to take down - buys nothing, because a leaf
-/// has no callee to protect anything from.
+/// A shadow call stack that counts activations returning without having
+/// called anything. Such an activation gains nothing from its frame: eight
+/// instructions to build and six to take down, with no callee to protect
+/// anything from.
 ///
-/// `jal`/`jalr` writing ra is a call and `jalr x0, ra` is a return, which is
-/// exactly how this compiler spells them. A tail call is `jalr x0, <reg>`:
-/// the caller's frame is already gone and the callee's activation is charged
-/// to the same slot, so a tail-calling leaf is not counted as one. That
-/// undercounts, which is the safe direction.
+/// A `jal` or `jalr` writing ra is a call and `jalr x0, ra` is a return;
+/// the compiler emits exactly these forms. A tail call is `jalr x0, <reg>`.
+/// The caller's frame is already gone and the callee's activation is charged
+/// to the same slot, so a tail-calling leaf is not counted. The result is
+/// an undercount.
 fn prof_call(m: &mut Machine, target: u32) {
     let d = m.watch.depth;
-    // The caller is a function that calls, whatever this particular
-    // activation of it happens to do.
+    // Mark the caller as a function that calls, whatever this particular
+    // activation does.
     let here = m.watch.entry_pc[d];
     m.watch.funcs.entry(here).or_insert((0, false)).1 = true;
     m.watch.called[d] = true;
@@ -314,8 +312,8 @@ fn op_branch(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 }
 
 // ---- memory ---------------------------------------------------------------
-/// Unaligned accesses are serviced rather than trapped: the object memory
-/// leans on that for byte vectors and packed image data.
+/// Unaligned accesses are serviced rather than trapped. The object memory
+/// relies on this for byte vectors and packed image data.
 #[inline(always)]
 fn do_load(m: &mut Machine, a: u32, f: u32, fuel: u32) -> Option<u32> {
     let sz = 1u32 << (f & 3);
@@ -359,9 +357,9 @@ fn op_load(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     next!(m, pc.wrapping_add(4), fuel - 1)
 }
 
-/// Was this word already in a register, put there earlier in this same
-/// straight-line run? That is exactly what a basic-block peephole can see,
-/// and the number decides whether one is worth writing.
+/// Count a load of a word already held in a register, established earlier in
+/// the same straight-line run. A basic-block peephole could remove such
+/// loads; this count measures how many there are.
 fn prof_load(m: &mut Machine, a: u32, pc: u32, dst: u32) {
     let gen = m.watch.block;
     let mut hit = false;
@@ -380,22 +378,8 @@ fn prof_load(m: &mut Machine, a: u32, pc: u32, dst: u32) {
     }
 }
 
-#[inline(always)]
-/// TEMPORARY: report a word being stored whose top half matches LM_WATCH_HI.
-/// The corruption being chased shows up as a jump to `0xf7f7xxxx`, and every
-/// attempt to catch it from Lisp moves it, so the net has to be down here.
-fn watch_hi() -> Option<u32> {
-    use std::sync::OnceLock;
-    static HI: OnceLock<Option<u32>> = OnceLock::new();
-    *HI.get_or_init(|| {
-        std::env::var("LM_WATCH_HI")
-            .ok()
-            .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-    })
-}
-
-/// The name of the function the machine is standing in, read out of the code
-/// object every frame keeps in s1 - the same word a backtrace uses.
+/// The name of the function the machine is currently in, read from the code
+/// object every frame keeps in s1. A backtrace reads the same word.
 pub fn watch_backtrace(m: &Machine) -> String {
     // Every prologue saves its caller's frame base at s0-8 and its caller's
     // code object at s0-16, which is what a Lisp backtrace walks.
@@ -443,67 +427,15 @@ pub(crate) fn name_of(m: &Machine, code: u32) -> String {
     out
 }
 
-fn watch_where(m: &Machine) -> String {
-    let s1 = m.x[9];
-    if s1 & 7 != 4 {
-        return String::from("?");
-    }
-    let name = m.peek32(s1.wrapping_add(4 * crate::heap::CODE_NAME));
-    if name & 7 != 4 {
-        return String::from("?");
-    }
-    let hdr = m.peek32(name.wrapping_sub(4));
-    if hdr & 0xff != crate::heap::T_STRING {
-        return String::from("?");
-    }
-    let n = (hdr >> 8).min(64);
-    let mut out = String::new();
-    for i in 0..n {
-        out.push(m.peek32(name + i) as u8 as char);
-    }
-    out
-}
-
-fn watch_range() -> Option<(u32, u32)> {
-    use std::sync::OnceLock;
-    static R: OnceLock<Option<(u32, u32)>> = OnceLock::new();
-    *R.get_or_init(|| {
-        let lo = std::env::var("LM_WATCH_ADDR").ok()?;
-        let lo = u32::from_str_radix(lo.trim_start_matches("0x"), 16).ok()?;
-        let len = std::env::var("LM_WATCH_LEN")
-            .ok()
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(128);
-        Some((lo, len))
-    })
-}
-
 fn do_store(m: &mut Machine, a: u32, f: u32, v: u32, fuel: u32) -> bool {
     if f > 2 {
         return false;
     }
-    if let Some(hi) = watch_hi() {
-        if f == 2 && (v >> 16) == hi {
-            eprintln!("watch: stored {v:#x} to {a:#x} from pc {:#x}", m.pc);
-        }
-    }
-    if let Some((lo, len)) = watch_range() {
-        if a >= lo && a < lo + len {
-            eprintln!(
-                "watch: wrote {v:#x} ({} bytes) to {a:#x} from pc {:#x} in {}",
-                1 << f,
-                m.pc,
-                watch_where(m)
-            );
-        }
-    }
     let sz = 1u32 << f;
-    // The first eight bytes are nil's cell: they are what `car` and `cdr` of
-    // nil read, so they have to stay zero for the machine's whole life. The
-    // checked stores behind `set-car!` and `set-cdr!` already refuse nil; this
-    // is every other store, which is how an allocator that had lost its run
-    // once wrote a window there and gave nil a car that nobody noticed until
-    // something far away read it.
+    // The first eight bytes are nil's cell: `car` and `cdr` of nil read them,
+    // so they must stay zero for the machine's whole life. The checked stores
+    // behind `set-car!` and `set-cdr!` refuse nil; this refuses every other
+    // store there.
     if a < 8 {
         return false;
     }
@@ -536,7 +468,7 @@ fn op_store(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         return m.fault(C_SFAULT, a, pc, fuel);
     }
     if m.prof_on && f3(w) == 2 && (rs1(w) == 8 || rs1(w) == 2) {
-        // Whatever else claimed this address holds the old value now.
+        // Any other register that mirrored this address now holds a stale value.
         let gen = m.watch.block;
         for k in 1..32 {
             if m.watch.gen[k] == gen && m.watch.addr[k] == a {
@@ -556,7 +488,7 @@ fn op_store(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 /// Which ratified extension an OP or OP-IMM encoding belongs to, for the
 /// histogram. The base ISA's own funct7 values (0x00 for the arithmetic and
 /// logical forms, 0x20 for sub and the arithmetic shifts, 0x01 for M) are not
-/// counted; everything else here was added by Zba, Zbb, Zbs or Zicond.
+/// counted; every other value belongs to Zba, Zbb, Zbs or Zicond.
 fn prof_ext(m: &mut Machine, f7: u32, f3: u32) {
     let slot = match f7 {
         0x10 => crate::prof::ZBA,
@@ -603,8 +535,8 @@ fn op_imm(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         4 => a ^ i,
         6 => a | i,
         7 => a & i,
-        // The shift-immediate slot is where the B extension hides its
-        // single-source operations: funct7 tells them apart, and for the
+        // The B extension encodes its single-source operations in the
+        // shift-immediate slot: funct7 selects the operation, and for the
         // Zbb unary forms the shift amount is a further selector.
         1 => match w >> 25 {
             0x00 => a << sh,
@@ -631,9 +563,9 @@ fn op_imm(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
             _ => return illegal(m, w, pc, fuel),
         },
     };
-    // The stack limit. Only a decrement of sp itself is checked, because that
-    // is what every frame and every push is; a frame that would go below the
-    // limit faults instead, with sp left where it was.
+    // The stack limit. Only a decrement of sp itself is checked; every frame
+    // and every push is one. A frame that would go below the limit faults,
+    // with sp left unchanged.
     if rd(w) == 2 && f3(w) == 0 && rs1(w) == 2 && (i as i32) < 0 && !m.stack_ok(v) {
         return m.fault(C_STACK, v, pc, fuel);
     }
@@ -684,7 +616,7 @@ fn op_reg(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
             _ => return illegal(m, w, pc, fuel),
         },
         // ---- Zbb: min and max. Tagged fixnums are 2n+1, which preserves
-        // signed order, so these are correct on tagged values as they stand.
+        // signed order, so these are correct on tagged values.
         0x05 => match f {
             4 => (a as i32).min(b as i32) as u32,
             5 => a.min(b),
@@ -692,8 +624,8 @@ fn op_reg(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
             7 => a.max(b),
             _ => return illegal(m, w, pc, fuel),
         },
-        // ---- Zicond: conditional zero, which is how a branchless select is
-        // built without a flags register.
+        // ---- Zicond: conditional zero, the basis of a branchless select
+        // without a flags register.
         0x07 => match f {
             5 => {
                 if b == 0 {
@@ -731,7 +663,7 @@ fn op_reg(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
             1 => a ^ (1 << (b & 31)), // binv
             _ => return illegal(m, w, pc, fuel),
         },
-        // ---- Zbb: zext.h, which on RV32 lives here rather than in OP-IMM ----
+        // ---- Zbb: zext.h, which on RV32 is encoded in OP rather than OP-IMM ----
         0x04 => match f {
             4 if rs2(w) == 0 => a & 0xffff,
             _ => return illegal(m, w, pc, fuel),
@@ -781,7 +713,7 @@ fn op_reg(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 #[inline(never)]
 fn op_fence(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     // Nothing is reordered and there is no icache, so fence and fence.i are
-    // both nops. Self-modifying code just works, which the compiler relies on.
+    // both nops. Self-modifying code needs no flush; the compiler relies on this.
     let _ = w;
     next!(m, pc.wrapping_add(4), fuel - 1)
 }
@@ -804,8 +736,8 @@ fn op_system(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
                 let t = m.mepc;
                 m.fuel_left = fuel - 1;
                 m.pc = t;
-                // Re-enabling interrupts can make one immediately deliverable,
-                // so hand back to the outer loop rather than run blind.
+                // Re-enabling interrupts can make one deliverable at once, so
+                // control returns to the outer loop.
                 Stop::Fuel
             }
             0x1050_0073 => {
@@ -850,26 +782,24 @@ fn op_bad(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 // ------------------------------------------------------------------- pairs
 /// The custom-0 opcode space: a load or a store through a checked reference.
 ///
-/// This is RV32I's LOAD and STORE with the width field spent on something
-/// better. Every access here is a word, because every Lisp value is; the three
-/// bits that would have said byte-or-halfword say instead what the base
-/// register has to be, and the twelve-bit offset says which slot.
+/// The encoding is RV32I LOAD and STORE with the width field reused. Every
+/// access is a word, because every Lisp value is one. The three width bits
+/// instead say what the base register must be, and the twelve-bit offset
+/// says which slot.
 ///
 ///     funct3 0   load  through a pair;   nil is a pair and reads as nils
 ///     funct3 1   load  through an object
 ///     funct3 4   store through a pair;   nil has no cell and is refused
 ///     funct3 5   store through an object
 ///
-/// `car` is offset 0 and `cdr` is offset 4 of the same instruction, which is
-/// how four opcodes became two. The offset is what makes it general: a
-/// symbol's value cell, a closure's code object and an object's header were
-/// all bare `lw`s that proved nothing, and they are checked now for the same
-/// one instruction they always cost.
+/// `car` is offset 0 and `cdr` is offset 4 of the same instruction. The
+/// offset makes the form general: a symbol's value cell, a closure's code
+/// object and an object's header are all reached this way, type-checked, in
+/// the one instruction a bare `lw` costs.
 ///
-/// What this does *not* do is bound the offset. That is `ldx`'s job, and it
-/// needs the length out of the header to do it. Here the offset is a constant
-/// the compiler wrote, into a layout it decided; the check is that the thing
-/// being reached into is the kind of thing that has such a layout at all.
+/// The offset is not bounds-checked. `ldx` does that, using the length in
+/// the header. Here the offset is a compiler constant into a compiler-chosen
+/// layout; the check is that the base is the kind of object with that layout.
 #[inline(never)]
 fn op_ref(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let f = f3(w);
@@ -903,31 +833,27 @@ fn op_ref(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 
 /// The custom-1 opcode space: indexed access to an object, checked.
 ///
-/// One instruction does what four did - untag the index, scale it, add it to
-/// the base, load - and on the way it establishes everything that was being
-/// taken on trust. The address arithmetic needs the header word anyway to be
-/// worth anything, and the header is where the length is, so the bounds check
-/// costs a comparison the processor can do in parallel with the address.
+/// One instruction untags the index, scales it, adds it to the base and
+/// loads, checking the type and the bounds as it goes. The address needs the
+/// header word, and the header holds the length, so the bounds check is one
+/// comparison alongside the address arithmetic.
 ///
 ///     funct7   the type the object must be, or 0 for any object at all
 ///     funct3   bit 0 store, bit 1 byte, bit 2 the index is an immediate
 ///     rs1      the object, tagged
-///     rs2      the index: a register holding a tagged fixnum, or - when
-///              funct3 bit 2 is set - a raw five-bit index, 0 to 31
-///     rd       where the result goes, or - for a store - the value to write
+///     rs2      the index: a register holding a tagged fixnum, or, when
+///              funct3 bit 2 is set, a raw five-bit index, 0 to 31
+///     rd       where the result goes, or, for a store, the value to write
 ///
 /// The immediate form exists because most indices are constants: every record
-/// field, every closure slot, the instance tag and version. Putting the index
-/// in the rs2 field follows `slli`, which has always kept its shift amount
-/// there, so the encoding stays R-type and nothing that walks instructions
-/// needs a new case. The immediate form is also what makes a checked call
-/// free: loading a closure's entry point is slot 0 of a t-closure, which used
-/// to be a bare `lw` that proved nothing.
+/// field, every closure slot, the instance tag and version. The index sits in
+/// the rs2 field, as the shift amount of `slli` does, so the encoding stays
+/// R-type and instruction walkers need no new case. The immediate form also
+/// checks a call: a closure's entry point is slot 0 of a t-closure.
 ///
-/// Byte forms leave a raw byte in `rd` and take a raw byte from it, so the
-/// tagging a character or a fixnum needs stays where it belongs, in the
-/// compiler. Traps carry the offending value in `mtval`, and the handler
-/// decodes the instruction to say which operand it was.
+/// Byte forms leave a raw byte in `rd` and take a raw byte from it; the
+/// compiler adds any character or fixnum tag. Traps carry the offending value
+/// in `mtval`, and the handler decodes the instruction to name the operand.
 #[inline(never)]
 fn op_index(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let obj = r(m, rs1(w));
@@ -947,8 +873,8 @@ fn op_index(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     if m.prof_on { unsafe {
         *m.prof.get_unchecked_mut(crate::prof::INDEX0 + f as usize) += 1;
     }}
-    // An immediate index is trusted to be a small non-negative number, because
-    // the compiler put it there. A register index is a Lisp value and is not.
+    // An immediate index is a compiler constant, 0 to 31, and is trusted. A
+    // register index is a Lisp value and is checked.
     let i = if f & 4 != 0 {
         rs2(w) as i32
     } else {
@@ -996,22 +922,18 @@ fn tag(v: i32) -> u32 {
 
 /// The custom-2 opcode space: fixnum arithmetic, checked.
 ///
-/// This is the hole the rest of the machine did not have. `car` of a fixnum
-/// traps, `vector-ref` of a string traps, calling a number traps - and until
-/// this instruction existed, `(+ "abc" 2)` returned a *cons*: a string is an
-/// object pointer with its low three bits equal to four, adding a tagged two
-/// adds four, and four plus four is the pair tag. You could fabricate a
-/// pointer to the middle of a string with one addition, and `car` would read
-/// it. Both operands are checked here, and the offending one is what lands in
-/// `mtval` for the handler to name.
+/// Both operands must be tagged fixnums; the offending one lands in `mtval`
+/// for the handler to name. A plain `add` on an object pointer and a tagged
+/// fixnum can produce a value with the pair tag: a string pointer has low
+/// three bits 100, a tagged two adds four, and the sum has low bits 000.
+/// The check refuses that.
 ///
 ///     funct7 0x00   add sub mul div rem and or xor, wrapping at 31 bits
 ///     funct7 0x20   the same five arithmetic forms, trapping on overflow
 ///     funct7 0x01   sll srl sra lt ltu eq
 ///
-/// The comparisons leave a raw 0 or 1, the way `slt` does, because what
-/// follows is either a branch or the two instructions that turn a flag into
-/// `t` and `nil`.
+/// The comparisons leave a raw 0 or 1, as `slt` does; what follows is either
+/// a branch or the two instructions that turn a flag into `t` and `nil`.
 #[inline(never)]
 fn op_fixnum(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let a = r(m, rs1(w));
@@ -1041,8 +963,8 @@ fn op_fixnum(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
             _ => return illegal(m, w, pc, fuel),
         },
         0x00 | 0x20 => match f {
-            // and and or keep the low bit when both sides have it; xor clears
-            // it and has to put it back.
+            // and and or keep the tag bit when both sides have it; xor clears
+            // it, so it is restored.
             5 => a & b,
             6 => a | b,
             7 => (a ^ b) | 1,
@@ -1079,10 +1001,9 @@ fn op_fixnum(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 /// The custom-3 opcode space: a fixnum against a constant, and memory reached
 /// through a tagged address.
 ///
-/// The second half is the bigger one. `peek` was four instructions - strip the
-/// tag off the address, load, shift the word up, put a tag on - and the
-/// collector's own code is nothing but that. One instruction does it, and
-/// checks that the address was a number rather than, say, a string.
+/// The memory forms do in one instruction what takes four in the base ISA:
+/// untag the address, load, shift the word up, tag it. The collector's code
+/// is mostly such accesses. The address is checked to be a fixnum.
 ///
 ///     funct3 0  faddi rd, rs1, imm   rd <- rs1 + 2*imm
 ///     funct3 1  fandi rd, rs1, imm   rd <- rs1 & (2*imm | 1)
@@ -1127,13 +1048,12 @@ fn op_tagged(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     }
 }
 
-/// The memory half of custom-3, split out so that the arithmetic half can end
-/// in a tail call of its own rather than fall past one.
+/// The memory half of custom-3, split out so that the arithmetic half ends in
+/// a tail call of its own.
 ///
-/// It goes through the same `do_load` and `do_store` the base ISA uses, which
-/// matters more than it looks: a device register is at `mmio-base`, and
-/// `mmio-base` is a *negative* fixnum. An address that is not RAM is not
-/// automatically a fault.
+/// It uses the same `do_load` and `do_store` as the base ISA, so device
+/// registers are reachable: `mmio-base` is a negative fixnum, and an address
+/// outside RAM is not automatically a fault.
 #[inline(never)]
 fn op_tagged_mem(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let f = f3(w);
@@ -1152,7 +1072,7 @@ fn op_tagged_mem(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
             return m.fault(C_SFAULT, addr, pc, fuel);
         }
     } else {
-        // lw, or lbu so that a byte arrives without a sign on it.
+        // lw, or lbu so that a byte is zero-extended.
         let sz = if f & 1 == 0 { 2 } else { 4 };
         match do_load(m, addr, sz, fuel) {
             Some(v) => w_(m, rd(w), tag(v as i32)),
@@ -1347,7 +1267,7 @@ fn c_jalr_mv(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
                 return illegal(m, w, pc, fuel);
             }
             let t = r(m, d) & !1;
-            // A return, when it is the return address being jumped through.
+            // A jump through ra is a return.
             if m.prof_on {
                 m.watch.new_block();
                 if d == 1 {
@@ -1383,13 +1303,12 @@ fn c_jalr_mv(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 }
 
 // ===================================================================== table
-/// Counting is a second dispatch table rather than a test in the dispatch
-/// macro. A branch there costs more than everything it guards, because that
-/// macro is the one piece of code every instruction in the machine expands;
-/// swapping the table costs one load of a pointer that is already hot.
+/// Counting uses a second dispatch table rather than a test in `next!`.
+/// A branch in that macro is paid by every instruction; swapping the table
+/// costs one load of a pointer that is already hot.
 ///
-/// Every entry is the same function, because it can work out which slot it is
-/// from the instruction word it was handed anyway.
+/// Every entry is the same function, which recomputes the token from the
+/// instruction word.
 #[inline(never)]
 fn prof_hook(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let tok = if w & 3 == 3 {
@@ -1406,22 +1325,83 @@ fn prof_hook(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 
 pub static PROF_TABLE: [Handler; 64] = [prof_hook; 64];
 
-/// `s2` holds the running task and nothing but `%set-this-task!` writes it, so
-/// it is either nil or a record in object space - always. This checks that
-/// before every instruction and reports the first one that finds it otherwise,
-/// naming the instruction *before* it, which is the one that did it.
+/// What a store instruction is about to write: the address, the width in
+/// bytes and the value. Used by the store watch below. It covers the forms
+/// the compiler emits: the base ISA stores, their compressed forms, and the
+/// custom stores.
+fn store_target(m: &Machine, w: u32) -> Option<(u32, u32, u32)> {
+    if w & 3 == 3 {
+        let f = f3(w);
+        match w & 0x7f {
+            0x23 if f <= 2 => Some((r(m, rs1(w)).wrapping_add(imm_s(w)), 1 << f, r(m, rs2(w)))),
+            // custom-0: a word through a checked reference
+            0x0b if f & 4 != 0 => Some((r(m, rs1(w)).wrapping_add(imm_s(w)), 4, r(m, rs2(w)))),
+            // custom-3: through a tagged address, the value untagged
+            0x7b if f >= 6 => {
+                let base = ((r(m, rs1(w)) as i32) >> 1) as u32;
+                let v = ((r(m, rs2(w)) as i32) >> 1) as u32;
+                Some((base.wrapping_add(imm_s(w)), if f == 6 { 4 } else { 1 }, v))
+            }
+            // custom-1: an indexed store, the value in rd
+            0x2b if f & 1 != 0 => {
+                let obj = r(m, rs1(w));
+                let i = if f & 4 != 0 { rs2(w) } else { ((r(m, rs2(w)) as i32) >> 1) as u32 };
+                if f & 2 == 0 {
+                    Some((obj.wrapping_add(i << 2), 4, r(m, rd(w))))
+                } else {
+                    Some((obj.wrapping_add(i), 1, r(m, rd(w))))
+                }
+            }
+            _ => None,
+        }
+    } else {
+        match (w & 3, (w >> 13) & 7) {
+            (0, 6) => Some((r(m, rcs(w, 7)).wrapping_add(clw_imm(w)), 4, r(m, rcs(w, 2)))),
+            (2, 6) => {
+                let off = ((w >> 7) & 0x3c) | ((w >> 1) & 0xc0);
+                Some((r(m, 2).wrapping_add(off), 4, r(m, (w >> 2) & 31)))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The debugging watches, installed as the dispatch table when any of
+/// `LM_WATCH_S2`, `LM_WATCH_ADDR` or `LM_WATCH_HI` is set. They cost no
+/// cycles and no fuel, so installing them does not move a timing-dependent
+/// fault.
 ///
-/// It costs no cycles and no fuel, the way the profiler's hook does not, so
-/// installing it does not move a fault that depends on timing.
+/// `s2` holds the running task and only `%set-this-task!` writes it, so it
+/// is either nil or a record in object space. Every indirect jump lands in
+/// code space. The first instruction that violates either rule is reported
+/// together with the instruction before it. A store into the watched range,
+/// or of a word whose top half is the watched value, is reported with the
+/// function it came from.
 fn watch_hook(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
+    if m.watch_hi.is_some() || m.watch_addr.is_some() {
+        if let Some((a, sz, v)) = store_target(m, w) {
+            if let Some(hi) = m.watch_hi {
+                if sz == 4 && (v >> 16) == hi {
+                    eprintln!("watch: stored {v:#x} to {a:#x} from pc {pc:#x} in {}", name_of(m, m.x[9]));
+                }
+            }
+            if let Some((lo, len)) = m.watch_addr {
+                if a >= lo && a < lo.wrapping_add(len) {
+                    eprintln!(
+                        "watch: wrote {v:#x} ({sz} bytes) to {a:#x} from pc {pc:#x} in {}",
+                        name_of(m, m.x[9])
+                    );
+                }
+            }
+        }
+    }
     if !m.watch_fired {
         // s2 holds the running task: nil, or a record in object space.
         let s2 = m.x[18];
         let s2_ok = s2 == 0
             || (s2 & 7 == 4 && s2 >= crate::map::OBJ_BASE && s2 < crate::map::OBJ_END);
-        // And every indirect jump lands in code space. Catching it here rather
-        // than at the fetch means the registers that chose the target are
-        // still the ones this instruction is looking at.
+        // Every indirect jump lands in code space. Checking here rather than
+        // at the fetch keeps the registers that chose the target intact.
         let jump = if w & 0x7f == 0x67 {
             let rs1 = ((w >> 15) & 31) as usize;
             let imm = ((w as i32) >> 20) as u32;
@@ -1432,9 +1412,9 @@ fn watch_hook(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         } else {
             None
         };
-        // mret returns to whatever the trap stub put in mepc, which for a task
-        // resuming is word 0 of its context. A wrong one is a jump with no
-        // jump instruction in it.
+        // mret returns to whatever the trap stub put in mepc; for a resuming
+        // task that is word 0 of its context. A wrong value is an indirect
+        // jump without a jump instruction, so it is checked too.
         let mret = if w == 0x3020_0073 { Some(m.mepc) } else { None };
         let jump_bad = match jump.map(|(_, t)| t).or(mret) {
             Some(t) => t < crate::map::CODE_BASE || t >= crate::map::CODE_END,

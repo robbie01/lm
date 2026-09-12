@@ -1,31 +1,23 @@
-;;; table.lisp - hash tables, keyed by identity.
+;;; table.lisp - hash tables keyed by identity.
 ;;;
-;;; A symbol's identity is a small dense integer, handed out by the one
-;;; counter that both the forge and the running machine intern through. That
-;;; makes it a perfect hash for the case that matters: no collisions at all,
-;;; nothing to recompute, and nothing a collector could invalidate by moving
-;;; something.
-;;;
-;;; Open addressing rather than buckets of pairs, because the whole point of a
-;;; table is to be cheaper than the list it replaces, and a chain costs two
-;;; conses an entry before it has stored anything. Two parallel vectors and
-;;; linear probing store nothing but the keys and the values.
+;;; A symbol's identity is a small dense integer handed out by the one counter
+;;; both the forge and the machine intern through, which makes it a perfect
+;;; hash. Open addressing over two parallel vectors, with linear probing: a
+;;; table stores nothing but its keys and values.
 
 (in-package lm)
 
 (defrecord (table tbl) keys vals count dead)
 
 ;; Two objects nothing else can reach, so they can never be mistaken for a key
-;; that somebody actually stored.
+;; somebody stored.
 (define *table-empty* (%cons 'empty nil))
 (define *table-gone* (%cons 'gone nil))
 
+;; Symbols hash by identity, fixnums and characters by value, and anything
+;; else by address. Objects never move, so an address is stable; if that ever
+;; changes, every table has to be rehashed after a collection.
 (define (eq-hash k)
-  ;; Symbols hash by identity. Fixnums and characters hash by value. Anything
-  ;; else hashes by address, which is stable only because objects in this
-  ;; system never move - see the collector, which compacts pairs and leaves
-  ;; objects where they are. If that ever changes, this is the line that has
-  ;; to change with it, and every table will need rehashing after a collection.
   (cond ((%symbol? k) (symbol-index k))
         ((%fixnum? k) k)
         ((%char? k) (%char->int k))
@@ -45,8 +37,8 @@
 (define (table-capacity tbl) (%vector-length (tbl-keys tbl)))
 
 ;; ---------------------------------------------------------------- probing
-;; Where a key lives, or -1. Stops at an empty slot and steps over the ones
-;; something used to be in.
+;; Where a key lives, or -1. Stops at an empty slot and steps over deleted
+;; ones.
 (define (table-find-slot keys key)
   (let* ((n (%vector-length keys))
          (mask (%- n 1))
@@ -60,9 +52,9 @@
               (else (set! i (%logand (%+ i 1) mask))))))
     found))
 
-;; Where a key lives, or where it should go. A slot something was deleted from
-;; is reused, but only after the whole probe has failed to find the key
-;; further along - otherwise one key could end up stored twice.
+;; Where a key lives, or where it should go. A deleted slot is reused only
+;; after the whole probe has failed to find the key further along, or one key
+;; could be stored twice.
 (define (table-insert-slot keys key)
   (let* ((n (%vector-length keys))
          (mask (%- n 1))
@@ -92,8 +84,8 @@
 (define (table-has? tbl key)
   (%>= (table-find-slot (tbl-keys tbl) key) 0))
 
+;; Twice the size, and the deleted slots do not come along.
 (define (table-grow! tbl)
-  ;; Twice the size, and the deleted slots do not come with it.
   (let* ((old-keys (tbl-keys tbl))
          (old-vals (tbl-vals tbl))
          (n (%vector-length old-keys))
@@ -114,10 +106,9 @@
     (set-tbl-dead! tbl 0)
     tbl))
 
+;; Grown at three quarters full, counting the deleted slots: they cost a probe
+;; step each.
 (define (table-set! tbl key val)
-  ;; Grown at three quarters full, counting the deleted slots: they cost a
-  ;; probe step each, so a table full of holes is as slow as a table full of
-  ;; keys and has to be rebuilt just the same.
   (let ((used (%+ (tbl-count tbl) (tbl-dead tbl))))
     (if (%>= (%* (%+ used 1) 4) (%* (table-capacity tbl) 3))
         (table-grow! tbl)
@@ -136,9 +127,9 @@
     (%vector-set! (tbl-vals tbl) i val)
     val))
 
+;; A deleted slot is marked rather than emptied: a key further along the probe
+;; may have walked past it.
 (define (table-del! tbl key)
-  ;; A hole rather than an empty slot: something further along the probe may
-  ;; have walked past here to get where it is.
   (let ((i (table-find-slot (tbl-keys tbl) key)))
     (if (%< i 0)
         nil

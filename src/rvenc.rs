@@ -1,5 +1,5 @@
-//! RV32IMC instruction encoders. Used to build test programs and, later, as
-//! the reference the Lisp assembler is differential-tested against.
+//! RV32IMC instruction encoders. Used to build test programs and as the
+//! reference the Lisp assembler is differential-tested against.
 
 #![allow(dead_code)]
 
@@ -121,10 +121,9 @@ pub fn sw(rs2: u32, rs1: u32, o: i32) -> u32 {
 }
 
 // ---- B extension: Zba, Zbb, Zbs; and Zicond ----
-// Ratified RISC-V, not our own. They are here because the collector's bit
-// maps, the boolean materialisation and the compositor's clipping all want
-// them, and because reaching for a standard extension is what keeps the
-// custom opcodes small.
+// Ratified RISC-V extensions. The collector's bitmaps, boolean
+// materialisation and the compositor's clipping use them, and using standard
+// extensions keeps the custom opcode space small.
 pub fn sh1add(rd: u32, rs1: u32, rs2: u32) -> u32 {
     r_type(0x10, rs2, rs1, 2, rd, 0x33)
 }
@@ -476,12 +475,12 @@ pub fn fence() -> u32 {
     0x0ff0_000f
 }
 
-/// The rule for when a 32-bit instruction has a 16-bit equivalent, written
-/// out a second time so that the assembler's copy has something independent
-/// to disagree with. Returns the short form or the original.
+/// The rule for when a 32-bit instruction has a 16-bit equivalent, kept
+/// independent of the assembler's copy for differential testing. Returns the
+/// short form or the original.
 ///
-/// Only forms whose encoding does not depend on a distance, which is what
-/// lets the assembler shorten instructions without a relaxation pass.
+/// Only forms whose encoding does not depend on a distance are compressed,
+/// so the assembler can shorten instructions without a relaxation pass.
 pub fn compress(w: u32) -> u32 {
     let rd = (w >> 7) & 31;
     let rs1 = (w >> 15) & 31;

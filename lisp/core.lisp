@@ -1,10 +1,10 @@
-;;; core.lisp - the bottom of the world.
+;;; core.lisp - the bottom of the library.
 ;;;
-;;; Everything here is written with only the nine special forms (quote if
-;;; lambda set! define begin while let defmacro) and the % intrinsics, because
-;;; at this point in the boot there is nothing else. The compiler open-codes
-;;; most of these when it sees them in operator position; the definitions here
-;;; are what you get when you pass one around as a value.
+;;; Written with only the nine special forms (quote if lambda set! define
+;;; begin while let defmacro) and the % primitives, because nothing else exists
+;;; when it loads. The compiler open-codes most of these when it sees them in
+;;; operator position; the definitions here are what a name means when it is
+;;; passed around as a value.
 
 (in-package lm)
 
@@ -23,10 +23,8 @@
 (define (number? x) (if (%fixnum? x) t (%bignum? x)))
 (define (function? x) (%closure? x))
 
-;; `t` is its own value. The forge's interpreter says so in Rust, which is
-;; enough for an image it builds; an image the machine builds from these
-;; sources takes its values from these sources and nowhere else, and needs to
-;; be told.
+;; `t` is its own value. The forge's interpreter says so in Rust; an image the
+;; machine builds from these sources takes every value from them.
 (define t 't)
 
 (define (boolean? x) (if (%null? x) t (%eq? x t)))
@@ -56,17 +54,16 @@
 (define (sub2 a b) (%- a b))
 (define (mul2 a b) (%* a b))
 
-;; `+`, `-` and `*` are mixed fixnum and bignum arithmetic: they promote when
-;; an answer outgrows a fixnum and demote when one fits again, so a program
-;; never sees a wrapped result and never has to ask which kind it has.
+;; `+`, `-` and `*` are mixed fixnum and bignum arithmetic: a result that
+;; outgrows a fixnum promotes and one that fits again demotes. They are built
+;; on the trapping fixnum instructions, so the common case is one instruction
+;; and the widening happens in the trap handler (`try-widen` in sys.lisp).
 ;;
-;; The promotion costs nothing when it does not happen. These are the trapping
-;; forms of the fixnum instructions - one instruction each, no check - and the
-;; widening happens in the trap handler, in `try-widen`.
+;; Three other families exist for code with a reason not to promote:
 ;;
-;; `wrap+`, `wrap-` and `wrap*` are the old behaviour for the code that wants
-;; it: hashing, fixed-point arithmetic, anything working modulo 2^31 on
-;; purpose.
+;;   wrap+   wrap-   wrap*     modulo 2^31, silently: hashing, fixed point
+;;   strict+ strict- strict*   an error if the answer is not a fixnum
+;;   sat+    sat-    sat*      clamped to the ends of the fixnum range
 (define (+ . xs)
   (let ((acc 0))
     (while (%cons? xs)
@@ -113,22 +110,6 @@
       (set! xs (%cdr xs)))
     acc))
 
-;; ---- when promotion is not what is wanted ----
-;; Three families, for code that has a reason to stay in fixnums:
-;;
-;;   wrap+   wrap-   wrap*     modulo 2^31, silently. Hashing and fixed-point
-;;                             arithmetic mean this, and `hash-string-into`
-;;                             has to have it or interning changes.
-;;   strict+ strict- strict*   an error if the answer is not a fixnum, for
-;;                             code that means to stay small and wants to be
-;;                             told when it does not.
-;;   sat+    sat-    sat*      clamped to the ends of the fixnum range, for
-;;                             coordinates and counters where a wrong-signed
-;;                             answer is worse than a stuck one.
-;;
-;; The strict and saturating pairs are built on the promoting instruction
-;; rather than on a check before it, so the case that fits costs one
-;; instruction and a type test, and only the case that does not allocates.
 (define most-positive-fixnum 1073741823)
 (define most-negative-fixnum -1073741824)
 
@@ -155,8 +136,8 @@
       (set! xs (%cdr xs)))
     acc))
 
+;; (< a b c) holds when every neighbouring pair does.
 (define (chain2 op xs)
-  ;; (< a b c) holds when every neighbouring pair does.
   (let ((ok t))
     (while (%cons? (%cdr xs))
       (if (%funcall op (%car xs) (%car (%cdr xs)))
@@ -165,30 +146,27 @@
       (set! xs (%cdr xs)))
     ok))
 
-
-;; These comparators are top level functions rather than lambdas written in
-;; place, because a lambda in place would build a closure on every single
-;; call - and (> n 0) inside a loop is about as hot as code gets.
+;; Top level functions rather than lambdas written in place: a lambda in place
+;; would build a closure on every call.
 (define (num-eq a b) (%= a b))
 (define (num-lt a b) (%< a b))
 (define (num-gt a b) (%> a b))
 (define (num-le a b) (%<= a b))
 (define (num-ge a b) (%>= a b))
 
-(define (= . xs) (chain2 num-eq xs))
-(define (< . xs) (chain2 num-lt xs))
-(define (> . xs) (chain2 num-gt xs))
-(define (<= . xs) (chain2 num-le xs))
-(define (>= . xs) (chain2 num-ge xs))
+;; Two required arguments, so that the common call, which is also what
+;; `sort` and `apply` make through a variable, builds no rest list. The
+;; primitive in value position is the checking instruction, which widens to
+;; bignums through the trap handler.
+(define (= a b . more) (if (%null? more) (%= a b) (chain2 num-eq (%cons a (%cons b more)))))
+(define (< a b . more) (if (%null? more) (%< a b) (chain2 num-lt (%cons a (%cons b more)))))
+(define (> a b . more) (if (%null? more) (%> a b) (chain2 num-gt (%cons a (%cons b more)))))
+(define (<= a b . more) (if (%null? more) (%<= a b) (chain2 num-le (%cons a (%cons b more)))))
+(define (>= a b . more) (if (%null? more) (%>= a b) (chain2 num-ge (%cons a (%cons b more)))))
 (define (/= a b) (if (%= a b) nil t))
 
 (define (1+ n) (%+o n 1))
 (define (1- n) (%-o n 1))
-;; These are all written with the primitive in *value* position on purpose.
-;; A comparison there is the checking instruction, which widens through the
-;; trap handler when it meets a bignum; the same comparison as the test of an
-;; `if` compiles to a bare branch on the tagged words, which is right for two
-;; fixnums and compares two addresses for anything else.
 (define (zero? n) (%= n 0))
 (define (positive? n) (%> n 0))
 (define (negative? n) (%< n 0))
@@ -198,19 +176,17 @@
 (define (abs n) (if (negative? n) (- 0 n) n))
 (define (clamp v lo hi) (if (num-lt v lo) lo (if (num-gt v hi) hi v)))
 
-
-;; Integer square root, by Newton. Wanted by anything that has to turn a
-;; distance into a length, which on a machine with no floats is more things
-;; than you would think.
+;; Integer square root, by Newton. The first estimate is n/2 + 1, formed
+;; without the n + 1 that overflows at the top of the fixnum range.
 (define (isqrt n)
   (if (%< n 2)
       (if (%< n 0) 0 n)
-      (let ((x n) (y (%lsh (%+ n 1) -1)))
+      (let ((x n) (y (%+ (%lsh n -1) 1)))
         (while (%< y x)
           (set! x y)
           (set! y (%lsh (%+ x (%/ n x)) -1)))
         x)))
-(define (neg n) (%- 0 n))
+(define (neg n) (- 0 n))
 (define (min2 a b) (if (num-lt a b) a b))
 (define (max2 a b) (if (num-gt a b) a b))
 (define (min x . xs)
@@ -241,21 +217,16 @@
     (while (%cons? xs) (set! acc (%logxor acc (%car xs))) (set! xs (%cdr xs)))
     acc))
 (define (lognot n) (%lognot n))
-;; Shifting is multiplying and dividing by a power of two, so it promotes and
-;; demotes like the rest of the arithmetic. `%ash` is still the fast path,
-;; taken when the value is small and the shift cannot carry anything off the
-;; end of it - the primitive takes its count modulo thirty-two, which is the
-;; machine's rule and quietly wrong for `(ash 1 100)`.
-;;
-;; `lsh` stays raw. It is the logical shift, and a bignum has no top for bits
-;; to fall off.
+
+;; An arithmetic shift is a multiplication or division by a power of two, so
+;; it promotes and demotes like the rest of the arithmetic. `%ash` is the fast
+;; path when the value is a fixnum and the shift is small; a left shift is
+;; checked by shifting back, because `%ash` takes its count modulo thirty-two
+;; and drops bits off the top. `lsh` is the raw logical shift and stays raw.
 (define (ash n k)
   (if (%fixnum? n)
       (if (if (%> k -31) (%< k 15) nil)
           (let ((r (%ash n k)))
-            ;; A left shift can drop bits off the top, and the way to find out
-            ;; is to shift it back: one more instruction, against a call and a
-            ;; multiply.
             (if (%<= k 0)
                 r
                 (if (%= (%ash r (%- 0 k)) n) r (generic-ash n k))))
@@ -265,11 +236,13 @@
 (define (lsh n k) (%lsh n k))
 (define (bit-set? n k) (%= 1 (%logand 1 (%ash n (%- 0 k)))))
 
+;; By squaring, and promoting: (expt 2 100) is exact.
 (define (expt b e)
   (let ((acc 1))
     (while (%> e 0)
-      (set! acc (%* acc b))
-      (set! e (%- e 1)))
+      (if (%= 1 (%logand e 1)) (set! acc (* acc b)) nil)
+      (set! b (* b b))
+      (set! e (%lsh e -1)))
     acc))
 
 (define (gcd a b)
@@ -284,8 +257,8 @@
 ;; ---------------------------------------------------------------- lists
 (define (list . xs) xs)
 
+;; (list* 1 2 '(3 4)) => (1 2 3 4)
 (define (list* x . xs)
-  ;; (list* 1 2 '(3 4)) => (1 2 3 4)
   (if (%null? xs)
       x
       (let ((head (%cons x nil)) (tail nil))
@@ -500,15 +473,16 @@
       (set! n (%- n 1)))
     acc))
 
+;; Merge sort: stable, and no recursion on the length of the list. The runs
+;; are kept in list order through every pass, which is what makes it stable.
 (define (sort xs less)
-  ;; Merge sort, so it is stable and does not recurse on list length.
   (if (%null? (%cdr xs))
       xs
       (let ((runs nil))
-        ;; Start with every element as a run of one.
         (while (%cons? xs)
           (set! runs (%cons (%cons (%car xs) nil) runs))
           (set! xs (%cdr xs)))
+        (set! runs (reverse runs))
         (while (%cons? (%cdr runs))
           (let ((merged nil))
             (while (%cons? runs)
@@ -519,9 +493,11 @@
                   (begin
                     (set! merged (%cons (%car runs) merged))
                     (set! runs nil))))
-            (set! runs merged)))
+            (set! runs (reverse merged))))
         (%car runs))))
 
+;; Takes from `a` unless an element of `b` is strictly less, so equal elements
+;; keep their order.
 (define (merge2 a b less)
   (let ((acc nil))
     (while (if (%cons? a) (%cons? b) nil)
@@ -537,10 +513,9 @@
     (reverse acc)))
 
 ;; ---------------------------------------------------------------- equality
-;; `eq?` is identity, and two bignums of the same value are two objects, so
-;; this is where "the same number" has to be answered for them. Fixnums are
-;; still `eq?` to each other, which is the point of demoting every result that
-;; fits: only numbers too big for a fixnum need this path at all.
+;; `eq?` is identity. Two bignums of the same value are two objects, so the
+;; numeric equality has to be asked for them; fixnums are always `eq?`,
+;; because every result that fits is demoted to one.
 (define (eqv? a b)
   (cond
    ((%eq? a b) t)
@@ -695,8 +670,8 @@
 (define (number->string-fix n)
   (cond
    ((%= n 0) "0")
-   ;; Negating this one wraps it straight back to itself - its magnitude is
-   ;; one more than the largest fixnum - so the digits are written out.
+   ;; Its magnitude is one more than the largest fixnum, so negating it
+   ;; wraps straight back to itself.
    ((%= n -1073741824) "-1073741824")
    (else
       (let ((neg (%< n 0)) (acc nil))
@@ -707,6 +682,7 @@
         (if neg (set! acc (%cons (%int->char 45) acc)) nil)
         (list->string acc)))))
 
+;; The bit pattern of the word, so a negative number shows as eight digits.
 (define (number->hex n)
   (if (%= n 0)
       "0"
@@ -717,19 +693,15 @@
           (set! n (%lsh n -4)))
         (list->string acc))))
 
+;; Straight off the string, with promoting arithmetic: a literal wider than a
+;; fixnum reads as a bignum.
 (define (string->number s)
-  ;; Straight off the string. The reader asks this about every token it reads,
-  ;; nearly all of them names, and turning each one into a list of characters
-  ;; first cost a pair a character just to answer no.
   (let ((i 0) (n (%string-length s)) (neg nil) (acc 0) (ok nil))
     (if (%> n 0)
         (if (%eq? (%string-ref s 0) #\-)
             (begin (set! neg t) (set! i 1))
             (if (%eq? (%string-ref s 0) #\+) (set! i 1) nil))
         nil)
-    ;; `*` and `+` here rather than `%*` and `%+`: a literal wider than a
-    ;; fixnum used to wrap round silently, so a program that wrote out a
-    ;; twenty-digit number got a small negative one and no complaint.
     (while (%< i n)
       (if (char-numeric? (%string-ref s i))
           (begin
@@ -812,9 +784,9 @@
           val))))
 
 ;; ---------------------------------------------------------------- functions
-;; A function can be named by its symbol wherever one is called for, so
-;; (funcall 'car x) and (apply '+ xs) work. This is a Lisp-1, so the function
-;; is the symbol's value. %fluid-value rather than %symbol-value because the
+;; A function may be named by its symbol wherever one is called for, so
+;; (funcall 'car x) and (apply '+ xs) work. This is a Lisp-1: the function is
+;; the symbol's value. `%fluid-value` rather than `%symbol-value` because the
 ;; forge keeps its globals somewhere else.
 (define (resolve-function f)
   (let ((g (if (%symbol? f) (%fluid-value f) f)))
@@ -822,18 +794,16 @@
 
 (define (funcall f . args) (%apply (resolve-function f) args))
 
-;; (apply f 1 2 '(3 4)) calls f with 1 2 3 4: the last argument is a list, and
-;; any before it go on its front the way list* puts them there.
+;; (apply f 1 2 '(3 4)) calls f with 1 2 3 4: the last argument is a list and
+;; any before it go on its front.
 (define (apply f arg . more)
   (%apply (resolve-function f) (if (%null? more) arg (%cons arg (%apply list* more)))))
 
-;; %apply takes a list of any length: the first eight go in registers and the
-;; rest on the stack, the same as a call written out. This is it without the
-;; symbol lookup, for callers that already hold the function.
+;; `%apply` takes a list of any length: the first eight go in registers and
+;; the rest on the stack. This is it without the symbol lookup.
 (define (apply-list f args) (%apply f args))
 (define (identity x) x)
 (define (compose f g) (lambda (x) (%funcall f (%funcall g x))))
 (define (constantly x) (lambda () x))
 
-;; Output lives in print.lisp for the machine and in hostio.lisp for the
-;; forge: the two write to very different places, and neither belongs here.
+;; Output is in print.lisp for the machine and hostio.lisp for the forge.

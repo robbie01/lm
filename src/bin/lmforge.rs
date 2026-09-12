@@ -1,10 +1,9 @@
-//! `lmforge` — build an image for the machine to boot.
+//! `lmforge`: build an image for the machine to boot.
 //!
-//! The build is the interesting half of this system. A small interpreter in
-//! Rust brings up the Lisp sources, and then the compiler — which is one of
-//! those sources, written in Lisp — compiles the whole system including
-//! itself, into the same heap the interpreter has been building all along.
-//! What is left in memory at the end is the image.
+//! A small interpreter in Rust brings up the Lisp sources. The compiler, one
+//! of those sources and written in Lisp, then compiles the whole system,
+//! itself included, into the heap the interpreter has been building. What is
+//! left in memory at the end is the image.
 
 use clap::{Parser, Subcommand};
 
@@ -38,11 +37,10 @@ enum Cmd {
 
     /// Build a fresh image by having a previous image build it
     ///
-    /// The machine has a reader, a compiler and an image writer. The sources
-    /// are typed at its console twice - once to make the machine the new
-    /// system, once to compile a fresh image with it - and it writes that
-    /// image out. Nothing the old image held comes with it. This is the
-    /// self-hosting path, and it does not go near the bootstrap interpreter.
+    /// The sources are typed at the machine's console twice: once to make the
+    /// running machine the new system, once to compile a fresh image with it.
+    /// The machine writes that image out. Nothing the old image held comes
+    /// with it, and the bootstrap interpreter is not involved.
     Rebuild {
         /// The image to build with
         #[arg(short, long, default_value = "kick.img")]
@@ -63,9 +61,9 @@ enum Cmd {
 
     /// Slide object space down in a saved image, and write it out again
     ///
-    /// `build` does this on the way out. This is for an image that was written
-    /// by the machine itself - a rebuild, or a `(save-image)` - which has no
-    /// forge in the loop and so carries every hole the collector left.
+    /// `build` does this on the way out. This is for an image written by the
+    /// machine itself, by a rebuild or a `(save-image)`, which carries every
+    /// hole the collector left.
     Compact {
         /// The image to compact
         #[arg(short, long, default_value = "next.img")]
@@ -80,9 +78,9 @@ enum Cmd {
         verbose: bool,
 
         /// Slide code space down too, and blank the pool's scratch. Only for
-        /// an image that boots through its kickstart, as `rebuild` makes -
-        /// never one from `(save-image)`, which resumes with return addresses
-        /// on its stacks
+        /// an image that boots through its kickstart, as `rebuild` makes; not
+        /// one from `(save-image)`, which resumes with return addresses on
+        /// its stacks
         #[arg(long)]
         fresh: bool,
     },
@@ -90,8 +88,7 @@ enum Cmd {
     /// Regenerate lisp/layout.lisp from the Rust definitions
     ///
     /// The memory map and object layout are defined once, in Rust, and emitted
-    /// as Lisp constants so the two sides cannot drift apart. `build` does this
-    /// for you; this is here for when you want to look at the result.
+    /// as Lisp constants so the two sides agree. `build` does this itself.
     Layout,
 }
 

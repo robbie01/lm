@@ -12,12 +12,12 @@
 //!     w & 7 == 4        object. header at [w-4], payload from [w].
 //!     w & 7 == 2        immediate: kind = (w >> 3) & 31, payload = w >> 8.
 //!
-//! Header word: (len << 8) | type. `len` counts payload elements - words for
+//! Header word: (len << 8) | type. `len` counts payload elements: words for
 //! the tagged types, bytes for the byte types.
 //!
-//! Nothing ever moves. The collector is conservative over task stacks, which
-//! is what lets compiled code keep values in registers and lets the Exec
-//! kernel hold raw pointers into the same heap without any cooperation.
+//! Nothing ever moves. The collector is conservative over task stacks, so
+//! compiled code can keep values in registers and the Exec kernel can hold
+//! raw pointers into the heap.
 
 #![allow(dead_code)]
 
@@ -105,14 +105,14 @@ pub const T_CLOSURE: u32 = 5; // word0 raw entry address, rest tagged
 pub const T_RECORD: u32 = 6; // len tagged words, word0 is a type tag
 pub const T_FLOAT: u32 = 7; // one raw word
 pub const T_PORT: u32 = 8; // len tagged words
-// Slot 0 is the sign - 0 for positive, 1 for negative - and the rest are the
+// Slot 0 is the sign, 0 for positive and 1 for negative. The rest are the
 // magnitude as raw 32-bit limbs, least significant first. Normalised: the top
-// limb is never zero, the magnitude is never zero (zero is the fixnum), and
-// the value never fits a fixnum (anything that does IS a fixnum, which is what
-// keeps `eq?` working on small numbers).
+// limb is never zero, the magnitude is never zero, and the value never fits a
+// fixnum. Any value that fits a fixnum is a fixnum, so `eq?` works on small
+// numbers.
 pub const T_BIGNUM: u32 = 9;
 pub const T_CODE: u32 = 10; // word0 raw entry, word1 raw length, word2 name,
-                            // then the literal vector - all tagged from 2 on
+                            // then the literal vector; all tagged from 2 on
 
 pub const SYM_SLOTS: u32 = 6;
 pub const SYM_NAME: u32 = 0;
@@ -129,8 +129,8 @@ pub const SYM_MACRO: i32 = 1;
 pub const SYM_EXPORTED: i32 = 2;
 
 /// A package: a name, and the list of packages whose exports it inherits.
-/// What a package holds is not stored here - the obarray is keyed by package
-/// and name together, and a symbol knows which package is its home.
+/// What a package holds is not stored here: the obarray is keyed by package
+/// and name together, and a symbol records its home package.
 pub const PKG_TAG: u32 = 0;
 pub const PKG_NAME: u32 = 1;
 pub const PKG_USE: u32 = 2;
@@ -184,7 +184,7 @@ pub fn obj_size(h: u32) -> u32 {
 // ============================================================== the heap view
 /// A view onto the machine's RAM that knows about Lisp objects. The build-time
 /// interpreter and the image writer both work through this, so what the
-/// compiler builds is literally what the machine will run.
+/// compiler builds is what the machine runs.
 pub struct Heap<'a> {
     pub m: &'a mut Machine,
 }
@@ -226,9 +226,7 @@ impl<'a> Heap<'a> {
         self.set_g(LG_POOLPTR, POOL_BASE);
         self.set_g(LG_POOLEND, POOL_END);
         self.set_g(LG_CONS_FREE, NIL);
-        self.set_g(LG_OBJ_FREE, NIL);
         self.set_g(LG_SYMLIST, NIL);
-        self.set_g(LG_GCTHRESH, 1 << 20);
     }
 
     // ---- allocation (bump only; the collector lives in Lisp) ----
@@ -252,7 +250,7 @@ impl<'a> Heap<'a> {
         }
         self.set_g(LG_OBJ_PTR, p + sz);
         self.st(p, h);
-        // Tagged payloads start life as nil; raw payloads as zero. Same thing.
+        // Tagged payloads start as nil and raw payloads as zero; both are 0.
         for i in (4..sz).step_by(4) {
             self.st(p + i, 0);
         }
@@ -372,7 +370,7 @@ impl<'a> Heap<'a> {
         }
         self.car(v)
     }
-    /// Append in place is not needed; this builds a fresh list.
+    /// Builds a fresh list: `a` is copied, `b` is shared.
     pub fn append2(&mut self, a: V, b: V) -> V {
         let items = self.list_vec(a);
         let mut r = b;
@@ -434,16 +432,13 @@ impl<'a> Heap<'a> {
 
     // ---- bignums ----
     //
-    // The magnitude arithmetic here is `num_bigint`'s, not ours. This is the
-    // *host* side: it runs at build time, on a machine with a real allocator
-    // and a crate registry, and the only thing it has to be is right - a
-    // number read out of a source file has to be the same number the machine
-    // would read. The interesting implementation is the machine's own, in
-    // lisp/bignum.lisp, which has to work in sixteen-bit pieces because a
-    // Lisp value there cannot hold a limb.
+    // The magnitude arithmetic here is `num_bigint`'s. This is the host side:
+    // it runs at build time, and a number read out of a source file must be
+    // the same number the machine would read. The machine's own bignum
+    // arithmetic is in lisp/bignum.lisp and works in sixteen-bit pieces,
+    // because a Lisp value there cannot hold a limb.
     //
-    // `rug` would be the other choice and is faster, but it is GMP behind a
-    // C build; this is pure Rust and the build stays a `cargo build`.
+    // `num_bigint` is pure Rust, so the build stays a plain `cargo build`.
 
     /// A number of either kind as a `BigInt`.
     pub fn to_big(&self, v: V) -> Option<BigInt> {
@@ -457,9 +452,9 @@ impl<'a> Heap<'a> {
         None
     }
 
-    /// And back, demoting when it fits - the same invariant the machine's own
-    /// `bn-finish` keeps, and it has to be the same one or a number read at
-    /// build time and the same number read at run time would not be `eqv`.
+    /// A `BigInt` as a value, demoted to a fixnum when it fits. This is the
+    /// invariant the machine's `bn-finish` keeps, so a number read at build
+    /// time is `eqv` to the same number read at run time.
     pub fn from_big(&mut self, n: &BigInt) -> V {
         if let Some(i) = n.to_i64() {
             if (-(1 << 30)..(1 << 30)).contains(&i) {
@@ -501,15 +496,13 @@ impl<'a> Heap<'a> {
         self.make_bignum(v < 0, &[m as u32, (m >> 32) as u32])
     }
 
-    /// The three widening operations, host side. The forge reads its own
-    /// sources with the machine's reader running on these, and that reader
-    /// builds a number by multiplying by ten - so a literal is only as wide as
-    /// these are. They were i64 for one build, and a twenty-six digit constant
-    /// in a source file quietly became its bottom sixty-four bits.
+    /// The three widening operations, host side. The machine's reader, run by
+    /// the forge over its own sources, builds a number by multiplying by ten,
+    /// so a literal is only as wide as these operations allow.
     pub fn num_add(&mut self, a: V, b: V) -> Option<V> {
-        // Two fixnums is the overwhelming case - once per digit of every
-        // number in every source file - and both are thirty-one bits, so i64
-        // holds the answer exactly and nothing is allocated.
+        // Two fixnums is the common case, once per digit of every number read.
+        // Both are thirty-one bits, so i64 holds the answer exactly and
+        // nothing is allocated.
         if is_fixnum(a) && is_fixnum(b) {
             return Some(self.bignum_of_i64(unfix(a) as i64 + unfix(b) as i64));
         }
@@ -568,22 +561,10 @@ impl<'a> Heap<'a> {
         v
     }
 
-    /// djb2, masked to 30 bits every round. The mask is not decoration: the
-    /// same hash is computed in Lisp by `string-hash`, where intermediates are
-    /// fixnums, and a symbol interned at build time has to land in the same
-    /// bucket as one interned by the running machine or they would not be eq.
-    pub fn sym_hash(name: &str) -> u32 {
-        let mut h: u32 = 5381;
-        for &b in name.as_bytes() {
-            h = (h.wrapping_mul(33).wrapping_add(b as u32)) & 0x3fff_ffff;
-        }
-        h
-    }
-
-    /// djb2 again, but over the package name, a colon, and the symbol name,
-    /// so that two packages can each have a `draw-char` without colliding.
-    /// `qualified_hash` in Lisp computes exactly this, and the two agreeing is
-    /// what makes a symbol read at build time eq to one read by the machine.
+    /// djb2 over the package name, a colon, and the symbol name, masked to 30
+    /// bits, so two packages can each have a `draw-char` without colliding.
+    /// `qualified_hash` in Lisp computes the same value, which makes a symbol
+    /// read at build time eq to one read by the machine.
     pub fn qual_hash(pkg: &str, name: &str) -> u32 {
         let mut h: u32 = 5381;
         for &b in pkg.as_bytes() {
@@ -624,7 +605,7 @@ impl<'a> Heap<'a> {
         pkg
     }
 
-    /// The package everything lands in until something says otherwise.
+    /// The package a bare name lands in: `lm`.
     pub fn base_package(&mut self) -> V {
         self.package("lm")
     }
@@ -668,14 +649,13 @@ impl<'a> Heap<'a> {
         self.set_slot(s, SYM_VALUE, UNBOUND);
         self.set_slot(s, SYM_FUNCTION, NIL);
         self.set_slot(s, SYM_PLIST, NIL);
-        // Flags in the low eight bits, the symbol's identity above them.
-        // Interning is the only place a symbol is made, on either side of the
-        // bootstrap, so the counter in low memory is what keeps the two from
-        // ever handing out the same number.
+        // Flags in the low eight bits, the symbol's identity above them. Every
+        // symbol takes its number from the counter in low memory, on either
+        // side of the bootstrap, so no two symbols share one.
         let idx = self.g(LG_SYMCOUNT);
         self.set_g(LG_SYMCOUNT, idx + 1);
         self.set_slot(s, SYM_FLAGS, fix((idx << 8) as i32));
-        // And the index for the name on its own, which the build's tables use.
+        // The index for the name alone, which the build's tables use.
         let next = self.m.name_ids.len() as u32;
         let nid = *self.m.name_ids.entry(name.to_string()).or_insert(next);
         let i = idx as usize;
@@ -696,6 +676,24 @@ impl<'a> Heap<'a> {
     pub fn intern(&mut self, name: &str) -> V {
         let p = self.base_package();
         self.intern_in(p, name)
+    }
+
+    /// A symbol in no package and on no list: what `gensym` makes. Nothing
+    /// reaches it but the code that mentions it, so the collector frees it
+    /// when that code goes. It takes an identity from the counter like any
+    /// other symbol, so tables can hash it.
+    pub fn make_symbol(&mut self, name: &str) -> V {
+        let nm = self.string(name);
+        let s = self.alloc_obj(T_SYMBOL, SYM_SLOTS);
+        self.set_slot(s, SYM_NAME, nm);
+        self.set_slot(s, SYM_VALUE, UNBOUND);
+        self.set_slot(s, SYM_FUNCTION, NIL);
+        self.set_slot(s, SYM_PLIST, NIL);
+        let idx = self.g(LG_SYMCOUNT);
+        self.set_g(LG_SYMCOUNT, idx + 1);
+        self.set_slot(s, SYM_FLAGS, fix((idx << 8) as i32));
+        self.set_slot(s, SYM_PACKAGE, NIL);
+        s
     }
 
     /// `pkg:name`, for the places on the Rust side that reach into the Lisp
@@ -721,29 +719,26 @@ impl<'a> Heap<'a> {
     pub fn sym_value(&self, s: V) -> V {
         self.slot(s, SYM_VALUE)
     }
-    /// A symbol's identity: a dense index handed out by `intern_in`, above the
-    /// eight flag bits. Interning is the only place a symbol is made, so these
-    /// run 0, 1, 2, ... with no gaps.
+    /// A symbol's identity: a dense index from the symbol counter, above the
+    /// eight flag bits. `intern_in` and `make_symbol` both take the next
+    /// number, so indices run 0, 1, 2, ... with no gaps.
     pub fn sym_index(&self, s: V) -> usize {
         (unfix(self.slot(s, SYM_FLAGS)) as u32 >> 8) as usize
     }
 
-    /// A dense index for a symbol's *name*, ignoring its package - so every
-    /// symbol spelled `car` shares one, whichever package it belongs to.
+    /// A dense index for a symbol's name, ignoring its package: every symbol
+    /// spelled `car` shares one, whichever package it belongs to.
     ///
-    /// This is what the build's global and macro tables are indexed by, and it
-    /// has to be the name rather than the symbol: the sources read before
-    /// packages.lisp go through a flat reader with one namespace, and they
-    /// call things that are defined later inside a package. Those two spell
-    /// the same name and mean the same function, and a table keyed by symbol
-    /// would give them separate cells.
+    /// The build's global and macro tables are indexed by this. It has to be
+    /// the name rather than the symbol: the sources read before packages.lisp
+    /// go through a flat reader with one namespace, and they call things that
+    /// are defined later inside a package. Those two spell the same name and
+    /// mean the same function, and a table keyed by symbol would give them
+    /// separate cells.
     ///
-    /// The tables used to be `HashMap<String, V>`, which got the same answer
-    /// by hashing the name every time - and building that String out of the
-    /// machine's heap on every global reference in the build.
     /// Filled on demand: `intern_in` here records it, but the machine's own
-    /// `intern-in` in runtime.lisp makes symbols too - it runs interpreted
-    /// during the build - and those arrive without one.
+    /// `intern-in` in runtime.lisp also makes symbols while it runs
+    /// interpreted during the build, and those arrive without one.
     pub fn name_id(&mut self, s: V) -> usize {
         let i = self.sym_index(s);
         if i < self.m.sym_name_id.len() {
@@ -893,9 +888,11 @@ impl<'a> Heap<'a> {
         if is_obj(v) {
             match self.otype(v) {
                 T_SYMBOL => {
-                    // The bootstrap prints a bare name: it has one package,
-                    // and the machine's own printer is the one that has to
-                    // decide when a name needs qualifying.
+                    // Printed as a bare name, without its package. An
+                    // uninterned symbol is marked `#:` as the machine marks one.
+                    if self.slot(v, SYM_PACKAGE) == NIL {
+                        out.push_str("#:");
+                    }
                     out.push_str(&self.sym_name(v))
                 }
                 T_STRING => {

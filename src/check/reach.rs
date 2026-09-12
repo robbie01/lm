@@ -5,10 +5,10 @@
 //! walks the heap once per package from exactly those roots and records, for
 //! every cell it finds, the set of packages that can get to it.
 //!
-//! The interesting number is not the totals, which overlap almost completely -
-//! compiled code calls other packages' functions through their symbols, so a
-//! walk from anywhere ends up nearly everywhere. It is the exclusive weight:
-//! what would go away if a package did.
+//! The totals overlap almost completely: compiled code calls other packages'
+//! functions through their symbols, so a walk from anywhere reaches nearly
+//! everything. The exclusive weight is the useful number: the bytes that
+//! would go away if the package did.
 
 use crate::heap::*;
 use crate::image;
@@ -16,9 +16,9 @@ use crate::mach::Machine;
 use crate::map::*;
 use std::collections::{HashMap, HashSet};
 
-/// A pair is two words; an object is its header and payload rounded to eight;
-/// a code object is that plus the machine code it points at, which is the
-/// only weight in code space anything can be said to own.
+/// A pair is two words. An object is its header and payload rounded to eight.
+/// A code object also counts the machine code it points at, which is how
+/// code space is attributed.
 fn weight(h: &Heap, v: V) -> u32 {
     if is_cons(v) {
         return 8;
@@ -45,7 +45,7 @@ fn edges(h: &Heap, v: V, out: &mut Vec<V>) {
         T_STRING | T_BYTES | T_FLOAT | T_BIGNUM => (0, 0),
         // Slots 0 and 1 are a raw address and a raw length.
         T_CODE => (CODE_NAME, len),
-        // Slot 0 is a raw entry address; following it would be a bug.
+        // Slot 0 is a raw entry address, not a tagged word.
         T_CLOSURE => (1, len),
         _ => (0, len),
     };
@@ -133,9 +133,9 @@ pub fn run(path: &str, json: bool) -> i32 {
         }
     }
 
-    // Context for the picture: everything the collector would keep, and how
-    // much of object space is neither kept nor given back. Objects are never
-    // moved, so what the build threw away stays in the file as holes.
+    // Context: everything the collector would keep, and how much of object
+    // space is neither kept nor given back. Objects never move, so what the
+    // build discarded stays in the file as holes.
     let root_slots = [
         LG_SYMLIST,
         LG_OBARRAY,
@@ -170,7 +170,7 @@ pub fn run(path: &str, json: bool) -> i32 {
     // Dead object space, split by whether it can leave the file. The writer
     // skips a page of zeroes, and `gc-for-image` blanks every free block, so a
     // page with nothing live on it costs nothing. A page with one survivor on
-    // it costs the whole page - that part is what compacting would reclaim.
+    // it costs the whole page; compacting would reclaim that part.
     let obj_pages = (obj_high as usize + 4095) / 4096;
     let mut page_used = vec![false; obj_pages.max(1)];
     for v in reach(&h, &roots) {
@@ -190,10 +190,10 @@ pub fn run(path: &str, json: bool) -> i32 {
     }
     let empty_pages = page_used.iter().filter(|u| !**u).count();
 
-    // What compacting would cost and what it would buy: how much live data
-    // sits on each page, and how much of it would have to be copied to close
-    // the gaps. A page that is nearly full is not worth evacuating; the
-    // histogram says how many are.
+    // What compacting would cost and buy: how much live data sits on each
+    // page, and how much would have to be copied to close the gaps. A nearly
+    // full page is not worth evacuating; the histogram counts pages by how
+    // full they are.
     let mut page_live = vec![0u64; obj_pages.max(1)];
     for v in reach(&h, &roots) {
         if is_cons(v) {
@@ -232,8 +232,8 @@ pub fn run(path: &str, json: bool) -> i32 {
             sparse_bytes += *l;
         }
     }
-    // The regions of the diagram: bytes that exactly this set of packages can
-    // reach, and nobody else.
+    // The regions: bytes that exactly this set of packages can reach and no
+    // other package does.
     let mut region: HashMap<u32, u64> = HashMap::new();
     let mut live: u64 = 0;
     for (v, bits) in &mask {
