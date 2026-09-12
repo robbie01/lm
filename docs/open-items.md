@@ -65,7 +65,7 @@ by the `(drivers)` test.
 
 **Window management is a shell in a window and not much more.** The zoom and
 collapse boxes are drawn and do nothing; there is no resize, though
-`pt-grow-box` is drawn by nobody; nothing but the pointer chooses the front
+`platinum:grow-box` is drawn by nobody; nothing but the pointer chooses the front
 window; the front window takes every keystroke; and a window dragged to the
 edge of the screen cannot be brought back from the keyboard.
 
@@ -126,7 +126,7 @@ per damage rectangle that touches more than one window, and
 `region-subtract` allocates its pieces. Damage inside one window is one
 copy with no allocation, which is the common case.
 
-**`asm-literal` is linear in the literals of a function**, so a function
+**`asm:literal` is linear in the literals of a function**, so a function
 with many distinct constants compiles in time quadratic in their number.
 
 **On the host,** the display is scanned out into the window every host frame

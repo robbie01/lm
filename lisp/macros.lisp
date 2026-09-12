@@ -330,6 +330,12 @@
          (fields nil)
          (inits nil)
          (out nil))
+    ;; The accessors are interned where the type is, so the type has to be
+    ;; this package's own: a name inherited from another package would put
+    ;; them there.
+    (if (%eq? pkg (current-package))
+        nil
+        (error "defrecord: the type belongs to another package" type))
     (dolist (spec (cddr form))
       (if (if (%cons? spec) (word? (%car spec) "include") nil)
           (let ((base (record-shape (cadr spec))))

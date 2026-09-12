@@ -55,7 +55,7 @@
   nil)
 
 ;; ---------------------------------------------------------------- metrics
-;; Rows 0..21 of a window: the outline, nineteen interior rows, the shadow row
+;; Rows 0..21 of a window: the frame-rect, nineteen interior rows, the shadow row
 ;; and the content border. Everything else is measured off that.
 (define title-height 22)
 (define band 6)              ; left, right and bottom bands
@@ -72,7 +72,7 @@
 (define (hline rp x y w c) (fill-rect rp x y w 1 c))
 (define (vline rp x y h c) (fill-rect rp x y 1 h c))
 
-(define (outline rp x y w h c)
+(define (frame-rect rp x y w h c)
   (hline rp x y w c)
   (hline rp x (%+ y (%- h 1)) w c)
   (vline rp x y h c)
@@ -116,7 +116,7 @@
     nil))
 
 ;; ---------------------------------------------------------------- boxes
-;; The close, zoom and collapse boxes: a #222 outline round a diagonal ramp
+;; The close, zoom and collapse boxes: a #222 frame-rect round a diagonal ramp
 ;; from #99 at the top left to white at the bottom right, with a white
 ;; highlight along the outside of the right and bottom edges.
 (define (title-box rp x y kind)

@@ -14,7 +14,7 @@
 (defrecord (window win)
   x y w h title
   refresh                 ; (lambda (w)) draws the interior
-  keys                    ; the port its keys are sent to, if anybody reads it
+  port                    ; where its events go, if anybody reads them
   task
   data                    ; whatever the window is for
   rp                      ; where this window draws: its own bitmap
@@ -212,7 +212,7 @@
     (fill-rect rp 0 title-height band (%- h title-height) g3)
     (fill-rect rp (%- w band) title-height band (%- h title-height) g3)
     (fill-rect rp 0 (%- h band) w band g3)
-    (outline rp 0 0 w h edge)
+    (frame-rect rp 0 0 w h edge)
     (if front
         (begin
           ;; The raised bands: white outside, #99 inside.
@@ -230,7 +230,7 @@
           (draw-text rp tx 4 title black nil))
         (draw-text rp tx 4 title g7 nil))
     ;; The content border, one pixel of outline round the interior.
-    (outline rp (%- (win-inner-x win) 1) (%- (win-inner-y win) 1)
+    (frame-rect rp (%- (win-inner-x win) 1) (%- (win-inner-y win) 1)
               (%+ (win-inner-w win) 2) (%+ (win-inner-h win) 2) edge)
     nil))
 
@@ -465,22 +465,33 @@
         (if (%>= y by) (%< y (%+ by box-size)) nil)
         nil)))
 
-;; ---------------------------------------------------------------- keys
-;; Keys go to a window as messages, to a port belonging to the task that
-;; reads the window, its shell's. The input task sends and never waits; the
-;; shell takes them in order when it wants one and sleeps on the port when
-;; there are none. A window nobody reads has no port, and a key sent to it
-;; goes nowhere.
-(define (window-push-key win c)
-  (let ((p (win-keys win)))
-    (if p (send p c) nil))
+;; ---------------------------------------------------------------- events
+;; A window's events go to its port as messages, one per event, in the
+;; window's own coordinates: `(key ascii code mods)`, `(button down n x y)`,
+;; `(button up n x y)`, `(mouse moved x y)` and `(wheel delta x y)`, with the
+;; words from the input package. The port belongs to the task that reads the
+;; window. The input task sends and never waits; the reader takes events in
+;; order and sleeps on the port when there are none. A window nobody reads
+;; has no port, and an event sent to it goes nowhere.
+(define (window-send win ev)
+  (let ((p (win-port win)))
+    (if p (send p ev) nil))
   nil)
 
-(define (window-pop-key win)
-  (let ((p (win-keys win)))
+;; The next event, or nil when none is waiting.
+(define (window-event win)
+  (let ((p (win-port win)))
     (if p
         (let ((m (get-message p))) (if m (message-body m) nil))
         nil)))
+
+;; The next event, sleeping until there is one.
+(define (window-wait-event win)
+  (let ((p (win-port win)))
+    (wait-port p)
+    (message-body (get-message p))))
+
+(define (key-event? ev) (%eq? (%car ev) 'input:key))
 
 ;; ---------------------------------------------------------------- shells
 ;; A shell keeps characters, not pixels: a grid it can redraw from.
@@ -607,16 +618,16 @@
   (make-stream
    (lambda (c) (shell-putc win sh c))
    (lambda ()
-     (let ((k (window-pop-key win)))
-       (if k
-           (let ((c (%int->char k))) (shell-putc win sh c) c)
+     (let ((ev (window-event win)))
+       (if (if ev (if (key-event? ev) (%> (cadr ev) 0) nil) nil)
+           (let ((c (%int->char (cadr ev)))) (shell-putc win sh c) c)
            nil)))
-   ;; Nothing to read: sleep until a key is sent.
-   (lambda () (wait (port-signal (win-keys win))))))
+   ;; Nothing to read: sleep until an event is sent.
+   (lambda () (wait (port-signal (win-port win))))))
 
 ;; A window with a prompt in it, and a task of its own to run the prompt.
-;; The task and its port are made before the window is on the screen, so
-;; that no key can arrive before there is somewhere for it to go.
+;; The task makes the window's port as its first act, before it reads, so
+;; that the port exists by the time anything waits on it.
 (define (new-shell . opts)
   (let* ((n (length *windows*))
          (x (%+ 20 (%* n 18)))
@@ -629,33 +640,51 @@
          (sh (make-shell cols rows)))
     (set-win-data! win sh)
     (set-win-refresh! win (lambda (v) (shell-refresh v)))
-    (let ((task (start-repl "shell" (shell-stream win sh))))
-      (set-win-keys! win (make-port-for task nil 0))
-      (set-win-task! win task))
+    (set-win-task! win (add-task "shell" 0
+                                 (lambda ()
+                                   (set-win-port! win (make-port nil 0))
+                                   (use-stream! (shell-stream win sh))
+                                   (repl))))
     (window-open win)
     win))
 
 ;; ---------------------------------------------------------------- input
-;; One task turns events into window operations: clicks choose and drag, keys
-;; go to whichever window is in front.
+;; One task turns events into window operations: a click on a title bar
+;; raises and drags, on a close box closes, and anywhere else in a window
+;; goes to the window's port with the button held there until it is let go.
+;; Keys and the wheel go to the front window and the window under the
+;; pointer.
 (define *drag-win* nil)
 (define *drag-dx* 0)
 (define *drag-dy* 0)
+(define *press-win* nil)   ; the window that took the button down
 
-(define (button-down x y)
+(define (window-send-at win ev x y)
+  (window-send win (list (%car ev) (cadr ev) (caddr ev)
+                         (%- x (win-x win)) (%- y (win-y win)))))
+
+(define (button-down n x y)
   (let ((w (window-at x y)))
     (if (%null? w)
         nil
         (begin
           (window-to-front w)
-          (if (in-close-box? w x y)
-              (window-close w)
-              (if (in-title? w x y)
-                  (begin
-                    (set! *drag-win* w)
-                    (set! *drag-dx* (%- x (win-x w)))
-                    (set! *drag-dy* (%- y (win-y w))))
-                  nil))))))
+          (cond ((in-close-box? w x y) (window-close w))
+                ((in-title? w x y)
+                 (set! *drag-win* w)
+                 (set! *drag-dx* (%- x (win-x w)))
+                 (set! *drag-dy* (%- y (win-y w))))
+                (else
+                 (set! *press-win* w)
+                 (window-send-at w (list 'input:button 'input:down n) x y)))))))
+
+(define (button-up n x y)
+  (set! *drag-win* nil)
+  (if *press-win*
+      (begin
+        (window-send-at *press-win* (list 'input:button 'input:up n) x y)
+        (set! *press-win* nil))
+      nil))
 
 ;; The pixels have not changed, only where they go: both ends are damaged,
 ;; what the window has uncovered and where it is now, footprints included so
@@ -679,20 +708,28 @@
       nil))
 
 ;; An event as input.driver sends it: `(key down ascii code mods)`, `(button
-;; down n x y)`, `(mouse moved x y)` and so on.
+;; down n x y)`, `(mouse moved x y)`, `(wheel delta x y)`.
 (define (handle-event e)
   (let ((what (%car e)) (how (cadr e)))
     (cond
      ((%eq? what 'input:key)
       (if (%eq? how 'input:down)
-          (let ((a (caddr e)) (f (front-window)))
-            (if (if f (%> a 0) nil) (window-push-key f a) nil))
+          (let ((f (front-window)))
+            (if f (window-send f (list 'input:key (caddr e) (cadddr e) (nth 4 e))) nil))
           nil))
      ((%eq? what 'input:button)
       (if (%eq? how 'input:down)
-          (button-down (cadddr e) (nth 4 e))
-          (set! *drag-win* nil)))
-     ((%eq? what 'input:mouse) (drag (caddr e) (cadddr e)))
+          (button-down (caddr e) (cadddr e) (nth 4 e))
+          (button-up (caddr e) (cadddr e) (nth 4 e))))
+     ((%eq? what 'input:mouse)
+      (cond (*drag-win* (drag (caddr e) (cadddr e)))
+            (*press-win*
+             (window-send-at *press-win* (list 'input:mouse 'input:moved 0)
+                             (caddr e) (cadddr e)))
+            (else nil)))
+     ((%eq? what 'input:wheel)
+      (let ((w (window-at (caddr e) (cadddr e))))
+        (if w (window-send-at w (list 'input:wheel (cadr e) 0) (caddr e) (cadddr e)) nil)))
      (else nil))))
 
 ;; The compositor: one pass a frame, and only over what changed.

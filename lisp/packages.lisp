@@ -30,7 +30,9 @@
 (defpackage platinum use lm hw)                                    ; the Mac OS 8/9 appearance
 (defpackage wb use lm hw sys exec platinum)                        ; the workbench
 (defpackage eyes use lm gc hw exec sys wb platinum)                ; xeyes
-(defpackage user use lm gc hw asm compiler sys exec snap wb eyes platinum)  ; where a prompt starts
+(defpackage ui use lm hw exec wb platinum)                        ; controls
+(defpackage explorer use lm hw exec sys wb platinum ui)           ; a window onto the heap
+(defpackage user use lm gc hw asm compiler sys exec snap wb eyes platinum explorer)  ; where a prompt starts
 
 ;; ---------------------------------------------------------------- exports
 ;; The prelude first: every other list below is read in its own package, and
@@ -235,7 +237,7 @@
   rebuild rebuild-end genesis *fresh-image* record-initialiser register-macro repl
   resume-kickstart print-report
   ctx-pc ctx-reg trap-reg trap-raw
-  start-repl system-name top-level-form
+  system-name top-level-form
 ))
 
 (in-package exec)
@@ -306,7 +308,7 @@
   g1 g2 g3 g4 g5 g6 g7 g8 g9 g10 g11 g12 g13
   lav lav-light lav-dark lav-darkest desktop desktop-dark
   title-height band box-size box-x box-y menubar-height menubar-first-x
-  hline vline outline raised sunken stripes title-box grow-box
+  hline vline frame-rect raised sunken stripes title-box grow-box
 ))
 
 (in-package wb)
@@ -317,7 +319,8 @@
   button-down drag repaint win-data
   win-inner-h win-inner-w win-inner-x win-inner-y win-refresh
   win-task window-close window-open set-win-data! set-win-refresh! set-win-task!
-  win-h win-w win-x win-y window-push-key workbench win-bm resume
+  win-h win-w win-x win-y workbench win-bm resume
+  win-port set-win-port! window-send window-event window-wait-event key-event?
   text-width text-truncate draw-text draw-char
   make-demo-window win-plot win-point win-fill win-row window-footprint
   draw-mono draw-mono-char mono-width mono-advance mono-height
@@ -328,6 +331,22 @@
   eyes eyes? make-eyes look-at
   eyes-window eyes-rad eyes-look-x eyes-look-y
   set-eyes-look-x! set-eyes-look-y! set-eyes-rad!
+))
+
+(in-package ui)
+(export '(
+  row-height scrollbar-width changed
+  make-scrollbar scrollbar-range! scrollbar-set! draw-scrollbar scrollbar-event
+  sb-value sb-max
+  make-button draw-button button-event bt-label set-bt-label!
+  make-outline draw-outline outline-event outline-selected expand! collapse! toggle!
+  ol-roots ol-selected rw-object rw-label rw-depth rw-expanded rw-children
+  triangle scroll-arrow
+))
+
+(in-package explorer)
+(export '(
+  explorer explore brief parts has-parts?
 ))
 
 ;; A prompt starts here.

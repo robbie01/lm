@@ -465,6 +465,8 @@ pub const SYSTEM: &[&str] = &[
     "lisp/platinum.lisp",
     "lisp/wb.lisp",
     "lisp/eyes.lisp",
+    "lisp/ui.lisp",
+    "lisp/explorer.lisp",
     "lisp/demo.lisp",
 ];
 

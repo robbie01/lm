@@ -723,15 +723,6 @@
               (write v)))))
     nil))
 
-;; A prompt in a task of its own, talking to a stream of its own. Where its
-;; characters come from, what it half-read and where an error puts it back
-;; all travel with the task, so two prompts do not interfere.
-(define (start-repl name stream)
-  (add-task name 0
-            (lambda ()
-              (use-stream! stream)
-              (repl))))
-
 ;; ---------------------------------------------------------------- kickstart
 ;; The forge left a thunk for every top level form that was not a function
 ;; definition, in source order.

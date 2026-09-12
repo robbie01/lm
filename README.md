@@ -67,6 +67,7 @@ interpreter nor the tests.
 | `lisp/disk.lisp` `lisp/input.lisp` `lisp/gfx.lisp` `lisp/console.lisp` | the drivers |
 | `lisp/snap.lisp` | writing an image from the running machine |
 | `lisp/wb.lisp` `lisp/platinum.lisp` `lisp/font.lisp` `lisp/mono.lisp` | the workbench, its appearance and its fonts |
+| `lisp/ui.lisp` `lisp/explorer.lisp` | Platinum controls, and a window onto every symbol in the heap |
 | `lisp/eyes.lisp` `lisp/demo.lisp` | xeyes, the demos, and the test suites typed at the prompt |
 | `lisp/boot.lisp` | the three assembly stubs; run by the forge, not compiled into the image |
 | `lisp/boot0.lisp` `lisp/hostio.lisp` | what the bootstrap interpreter needs before the real reader is up |
@@ -352,7 +353,7 @@ budget: when allocation since the last collection reaches twice the live
 data or 8 MiB, whichever is more. A rebuild does not collect at all until it
 writes its image.
 
-The image collection, `gc-for-image`, also drops idle symbols from the
+The image collection, `gc:collect-for-image`, also drops idle symbols from the
 obarray, collects, reattaches those still reachable, and blanks everything
 reclaimed, so the file is the size of what is in it.
 
@@ -494,7 +495,25 @@ window and is one copy.
 
 A drawing task calls `present`, which hands its window over and waits for
 the next frame. The input task turns events from `input.driver` into raise,
-drag, close and keys to the front window.
+drag and close, and sends everything else to windows: keys to the front
+window, a button pressed in a window's content to that window until it is
+released, and the wheel to the window under the pointer. A window's events
+arrive on its port as messages in the window's own coordinates, so the task
+that reads a window sleeps on one port for its keys and its clicks.
+
+Controls live in the `ui` package: a Platinum scroll bar, a push button,
+and an outline, which is a list of rows with disclosure triangles that open
+onto more rows. A control is a record positioned in window coordinates; the
+window's task draws it through the window's rastport and hands it the
+window's events.
+
+`(explorer)` opens an outline of every package; a package opens onto its
+symbols, a symbol onto its value, function and property list, and a value
+onto its parts: the elements of a list or vector, the fields of a record by
+name, the code and free variables of a function, the literals of a code
+object. `(explore x)` opens the same outline on any object, and return or a
+double click on a row opens another explorer on what the row holds. The
+arrows move and open rows, and the wheel scrolls.
 
 The interface is set in Charcoal (the Virtue strike, 12 ppem) and shells in a
 5x7 face. A glyph is drawn with one wait for the blitter and then plain
@@ -511,6 +530,8 @@ stores.
 (workbench)           a desktop, with a shell in a window
 (new-shell)           another shell window
 (eyes)                xeyes; call it more than once
+(explorer)            every symbol in the heap, in a window
+(explore x)           any object, opened up
 (mandelbrot)          fixed point, straight to the bitmap
 (life 200)            Conway, with the blitter for the copy
 (balls 6)             six tasks drawing into one window
