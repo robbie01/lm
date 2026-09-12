@@ -1,18 +1,18 @@
-# LM — a Lisp machine
+# LM, a Lisp machine
 
-A RISC-V computer that does not run an operating system written in C. It boots
-into a Lisp image that contains its own compiler and assembler, and everything
-above the emulator — the kernel, the collector, the compiler, the graphics — is
-Lisp compiled to native RV32.
+A RISC-V computer that boots into a Lisp image. The image holds its own
+compiler and assembler, and everything above the emulator, the kernel, the
+collector, the compiler and the graphics, is Lisp compiled to native RV32
+code.
 
 ```
 $ cargo build --release
-$ ./target/release/lmforge build   # compile the Lisp sources into an image
+$ ./target/release/lmforge build   # compile the Lisp sources into kick.img
 $ ./target/release/lm              # boot it
 
 LM 0.1 - a lisp machine
-cons space 16384k pairs, object space 65536k, code 272k used
-exec at 52080, 1 task
+cons space 16384k pairs, object space 65536k, code 461k used
+exec: 6 tasks
 type (help) for what to try
 
 > (define (fact n) (if (< n 2) 1 (* n (fact (- n 1)))))
@@ -21,144 +21,123 @@ fact
 479001600
 ```
 
-That `define` was compiled to RISC-V machine code, by a compiler that is itself
-RISC-V machine code, sitting in the image you just booted.
+The `define` was compiled to RISC-V machine code by a compiler that is itself
+RISC-V machine code in the image.
 
 ## What is here
 
-Three things, and they are deliberately separable — a machine, a forge that
-builds images for it, and a bench that checks both. The binaries follow the
-same seam, so the runtime carries neither the bootstrap interpreter nor the
-tests.
+Three separable parts: a machine, a forge that builds images for it, and a
+bench that checks both. The runtime binary carries neither the bootstrap
+interpreter nor the tests.
 
 | binary | |
 |---|---|
-| `lm` | boot an image. The runtime, and only the runtime |
-| `lmforge` | compile the Lisp sources into an image |
-| `lmdev` | conformance tests, benchmarks, and tools for looking inside |
+| `lm` | boot an image |
+| `lmforge` | compile the Lisp sources into an image, or have an image build its successor |
+| `lmdev` | conformance tests, benchmarks, and tools for looking inside an image |
 
 | the machine | |
 |---|---|
-| `src/cpu.rs` | token-threaded RV32IMC core, explicit tail calls |
+| `src/cpu.rs` | token-threaded RV32IMC core with the custom opcodes |
 | `src/mach.rs` `src/run.rs` | registers, memory, CSRs, traps, the outer loop |
-| `src/dev/` | uart, timer, framebuffer, blitter, input, block storage |
+| `src/dev/` | uart, timer, display, blitter, input, block storage, the host window |
 | `src/heap.rs` `src/image.rs` | object memory and the image format |
+| `src/map.rs` | the memory map and the low-memory globals |
 | `src/boot.rs` | loading an image and letting it run |
 
 | the forge | |
 |---|---|
 | `src/forge/hostlisp.rs` | the bootstrap interpreter |
 | `src/forge/read.rs` | the bootstrap reader: lists, and nothing else |
-| `src/forge/mod.rs` | the build driver |
+| `src/forge/mod.rs` | the build driver, and the generator for `lisp/layout.lisp` |
 | `src/forge/compact.rs` | sliding object space down on the way into an image |
-| `lisp/asm.lisp` | RV32 assembler, in Lisp |
-| `lisp/compile.lisp` | Lisp → RISC-V compiler, in Lisp |
+
+| the Lisp | |
+|---|---|
+| `lisp/packages.lisp` | every package, and the names it exports |
+| `lisp/layout.lisp` | generated: the memory map, object layouts and device registers as constants |
+| `lisp/core.lisp` `lisp/runtime.lisp` `lisp/macros.lisp` | the language: lists, numbers, strings, symbols, packages, allocation |
+| `lisp/bignum.lisp` `lisp/table.lisp` `lisp/stream.lisp` | arbitrary precision integers, hash tables, streams |
+| `lisp/read.lisp` `lisp/print.lisp` | the reader and the printer |
+| `lisp/asm.lisp` `lisp/compile.lisp` | the assembler and the compiler |
 | `lisp/gc.lisp` | the collector |
-| `lisp/exec.lisp` | Amiga Exec-style kernel |
-| `lisp/packages.lisp` | every module, and the names it makes public |
-| `lisp/hw.lisp` | the custom chips |
-| `lisp/platinum.lisp` | the Mac OS 8/9 appearance, ported from ~/platinum |
-| `lisp/font.lisp` `lisp/mono.lisp` | Charcoal for the interface, a 5x7 face for shells |
-| `lisp/eyes.lisp` | xeyes, and the demonstration that an application can have more than one of itself |
-| `lisp/read.lisp` | the reader, and the only one |
-| `lisp/sys.lisp` | the kickstart: traps, REPL, rebuild |
+| `lisp/hw.lisp` | the chips: devices, bitmaps, rastports, the blitter |
+| `lisp/sys.lisp` | the kickstart: traps, fault reports, the prompt, rebuild |
+| `lisp/exec.lisp` | the kernel: tasks, signals, ports, mutexes, interrupts |
+| `lisp/disk.lisp` `lisp/input.lisp` `lisp/gfx.lisp` `lisp/console.lisp` | the drivers |
+| `lisp/snap.lisp` | writing an image from the running machine |
+| `lisp/wb.lisp` `lisp/platinum.lisp` `lisp/font.lisp` `lisp/mono.lisp` | the workbench, its appearance and its fonts |
+| `lisp/eyes.lisp` `lisp/demo.lisp` | xeyes, the demos, and the test suites typed at the prompt |
+| `lisp/boot.lisp` | the three assembly stubs; run by the forge, not compiled into the image |
+| `lisp/boot0.lisp` `lisp/hostio.lisp` | what the bootstrap interpreter needs before the real reader is up |
 
 | the bench | |
 |---|---|
 | `src/check/cpu.rs` | processor conformance |
 | `src/check/asm.rs` | the Lisp assembler against an independent Rust encoder |
 | `src/check/compiler.rs` | source in, machine code out, run, compare |
-| `src/check/inspect.rs` | what is actually in an image |
+| `src/check/readers.rs` | name resolution across packages |
+| `src/check/inspect.rs` | what is in an image |
 | `src/check/reach.rs` | what each package's symbols can reach |
 
 ## The processor
 
-`rv32imc_zba_zbb_zbs_zicond_xlm`, machine mode, with the CSRs a kernel needs.
-The standard part is ordinary RISC-V; `Xlm` is the two custom opcodes below.
-(`L` would have been the obvious letter and is not available: the spec reserves
-it for decimal floating point, and a non-standard extension is spelled with an
-`X` anyway.) Dispatch is token
-threaded on the opcode itself — no predecode, no translation cache, nothing to
-invalidate when the compiler writes fresh code into the heap and jumps to it:
+`rv32imc_zba_zbb_zbs_zicond_xlm`, machine mode, with the CSRs a kernel needs
+and one custom CSR. `Xlm` is the four custom opcodes below.
+
+Dispatch is token threaded on the opcode: no predecode and no translation
+cache, so nothing has to be invalidated when the compiler writes fresh code
+into the heap and jumps to it.
 
 ```
 16-bit forms   tok = (op[1:0] << 3) | funct3     ->  0 .. 23
 32-bit forms   tok = 32 + opcode[6:2]            -> 32 .. 63
 ```
 
-Every handler ends by expanding a macro that re-does the fetch, the token
-computation and the indirect jump *in place*, then makes an explicit tail call
-with nightly's `become`. The replication is the point: each opcode gets its own
-branch site, so the predictor learns per-opcode successors instead of thrashing
-on one shared dispatch. It runs at about **500 MIPS**, roughly seven host
-cycles per guest instruction, in constant stack — fast enough that Conway's
-life on a 640x400 board, or a Mandelbrot set in fixed point, runs at a
-perfectly reasonable speed inside a Lisp inside an interpreter.
+Every handler ends by fetching the next instruction, computing its token and
+making an explicit tail call to the next handler, so each opcode has its own
+branch site. The core runs at 300 to 500 MIPS on a current host.
 
-The timebase is the retired-instruction count rather than host wall time, so
-the whole machine is deterministic: the same image produces the same schedule
-on every run, down to which instruction a task is preempted on.
+The timebase is the retired-instruction count, not host time, so a run is
+deterministic: the same image produces the same schedule every time, down to
+the instruction a task is preempted on. A windowed machine sleeps through its
+idle time on the host without moving its own clock.
 
-## Object memory
+### Values
 
 One 32-bit word per value:
 
 ```
-w == 0          nil. Also a valid cons whose car and cdr are nil, so car and
-                cdr need no null check and null? is a single beqz.
-w & 1 == 1      fixnum, value = (i32)w >> 1. Order preserving, so signed
-                compares work untagged and add/sub need one correction.
-w & 7 == 0      cons.   car at [w], cdr at [w+4].
+w == 0          nil. Also a valid pair whose car and cdr are nil.
+w & 1 == 1      fixnum, value = (i32)w >> 1. Order preserving.
+w & 7 == 0      pair.   car at [w], cdr at [w+4].
 w & 7 == 4      object. header at [w-4], payload from [w].
 w & 7 == 2      immediate: characters, the unbound marker, eof.
 ```
 
-`gp` and `tp` are dedicated for the life of the machine to the cons allocator's
-bump pointer and the end of its current run, so a fresh pair costs four
-instructions and one well-predicted branch.
+An object header holds the type in its low eight bits and the length in
+slots above them. The types are symbol, string, vector, bytes, closure,
+record, float, port, bignum and code.
 
-### Pairs are instructions
+### The custom opcodes
 
-RISC-V reserves opcode space for whoever builds the machine, and this one knows
-what a pair is, so `car`, `cdr`, `set-car!` and `set-cdr!` live in custom-0
-rather than being loads and stores:
+Four opcodes are used. Each checks its operands as it forms an address or a
+result, so the check costs no extra instructions.
 
-```
-funct3 0   car rd, rs1        rd <- [rs1]
-funct3 1   cdr rd, rs1        rd <- [rs1 + 4]
-funct3 2   set-car! rs2, rs1  [rs1] <- rs2
-funct3 3   set-cdr! rs2, rs1  [rs1 + 4] <- rs2
-```
-
-The check is the point, and the tag scheme is what makes it free: a pair has
-its low three bits clear, so a fixnum (odd), an immediate (2 mod 8) and an
-object (4 mod 8) are all caught by a mask the processor computes alongside the
-address it was going to form anyway. Same one instruction, same 475 MIPS on a
-list-walking loop. nil passes, because it is a legal pair; writing through it
-does not, because that cell is the global vector at address 0.
-
-A wrong type traps with cause 24 — RISC-V leaves 24 through 31 to the
-implementation — and the offending value in `mtval`, which is enough for the
-handler to decode the instruction that trapped, name the operation and print
-the value itself:
+**custom-0: pairs and slots.** A word load or store whose funct3 says what
+the base register must be. car and cdr are offsets 0 and 4 of the same
+instruction.
 
 ```
-> (car 5)
-*** car: expected a pair, got 5, at pc 1047944
-> (car "hi")
-*** car: expected a pair, got "hi", at pc 104793c
-> (set-car! nil 1)
-*** set-car!: nil has no cell to write, at pc 10478f0
+funct3 0   lref rd, off(rs1)    rs1 must be a pair (nil allowed)
+funct3 1   lobj rd, off(rs1)    rs1 must be an object
+funct3 4   sref rs2, off(rs1)   rs1 must be a pair, and not nil
+funct3 5   sobj rs2, off(rs1)   rs1 must be an object
 ```
 
-### Indexed access is one instruction
-
-custom-1 does for objects what custom-0 does for pairs, and rather more, since
-an indexed access has four things to establish rather than one. `funct7`
-carries the type the object has to be - 0 for any object at all - and one
-instruction checks the tag, checks the header, checks that the index is a
-fixnum, checks it against the length in the header, then untags it, scales it
-and forms the address:
+**custom-1: indexed access.** funct7 carries the type the object must be, 0
+for any object. One instruction checks the tag, the type, that the index is
+a fixnum, and the bound in the header, then forms the address.
 
 ```
 funct3 bit 0   store rather than load
@@ -166,156 +145,95 @@ funct3 bit 1   byte rather than word
 funct3 bit 2   the index is a five-bit immediate in the rs2 field
 ```
 
-The address arithmetic needs the header word anyway, and the length is in the
-header, so the bound costs a comparison the processor makes in parallel with
-the address. Out of range traps with cause 25 and the index in `mtval`.
+The immediate form serves every record field, closure slot and record tag.
+A closure's entry point is slot 0 of a closure object, so a call loads it
+with `ldxi t2, t0, 0, t-closure`, and calling anything that is not a closure
+traps with a report.
 
-The immediate form is there because most indices are written down rather than
-computed: every record field, every record's tag, every closure slot.
-Putting the index in the `rs2` field follows `slli`, which has always kept its
-shift amount there, so the encoding stays R-type and nothing that walks
-instructions needs a new case.
-
-**It is also what makes a checked call free.** A closure's entry point is slot
-0 of a `t-closure`, and the call sequence used to load it with a bare `lw` that
-proved nothing:
+**custom-2: fixnum arithmetic.** Both operands must be fixnums; the one that
+is not lands in `mtval`.
 
 ```
-> (let ((f 5)) (f 1))       ; before
-*** illegal instruction at pc 0, value 0
-> (nosuchfunction 1)
-*** illegal instruction at pc 8, value 92090
+funct7 0x00   add sub mul div rem and or xor, wrapping at 31 bits
+funct7 0x20   add sub mul, trapping on overflow
+funct7 0x01   sll srl sra lt ltu eq, the compares leaving a raw 0 or 1
 ```
 
-Calling a number jumped to whatever was in the nil cell; calling an undefined
-name jumped to the sysbase pointer and executed it. `ldxi t2, t0, 0, t-closure`
-is the same one instruction and says what it means:
+`+`, `-` and `*` are the trapping forms. The trap handler widens the
+operation into a bignum and resumes after the instruction, so an integer that
+fits costs one instruction and one that does not costs a trap. An operand
+that is a bignum takes the same route.
+
+**custom-3: constants and tagged memory.** A fixnum against an immediate
+(add, and, or, shift by a constant), and a word or byte load or store through
+an address held as a fixnum.
+
+### Traps
+
+RISC-V leaves causes 24 to 31 to the implementation:
 
 ```
-> (let ((f 5)) (f 1))       ; after
+24   wrong type          the value in mtval
+25   index out of range  the index in mtval
+26   fixnum overflow
+27   division by zero
+28   stack overflow      sp went below the stack-limit CSR (0x7c0)
+```
+
+The handler decodes the instruction at the faulting pc and names the
+operation and the value:
+
+```
+> (car 5)
+*** car: expected a pair, got 5, at pc 1047944
+> (vector-ref "abc" 0)
+*** vector-ref: expected a vector, got "abc", at pc 104a1c0
+> (let ((f 5)) (f 1))
 *** call: expected a function, got 5, at pc 105e7d8
-backtrace:
-  repl-loop at 105e7d8
-> (nosuchfunction 1)
-*** call: undefined function, at pc 105ce44
-```
-
-### Arithmetic is checked too
-
-The machine used to go to real trouble over `car` of a fixnum and
-`vector-ref` of a string, and then let this happen:
-
-```
-> (+ "abc" 2)
-(#\  . #<immediate>)
-> (car (+ "abc" 2))
-#\
-```
-
-`(+ "abc" 2)` returned a **cons**. A string is an object pointer with its low
-three bits equal to four, adding a tagged two adds four, and four plus four is
-the pair tag — so one addition fabricates a pointer into the middle of a
-string, and `car` reads it. `(+ nil 1)` gave you a character. `(* (vector 1 2
-3) 2)` gave you half a heap address wearing an integer's clothes.
-
-custom-2 is the arithmetic, checked. Both operands must be fixnums, the
-offending one goes in `mtval`, and the handler names the operation the source
-used:
-
-```
-> (+ "abc" 2)
-*** +: expected a number, got "abc", at pc 1053b20
 > (+ nil 1)
 *** +: expected a number, got nil, at pc 1053b90
-> (/ 5 0)
-*** /: division by zero, at pc 1053bc0
-> (peek "abc")
-*** peek: expected a number, got "abc", at pc 1053bec
+> (ackermann 5 5)
+*** stack overflow at pc 10611c4, value 20f0f0
 ```
 
-It is cheaper as well as safer, because the tag arithmetic goes into the
-instruction. `%+` was `add` and a correcting `addi`; it is one `fadd`. `%*`
-was four instructions, `%/` five; they are one each. A comparison was an
-unchecked `slt` and is now a checked `flt` for the same single instruction,
-because 2n+1 preserves the order either way. `%eq?` is deliberately *not* one
-of these: it compares identity, on values of any kind, and asking it for two
-numbers would be asking it the wrong question.
+The stack limit is set by the scheduler at each switch, 8 KiB above the
+bottom of the incoming task's stack, and is enforced only with interrupts on:
+the collector and the kernel run with them off and may be entered with the
+stack nearly full.
 
-custom-3 carries the same operations against a written-down constant, and the
-other half of what a tag costs: memory reached through a tagged address.
-`peek` was four instructions — strip the tag off the address, load, shift the
-word up, put a tag back on — and the collector's inner loops are made of
-little else. It is one `tlw`.
+Traps nest. `mscratch` names the frame a trap saves into: the running task's
+context block at the outermost level, and a frame from an array of eight
+below that. A trap inside the handler is normal, because the handler's own
+arithmetic may widen. Nine deep halts the machine with exit code 9.
 
-Measured over a run, instructions that exist only because values carry a tag
-were 4.2% of `fib`, 9.4% of a collection-heavy workload and 7.3% of the
-workbench, with roughly one tag correction for every arithmetic instruction.
-
-**Overflow is a different question and is not switched on.** The trapping
-forms exist, are tested, and nothing emits them: `string-hash` multiplies its
-way past 2^30 on purpose and the fixed-point Mandelbrot relies on wrapping.
-What should happen there is a decision about a numeric tower, not a change of
-encoding — but an operation that cannot notice it overflowed is one bignums
-could never be retrofitted onto, so the notice is built.
-
-The one thing still unchecked is the *fused* comparison, where `(< i n)` is
-the test of an `if` and compiles to a bare `blt`. Checking it would double the
-instruction count in the hottest position in the machine, and its failure mode
-is a branch going the wrong way rather than a forged pointer. In practice its
-operands nearly always come from an operation that already checked them.
-
-### And the things that were vectors with numbers in them
-
-A window was eleven numbered slots, the compiler's context was thirteen with a
-comment block to say which was which, the assembler was seven, and a stream was
-three. They are records now, declared with `defrecord` (below), and an accessor
-checks *which* record it has:
+## Memory
 
 ```
-> (win-x "abc")
-*** slot: expected a record, got "abc"
-> (win-x (screen-rastport))
-*** expected a window, got #[hw::rastport ...]
+0x0000_0100  low-memory globals (the lg-* names in layout.lisp)
+0x0000_2000  the pool: raw memory for stacks, contexts, descriptors, bitmaps' tables
+0x0100_0000  code space, 16 MiB, bump allocated, swept but never moved
+0x0200_0000  cons space, 128 MiB, sixteen million pairs, compacted
+0x0A00_0000  object space, 64 MiB, swept in place; the forge compacts it
+0x0E00_0000  scratch
+0xF000_0000  device pages, 4 KiB each
 ```
 
-That needed a second indexed instruction. `%slot` takes any object, which is
-right for the handful of places that reach into a symbol, a closure or a code
-object by index and wrong everywhere else; `%record-ref` requires a record, and
-everything that knows it is holding one says so. Both are the same single
-`ldx` — the type it demands is a field in the instruction.
+Four registers are dedicated for the life of the machine: `gp` and `tp` are
+the cons allocator's bump pointer and limit, `s1` is the running function's
+code object, and `s2` is the running task.
 
-What stays raw is what has to be: the 32-word register context the trap stub
-writes, the pool free list, the mark and pin bitmaps, the code area, device
-registers, and object headers. Those are addresses, and pretending otherwise
-would cost more than it bought.
-
-### And a good deal of it was already standard
-
-Before inventing an instruction it is worth checking whether the committee got
-there first, and for a Lisp it repeatedly has. The core implements Zba, Zbb,
-Zbs and Zicond, and the compiler emits them:
-
-| | what wanted it |
-|---|---|
-| `bext`, `bset` | the collector's mark and pin maps: a bit test was a call, four run-time shifts and a mask |
-| `cpop` | counting marks, which needed a 256-byte lookup table built at the first collection - and a saved-image bug of its own, since the flag saying the table existed *was* saved and the table was not |
-| `czero.eqz` | turning a comparison into `t` or `nil`, at 530 sites |
-| `min`, `max` | a fixnum is 2n+1, which preserves signed order, so these are right on tagged values with no untagging at all |
-| `sh2add` | addressing the bit maps by word, which is what puts the bit index in the five bits `bext` looks at |
-
-None of it is ours, and that is the point: the two custom opcodes stay small
-because the standard ones did the rest. On a collection-heavy workload the lot
-together is **34% fewer instructions**, and a collection itself 39% faster -
-update 158M cycles to 97M, move 121M to 68M, marking 33M to 25M.
+A fresh pair is four instructions and one branch. Each task allocates out of
+its own run of cons space, carved 256 KiB at a time, so the sequence needs no
+lock and a timer interrupt cannot land between two tasks' stores.
 
 ## Calling
 
 ```
 a0..a7        arguments 0..7; 8 and up are pushed, so argument 8 is at 0(s0)
 t0            the closure being entered
-t1            how many arguments, raw
+t1            the argument count, raw
 a0            the result
-s1            the running function's literal vector - its own code object
+s1            the running function's code object
 
 s0 - 4        saved ra      raw
 s0 - 8        saved s0      raw
@@ -324,769 +242,263 @@ s0 - 16       saved s1
 s0 - 20 - 4i  local slot i
 ```
 
-Everything from `sp` up to and including the closure slot is a tagged value,
-and only the two raw words sit at fixed offsets. That is not tidiness for its
-own sake — it is the property the collector and the backtracer both live on.
+Every word between `sp` and the closure slot is a tagged value. Only the two
+raw words sit at fixed offsets. The collector and the backtrace both depend
+on this: the frame chain alone describes every frame exactly.
 
-**A function calling itself by name does not go the long way round.** The
-general sequence loads the global's value cell, sets the argument count, loads
-the entry address out of the closure and jumps indirectly — five instructions
-and two dependent loads to reach code the compiler is *already emitting*. A
-self-call instead reuses the closure it is running, from `s0-12`, and jumps
-straight to a label just past its own arity check:
+Compiled code holds no heap addresses. A function reaches its symbols and
+constants through its code object, which the prologue loads into `s1`, so a
+constant is one load and an object can move without any instruction being
+patched.
 
-```
-lw   t0, -12(s0)
-jal  ra, self                 ; and 'j self' for a tail call
-```
+**Leaves.** A function that calls nothing builds no frame: `ra` survives, no
+collection can start, and no callee can clobber its locals. Its locals live
+in `s3` to `s10`, its caller's code object in `s11`, and its prologue is two
+instructions. About seven functions in ten are leaves. Leaf-ness is decided
+from the source before code is emitted, and checked afterwards by reading the
+bytes: a leaf that writes `ra` is a build failure.
 
-Two instructions rather than five, plus two more saved in the prologue for the
-check it would only have been proving to itself: **six fewer instructions per
-recursive call, about 12% off `fib`**. It applies only where the compiler can
-see that it is safe — the operator is this function's own name, nothing local
-shadows it, the argument count matches exactly, and the function is not
-variadic, since the rest-list code reads that count out of `t1`.
+**Self-calls.** A function calling its own name, with the right number of
+arguments and nothing local shadowing the name, reuses the closure in its
+frame and jumps past its own arity check: two instructions rather than five.
+Redefining a function does not reach the self-calls already inside it, the
+same bargain the open-coded operators make.
 
-The price is the same bargain open-coding `car` makes: redefining a function
-does not reach the calls already inside it. A recursive function that redefines
-itself mid-flight will finish in the version it started in.
+**Open coding.** `car`, `+`, `<`, `vector-ref`, record accessors and about
+sixty other operators compile to their instructions when called with the
+right number of arguments. A comparison in a test position becomes the
+branch. Redefining one of these does not affect code already compiled
+against it.
 
-### A function that calls nothing builds nothing
+## The language
 
-About seven functions in ten call nothing at all — accessors, predicates,
-arithmetic — and they take a bit over half of every call the machine makes.
-None of them needs the frame above. `ra` survives, because nothing will
-overwrite it. No collection can start, because allocating is a call. And their
-locals cannot be clobbered by a callee, because there is no callee.
+Scheme-shaped, with Common Lisp's packages and a small record facility.
 
-So a leaf keeps its locals in `s3`–`s10` and its caller's literal vector in
-`s11`, and its whole prologue is two instructions:
+**Packages.** A package is a reading concern and nothing else: the reader
+resolves a bare name in the current package, then in what the packages it
+uses export, and interns a new symbol if neither has it. `pkg:name` reaches
+an export and `pkg::name` reaches past the interface. The compiler resolves a
+global to its symbol at compile time, so packages cost the running machine
+nothing. `lisp/packages.lisp` declares every package and its export list,
+and is read first on both sides of the bootstrap. The current package is per
+task.
 
-```
-mv   s11, s1                  ; the caller's literals
-lw   s1,  4(t0)               ; ours
-                              ; ...and parameters stay in a0.. , moved to s3..
-```
-
-against ten for a frame — and its epilogue is `mv s1, s11; ret` against six.
-Nothing else in the machine touches those nine registers, so there is nothing
-to save and nothing to restore. Locals stop being memory entirely: no store on
-entry, no reload at each mention.
-
-The collector needs no telling. It scans from the innermost stack pointer up to
-the frame it can see, and a leaf simply has no frame in between; a leaf that
-pushes an argument pushes a tagged value below that pointer, which is inside
-the range already. Backtraces are unaffected too, because the trap handler is
-handed the saved `s1` separately from the frame chain, so the innermost
-function names itself.
-
-The catch is that leaf-ness is decided from the source, before a word is
-emitted, and a source pre-pass can be wrong. So it is checked against the
-result: `check-leaf` walks the bytes the function actually produced, and any
-instruction that writes `ra` in something compiled as a leaf is a build
-failure. On a collection-heavy workload the change is **11% fewer instructions**
-and it takes frame and spill traffic from a quarter of everything the machine
-runs to a sixth.
-
-## Packages
-
-Every name used to land in one global namespace, and the code leaned on
-prefixes - `gc-`, `win-`, `tc-`, `i-` - to keep out of its own way. It now has
-Common Lisp's packages, in their small form: a namespace per module, an
-explicit export list, and `pkg:name` / `pkg::name` to say when you are reaching
-outside your own.
-
-They fit this machine unusually well, because a package here is a **reading**
-concern and nothing else. The reader resolves a bare name in the current
-package, then in whatever the packages it uses have exported, and interns one
-of its own if neither has it. After that it is all symbol objects: the compiler
-already resolves a global to a symbol at compile time, so **packages cost the
-running machine not one instruction**.
-
-`lisp/packages.lisp` is the whole module structure in one file, read first on
-both sides of the bootstrap - which matters, because the forge and the machine
-load the sources in different orders and a name has to mean the same thing in
-both. It holds only the packages the *machine* has: `packages.lisp` is
-compiled into the image, so a package declared there is a package the image
-carries, and the forge's own namespace for the assembly stubs is declared at
-the head of `boot.lisp` instead. Anything left over — a package the build made
-and nothing was compiled into — is dropped before the image is collected, so
-`(all-packages)` on a fresh machine lists eleven and every one of them has
-code in it.
-
-The export lists were computed from actual cross-package use rather than
-guessed, which is why they are as small as they are:
-
-```
-compiler    11 public of 100 definitions
-gc          23 of 105
-exec        19 of 183
-sys         26 of  69
-wb          33 of  88
-lm         541 of 474 definitions plus the primitives and special forms
-```
-
-Roughly four definitions in five are now private. The prelude is the exception
-and should be: it is a library, so its interface is the library.
-
-The current package is **per task**, swapped by the scheduler along with the
-streams, so one shell can be in `wb` while another is in `user`:
-
-```
-> (current-package)
-#<package user>
-> (in-package wb)
-> (length *windows*)
-1
-> wb::title-height
-10
-```
-
-Two things fell out of doing this that were worth the trip on their own. The
-first is that the collector was not tracing the package list, which would have
-quietly collected the reader's world out from under it. The second is that the
-compiler was interning `make-closure` and `t` *by name at compile time*, in
-whatever package happened to be current - so compiling `wb.lisp` was quietly
-creating `wb::make-closure`. Both were invisible in a flat namespace.
-
-`lmdev readers` is what holds the rules down. There used to be two readers to
-keep honest; now there is one, so what it checks is behaviour rather than
-agreement — that a bare name finds what its package can see, that `pkg:name`
-reaches an export and `pkg::name` reaches past the interface, that asking a
-package for something it does not export is an error rather than a quietly
-interned second symbol, and that the same new name read in two packages is two
-symbols.
-
-## Records
-
-A record is an object whose slot 0 is a symbol saying what it is and whose
-remaining slots are named fields. `defrecord` is where the names are written
-down, and the only place they are written down:
+**Records.** `defrecord` writes the field names down once and produces the
+slot numbers, the allocator, the predicate and the accessors:
 
 ```lisp
-(defrecord (window win)
-  x y w h title refresh keys task data rp bm)
-
-;; win-slots  win-make  window?
-;; win-x      set-win-x!      ... one pair per field
+(defrecord (window win) x y w h title refresh keys task data rp bm front)
+;; win-alloc  window?  win-x  set-win-x!  ...
 ```
 
-The slot numbers, the allocator, the predicate and the accessors all come out
-of that one line, so adding a field in the middle is a matter of typing it
-there. Before this, every one of them was a hand-kept constant beside a
-hand-written pair of functions, and adding a field in the middle meant
-renumbering by eye.
+An accessor is a function, and the compiler open-codes calls to it as a
+type check and one indexed instruction. Slot 0 holds the type symbol, so an
+accessor handed the wrong kind of record traps naming both ends.
+`(include node)` puts another record's fields first, which is how a task is
+also a list node; `open` marks a record others are built on, whose accessors
+check only that they have a record.
 
-An **accessor is a function, and the compiler open-codes calls to it** — the
-same bargain it already makes for `car`. So `(map win-x ws)` means what it
-looks like, and `(win-x w)` in a body is four instructions and no call:
+**Fluid bindings.** Variables that are per task in truth, where output goes,
+where input comes from, the current package, stay ordinary globals, and
+`fluid-let` binds them. A binding is a `(place . value)` pair on a stack the
+task owns; the scheduler exchanges each entry with its place on every
+switch, which leaves the task's value in the place while it runs and the
+outer value while it does not. A new task starts holding what its creator
+held. An error does not unwind, so the prompt it lands in unwinds the
+bindings back to where they stood when it started.
 
-```
-ldxi t2, a0, 0, t-record     ; the tag
-lw   t3, off(s1)             ; the type this code was compiled against
-beq  t2, t3, ok              ; ...and it had better be that one
-ldxi a0, a0, 1, t-record     ; the field
-```
+**Symbols.** Interning gives every symbol a dense identity in its flags
+word, and `lisp/table.lisp` hashes on it: open addressing over two parallel
+vectors. `gensym` makes uninterned symbols, printed `#:g1`, so a macro's
+temporaries do not accumulate in the obarray; the image writer drops
+interned symbols that hold nothing and that nothing reaches.
 
-Three of those four are the check, and the check is the point: a rastport
-handed to `win-x` is a trap naming both ends rather than a plausible-looking
-number out of the middle of somebody else. It comes out even anyway, because
-what it replaces — `(win-get w win-x)` — was a function call.
+**Numbers.** Fixnums are 31 bits. Arithmetic that outgrows them promotes to
+a bignum and demotes when the result fits again; `(fact 50)` is exact and
+`(ash 1 100)` is 2^100. Bignums are sign-magnitude with 32-bit limbs, worked
+sixteen bits at a time because a Lisp value cannot hold a limb. Three
+explicit families exist for code that must not promote: `wrap+`, `strict+`
+and `sat+` with their `-` and `*` forms. A machine word is not a fixnum:
+`peek` reads a word unsigned, `peek-signed` reads it signed, and `poke`
+stores the low 32 bits of either.
 
-Two declarations that are not just a list of fields:
-
-```lisp
-(defrecord (node open) succ pred pri name)
-(defrecord (task tc) (include node) state sigalloc sigwait ...)
-```
-
-`include` puts another record's fields first, so a task **is** a node and their
-slots line up — which is what Exec's lists are made of, and what lets one list
-hold tasks, ports and interrupt servers at once. `open` says others are built
-on this one, so a node's own accessors check that they have a record and stop
-there; something has to be able to walk that list.
-
-The shape is needed twice, the way a macro is: by the compiler running now and
-by the machine's own compiler once the image boots. So `defrecord` is a macro
-that expands into ordinary definitions — which is what the bootstrap
-interpreter gets — and the compiler catches it before expansion, registers the
-shape, and open-codes the accessors as well.
-
-## Which task is running is a register
-
-`s2` is dedicated for the life of the machine to the running task. Exec has no
-variable for it and the scheduler does not set one: the trap stub was saving
-all thirty-two registers anyway, so a task's context already carries it, and
-`(this-task)` is `mv a0, s2`.
-
-It used to hold an **instance** — a per-package record the compiler resolved
-bare names into, so that `rad` inside `eyes` meant a slot rather than a global.
-That read beautifully and it was a second mechanism for per-task state, with
-its own register, its own trap and its own rule about what a name means inside
-a package, serving one application. `eyes.lisp` passes a record now:
-
-```lisp
-(defrecord eyes window (rad 20) (pr 7) (look-x -1) (look-y -1))
-
-(define (draw-eye e rp cx cy)
-  (fill-circle rp cx cy (eyes-rad e) pt-white)
-  (draw-circle rp cx cy (eyes-rad e) pt-black))
-```
-
-Nothing in `lisp/eyes.lisp` knows how many pairs of eyes there are. `(eyes)`
-twice is still two windows, two tasks, two sets of pupils, one copy of the
-machine code — it just says which pair it means.
-
-## Fluid bindings
-
-Some variables are per task in truth: where output goes, where input comes
-from, the character the reader put back, which package a prompt reads in, the
-block of memory this task programs the blitter through. They stay ordinary
-globals, because everything reads them constantly and the common case has to
-be one load. What makes them local is a **binding**:
-
-```lisp
-(fluid-let ((*out* (window-stream w)))
-  (report))
-```
-
-A binding is a `(place . value)` pair on a stack the running task owns, and the
-scheduler swaps that stack in and out along with the registers. The swap is
-symmetrical, which is the whole trick: each entry holds the value that was
-current when the binding was made, so exchanging the entry with the place
-leaves the task's value in the entry and the outer value in the place — which
-is exactly what "this task is not running" means. Exchanging again puts it
-back, and nothing has to know which of the two states it is in.
-
-Two consequences worth stating. A task that binds nothing shares the globals,
-which is right: it has not asked for anything of its own. And a task that binds
-and then *assigns* keeps the assignment, because what is exchanged is the
-current value and not the one it started with.
-
-This replaces a fixed seven-slot environment vector that the context switch
-saved and loaded field by field, and whose contents were listed in three
-places. A new task starts out holding whatever its creator held, which is how
-a shell's children talk to the shell's window; `read.lisp` uses the same form
-for the three places it used to save and restore by hand.
-
-An error does not unwind — the stack it happened on is abandoned where it
-stands — so the prompt it lands in unwinds the bindings itself, back to where
-they stood when it started. Its own streams and package survive; whatever the
-form that failed had bound on top of them does not.
-
-## Symbols have identities
-
-Interning hands every symbol a small dense integer, packed into the flags word
-that was sitting empty, and the counter lives in low memory so that a symbol
-made by the forge and one made by the running machine can never collide. It is
-a **perfect hash**: no collisions, nothing to recompute, and nothing a
-collector could invalidate by moving something.
-
-That is what `lisp/table.lisp` is built on — open addressing over two parallel
-vectors rather than buckets of pairs, because a chain costs two conses an entry
-before it has stored anything. Looking up one of two hundred symbols takes 244
-cycles against 9,256 for the `assq` it replaces.
-
-The compiler was the first customer. It used to walk two lists, ninety entries
-between them, at every call site it looked at; now the emitter for an
-open-coded operator hangs off the symbol's function slot, which was also
-sitting empty. **Compiling on the machine went from 236k cycles to 145k**, and
-between that and the direct self-calls the compiler is about 40% faster than it
-was.
-
-## Finding every pointer
-
-Compiled code contains **no heap addresses at all**. Each function reaches its
-symbols and constants through a literal vector — its own code object — held in
-`s1` and loaded once in the prologue. A constant is `lw a0, off(s1)`: one
-instruction, where materialising an address took two. `lm inspect` checks the
-invariant by decoding every `lui`/`addi` pair in code space and asserting that
-none of them names anything in the heap.
-
-That is what makes the rest possible. An object can move without a single
-instruction being patched, and there are no relocation tables to maintain.
-
-Roots are found **precisely, with no stack maps**. Every word in a Lisp frame
-between its stack pointer and its closure slot is a tagged value — locals,
-spilled temporaries, pushed arguments, the saved literal vector. Only the
-return address and the frame link are raw, and they sit at fixed offsets. And a
-callee's frame base *is* its caller's stack pointer. So the frame chain alone
-describes every frame exactly, with no per-call-site metadata:
-
-```
-scan [sp, s0-8)              locals, temporaries, closure, literal vector
-ra   = [s0-4]                raw
-sp   = s0                    the caller's stack pointer
-s0   = [s0-8]                the caller's frame
-```
-
-Allocation is the one place a live value can be in a register rather than a
-frame, so a cons site tells the truth about it: the slow path writes a
-live-register mask into `t5`, and the collector takes exactly those.
-
-Exec hands over the Lisp values in its own structures — task functions, port
-names, message bodies, library vectors — field by field, rather than having
-the pool scanned by guesswork.
-
-### The same chain is a backtrace
-
-Nothing else was needed. A frame already holds its caller's frame base at
-`s0-8` and its caller's literal vector — that is, its caller's *code object* —
-at `s0-16`, and a code object now carries the name of the function it is. So
-the walk the collector does for roots does for blame as well, with no debug
-section, no unwind tables and no side map from address to function:
-
-```
-> (define (inner x) (+ 1 (car x)))
-> (define (middle x) (+ 1 (inner x)))
-> (define (outer) (+ 1 (middle 5)))
-> (outer)
-*** car: expected a pair, got 5, at pc 10484b8
-backtrace:
-  inner at 10484b8
-  middle at 104853c
-  outer at 10485b8
-  repl-loop at 103d34c
-  kickstart at 103d578
-```
-
-Anonymous functions are named after where they were written, so a lambda still
-says something (`lambda in map`). An arity error names the function it was
-about to enter and the count it was handed, because at that instant the callee
-is still in `t0` and the count in `t1`. A tail call leaves no frame and so
-appears in no trace — which is the honest answer, since there is no frame left
-to describe.
-
-A prompt is per task, not per machine. Everything that makes one — where its
-characters come from, where they go, what it half-read, where an error puts it
-back — is five globals, and the scheduler swaps them on a context switch, the
-same way it swaps the registers. The common case stays one load, and two REPLs
-in two windows do not interfere: an error in one prints its own backtrace and
-restarts its own reader on its own stack.
-
-The restart is a **return, not a call**. An error rewrites the interrupted
-context — pc, `sp`, `t0`, `s0` — to look as though the reader had just been
-entered on a clean stack, and lets the trap stub put it back. Calling the
-reader from inside the handler instead would leave it running on the trap
-stack, on top of the frames that had just faulted: that works exactly once, and
-makes the backtrace of the second error a walk through the wreckage of the
-first. Starting a task builds the same four words for the same reason.
-
-**One thing is still guessed at.** A task preempted mid-expression has live
-values in registers whose types nothing recorded. Making that precise would
-mean safepoint polls in every prologue and loop back-edge, at perhaps a tenth
-of the machine's speed, to remove thirty-two words of uncertainty per suspended
-task. Instead those words are scanned conservatively and whatever they reach is
-**pinned**. A pinned object does not move, and pushes the free pointer past
-itself — which is also why the free pointer is never above the object being
-considered, and why the slide can copy upwards through memory without ever
-overwriting something it has not yet moved.
+**Errors.** There is no condition system. `error` prints its message and
+traps; the handler composes a report with a backtrace into a string, then
+rewrites the faulting task's context so that it returns into the prompt's
+restart on a clean stack, which prints the report. A task with no prompt
+behind it ends. Nothing on the abandoned stack runs again; a mutex held
+there is marked abandoned and handed on.
 
 ## The collector
 
-Mark, then compact, in four passes: plan where everything is going, rewrite
-every pointer to where its target will be, slide, and blank what is left
-behind. Forwarding is not stored per object — there is nowhere to put it
-without growing every pair by half. Instead each block of the heap records
-where the free pointer had reached when the walk arrived at it, and a lookup
-replays the few objects in between.
+Mark, then compact pairs in three passes: plan where every live pair goes,
+rewrite every pointer to its destination, slide. Forwarding is not stored per
+pair; each 64-byte block of cons space records where the free pointer had
+reached when the walk arrived, and a lookup replays the block with a
+popcount over the mark bitmap. Objects and code are marked and swept in
+place and never moved by the machine: the collector is written in the
+language it collects, and reaches its own functions and constants through
+objects.
 
-**Pairs are compacted. Objects and code are swept in place.** Not squeamishness
-about variable sizes — it is about who is doing the collecting. This collector
-is written in the language it collects: it calls functions through symbol value
-cells and reaches its constants through the literal vector of its own code
-object, and every one of those is an object. Move them and it loses the ability
-to run, halfway through running. Pairs are safe because nothing between
-updating and sliding dereferences one, and pairs are where the space is: a few
-million of them against a few thousand objects.
+Roots are found precisely on Lisp stacks, from the frame chain. The
+allocator's slow path writes a mask of the live argument registers where the
+collector can read it. A task preempted mid-expression has live values in
+registers whose types nothing recorded; those thirty-two words are scanned
+conservatively and whatever they reach is pinned for that collection.
 
-Code space is collected but not moved, for the same reason. Liveness needs no
-special rule: a closure holds its code object, a frame holds its closure, and a
-running function's literal vector *is* its own code object sitting in `s1`, so
-anything executing, anything on any stack and anything callable is already
-reachable. The registry of code objects lives in the pool rather than the heap,
-because a list in the heap would have to be a root, and a root would keep every
-version of every function alive forever — the opposite of the point.
+A collection runs with interrupts off, from the root scan to the last
+pointer update, and stops the world for its duration. It is scheduled by
+budget: when allocation since the last collection reaches twice the live
+data or 8 MiB, whichever is more. A rebuild does not collect at all until it
+writes its image.
 
-The effect on an image is the whole reason for the exercise:
+The image collection, `gc-for-image`, also drops idle symbols from the
+obarray, collects, reattaches those still reachable, and blanks everything
+reclaimed, so the file is the size of what is in it.
 
-| | |
-|---|---|
-| non-moving, no blanking | 27 MB |
-| swept and blanked | 10.6 MB |
-| compacted | **1.8 MB** |
+## Building an image
 
-That last figure is 10,340 live pairs out of the 3.4 million the compiler
-allocated to build itself.
-
-## The bootstrap, and building without it
-
-There are two ways to make an image, and neither of them carries a second copy
-of the language.
-
-`lmforge build` is the one that needs nothing. It comes up in two stages. The
-first is a reader in Rust that knows how to make a list and nothing else — no
-packages, no `pkg:name`, no idea that `in-package` is anything but a call —
-and a small interpreter that runs what it reads. That is enough to bring up
-the prelude, and the last file in the prelude is `lisp/read.lisp`: **the
-reader, written in Lisp**. From there the bootstrap reads with that, itself
-included, and the compiler — one of the sources, also written in Lisp —
-compiles the whole system into the same heap the interpreter has been filling
-all along. What is left in memory at the end is the image.
+`lmforge build` needs no image. A reader in Rust that makes lists and
+nothing else, and a small interpreter, bring up the prelude; the last file
+of the prelude is `lisp/read.lisp`, the reader written in Lisp, and from
+there the bootstrap reads with that. The compiler, also one of the sources,
+compiles the whole system into the same heap the interpreter has been
+filling. The machine's own collector then runs on the machine, the forge
+slides object space down, and what is left in memory is the image.
 
 ```
-boot0 layout stream core macros runtime hostio read     <- read by Rust
+boot0 layout core macros runtime hostio stream read     <- read by Rust
 packages gc hw exec asm compile boot                    <- read by read.lisp
 ```
 
-The split is a rule, not an accident: everything the Rust reader touches is
-one namespace, which is why it is exactly the prelude. `boot0.lisp` is two
-no-op macros so those files can still say which package they are in;
-`read.lisp` replaces them with the real ones on its way past.
+Everything the Rust reader touches is one flat namespace, which is why the
+split falls exactly at the prelude.
 
-`lmforge rebuild` is the one that needs an image: it boots a previous one,
-**types the sources at its console**, and lets the machine compile them and
-write its successor. The machine already has a reader, a compiler and an image
-writer; what it does not have is a filesystem, and a console is a perfectly
-good substitute.
-
-It goes through the sources twice, the way the forge does. The first pass,
-`sys:rebuild`, compiles them into the machine itself, so that the compiler and
-the macros doing the work are the new ones. The second, `sys:genesis`,
-compiles them again with those, and every definition goes into a table for the
-image instead of into the machine. Then `snap:save-fresh` hands over: it
-warm-resets the machine through its own reset stub into the image's
-`finish-fresh`, which gives every symbol what the table says and nothing else,
-collects from the image's own roots, and writes the file. The forge closes the
-holes on the way out, in code space as well as object space - an image that
-boots through its kickstart resumes nothing, and compiled code reaches other
-code only through closures, so code can move.
-
-What comes out is **a fresh image, not an updated one**: nothing typed at a
-prompt, nothing the new sources no longer define, and nothing compiled by the
-old compiler. Rebuilding from a saved session gives the same image as
-rebuilding from the kickstart, and each generation is the size of the last.
-The machine compiles a five-line function in 148,600 cycles, 0.35 ms, so going
-through the sources twice takes it about as long as the forge takes once:
+`lmforge rebuild` needs an image: it boots one, types the sources at its
+console, and lets the machine compile them and write its successor. The
+sources go through twice. `sys:rebuild` compiles them into the running
+machine, so the compiler and macros doing the work are the new ones;
+`sys:genesis` compiles them again with those, every definition going into a
+table for the image; `snap:save-fresh` warm-resets the machine through its
+reset stub into the image's own `finish-fresh`, which gives every symbol what
+the table says, collects from the image's own roots, and writes the file. The
+result is a fresh image, not an updated one.
 
 ```
-lmforge build                       kick.img,  904 KiB, in 2.6s
-lmforge rebuild --from kick.img     next.img,  868 KiB, in 2.9s, 2012 forms twice
+lmforge build                       kick.img,  880 KiB
+lmforge rebuild --from kick.img     next.img
 lmforge rebuild --check             compile everything twice, collect, write nothing
 lmforge compact [-f IMG] [-o OUT]   slide object space down in a saved image
-                [--fresh]           and code space, for an image that does not resume
+lmforge layout                      regenerate lisp/layout.lisp from the Rust definitions
 ```
 
-What both of these buy is the end of mirroring. There used to be a second
-reader in `src/forge/read.rs` that knew about packages, `pkg:name`, use lists
-and the symbol hash, because a symbol read at build time has to be the same
-symbol read at run time — and every change to one of them had to be made
-twice. What is left cannot disagree about a name, because it does not resolve
-names: it interns every token into one package and stops. Layout is already
-single-sourced out of `map.rs` and `heap.rs`.
-
-One thing to know about the rebuild. In the first pass the compiler being
-recompiled is the compiler doing the compiling, and calls go through symbol
-value cells, so the new one takes over partway through and finishes the job;
-if it is broken, the way you find out is that the build goes wrong somewhere
-confusing. `lmforge rebuild --verbose` names every form of the second pass as
-it goes, which narrows that down.
-
-### Compacting on the way out
-
-Object space is written by an allocator that never moves anything, and by the
-end of a build most of it is holes: the compiler's expanded macro trees,
-assembler buffers and analysis lists, allocated once and dead ever since. That
-is not a fragmented heap, it is a **high water mark** — the build really did
-need the memory — but an image is a file, and a file should be the size of
-what is in it.
-
-The machine cannot fix this itself, and `gc.lisp` says why: its collector is
-written in the language it collects, and reaches its functions through symbol
-value cells and its constants through the literal vector of its own code
-object. Every one of those is an object. Move them and it loses the ability to
-run, halfway through running.
-
-The forge is under no such obligation. By the time `src/forge/compact.rs`
-runs, the heap has stopped, and liveness has already been decided by the
-machine's own collector — which knows about task stacks and pinned registers —
-so object space is a walkable sequence of live blocks and `t-free` holes, and
-all that is left is to close them. Pointers are rewritten first and everything
-slides afterwards, the same order the machine uses for pairs. Words in the
-Exec pool are raw, so anything there that looks like an object pointer pins
-what it names rather than being rewritten; on a freshly built image nothing
-does.
-
-```
-objects 4102 KiB -> 307 KiB, 13,305 blocks moved, 0 pinned
-kick.img 904 KiB
-```
-
-`lmforge compact` is the same pass on an image that came off the disk. One
-from `(save-image)` pins more - its tasks really are holding objects - so it
-compacts less well. What `rebuild` makes is the other extreme: a fresh image
-resumes nothing, so nothing in it is pinned, and its code space closes up as
-well. With no stack holding a return address, the entry word of a code object
-and of each closure made from it are the only words that say where code is,
-and `--fresh` moves them. A rebuild's 7.9 MB of object space and 1.3 MB of
-code come out as 295 KiB and 441 KiB.
-
-The machine still cannot do this to itself. What it would take is written down
-in [docs/moving-objects.md](docs/moving-objects.md), along with why it has not
-mattered yet.
+`lisp/layout.lisp` is generated on every build from `src/map.rs`,
+`src/mach.rs`, `src/heap.rs` and the device files, so a Lisp constant for a
+memory region, an object slot, a trap cause or a device register is never
+written by hand.
 
 ## Exec
 
-An Amiga Exec, in Lisp, in one shared address space with no MMU and no
-protection. Tasks with 32 signal bits and `Wait`/`Signal`; message ports on top
-of signals; mutexes that belong to the task holding them; Disable for the few
-sections too short to need one; libraries reached through a jump table below
-their base pointer.
+An Amiga Exec, in Lisp, in one shared address space with no MMU. Tasks with
+32 signal bits and `wait`/`signal`; message ports on top of signals; mutexes
+that belong to the task holding them; interrupt servers on the chips' lines.
+There is no ExecBase: the lists are records held in variables. Sending a
+message costs a pointer on a list.
 
-`PutMsg` costs a pointer on a list. Nothing is copied, because there is nothing
-to copy it between - which is the whole reason to have a shared address space.
+The context switch is one CSR write. The trap stub saves all 32 registers
+into the block `mscratch` names and restores from there on the way out, so
+switching tasks is pointing `mscratch` at another task's block. Preemption is
+the timer interrupt; a task that blocks asks for a reschedule with an
+`ecall`, so the switch always happens inside the handler. Which task is
+running is the register `s2`.
 
-### No ExecBase, and no raw structures
+**Signals.** Bits 0 to 15 are reserved and 16 to 29 are allocated with
+`alloc-signal`; bit 30 would make a mask negative. Three are fixed:
+`sigf-vblank` (5), `sigf-blit` (7) and `sigf-mutex` (8), the same bit in
+every task, so waking every waiter is a walk of the wait list.
 
-A real ExecBase exists so that any program, in any language, compiled
-separately, can find the kernel with `move.l 4.w,a6` and no linker. None of
-that applies to one image in one address space where every function can name a
-symbol. So there isn't one: the current task, the two nesting counts, the saved
-interrupt state, the counters and the four lists are ordinary variables. Two
-instructions to read instead of four, inspectable by name rather than by
-offset, and no longer written through a null base pointer during the allocation
-that creates the base pointer, which is what `Disable` was quietly doing at
-every boot.
+**Servers.** A driver is a task with a port. `make-server` makes the task,
+gives it its port and only then starts it; `request` sends and waits for the
+answer, `send` does not wait, `notify` is an edge with no message, which is
+what an interrupt server posts because a server must not allocate. A handler
+that fails answers its caller with a failure and the server restarts on a
+clean stack; a task that ends has everything queued on its ports answered
+with failures. `spawn` makes a dependent task that ends with its parent.
 
-Tasks, ports, messages, libraries and interrupt servers are records rather than
-blocks of pool memory. That is not for speed, though a slot read is one checked
-instruction where `peek` was four unchecked ones. It is because `rem-task` used
-to hand a task's memory back to the pool, and the pool handed it out again — so
-a task pointer somebody kept could come back pointing at a *different, live*
-task. The old defence zeroed the node type on the way out and checked it on the
-way in, and its own comment admitted the hole: *"A block reused as another task
-passes this test, and then the signal goes to the wrong task rather than to
-nobody."* Nothing frees a record. A kept reference is either a live task or a
-dead one that says it is removed and ignores its signals:
+**Locking.** Three ways to share, in the order to reach for them: a port,
+because something one task owns cannot be raced for; a mutex, for data
+several tasks share and for any section that may have to wait; and
+`without-interrupts`, for what an interrupt server touches and for the
+kernel's own few-instruction sections. Nothing sleeps with interrupts off:
+`wait`, `reschedule`, taking a mutex and the running task ending itself are
+errors there. A mutex nests for its owner, only the owner unlocks it, waiters
+queue in priority order and are handed it directly, a waiter lends the owner
+its priority, and a wait that would close a circle is an error naming the
+circle. A task that ends holding a mutex, or whose stack an error abandons
+inside `with-mutex`, has it taken away, and the next taker is told.
 
-```
-> (define v (add-task "victim" 0 (lambda () nil)))
-> (list (task? v) (%slot v exec::tc-state) exec::ts-removed)
-(t 6 6)
-> (signal v 1)
-nil
-```
+**Idle.** The idle task is always ready and runs `wfi`, so a machine where
+every task is waiting costs nothing.
 
-The collector stopped needing to be told anything, too. It used to walk the
-lists by hand and name each Lisp-valued field of a task in `gc-scan-task` —
-add a field, forget a line, and it is silently collected out from under a
-running task. Now one root reaches every task, port, message, library and
-interrupt server and every value in them. What is left in `gc-extra-roots` is
-the part the collector genuinely cannot reach: the raw stacks and register
-blocks that suspended tasks were sitting on.
+## Drivers and the chips
 
-### Lists, and the trick that went
+Every device is a 4 KiB page of 32-bit registers at `0xF0000000` and up:
+`sys` (halt, interrupt control, entropy), `uart`, `timer`, `gfx`, `input`,
+`blit`, `disk`. Their register offsets are in the generated layout.
 
-Exec's list header pretends to be a node at both ends, so insert and remove
-need no test for the ends of the list — a node's predecessor is always some
-node, real or sentinel. It packs both sentinels into the header's own three
-words by treating it as a node at `l` and another at `l + 4`, sharing the word
-that is the head's predecessor and the tail's successor, neither of which is
-ever read.
+A device is a value with an owner. Register access goes through `dev-reg`,
+which refuses a task that does not hold the device, and a task that ends
+gives back what it held. `sys` and `timer` are the kernel's. The uart is
+reachable raw by design, for the collector, the trap handler and a rebuild.
 
-The sentinels are real nodes here, and the header owns two of them. Insert and
-remove are the same four unconditional writes; the walk still ends on the tail
-sentinel's nil successor, exactly as it ended on Exec's zero. What went is the
-packing, and only because it cannot be expressed: sharing that word means
-pointing four bytes into the header, and an object reference has its low three
-bits equal to four, so four bytes along reads as a cons. It saved one word per
-list, on twelve lists.
+| driver | owns | requests |
+|---|---|---|
+| `disk.driver` | the controller | `(read block n bytes)` `(write block n bytes)` `(flush)` `(size)` `(exclusive job)` |
+| `input.driver` | keyboard and mouse | `(subscribe port)` `(unsubscribe port)` `(inject ...)`; every subscriber gets every event |
+| `gfx.driver` | the display chip | `(screen w h)` `(show)` `(colours pairs)` `(present)`; wakes tasks whose blits have landed |
+| `console.driver` | the serial line | `(write string)` `(read port)`; whole lines, and a prompt that sleeps between keys |
 
-The context switch comes out almost free. The trap stub already saves all 32
-registers into the block `mscratch` points at and restores from there on the
-way out, so switching tasks is one CSR write: point `mscratch` at a different
-task's context and return. Taking a trap and switching tasks turn out to be the
-same operation seen from two directions. That block stays raw pool memory —
-thirty-two untagged words is not something a record can hold.
+A driver sleeps on its device's interrupt and the rest of the machine runs
+meanwhile. A request round trip costs about 9,700 cycles, so the unit of
+work sent to a driver is a whole operation, never a primitive: tasks link
+their own blitter descriptors rather than asking a driver to blit.
 
-Preemption is the timer interrupt; a task that blocks asks for a reschedule
-with an `ecall`, so the switch always happens inside the handler where the
-registers are already saved. It is on from the moment the kickstart finishes,
-which it did not used to be — you had to ask for it, so nothing was ever
-tested against it.
+**Bitmaps.** A bitmap's pixels are a byte object, so a bitmap cannot be
+forged from an address, an overrun stays in object space, and the collector
+frees the pixels when the last reference goes. Drawing goes through a
+rastport, a bitmap with an origin and a clip region.
 
-### Being interruptible
+**The blitter** is asynchronous. A task fills a descriptor from its own ring
+of eight and links it onto the chain; the chip walks the chain on its own
+clock, charged by bandwidth, and writes a done word back into each
+descriptor. `blit-sync` waits for this task's last descriptor, sleeping on
+`sigf-blit` if the wait would be long; `blit-drain` waits for the chip.
+Anything that reads or writes pixels directly calls `blit-sync` first.
 
-Turning it on for good meant making everything that touches shared state safe
-to be interrupted in the middle of, and the shape that took is worth
-describing because it is not the obvious one.
+Details of the model are in [docs/drivers.md](docs/drivers.md).
 
-**Interrupts are saved and restored, not turned on and off.** `%disable`
-answers whether they *were* on — the instruction that clears the bit computes
-that for free, and the only question was whether anyone kept the answer — and
-`%restore-interrupts` puts back what it found. So there is no "enable"
-operation for anything to get wrong, and no shared nesting count that everyone
-has to agree to maintain: each caller keeps its own answer on its own stack.
-Exec's `Disable`/`Enable` counter is gone; nothing ever read it but the pair
-itself. `without-interrupts` is
-the form you write, and it is a macro rather than something taking a thunk,
-because a thunk that captures anything is a closure and the collector may not
-allocate.
+## The workbench
 
-What it does not do is unwind. An error abandons the stack it happened on, so
-`abort-to-repl` re-establishes the interrupt state rather than restoring it,
-and zeroes Exec's nesting counts on the way past — otherwise one bad
-expression inside a critical section would leave the machine deaf for as long
-as it ran.
+`(workbench)` opens a desktop in the Platinum appearance with a shell in a
+window; `(new-shell)` opens another. Each shell is a task with a prompt of
+its own, reading keys from a port and printing into its window.
 
-**Every task allocates out of its own run.** This is the one that had teeth.
-The inline allocator is four instructions — check for room, store the car,
-store the cdr, bump — and it is not atomic. `gp` and `tp` used to be machine
-wide and deliberately *not* restored on a context switch, which was exactly
-right when switches only happened at a `reschedule` and exactly wrong the
-moment a timer could land between the store and the bump: two tasks would
-write the same cell and carry on, and it would surface much later as a pair
-holding somebody else's cdr. Now `refill-cons` carves a 256 KiB chunk out of
-the frontier for the asking task alone, the trap stub restores `gp` and `tp`
-with everything else, and the sequence is private to one task. After a
-compaction every run describes the wrong heap, so each suspended task keeps
-only the cell its run was about to use - moved with everything else, its `gp`
-updated to match - and refills after that. The collector used to zero both
-registers instead, and a task preempted between its room check and its stores
-then wrote its pair into nil's cell.
+Every window has two bitmaps. Its owner draws into the first; the second is
+what the screen is made from, and the only way from one to the other is the
+owner saying part of its picture is finished (`window-damage-rect`). The
+compositor runs once a frame over the damage list, front to back, writing
+every pixel once, so a picture part way through being drawn is never on the
+screen and a pixel the display catches early is old, never wrong. Damage is a
+short list of rectangles guarded by a mutex; most damage lies inside one
+window and is one copy.
 
-**A device command is a critical section.** Setting up a blit is several
-register writes and then the one that starts it; two tasks interleaved there
-start each other's work. That one is visible — it draws a line across the
-screen from a rectangle that was supposed to be clipped to a window.
+A drawing task calls `present`, which hands its window over and waits for
+the next frame. The input task turns events from `input.driver` into raise,
+drag, close and keys to the front window.
 
-### Locks
-
-Ports come first: a resource one task owns cannot be raced for, which is why
-every driver is a task. For data that tasks really do share there is a mutex,
-and it is the Windows kind rather than a bare semaphore - it belongs to the
-task holding it. Only the owner can let it go; it nests; waiters queue in
-priority order and are handed it directly; a waiter lends the owner its
-priority; and a task that dies holding one, or whose stack an error abandons,
-has it taken away, and the next owner is told - through a repair function the
-mutex can be made with. A wait that would close a circle of tasks is an error
-naming the circle, not a hang.
-
-`without-interrupts` stays, for the few sections an interrupt server shares
-and for the kernel's own few-instruction bookkeeping, and nothing may sleep
-inside it: `wait`, `reschedule` and taking a mutex there are errors that say
-so. There is no Forbid. Everything it guarded is a mutex or a port now, and
-the one thing it did that Disable does not - leave interrupts on through a
-long section - is what a mutex is for. `(locking)` at the prompt checks all of
-it. The rules, and how they came about, are under *Locking* in
-[docs/open-items.md](docs/open-items.md).
-
-### Waiting for a frame
-
-Preemption also made it obvious that nothing was ever *waiting*. A drawing task
-looped on `reschedule`, which under a cooperative scheduler was polite and
-under a preemptive one is a task asking for the processor back thousands of
-times a second to redraw a picture the display shows sixty times.
-
-So the display gets an interrupt server. Exec reserves one signal bit —
-`sigf-vblank`, the same bit in every task, which is what makes waking every
-waiter a walk of the wait list rather than a registry somebody has to keep —
-and `(wait-vblank)` blocks until the display has finished a frame. The eyes
-and the workbench's input task use it, and a task blocked there is off the
-ready list entirely.
-
-Then the rest of it, because a clock is only the right thing to wait on if you
-are watching the clock. A shell waiting for a key is woken by the key: the
-input task signals the window's task when it delivers one. The input task
-itself is woken by the input device's own interrupt rather than by asking sixty
-times a second whether anything arrived — and because that device holds its
-line up for as long as it has events, the server masks the line and the task
-turns it back on when the queue is dry, which is what makes a level-triggered
-device behave.
-
-And an idle task, which turns out to be load-bearing rather than tidy. With
-every task genuinely blocking, a machine where they all block at once has an
-empty ready list, and `switch-tasks` quietly declines to switch — so the task
-that just declared itself asleep carries on running, goes round `wait`'s loop
-and adds itself to the wait list a second time. A doubly linked list with one
-node in it twice is the end of the scheduler. Nothing noticed while every task
-was a spin loop. The idle task is always ready, runs `wfi`, and costs nothing.
-
-Four pairs of eyes open and nothing happening: three seconds of machine time
-now costs three seconds of wall clock, with the emulator idling through it.
-Spinning, the same three seconds had not arrived after 174. The input task went
-from 125,215 context switches in that window to one; the shell from 20,893 to
-one.
-
-That stopped being true once the frame interrupt was on for good: an idle
-machine skipped from one frame to the next as fast as the host could go, so a
-workbench ran hundreds of machine seconds a wall-clock second, drawing and
-allocating for every one of them. `run::pace` now sleeps through a windowed
-machine's idle time, and it holds again - without touching the machine's own
-clock, so a run is as deterministic as ever, and without slowing a busy one.
-
-What should happen next, and why `wait-vblank` is the mechanism rather than the
-interface, is in [docs/presenting.md](docs/presenting.md).
-
-## The Workbench
-
-A window owns the part of the bitmap it may draw on, and nothing else. Its
-**region** is its own rectangle less the rectangle of every window in front of
-it, recomputed whenever a window opens, closes, moves or comes forward. All
-drawing goes through a **rastport** — a bitmap, an origin and a region — and
-every drawing call takes one, the way `RectFill(rp, ...)` does: a rastport
-belongs to a window, so anybody holding the window is clipped to it. A
-**bitmap** is one value too — the memory and both its dimensions — because
-three arguments that have to agree are three that can disagree, and a stride
-that does not match its memory is not a drawing that looks wrong: the clipping
-passes and the write lands past the end, where the stacks are.
-
-That is the difference between an ordering and a guarantee. Before it, z-order
-held only until the next repaint: a task at the back would paint over the
-window in front two milliseconds later, and `xeyes` behind another window drew
-its eye straight across it. Now it cannot.
-
-It also means repainting is **only what was uncovered**. Closing a window
-repaints the strip it vacated rather than the screen, and drawing order stops
-mattering at all, because the regions do not overlap.
-
-`region-subtract` is the whole of the machinery: one rectangle minus another is
-at most four rectangles, and everything else is that in a loop.
-
-`(workbench)` opens a desktop with a shell in a window, and `(new-shell)` opens
-another. Each shell is a task with a prompt of its own, reading from its own
-window and printing into it — the same compiler, the same collector, the same
-everything, just not on the serial line.
-
-**No window has a backing store.** There is one bitmap and every window draws
-straight into it, clipped to its own region. That costs a window a few hundred
-bytes instead of a quarter of a megabyte, and the price is that a window has to
-be able to draw itself again on demand — a shell can, because it keeps the
-characters rather than the pixels, in a grid it scrolls with the blitter.
-
-The font is five columns by seven in an eight-pixel cell, written as eight
-small numbers a glyph so the whole thing is legible in `lisp/font.lisp`, and
-unpacked into a byte vector at startup. A glyph is drawn a pixel at a time,
-which sounds extravagant until you count it: a full screen of text is about a
-millisecond.
-
-One task turns events into window operations — click to raise, drag the title
-bar to move, the close box to close — and keys go to whichever window is in
-front. Nothing else in the system knows a mouse exists.
-
-## The chips
-
-Every device is a 4 KiB page of naturally aligned 32-bit registers, so talking
-to hardware from Lisp is peek and poke.
-
-- **uart** — the console, and where the REPL lives
-- **timer** — 64-bit compare against the instruction count
-- **gfx** — chunky 8-bit or 32-bit bitmap anywhere in RAM, 256-entry palette,
-  vertical blank derived from the cycle count so frames are reproducible
-- **blitter** — rectangle copy, fill, raster ops, masked sprite copy, lines
-- **input** — keyboard and mouse events in a fifo
-- **disk** — 512-byte blocks against a host file
-- **sys** — halt, interrupt request and enable, entropy
+The interface is set in Charcoal (the Virtue strike, 12 ppem) and shells in a
+5x7 face. A glyph is drawn with one wait for the blitter and then plain
+stores.
 
 ## Try it
 
@@ -1095,139 +507,80 @@ to hardware from Lisp is peek and poke.
 (selftest)            compile a function on the machine and time it
 (room)                heap and code usage
 (gc)                  collect now
-(tasks)               what every task is doing
+(tasks)               every task, its state and its priority
 (workbench)           a desktop, with a shell in a window
 (new-shell)           another shell window
 (eyes)                xeyes; call it more than once
 (mandelbrot)          fixed point, straight to the bitmap
 (life 200)            Conway, with the blitter for the copy
-(balls 6)             six preemptive tasks sharing one framebuffer
-(save-image)          write this machine to the disk
+(balls 6)             six tasks drawing into one window
+(numbers) (words) (nesting) (talking) (locking) (blitting) (devices) (drivers)
+                      the test suites; each prints nothing above its last line if all is well
+(save-image)          write this machine to the disk given with --disk
+bye                   stop the machine
 ```
 
-## Testing
+A saved image resumes with its memory and none of its tasks: Exec is rebuilt,
+the drivers start again, and the workbench restarts on the screen it had.
+
+## Testing and looking inside
 
 ```
 lmdev all             every suite
-lmdev cpu             174 processor conformance cases
+lmdev cpu             processor conformance
 lmdev asm             the Lisp assembler against an independent Rust encoder
-lmdev compiler        153 end-to-end cases: source in, machine code out, compare
-lmdev bench           measure the interpreter
+lmdev compiler        end-to-end: source in, machine code out, run, compare
 lmdev readers         name resolution: use lists, pkg:name, pkg::name
-lmforge rebuild --check   compile every source on the machine, then collect
-lmdev inspect [IMG]   look inside an image without running it
-lmdev reach [IMG]     what each package's symbols can reach, and what only they can
-lmdev eval EXPR       compile and run one expression, for debugging the compiler
+lmdev bench           measure the interpreter
+lmdev inspect [IMG]   what is in an image, and that code holds no heap addresses
+lmdev reach [IMG]     what each package's symbols can reach
+lmdev eval EXPR       compile and run one expression
 lmdev repl            a prompt on the bootstrap interpreter
+lmforge rebuild --check   compile every source on the machine twice, then collect
 ```
 
-`lmdev asm` is worth explaining: the same instruction sequence is written
-twice, once in Lisp and once with Rust encoders, and the two byte streams must
-match. Two independent readings of the RISC-V manual agreeing is evidence; one
-encoding agreeing with itself is not.
-
-`lmdev inspect` checks the invariant the collector depends on, by decoding
-every `lui`/`addi` pair in code space and asserting that none of them names
-anything in the heap.
-
-A static count of an image says what the compiler *emitted*; it says nothing
-about what runs, and the two distributions are not the same - a prologue is
-emitted once per function and executed once per call. For the other half:
+The machine's own suites are typed at the prompt; `(drivers)` needs a disk:
 
 ```
-lm kick.img --isaprof --script '...'
+lm kick.img --no-window --batch --disk scratch.disk \
+   --script '(numbers)\n(talking)\n(locking)\n(blitting)\n(drivers)\nbye'
 ```
 
-which prints a sorted histogram on exit, with the custom opcodes broken down by
-form, memory traffic by base register, a census of which functions never call
-anything, and a count of the instructions that exist only because values carry
-a tag.
-
-Counting is a *second dispatch table* rather than a test in the threaded core's
-`next!`. A branch there would cost more than everything it guarded, because
-that macro is the one piece of code every instruction expands; swapping the
-table costs one load of a pointer that is already hot, and measures as free.
-Every entry in the counting table is the same function, because it can work out
-which slot it is from the instruction word it was handed. The total it prints is smaller
-than the instruction count beside it, and the difference is real - `cycles` is
-the machine's timebase, and a machine parked on `wfi` has its clock moved
-forward to the next interrupt without executing anything.
-
-The histogram says which instructions run; `--fnprof` says whose:
+Instrumentation, all off by default:
 
 ```
-lm kick.img --fnprof --script '...'
-LM_FNPROF=1 lmforge rebuild
+lm --isaprof          a histogram of what executed, by opcode and custom form
+lm --fnprof           which functions the instructions were spent in
+lm --trace-traps      every trap the machine takes
+lm --shot FILE        the final display as a PPM
+LM_FNPROF=1 lmforge rebuild     the same profile of a rebuild
+LM_FORGE_PROF=1 lmforge build   which interpreted function the forge spends its time in
+LM_BLIT_GUARD=1       check every blit against the block it named
+LM_WATCH_ADDR=hex     report every store to an address (LM_WATCH_LEN bytes)
+LM_WATCH_HI=hex       report stores to one word, with the function that made them
+LM_WATCH_S2=1         report every change of the running task
 ```
 
-The outer loop hands the core slices of under a thousand instructions and
-charges each one to the function the machine is standing in - the code object
-every Lisp frame keeps in s1 - and once to every function on the frame chain
-above it. It prints the top forty both ways on exit: where the instructions
-were spent, and what they were spent on behalf of. A leaf that never builds a
-frame is charged to its caller. It is how `blit-go` and `alloc-object` turned
-out to be sixty percent of ten pairs of eyes following the mouse.
-
-`lmdev reach` walks the heap once per package, from that package's own symbols,
-and records for every cell the set of packages that can get to it. It answers
-what a namespace actually weighs - and it is how the dead object space in a
-fresh image was found: pairs were 100% live, code 99%, and objects 14%. It
-now reports every space as fully live, which is the check that the compaction
-above is doing what it claims.
+A screenshot of the workbench needs about four billion instructions of
+`--budget` to finish drawing; a smaller budget shows a half-composited
+screen.
 
 ## Known limits
 
-- Fixnums are 31-bit. No bignums, and no floats beyond a boxed representation
-  the compiler does not yet do arithmetic on.
-- Compiled code open-codes `+`, `car`, `<` and friends, so redefining one does
-  not affect code already compiled against it.
-- No condition system: an error prints a backtrace and restarts the reader on a
-  fresh stack. That is a reset, not an unwind — nothing gets a chance to clean
-  up on the way past, and there is no way to catch anything. The restart puts
-  the interrupt state and Exec's nesting counts back by hand, because nothing
-  else would.
-- The machine collects objects and code but never moves them, so object space
-  can still fragment over a long session. Its free lists are exact-fit and
-  segregated, which handles the usual case where sizes repeat, and the forge
-  compacts object space on the way into an image — which is the only place it
-  has mattered so far.
-- A fault inside a task with a prompt behind it restarts that prompt; one
-  without a prompt ends the task. Neither unwinds anything on the way.
-- A rebuild turns preemption off and does not turn it back on. It is
-  recompiling exec.lisp into the machine it is running on, and `(define
-  *sysbase* nil)` is a top level form like any other — for the rest of that
-  rebuild there is no ExecBase for a timer interrupt to find. The image it
-  writes turns preemption on for itself when it boots.
-- A task holding a partly used run keeps it until the next collection. At 256
-  KiB a chunk that is the worst case, and only for tasks that allocated once
-  and stopped.
-- A rebuilt image carries the holes left in *code space* by the functions it
-  replaced — object space is compacted, code space is not, because moving
-  machine code means finding every call site. So it is bigger than a freshly
-  built one and grows a little each generation. `lmforge build` renormalises.
-- Thirty-two words per suspended task are scanned conservatively, and what they
-  reach is pinned for that cycle. `(room)` reports how many.
-- A collection walks the whole used heap, so it costs proportional to the high
-  water mark rather than to the live set. Generations would fix that.
-- **A collection is about 110 million cycles and every one of them has
-  interrupts off** - three hundred frames at sixty hertz, five seconds at
-  20 MHz, during which the machine hears nothing. It was 175 million until the
-  mark bitmap stopped being cleared a word at a time over a hundred and
-  ninety-two megabytes of address space that has never been touched, the
-  forwarding tables stopped being filled in for a quarter of a million blocks
-  nothing reads, and the compacting walk stopped asking a lookup table for an
-  answer it could carry in a register. What is left is mostly the update pass
-  paying Lisp call overhead per pointer. It is the largest single defect in
-  the system and it wants a different shape, not another constant factor:
-  interrupts have to stay off for the root scan and the pointer update,
-  because those walk Exec's lists, but the marking and the sweeps touch only
-  the heap and could run with them on.
-- A task pointer is the only handle Exec has, and the memory it names is freed
-  when the task ends. `task?` catches the usual mistake - `signal` on a task
-  that has gone now reports rather than writing into whatever the pool handed
-  out next - but a block reused as another task passes that test.
-- More than eight arguments works, but not in tail position: the caller pushes
-  the overflow and a tail call's epilogue would move the stack out from under
-  it, so such a call is compiled as an ordinary one followed by a return.
-  `apply` is the same: up to eight arguments it makes a tail call, and past
-  eight an ordinary one.
+- No condition system: an error abandons the stack and nothing on it runs
+  again. There is no `unwind-protect`, `catch` or `dynamic-wind`.
+- Floats are boxed and the compiler does no arithmetic on them.
+- Bignums have no bitwise operations, and division is a bit at a time.
+- Open-coded operators and self-calls do not see a redefinition.
+- The machine never moves objects or code, so a long session can fragment
+  object space; only the forge compacts it, on the way into an image.
+- A collection stops the world for its duration, 30 to 110 million cycles
+  on a desktop with a few windows open.
+- Thirty-two words per suspended task are scanned conservatively and pin
+  what they reach.
+- Calls with more than eight arguments are never tail calls.
+- A rebuilt image carries the holes its replaced functions left in code
+  space; `lmforge build` renormalises.
+
+The open items, the API gaps and the performance risks are listed in
+[docs/open-items.md](docs/open-items.md).

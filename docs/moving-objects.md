@@ -1,152 +1,76 @@
 # Moving objects
 
-*Written 2026-09-08, after the forge learned to compact object space on the way
-into an image. This is the part that was left undone, and why.*
+The machine's collector compacts pairs and sweeps objects and code in place.
+The forge slides object space down on the way into an image, and
+`lmforge compact` does the same to an image that came off the disk, so every
+path that persists an image compacts it. A long-running machine does not
+compact its own object space. This note records what it would take.
 
-## Where things stand
+## Why the machine does not move objects
 
-Object space is written by an allocator that never moves anything. The machine's
-collector marks, sweeps objects in place, and compacts only pairs. `gc.lisp`
-gives the reason in full:
+The collector is written in the language it collects. It calls its functions
+through symbol value cells and reaches its constants through the literal
+vector of its own code object, and every one of those is an object. The
+pair compactor runs plan, update, slide: the update pass rewrites every
+stored pointer to its post-move address while nothing has moved, and between
+the end of update and the end of slide every pointer names an address whose
+contents have not arrived. Pairs survive that window because nothing in it
+dereferences a pair. Objects would not, because in that window the
+collector makes calls.
 
-> This collector is written in the language it collects: it calls functions
-> through symbol value cells, and reaches its own constants through the literal
-> vector of its own code object. Every one of those is an object. Move them and
-> the collector loses the ability to run, halfway through running.
+## What is built and switched off
 
-The forge is under no such obligation, so `src/forge/compact.rs` slides object
-space down on the way into an image, and `lmforge compact` does the same to one
-that came off the disk. That covers every path that persists an image —
-`build`, `rebuild`, and by hand — and a fresh `kick.img` is now 904 KiB with
-object space 100% live. An image `rebuild` makes has its code space slid down
-as well, since it resumes nothing and nothing on a stack can point into code.
+gc.lisp holds a complete object compactor that nothing calls:
+`gc-plan-objects` builds the per-block offset and first-object tables and
+handles pins, `gc-forward-object` replays a block to compute a forwarding
+address, and `gc-move-objects` slides. The one line holding it shut is
+`gc-forward-value`, which forwards pairs and answers an object's own
+address.
 
-**So compaction is, for now, a concern for persisted images only.** A long-lived
-running machine has never yet been the thing that hurt. Everything below is
-therefore *someday* work, and the ordering reflects that.
+The algorithm is settled: mark-bit prefix sums with a small side table per
+block, as the pair compactor uses. The heap stays walkable throughout and a
+forwarding address is computable at any moment. Threading compactors, which
+chain pointers through headers, are ruled out because the heap is
+unwalkable mid-pass and this collector has to run out of that heap.
 
-## What is already built and switched off
+## The options, in order
 
-`gc.lisp` contains a complete object compactor that nothing calls:
+**A low immobile region.** Make everything below a watermark immobile, and
+have the forge allocate the collector's own code objects and literal vectors
+there. Sliding would have put them at the bottom anyway, so protecting them
+costs nothing, and the test is one address comparison. Pinning the
+collector's transitive closure with `gc-pinmap` instead does not work well:
+pins scattered through a sparse heap hold whole pages down.
 
-- `gc-plan-objects` — builds the per-block offset table and the per-block
-  first-object table, handling pins.
-- `gc-forward-object` — replays a block to get a forwarding address.
-- `gc-move-objects` — slides.
+**The slide as a stub.** Only `gc-move-objects` and `gc-forward-object`
+have to be immune. Written as assembly in code space with no literal vector,
+reading only the mark bitmap, the offset tables and raw memory, the mover
+touches no object. It must be entered through a raw code address in a
+global, as `lg-refill` and `lg-gchook` are, and it must reload `s1` on the
+way out from a raw slot the update pass filled in, because the collector's
+live registers are not in any frame for the update pass to rewrite.
 
-The one line holding it shut:
+**A nursery for objects.** The garbage in a build is macro expansions,
+assembler buffers and analysis lists, all short-lived. A young-generation
+copier never moves anything the collector runs out of, because the
+collector is old. The pair walk that already happens every collection is
+the remembered set for pair-to-object references, so a nursery collection
+could ride on it. This is the only option that reduces peak usage rather
+than cleaning up after it.
 
-```lisp
-(define (gc-forward-value v)
-  ;; Pairs move. Objects do not, and answer their own address.
-  (if (%cons? v)
-      (%from-addr (gc-forward-cons (%addr-of v)))
-      v))
-```
-
-This is not a build-it problem. It is a *when is it safe to turn on* problem.
-
-## The algorithm question is settled
-
-The classical sliding-compaction families:
-
-| family | cost | fits here? |
-|---|---|---|
-| LISP 2 | a forwarding word per object | no — costs space in every object |
-| break tables (Haddon & Waite 1967) | table rolled through the gaps | workable, fiddly |
-| threading (Fisher / Jonkers / Morris) | none, but headers temporarily hold pointer chains | **no** — the heap is unwalkable mid-pass, and this collector has to run out of that heap |
-| mark-bit prefix sums (Abuaiadh 2004; the Compressor, Kermany & Petrank 2006) | a small side table per block | **yes** — heap stays walkable, forwarding computable at any moment |
-
-The last is what `gc-plan-objects` / `gc-forward-object` implement, and what
-the pair compactor already uses in anger. Nothing about the algorithm needs
-revisiting.
-
-## The real problem, precisely
-
-`gc-compact` runs **plan → update → slide**. The update pass rewrites every
-stored pointer to its *post-move* address while nothing has moved yet. Between
-the end of update and the end of slide, the world is systematically wrong:
-every pointer names an address whose contents have not arrived.
-
-Pairs survive that window because nothing in it dereferences a pair. Objects do
-not, because in that window the collector makes function calls — and a call
-goes through a symbol value cell, and a constant through the literal vector in
-`s1`, and both are objects whose pointers the update pass has just rewritten.
-
-The window is the whole problem, and it is small. That is what makes this
-tractable.
-
-## The options, in the order they should be tried
-
-### 1. A low immobile region
-
-Make *below a watermark* mean immobile, and arrange for the collector's own code
-objects and literal vectors to live down there. Allocation order is the forge's
-to choose. Then the collector's own working set costs nothing to protect,
-because sliding would have put it at the bottom anyway, and the test is one
-address comparison rather than an enumeration nobody can verify by reading.
-
-This subsumes the obvious alternative — pin the collector's transitive closure
-using the existing `gc-pinmap` — which fails for a measurable reason: pins
-scattered through a sparse heap hold whole pages down. The compaction of a
-*live* image already demonstrates this. 35 words in the Exec pool pinned 35
-objects, one of them near the top, and the compacted span did not shrink at all;
-only blanking the holes underneath the pin recovered the file size.
-
-### 2. The slide as a stub
-
-Only `gc-move-objects` and `gc-forward-object` have to be immune. Plan and
-update are ordinary Lisp running on a consistent heap. Written as assembly in
-code space with no literal vector, reading only the mark bitmap, the offset
-tables and raw memory, the mover touches no object at all and nothing needs
-pinning. `boot.lisp` already emits three stubs for exactly this class of reason;
-this is the fourth.
-
-Two sharp edges:
-
-- It must be entered through a **raw code address in a global**, the way
-  `lg-refill` and `lg-gchook` are, not through a symbol — by then the symbol's
-  cell names an address whose contents have not arrived.
-- The collector's **live registers** are not in any frame for the update pass to
-  rewrite. `s1` in particular. The stub has to reload it on the way out from a
-  raw slot the update pass filled in.
-
-### 3. A nursery for objects
-
-The 2.5 MB of garbage in a build is macro expansions, assembler buffers and
-analysis lists — textbook short-lived. The part that makes this fit:
-
-**The self-reference problem only applies to old objects.** A young-generation
-copier never moves anything the collector runs out of, because the collector is
-old.
-
-Normally the price is a write barrier for old→young pointers. Here pairs are
-already marked and compacted on every cycle, so the existing pair walk *is* the
-remembered set for pair→object references, and a nursery collection could ride
-on the collection that already happens.
-
-This attacks the cause rather than the symptom, and it is the only item here
-that would reduce the build's *peak* rather than clean up after it.
-
-### 4. Code space
-
-Visible only in rebuilt images, where code is 42% live: every function the
-rebuild replaced left a hole. Moving machine code means finding every call site,
-which is a different problem from moving data and wants its own note. Until
-then, `lmforge build` renormalises.
+**Code space.** Visible only in rebuilt images, where every function the
+rebuild replaced leaves a hole. Moving machine code means relocating every
+`clo-entry` and `code-entry` word; intra-function jumps are pc-relative and
+survive, and calls go through the closure's entry word.
 
 ## Two cautions
 
-**Peak usage is not fragmentation.** 2.5 MB dead in a fresh build is not
-evidence that the allocator fragments badly — the build genuinely needed that
-memory, and Johnstone & Wilson (1998) is worth re-reading before anyone
-concludes otherwise. What was being fixed is an artifact that should be the size
-of what is in it, not an allocator that misbehaves.
+Peak usage is not fragmentation. A build's dead object space is memory the
+build needed; the artifact should be the size of what is in it, which the
+forge's slide achieves.
 
-**Measure before choosing a strategy.** `lmdev reach` reports object pages by
-how full they are. Before compaction, a fresh image had 473 of 715 pages under a
-quarter full — so sparse that evacuating only the sparse ones (Immix's
-opportunistic defragmentation) would have moved 348 KiB of the 411 KiB live.
-There was no cheap 80/20 to design for; the full slide was the right shape. That
-may not be true of a long-running machine, which is the case none of this has
-measured yet.
+Measure before choosing a strategy. `lmdev reach` reports object pages by
+how full they are. Before the forge compacted, a fresh image had 473 of 715
+pages under a quarter full, so evacuating only the sparse pages would have
+moved most of the live data anyway; the full slide was the right shape. A
+long-running machine has not been measured.
