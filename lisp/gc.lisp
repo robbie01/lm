@@ -58,7 +58,7 @@
 
 (define *mark-sp* 0)
 (define *run-last* 0)
-(define *gc-count* 0)
+(define *count* 0)
 (define *t-clear* 0)
 (define *t-roots* 0)
 (define *t-drain* 0)
@@ -70,11 +70,11 @@
 (define *t-mv* 0)
 (define *t-blank* 0)
 (define *t-mark* 0)
-(define *gc-cycles* 0)
-(define *gc-verbose* nil)
+(define *cycles* 0)
+(define *verbose* nil)
 ;; A full extra pass over the live pairs after every compaction, reporting
 ;; pointers that still name a pair above the new top. Off unless debugging.
-(define *gc-check* nil)
+(define *check* nil)
 
 ;; ---------------------------------------------------------------- the stub
 ;; Layout of the frame the cons refill stub builds. It sits between two Lisp
@@ -88,7 +88,7 @@
 ;; ---------------------------------------------------------------- mark bits
 (defsubst (gc-bit-index p) (%lsh (%- p gc-heap-lo) -3))
 
-(defsubst (gc-marked? p) (%bit-ref gc-bitmap (gc-bit-index p)))
+(defsubst (marked? p) (%bit-ref gc-bitmap (gc-bit-index p)))
 (defsubst (gc-mark! p) (%bit-set! gc-bitmap (gc-bit-index p)))
 (defsubst (gc-pinned? p) (%bit-ref gc-pinmap (gc-bit-index p)))
 (defsubst (gc-pin! p) (%bit-set! gc-pinmap (gc-bit-index p)))
@@ -143,7 +143,7 @@
 
 ;; The clears are blits, and a blit is not finished when it returns; marking
 ;; must not start until they have landed.
-(define (gc-clear-bitmap)
+(define (clear-bitmap)
   (gc-clear-map gc-bitmap)
   (gc-clear-map gc-pinmap)
   (blit-wait-ring *gc-blit-ring*))
@@ -177,7 +177,7 @@
 (defsubst (gc-push v)
   (if (gc-heap-pointer? v)
       (let ((b (gc-block-of v)))
-        (if (gc-marked? b)
+        (if (marked? b)
             nil
             (begin
               (gc-mark! b)
@@ -216,7 +216,7 @@
 
 (define (gc-scan-object v) (gc-object-slots (%addr-of v)))
 
-(define (gc-drain)
+(define (drain)
   (while (%> *mark-sp* 0)
     (set! *mark-sp* (%- *mark-sp* 1))
     (let ((v (%ld-word (%+ gc-stack (%lsh *mark-sp* 2)))))
@@ -229,21 +229,21 @@
 ;; target is going.
 (defsubst (gc-update-slot addr)
   (let ((v (%ld-word addr)))
-    (if (gc-heap-pointer? v) (%st-word! addr (gc-forward-value v)) nil)))
+    (if (gc-heap-pointer? v) (%st-word! addr (forward-value v)) nil)))
 
 ;; One pointer-bearing word, in whichever pass this is. Every traversal goes
 ;; through here or `gc-update-slot`, so the same walk serves marking and
 ;; updating.
-(define (gc-slot addr)
+(define (slot addr)
   (let ((v (%ld-word addr)))
-    (if *gc-updating*
-        (if (gc-heap-pointer? v) (%st-word! addr (gc-forward-value v)) nil)
+    (if *updating*
+        (if (gc-heap-pointer? v) (%st-word! addr (forward-value v)) nil)
         (gc-push v))))
 
 (define (gc-scan-range lo hi)
   (let ((p (%logand lo -4)))
     (while (%< p hi)
-      (gc-slot p)
+      (slot p)
       (set! p (%+ p 4)))))
 
 ;; Words that might be pointers and might be integers. Anything reached this
@@ -252,11 +252,11 @@
 ;; address stays a number.
 (define *pinned* 0)
 
-(define (gc-scan-conservative lo hi)
+(define (scan-conservative lo hi)
   (let ((p (%logand lo -4)))
     (while (%< p hi)
       (let ((v (%ld-word p)))
-        (if (if *gc-updating* nil (gc-heap-pointer? v))
+        (if (if *updating* nil (gc-heap-pointer? v))
             (begin
               (set! *pinned* (%+ *pinned* 1))
               (gc-pin! (gc-block-of v))
@@ -282,7 +282,7 @@
   (let ((mask (%ld-fixnum (%+ base stub-mask-off))) (i 0))
     (while (%< i 8)
       (if (%= 1 (%logand 1 (%lsh mask (%- 0 i))))
-          (gc-slot (%+ base (%+ stub-args-off (%* 4 i))))
+          (slot (%+ base (%+ stub-args-off (%* 4 i))))
           nil)
       (set! i (%+ i 1)))))
 
@@ -291,7 +291,7 @@
 ;; saved return address and frame link are raw, at fixed offsets; and a
 ;; callee's frame base is its caller's stack pointer. So the chain alone gives
 ;; every frame's extent, with no stack maps.
-(define (gc-scan-frames sp0 s00)
+(define (scan-frames sp0 s00)
   (let ((sp sp0) (s0 s00) (go t) (guard 0))
     (while (if go (frame-ok? s0) nil)
       (set! guard (%+ guard 1))
@@ -305,30 +305,30 @@
         (set! s0 next)))))
 
 ;; Replaced by exec.lisp once the kernel is up, to walk every task's stack.
-(define (gc-extra-roots) nil)
+(define (extra-roots) nil)
 
 ;; Every root is named by the address of the word holding it, not by its
 ;; value, because the update pass has to write the new value back.
-(define (gc-roots)
-  (gc-slot lg-symlist)
-  (gc-slot lg-obarray)
-  (gc-slot lg-packages)
-  (gc-slot lg-package)
-  (gc-slot lg-bootlist)
-  (gc-slot lg-roots)
-  (gc-slot lg-toplevel)
-  (gc-slot lg-errhandler)
-  (gc-slot lg-traphook)
-  (gc-slot lg-refill)
-  (gc-slot lg-startup)
-  (gc-slot lg-scratch0)
+(define (roots)
+  (slot lg-symlist)
+  (slot lg-obarray)
+  (slot lg-packages)
+  (slot lg-package)
+  (slot lg-bootlist)
+  (slot lg-roots)
+  (slot lg-toplevel)
+  (slot lg-errhandler)
+  (slot lg-traphook)
+  (slot lg-refill)
+  (slot lg-startup)
+  (slot lg-scratch0)
   ;; The running task is a register, so there is no slot to rewrite; it is a
   ;; record, which does not move, so marking is the whole job.
-  (if *gc-updating* nil (gc-push (%this-task)))
+  (if *updating* nil (gc-push (%this-task)))
   ;; This task's own stack, from where it stands.
-  (gc-scan-frames (%stack-pointer) (%frame-pointer))
+  (scan-frames (%stack-pointer) (%frame-pointer))
   ;; Every other task's stack and registers.
-  (gc-extra-roots))
+  (extra-roots))
 
 ;; ---------------------------------------------------------------- runs
 ;; A run of free cons space is described in its own first cell: the end
@@ -375,10 +375,10 @@
 
 ;; One walk over object space does both halves: live objects have their
 ;; pointers to pairs rewritten, dead ones are gathered into free blocks.
-;; Called with `*gc-updating*` set, between the update of the pairs and their
+;; Called with `*updating*` set, between the update of the pairs and their
 ;; move. A dead run at the very top lowers the frontier instead of becoming a
 ;; free block.
-(define (gc-update-sweep-objects hi)
+(define (update-sweep-objects hi)
   (let ((p obj-base)
         (run 0)
         (runlen 0)
@@ -388,7 +388,7 @@
       (let ((size (obj-block-size (%ld-fixnum p))))
         ;; A zero size is a corrupt header and would spin here for ever.
         (if (%<= size 0) (gc-corrupt p) nil)
-        (if (gc-marked? p)
+        (if (marked? p)
             (begin
               (gc-object-slots (%+ p 4))
               (if (%> runlen 0)
@@ -429,8 +429,8 @@
 ;; copy upwards through memory without overwriting anything it has not yet
 ;; moved.
 
-(define *gc-updating* nil)
-(define *gc-moved* 0)
+(define *updating* nil)
+(define *moved* 0)
 (define *obj-freed* 0)
 (define *gc-compacted* nil)
 
@@ -440,9 +440,9 @@
 
 ;; One walk over the pairs, recording the free pointer on the way into each
 ;; block that holds a live pair. Answers where the live region will end. A
-;; dead run needs no entries: `gc-forward-cons` is only asked about live
+;; dead run needs no entries: `forward-cons` is only asked about live
 ;; pairs.
-(define (gc-plan-cons hi)
+(define (plan-cons hi)
   (let ((p cons-base) (mp gc-bitmap) (free cons-base) (blk 0))
     (%st-fixnum! gc-cons-prefix cons-base)
     (while (%< p hi)
@@ -456,7 +456,7 @@
                     (begin (set! blk b)
                            (%st-fixnum! (%+ gc-cons-prefix (%lsh b 2)) free))
                     nil))
-              (if (gc-marked? q)
+              (if (marked? q)
                   (if (gc-pinned? q)
                       (if (%> (%+ q 8) free) (set! free (%+ q 8)) nil)
                       (set! free (%+ free 8)))
@@ -476,7 +476,7 @@
 ;; bits below this one in a single byte. A pinned pair inside the block
 ;; breaks the rule, and then the block is replayed the way the plan walked
 ;; it.
-(define (gc-forward-cons p)
+(define (forward-cons p)
   (let ((b (cons-block-of p)))
     (if (gc-pinned? p)
         p
@@ -484,7 +484,7 @@
           (if (if (%= *pinned* 0) nil (gc-block-has-pins? b))
               (let ((q (%+ cons-base (%lsh b 6))))
                 (while (%< q p)
-                  (if (gc-marked? q)
+                  (if (marked? q)
                       (if (gc-pinned? q)
                           (if (%> (%+ q 8) free) (set! free (%+ q 8)) nil)
                           (set! free (%+ free 8)))
@@ -503,7 +503,7 @@
 ;; the window between update and move, during which the collector itself
 ;; calls functions and reaches constants through objects whose pointers have
 ;; already been rewritten. docs/moving-objects.md lists the ways round that.
-(define (gc-plan-objects hi)
+(define (plan-objects hi)
   (let ((p obj-base) (free obj-base) (blk 0))
     (%st-fixnum! gc-obj-prefix obj-base)
     (%st-fixnum! gc-obj-first obj-base)
@@ -515,7 +515,7 @@
           (%st-fixnum! (%+ gc-obj-first (%lsh blk 2)) p)))
       (let ((size (obj-block-size (%ld-fixnum p))))
         (if (%<= size 0) (gc-corrupt p) nil)
-        (if (gc-marked? p)
+        (if (marked? p)
             (if (gc-pinned? p)
                 (if (%> (%+ p size) free) (set! free (%+ p size)) nil)
                 (set! free (%+ free size)))
@@ -528,7 +528,7 @@
         (%st-fixnum! (%+ gc-obj-first (%lsh blk 2)) p)))
     free))
 
-(define (gc-forward-object p)
+(define (forward-object p)
   (if (gc-pinned? p)
       p
       (let* ((b (obj-block-of p))
@@ -536,7 +536,7 @@
              (q (%ld-fixnum (%+ gc-obj-first (%lsh b 2)))))
         (while (%< q p)
           (let ((size (obj-block-size (%ld-fixnum q))))
-            (if (gc-marked? q)
+            (if (marked? q)
                 (if (gc-pinned? q)
                     (if (%> (%+ q size) free) (set! free (%+ q size)) nil)
                     (set! free (%+ free size)))
@@ -544,12 +544,12 @@
             (set! q (%+ q size))))
         free)))
 
-(define (gc-move-objects hi)
+(define (move-objects hi)
   (let ((p obj-base) (n 0))
     (while (%< p hi)
       (let ((size (obj-block-size (%ld-fixnum p))))
-        (if (gc-marked? p)
-            (let ((to (gc-forward-object p)))
+        (if (marked? p)
+            (let ((to (forward-object p)))
               (if (%= to p)
                   nil
                   (begin
@@ -563,9 +563,9 @@
     n))
 
 ;; Pairs move; objects answer their own address.
-(defsubst (gc-forward-value v)
+(defsubst (forward-value v)
   (if (%cons? v)
-      (%from-addr (gc-forward-cons (%addr-of v)))
+      (%from-addr (forward-cons (%addr-of v)))
       v))
 
 ;; Every pointer-bearing word of an object from slot `from` up to slot `to`,
@@ -574,14 +574,14 @@
 (define (gc-slots base from to)
   (let ((p (%+ base (%lsh from 2)))
         (e (%+ base (%lsh to 2))))
-    (if *gc-updating*
+    (if *updating*
         (while (%< p e) (gc-update-slot p) (set! p (%+ p 4)))
         (while (%< p e) (gc-push (%ld-word p)) (set! p (%+ p 4))))))
 
 ;; ---------------------------------------------------------------- update
 ;; Every pointer inside every live pair. The roots are updated through the
-;; same walkers that found them, and the objects by `gc-update-sweep-objects`.
-(define (gc-update-pairs cons-hi)
+;; same walkers that found them, and the objects by `update-sweep-objects`.
+(define (update-pairs cons-hi)
   (let ((p cons-base) (mp gc-bitmap))
     (while (%< p cons-hi)
       (if (gc-run-dead? mp)
@@ -589,7 +589,7 @@
           (let ((q p) (e (%+ p 256)))
             (if (%> e cons-hi) (set! e cons-hi) nil)
             (while (%< q e)
-              (if (gc-marked? q)
+              (if (marked? q)
                   (begin (gc-update-slot q) (gc-update-slot (%+ q 4)))
                   nil)
               (set! q (%+ q 8)))))
@@ -602,14 +602,14 @@
 ;; `lg-cons-free`, which `refill-cons` hands out before fresh ground; the
 ;; hole's first cell can take the run's description as soon as the walk
 ;; reaches the pin, since nothing will be moved into it.
-(define gc-gap-min 1024)
+(define gap-min 1024)
 (define *gap-bytes* 0)       ; in holes handed to `lg-cons-free` this time
 (define *cons-live* 0)       ; bytes of pairs the last collection kept
 
 ;; The walk is in address order, so the destination is a running pointer
-;; rather than a lookup. It follows the rule `gc-plan-cons` uses to
+;; rather than a lookup. It follows the rule `plan-cons` uses to
 ;; build the table.
-(define (gc-move-cons hi)
+(define (move-cons hi)
   (let ((p cons-base) (mp gc-bitmap) (free cons-base) (n 0) (live 0) (holes 0))
     (set! *run-last* 0)
     (%st-fixnum! lg-cons-free 0)
@@ -619,12 +619,12 @@
           (let ((q p) (e (%+ p 256)))
             (if (%> e hi) (set! e hi) nil)
             (while (%< q e)
-              (if (gc-marked? q)
+              (if (marked? q)
                   (begin
                     (set! live (%+ live 8))
                     (if (gc-pinned? q)
                         (begin
-                          (if (%>= (%- q free) gc-gap-min)
+                          (if (%>= (%- q free) gap-min)
                               (begin (gc-add-run free q)
                                      (set! holes (%+ holes (%- q free))))
                               nil)
@@ -650,7 +650,7 @@
 ;; that the file is the size of what is in it.
 (define *cons-dirty-top* 0)
 
-(define (gc-blank lo hi)
+(define (blank lo hi)
   (let ((p lo))
     (while (%< p hi)
       (%st-fixnum! p 0)
@@ -661,7 +661,7 @@
 ;; holes pinned pairs left are stepped over: they hold whatever pairs were
 ;; last there, garbage by construction. The chain of holes is in address
 ;; order, because the move built it walking upwards.
-(define (gc-verify top)
+(define (verify top)
   (let ((p cons-base) (bad 0) (first 0) (hole (%ld-fixnum lg-cons-free)))
     (while (%< p top)
       (if (%= p hole)
@@ -682,12 +682,12 @@
     (uart-nl)
     bad))
 
-(define (gc-compact)
+(define (compact)
   (set! *t-mark* (%cycles))
   (let* ((cons-hi (%ld-fixnum lg-cons-ptr))
          (obj-hi (%ld-fixnum lg-obj-ptr))
-         (cons-top (gc-plan-cons cons-hi)))
-    (if *gc-check*
+         (cons-top (plan-cons cons-hi)))
+    (if *check*
         (begin
           (uart-string "  plan: hi=") (uart-hex cons-hi)
           (uart-string " top=") (uart-hex cons-top)
@@ -697,23 +697,23 @@
     ;; Rewrite every pointer to a pair. Nothing may follow a pair between
     ;; here and the slide.
     (set! *t-plan* (%- (%cycles) *t-mark*))
-    (set! *gc-updating* t)
-    (gc-roots)
+    (set! *updating* t)
+    (roots)
     (set! *t-upd* (%cycles))
-    (gc-update-pairs cons-hi)
+    (update-pairs cons-hi)
     (set! *t-upd* (%- (%cycles) *t-upd*))
     (set! *t-obj* (%cycles))
-    (set! *obj-freed* (gc-update-sweep-objects obj-hi))
+    (set! *obj-freed* (update-sweep-objects obj-hi))
     (set! *t-obj* (%- (%cycles) *t-obj*))
-    (set! *gc-updating* nil)
+    (set! *updating* nil)
     (set! *t-mv* (%cycles))
-    (set! *gc-moved* (gc-move-cons cons-hi))
+    (set! *moved* (move-cons cons-hi))
     (set! *t-mv* (%- (%cycles) *t-mv*))
-    (if *gc-check* (gc-verify cons-top) nil)
+    (if *check* (verify cons-top) nil)
     (if (%> cons-hi *cons-dirty-top*) (set! *cons-dirty-top* cons-hi) nil)
     (%st-fixnum! lg-cons-ptr cons-top)
     ;; An empty run for this task; every suspended task keeps only the cell
-    ;; its run was about to use (see `gc-invalidate-runs` in exec.lisp). The
+    ;; its run was about to use (see `invalidate-runs` in exec.lisp). The
     ;; next cons finds no room and asks for a run: a hole the move left behind
     ;; a pinned pair while there are any, and fresh ground after them.
     (%st-fixnum! lg-cons-run cons-top)
@@ -721,7 +721,7 @@
     (%st-fixnum! lg-cons-free-n (%+ (%lsh (%- cons-limit cons-top) -3)
                                      (%lsh *gap-bytes* -3)))
     (%reload-cons-run)
-    (gc-invalidate-runs)
+    (invalidate-runs)
     (set! *gc-compacted* t)
     (%lsh (%- cons-limit cons-top) -3)))
 
@@ -732,27 +732,27 @@
 ;; whichever is more, so the heap walked stays a small multiple of what is
 ;; live. Live is what the last collection kept, not how high the frontiers
 ;; stand: a pinned pair can hold a frontier up.
-(define gc-budget-min 8388608)
-(define *gc-budget* gc-budget-min)    ; bytes allowed between collections
+(define budget-min 8388608)
+(define *budget* budget-min)    ; bytes allowed between collections
 (define *gc-allocated* 0)             ; object bytes handed out since the last
 (define *cons-given* 0)               ; and bytes of cons runs
 
-(define (gc-over-budget?)
-  (%> (%+ *gc-allocated* *cons-given*) *gc-budget*))
+(define (over-budget?)
+  (%> (%+ *gc-allocated* *cons-given*) *budget*))
 
-(define (gc-set-budget)
+(define (set-budget)
   (let ((live (%+ (%- (%- (%ld-fixnum lg-obj-ptr) obj-base) (%ld-fixnum lg-obj-free-n))
                   *cons-live*)))
     (set! *gc-allocated* 0)
     (set! *cons-given* 0)
-    (set! *gc-budget* (if (%> (%* 2 live) gc-budget-min) (%* 2 live) gc-budget-min))))
+    (set! *budget* (if (%> (%* 2 live) budget-min) (%* 2 live) budget-min))))
 
 ;; Everything above fast-base, the maps, the mark stack and the forwarding
 ;; tables, is scratch that no image saves, and is rebuilt from nothing at
 ;; the start of every collection.
 ;;
 ;; Interrupts are off for the whole collection and put back as they were.
-(define (gc-collect)
+(define (collect)
   (let ((t0 (%cycles)))
     (without-interrupts
       ;; Runs are carved out of lg-cons-ptr, so it is already above every
@@ -761,31 +761,31 @@
       (set! *mark-sp* 0)
       (set! *pinned* 0)
       (set! *t-clear* (%- (%cycles) t0))
-      (gc-clear-bitmap)
+      (clear-bitmap)
       (set! *t-clear* (%- (%- (%cycles) t0) *t-clear*))
       (set! *t-roots* (%- (%cycles) t0))
-      (gc-roots)
+      (roots)
       (set! *t-roots* (%- (%- (%cycles) t0) *t-roots*))
       (set! *t-drain* (%- (%cycles) t0))
-      (gc-drain)
+      (drain)
       (set! *t-drain* (%- (%- (%cycles) t0) *t-drain*))
       ;; Code before objects: sweeping object space writes free-list links
       ;; over dead objects' first slots, and a dead code object's first slot
       ;; is the address of the code it owns.
       (set! *t-code* (%- (%cycles) t0))
-      (let ((k (gc-sweep-code))
+      (let ((k (sweep-code))
             (c (begin (set! *t-code* (%- (%- (%cycles) t0) *t-code*))
                       (set! *t-compact* (%- (%cycles) t0))
-                      (let ((v (gc-compact)))
+                      (let ((v (compact)))
                         (set! *t-compact* (%- (%- (%cycles) t0) *t-compact*))
                         v)))
             (o *obj-freed*))
-        (gc-set-budget)
-        (set! *gc-count* (%+ *gc-count* 1))
-        (set! *gc-cycles* (%+ *gc-cycles* (%- (%cycles) t0)))
-        (%st-fixnum! lg-gccount *gc-count*)
+        (set-budget)
+        (set! *count* (%+ *count* 1))
+        (set! *cycles* (%+ *cycles* (%- (%cycles) t0)))
+        (%st-fixnum! lg-gccount *count*)
         ;; Straight to the serial line: no allocation inside a collection.
-        (if *gc-verbose*
+        (if *verbose*
             (begin
               (uart-string "[gc ")
               (uart-num c)
@@ -802,7 +802,7 @@
               (uart-string "; ")
               (uart-num (%lsh *cons-live* -3))
               (uart-string " pairs live, next after ")
-              (uart-num *gc-budget*)
+              (uart-num *budget*)
               (uart-string " bytes]")
               (uart-nl))
             nil)
@@ -816,7 +816,7 @@
 (define cons-chunk 262144)     ; 32768 pairs
 
 ;; Replaced by exec.lisp once there are other tasks to tell.
-(define (gc-invalidate-runs) nil)
+(define (invalidate-runs) nil)
 
 ;; Called from the assembly stub when the inline allocator runs out of run.
 ;; Every caller-saved register was spilled on the way in, so the collector
@@ -825,27 +825,27 @@
 (define (refill-cons)
   (without-interrupts
     (let ((p (%ld-fixnum lg-cons-ptr)))
-      (if (if (gc-over-budget?)
+      (if (if (over-budget?)
               t
               (if (%< (%- cons-limit p) cons-chunk) (%= (%ld-fixnum lg-cons-free) 0) nil))
-          (begin (gc-collect) (set! p (%ld-fixnum lg-cons-ptr)))
+          (begin (collect) (set! p (%ld-fixnum lg-cons-ptr)))
           nil)
       (let ((hole (%ld-fixnum lg-cons-free)))
         (if (%> hole 0)
             (begin
               (%st-fixnum! lg-cons-free (%ld-fixnum (%+ hole 4)))
-              (gc-hand-out-run hole (%ld-fixnum hole)))
+              (hand-out-run hole (%ld-fixnum hole)))
             (begin
               (if (%<= (%- cons-limit p) 0) (out-of-memory "cons space") nil)
               (let ((top (if (%< (%- cons-limit p) cons-chunk) cons-limit (%+ p cons-chunk))))
                 (%st-fixnum! lg-cons-ptr top)
-                (gc-hand-out-run p top))))))))
+                (hand-out-run p top))))))))
 
 ;; The run goes into gp and tp here, with interrupts still off, rather than
 ;; in the stub afterwards: the two globals are one pair for the whole
 ;; machine, and a task preempted between storing them and picking them up
 ;; would come back to whatever another task had left there.
-(define (gc-hand-out-run start end)
+(define (hand-out-run start end)
   (set! *cons-given* (%+ *cons-given* (%- end start)))
   (%st-fixnum! lg-cons-run start)
   (%st-fixnum! lg-cons-run-end end)
@@ -857,7 +857,7 @@
 ;; this collection's allowance is spent, which is answered as no room at all:
 ;; `alloc-object` collects and asks again.
 (define (obj-take size)
-  (if (%> *gc-allocated* *gc-budget*)
+  (if (%> *gc-allocated* *budget*)
       0
       (let* ((gran (%lsh size -3))
              (bin (obj-bin-addr gran))
@@ -964,7 +964,7 @@
 ;; survived and handing the rest of code space back. The tail the compaction
 ;; leaves is cleared: those words are stale object pointers in the pool, and
 ;; anything reading the pool has to treat them as live.
-(define (gc-sweep-code)
+(define (sweep-code)
   (let ((r (code-registry))
         (n (%ld-fixnum lg-code-reg-n))
         (i 0)
@@ -972,7 +972,7 @@
         (freed 0))
     (while (%< i n)
       (let ((obj (%ld-word (%+ r (%lsh i 2)))))
-        (if (gc-marked? (%- (%addr-of obj) 4))
+        (if (marked? (%- (%addr-of obj) 4))
             (begin
               (%st-word! (%+ r (%lsh keep 2)) obj)
               (set! keep (%+ keep 1)))
@@ -993,7 +993,7 @@
 ;; Zeroing the inside of every free block in object space makes a page with
 ;; nothing live on it a page of zeroes, which the image writer skips. Far too
 ;; expensive for an ordinary collection.
-(define (gc-blank-free-objects)
+(define (blank-free-objects)
   (let ((p obj-base)
         (hi (%ld-fixnum lg-obj-ptr))
         (zeroed 0))
@@ -1004,7 +1004,7 @@
         (if (%= (%logand h 255) t-free)
             ;; words 0 and 1 are the block's size and its place on the chain
             (begin
-              (gc-blank (%+ p 8) (%+ p size))
+              (blank (%+ p 8) (%+ p size))
               (set! zeroed (%+ zeroed (%- size 8))))
             nil)
         (set! p (%+ p size))))
@@ -1012,19 +1012,19 @@
 
 ;; The same for the code that sweeping freed. A rebuild allocates its new
 ;; code above the old, so without this every dead byte goes into the file.
-(define (gc-blank-free-code)
+(define (blank-free-code)
   (let ((p (%ld-fixnum lg-code-free)))
     (while (%> p 0)
       (let ((size (%ld-fixnum p)) (next (%ld-fixnum (%+ p 4))))
-        (if (%> size 8) (gc-blank (%+ p 8) (%+ p size)) nil)
+        (if (%> size 8) (blank (%+ p 8) (%+ p size)) nil)
         (set! p next)))))
 
 ;; The holes pinned pairs left lie below the top of cons space and go into
 ;; the file: everything but the two words that make each one a run.
-(define (gc-blank-cons-holes)
+(define (blank-cons-holes)
   (let ((r (%ld-fixnum lg-cons-free)))
     (while (%> r 0)
-      (gc-blank (%+ r 8) (%ld-fixnum r))
+      (blank (%+ r 8) (%ld-fixnum r))
       (set! r (%ld-fixnum (%+ r 4))))))
 
 ;; ---- idle symbols ----
@@ -1067,7 +1067,7 @@
 
 ;; Answers a pool block holding the count and then the addresses of the
 ;; detached symbols, or 0 when there are none.
-(define (gc-detach-idle-symbols)
+(define (detach-idle-symbols)
   (let ((n 0) (l (%ld-word lg-symlist)))
     (while (%cons? l)
       (if (symbol-idle? (%car l)) (set! n (%+ n 1)) nil)
@@ -1095,13 +1095,13 @@
 ;; After the collection: the mark bits are still those of the collection
 ;; just done, and objects do not move, so a detached symbol's bit says
 ;; whether anything reached it.
-(define (gc-reattach-marked-symbols a)
+(define (reattach-marked-symbols a)
   (if (%= a 0)
       0
       (let ((n (%ld-fixnum a)) (i 1) (kept 0) (ob (%ld-word lg-obarray)))
         (while (%<= i n)
           (let ((p (%ld-fixnum (%+ a (%* 4 i)))))
-            (if (gc-marked? (%- p 4))
+            (if (marked? (%- p 4))
                 (let* ((s (%from-addr p)) (b (symbol-bucket s)))
                   (%vector-set! ob b (%cons s (%vector-ref ob b)))
                   (%st-word! lg-symlist (%cons s (%ld-word lg-symlist)))
@@ -1110,7 +1110,7 @@
           (set! i (%+ i 1)))
         ;; The block held raw addresses, which a conservative scan of the pool
         ;; would take for references.
-        (gc-blank a (%+ a (%* 4 (%+ n 1))))
+        (blank a (%+ a (%* 4 (%+ n 1))))
         (free-pool a)
         kept)))
 
@@ -1121,19 +1121,19 @@
 ;; data. The run goes back to memory, where the reset stub and a resume read
 ;; it, and what is left of it is given back: the high-water mark drops to the
 ;; last pair made, so the file holds the live pairs and nothing else.
-(define (gc-for-image)
-  (let ((idle (gc-detach-idle-symbols)))
-    (gc-collect)
-    (gc-reattach-marked-symbols idle))
+(define (collect-for-image)
+  (let ((idle (detach-idle-symbols)))
+    (collect)
+    (reattach-marked-symbols idle))
   (%sync-cons-run)
   (let ((top (%ld-fixnum lg-cons-run)))
     (%st-fixnum! lg-cons-ptr top)
     (%st-fixnum! lg-cons-run-end top)
     (%reload-cons-run)
-    (gc-blank top *cons-dirty-top*))
-  (gc-blank-cons-holes)
-  (gc-blank-free-objects)
-  (gc-blank-free-code))
+    (blank top *cons-dirty-top*))
+  (blank-cons-holes)
+  (blank-free-objects)
+  (blank-free-code))
 
 ;; ---------------------------------------------------------------- reporting
 (define (room)
@@ -1147,7 +1147,7 @@
   (emit-str (number->string
              (%- (%- (%ld-fixnum lg-code-ptr) code-base) (%ld-fixnum lg-code-free-n))))
   (emit-str ", collections ")
-  (emit-str (number->string *gc-count*))
+  (emit-str (number->string *count*))
   (newline)
   ;; The pool is the other heap: raw, unmoving, where stacks and command
   ;; blocks come from, and the one that runs out quietly.
@@ -1224,7 +1224,7 @@
 ;; wrapping them: a closure would have to be allocated first.
 (define (install-allocator)
   (set! *object-allocator* obj-take)
-  (set! *collector* gc-collect)
+  (set! *collector* collect)
   nil)
 
-(define (gc) (gc-collect))
+(define (gc) (collect))

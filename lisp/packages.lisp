@@ -26,10 +26,11 @@
 (defpackage input use lm hw exec)                                  ; input.driver
 (defpackage gfx use lm hw exec)                                    ; gfx.driver
 (defpackage console use lm hw exec)                                ; console.driver
-(defpackage snap use lm gc hw sys exec disk)                       ; saving the machine
-(defpackage wb use lm hw sys exec input gfx)                       ; the workbench
-(defpackage eyes use lm gc hw exec sys wb input)                   ; xeyes
-(defpackage user use lm gc hw asm compiler sys exec disk input gfx console snap wb eyes)  ; where a prompt starts
+(defpackage snap use lm gc hw sys exec)                            ; saving the machine
+(defpackage platinum use lm hw)                                    ; the Mac OS 8/9 appearance
+(defpackage wb use lm hw sys exec platinum)                        ; the workbench
+(defpackage eyes use lm gc hw exec sys wb platinum)                ; xeyes
+(defpackage user use lm gc hw asm compiler sys exec snap wb eyes platinum)  ; where a prompt starts
 
 ;; ---------------------------------------------------------------- exports
 ;; The prelude first: every other list below is read in its own package, and
@@ -148,9 +149,9 @@
 (in-package gc)
 (export '(
   alloc-code forget-package forget-unused-packages frame-ok?
-  cons-chunk gc gc-collect gc-extra-roots gc-for-image
-  gc-invalidate-runs gc-slot
-  gc-scan-conservative gc-scan-frames in-stub? install-allocator obj-take
+  cons-chunk gc collect extra-roots collect-for-image
+  invalidate-runs slot
+  scan-conservative scan-frames in-stub? install-allocator obj-take
   refill-cons register-code room stub-args-off stub-frame-size
   stub-mask-off stub-raw-off
 ))
@@ -195,8 +196,8 @@
   $a0 $a1 $a2 $a3 $a4 $a5 $a6 $a7 $gp $ra $s0 $s1 $s2 $sp $t0 $t1 $t2 $t3 $t4
   $t5 $t6 $tp $zero
   ;; s3..s11 are where a leaf function keeps its locals.
-  $s3 $s4 $s5 $s6 $s7 $s8 $s9 $s10 $s11 asm-code-object asm-gensym-label asm-label asm-len
-  asm-literal make-assembler asm-origin asm-place asm-place-at asm-buf asm-fixups
+  $s3 $s4 $s5 $s6 $s7 $s8 $s9 $s10 $s11 code-object gensym-label label asm-len
+  literal make-assembler asm-origin place place-at asm-buf asm-fixups
   asm-labels asm-nlits set-asm-len! set-asm-origin! csr-cycle
   csr-mcause csr-mepc csr-mie csr-mscratch csr-mstatus csr-mtval csr-mtvec csr-stklim
   i-add i-addi i-addi-w i-and i-andi i-beq i-beqz i-bge i-blt i-bltu i-bne
@@ -269,8 +270,8 @@
 
 (in-package disk)
 (export '(
-  disk-read disk-write disk-flush disk-size disk-exclusive disk-write-raw
-  start-disk-driver disk-driver-running? *disk-driver* *disk-sleeps*
+  read-blocks write-blocks flush size exclusive write-raw
+  start running? *driver* *sleeps*
 ))
 
 (in-package input)
@@ -278,20 +279,20 @@
   ;; The words an event is made of. Exported so that `key` read in another
   ;; package is this symbol.
   key mouse button wheel down up moved
-  input-listen input-unlisten next-input inject-input
+  listen unlisten next-event inject
   mouse-x mouse-y mouse-buttons
-  start-input-driver input-driver-running? *input-driver*
+  start running? *driver*
 ))
 
 (in-package gfx)
 (export '(
   open-screen attach-screen set-colour set-colours screen-sync vblank-count
-  start-gfx-driver gfx-driver-running? *gfx-driver* *blit-sleeps*
+  start running? *driver* *sleeps*
 ))
 
 (in-package console)
 (export '(
-  console-stream start-console-driver console-driver-running? *console-driver*
+  open start running? *driver*
 ))
 
 (in-package snap)
@@ -299,19 +300,25 @@
   save-image save-fresh
 ))
 
+(in-package platinum)
+(export '(
+  palette palette-base grey black white
+  g1 g2 g3 g4 g5 g6 g7 g8 g9 g10 g11 g12 g13
+  lav lav-light lav-dark lav-darkest desktop desktop-dark
+  title-height band box-size box-x box-y menubar-height menubar-first-x
+  hline vline outline raised sunken stripes title-box grow-box
+))
+
 (in-package wb)
 (export '(
-  *windows* front-window make-window new-shell title-height wb-back
-  window-rastport wb-update damage present window-bitmap
-  window-damage window-damage-rect window-rect wb-composite
-  wb-button-down wb-drag wb-face wb-repaint wb-shadow wb-text win-data
+  *windows* front-window make-window new-shell
+  window-rastport update damage present window-bitmap
+  window-damage window-damage-rect window-rect composite
+  button-down drag repaint win-data
   win-inner-h win-inner-w win-inner-x win-inner-y win-refresh
   win-task window-close window-open set-win-data! set-win-refresh! set-win-task!
-  win-h win-w win-x win-y window-push-key workbench win-bm wb-resume
-  pt-black pt-white pt-g1 pt-g2 pt-g3 pt-g6 pt-g7 pt-g8 pt-g10 pt-g13
-  pt-lav pt-lav-dark pt-lav-light pt-desktop pt-grey pt-band pt-title-h
-  pt-hline pt-vline pt-frame pt-raised pt-sunken pt-title-box pt-grow-box
-  platinum-palette text-width text-truncate draw-text draw-char
+  win-h win-w win-x win-y window-push-key workbench win-bm resume
+  text-width text-truncate draw-text draw-char
   make-demo-window win-plot win-point win-fill win-row window-footprint
   draw-mono draw-mono-char mono-width mono-advance mono-height
 ))

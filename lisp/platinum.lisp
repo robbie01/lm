@@ -7,93 +7,93 @@
 ;;; palette. The low sixteen entries are the machine's named colours and the
 ;;; middle is a grey ramp the demos draw gradients out of.
 
-(in-package wb)
+(in-package platinum)
 
 ;; ---------------------------------------------------------------- palette
-(define pt-base 232)
+(define palette-base 232)
 
 ;; Grey n of the ramp, 0 black and 15 white.
-(define (pt-grey n) (%+ pt-base n))
+(define (grey n) (%+ palette-base n))
 
-(define pt-black (%+ pt-base 0))
-(define pt-g13 (%+ pt-base 2))       ; 0x22, the darkest thing that is not black
-(define pt-g12 (%+ pt-base 3))       ; 0x33
-(define pt-g11 (%+ pt-base 4))       ; 0x44
-(define pt-g10 (%+ pt-base 5))       ; 0x55
-(define pt-g9 (%+ pt-base 6))        ; 0x66
-(define pt-g8 (%+ pt-base 7))        ; 0x77, the dark pinstripe
-(define pt-g7 (%+ pt-base 8))        ; 0x88
-(define pt-g6 (%+ pt-base 9))        ; 0x99, the shadow of a raised strip
-(define pt-g5 (%+ pt-base 10))       ; 0xAA
-(define pt-g4 (%+ pt-base 11))       ; 0xBB
-(define pt-g3 (%+ pt-base 12))       ; 0xCC, the frame face
-(define pt-g2 (%+ pt-base 13))       ; 0xDD, the dialog background
-(define pt-g1 (%+ pt-base 14))       ; 0xEE
-(define pt-white (%+ pt-base 15))
+(define black (%+ palette-base 0))
+(define g13 (%+ palette-base 2))       ; 0x22, the darkest thing that is not black
+(define g12 (%+ palette-base 3))       ; 0x33
+(define g11 (%+ palette-base 4))       ; 0x44
+(define g10 (%+ palette-base 5))       ; 0x55
+(define g9 (%+ palette-base 6))        ; 0x66
+(define g8 (%+ palette-base 7))        ; 0x77, the dark pinstripe
+(define g7 (%+ palette-base 8))        ; 0x88
+(define g6 (%+ palette-base 9))        ; 0x99, the shadow of a raised strip
+(define g5 (%+ palette-base 10))       ; 0xAA
+(define g4 (%+ palette-base 11))       ; 0xBB
+(define g3 (%+ palette-base 12))       ; 0xCC, the frame face
+(define g2 (%+ palette-base 13))       ; 0xDD, the dialog background
+(define g1 (%+ palette-base 14))       ; 0xEE
+(define white (%+ palette-base 15))
 
-(define pt-lav-light (%+ pt-base 16))   ; #CCCCFF
-(define pt-lav (%+ pt-base 17))         ; #9999FF
-(define pt-lav-dark (%+ pt-base 18))    ; #6666CC, the highlight colour
-(define pt-lav-darkest (%+ pt-base 19)) ; #333399
-(define pt-desktop (%+ pt-base 20))     ; #63639C
-(define pt-desktop-dark (%+ pt-base 21))
+(define lav-light (%+ palette-base 16))   ; #CCCCFF
+(define lav (%+ palette-base 17))         ; #9999FF
+(define lav-dark (%+ palette-base 18))    ; #6666CC, the highlight colour
+(define lav-darkest (%+ palette-base 19)) ; #333399
+(define desktop (%+ palette-base 20))     ; #63639C
+(define desktop-dark (%+ palette-base 21))
 
-(define (platinum-palette)
+(define (palette)
   ;; Sixteen greys, then the accents, as one request to the display driver.
-  (let ((pairs (list (%cons pt-lav-light (rgb 204 204 255))
-                     (%cons pt-lav (rgb 153 153 255))
-                     (%cons pt-lav-dark (rgb 102 102 204))
-                     (%cons pt-lav-darkest (rgb 51 51 153))
-                     (%cons pt-desktop (rgb 99 99 156))
-                     (%cons pt-desktop-dark (rgb 90 90 146))))
+  (let ((pairs (list (%cons lav-light (rgb 204 204 255))
+                     (%cons lav (rgb 153 153 255))
+                     (%cons lav-dark (rgb 102 102 204))
+                     (%cons lav-darkest (rgb 51 51 153))
+                     (%cons desktop (rgb 99 99 156))
+                     (%cons desktop-dark (rgb 90 90 146))))
         (i 15))
     (while (%>= i 0)
       (let ((v (%* i 17)))
-        (set! pairs (%cons (%cons (%+ pt-base i) (rgb v v v)) pairs)))
+        (set! pairs (%cons (%cons (%+ palette-base i) (rgb v v v)) pairs)))
       (set! i (%- i 1)))
-    (set-colours pairs))
+    (gfx:set-colours pairs))
   nil)
 
 ;; ---------------------------------------------------------------- metrics
 ;; Rows 0..21 of a window: the outline, nineteen interior rows, the shadow row
 ;; and the content border. Everything else is measured off that.
-(define pt-title-h 22)
-(define pt-band 6)              ; left, right and bottom bands
-(define pt-box 12)              ; a title-bar box
-(define pt-box-x 4)
-(define pt-box-y 4)
-(define pt-menubar-h 20)
-(define pt-menubar-first-x 9)
+(define title-height 22)
+(define band 6)              ; left, right and bottom bands
+(define box-size 12)              ; a title-bar box
+(define box-x 4)
+(define box-y 4)
+(define menubar-height 20)
+(define menubar-first-x 9)
 
 ;; ---------------------------------------------------------------- bevels
 ;; A raised strip is a white line along its top and left and a #99 line
 ;; along its bottom and right. Everything in Platinum that looks like an edge
 ;; is one of these.
-(define (pt-hline rp x y w c) (fill-rect rp x y w 1 c))
-(define (pt-vline rp x y h c) (fill-rect rp x y 1 h c))
+(define (hline rp x y w c) (fill-rect rp x y w 1 c))
+(define (vline rp x y h c) (fill-rect rp x y 1 h c))
 
-(define (pt-frame rp x y w h c)
-  (pt-hline rp x y w c)
-  (pt-hline rp x (%+ y (%- h 1)) w c)
-  (pt-vline rp x y h c)
-  (pt-vline rp (%+ x (%- w 1)) y h c))
+(define (outline rp x y w h c)
+  (hline rp x y w c)
+  (hline rp x (%+ y (%- h 1)) w c)
+  (vline rp x y h c)
+  (vline rp (%+ x (%- w 1)) y h c))
 
-(define (pt-raised rp x y w h)
-  (pt-hline rp x y (%- w 1) pt-white)
-  (pt-vline rp x y (%- h 1) pt-white)
-  (pt-hline rp (%+ x 1) (%+ y (%- h 1)) (%- w 1) pt-g6)
-  (pt-vline rp (%+ x (%- w 1)) (%+ y 1) (%- h 1) pt-g6))
+(define (raised rp x y w h)
+  (hline rp x y (%- w 1) white)
+  (vline rp x y (%- h 1) white)
+  (hline rp (%+ x 1) (%+ y (%- h 1)) (%- w 1) g6)
+  (vline rp (%+ x (%- w 1)) (%+ y 1) (%- h 1) g6))
 
-(define (pt-sunken rp x y w h)
-  (pt-hline rp x y (%- w 1) pt-g6)
-  (pt-vline rp x y (%- h 1) pt-g6)
-  (pt-hline rp (%+ x 1) (%+ y (%- h 1)) (%- w 1) pt-white)
-  (pt-vline rp (%+ x (%- w 1)) (%+ y 1) (%- h 1) pt-white))
+(define (sunken rp x y w h)
+  (hline rp x y (%- w 1) g6)
+  (vline rp x y (%- h 1) g6)
+  (hline rp (%+ x 1) (%+ y (%- h 1)) (%- w 1) white)
+  (vline rp (%+ x (%- w 1)) (%+ y 1) (%- h 1) white))
 
 ;; ---------------------------------------------------------------- pinstripes
 ;; Rows 4..15 of the title bar, white on even rows and #777 on odd, with a gap
 ;; cut around each box and around the title.
-(define (pt-stripes rp x y w cuts)
+(define (stripes rp x y w cuts)
   (let ((row 0))
     (while (%< row 12)
       (let ((dark (%= 1 (%logand row 1)))
@@ -105,12 +105,12 @@
             (let ((c0 (if dark (%car c) (%- (%car c) 1)))
                   (c1 (if dark (cadr c) (%+ (cadr c) 1))))
               (if (%> c0 cx)
-                  (pt-hline rp cx py (%- (if (%< c0 end) c0 end) cx)
-                            (if dark pt-g8 pt-white))
+                  (hline rp cx py (%- (if (%< c0 end) c0 end) cx)
+                            (if dark g8 white))
                   nil)
               (if (%> c1 cx) (set! cx c1) nil)))
           (if (%< cx end)
-              (pt-hline rp cx py (%- end cx) (if dark pt-g8 pt-white))
+              (hline rp cx py (%- end cx) (if dark g8 white))
               nil)))
       (set! row (%+ row 1)))
     nil))
@@ -119,39 +119,39 @@
 ;; The close, zoom and collapse boxes: a #222 outline round a diagonal ramp
 ;; from #99 at the top left to white at the bottom right, with a white
 ;; highlight along the outside of the right and bottom edges.
-(define (pt-title-box rp x y kind)
+(define (title-box rp x y kind)
   ;; kind 0 close, 1 zoom, 2 collapse.
-  (fill-rect rp x y 12 12 pt-g7)
-  (fill-rect rp (%+ x 1) (%+ y 1) 10 10 pt-g13)
+  (fill-rect rp x y 12 12 g7)
+  (fill-rect rp (%+ x 1) (%+ y 1) 10 10 g13)
   (let ((row 0))
     (while (%< row 8)
       (let ((col 0))
         (while (%< col 8)
           (let ((d (%+ row col)))
             (plot rp (%+ x (%+ col 2)) (%+ y (%+ row 2))
-                  (pt-grey (%+ 9 (%/ (%* d 6) 14)))))
+                  (grey (%+ 9 (%/ (%* d 6) 14)))))
           (set! col (%+ col 1))))
       (set! row (%+ row 1))))
   ;; The mark inside: a vertical bar for zoom, a horizontal one for collapse,
   ;; nothing for close.
   (if (%= kind 1)
-      (pt-vline rp (%+ x 6) (%+ y 2) 8 pt-g13)
-      (if (%= kind 2) (pt-hline rp (%+ x 2) (%+ y 6) 8 pt-g13) nil))
-  (pt-vline rp (%+ x 12) (%+ y 1) 12 pt-white)
-  (pt-hline rp (%+ x 1) (%+ y 12) 12 pt-white)
+      (vline rp (%+ x 6) (%+ y 2) 8 g13)
+      (if (%= kind 2) (hline rp (%+ x 2) (%+ y 6) 8 g13) nil))
+  (vline rp (%+ x 12) (%+ y 1) 12 white)
+  (hline rp (%+ x 1) (%+ y 12) 12 white)
   nil)
 
 ;; ---------------------------------------------------------------- grow box
-(define (pt-grow-box rp x y)
-  (fill-rect rp x y 15 15 pt-g3)
-  (pt-raised rp x y 15 15)
+(define (grow-box rp x y)
+  (fill-rect rp x y 15 15 g3)
+  (raised rp x y 15 15)
   (let ((i 0))
     (while (%< i 3)
       (let ((o (%+ 3 (%* i 4))) (j 0))
         (while (%< j 9)
           (let ((px (%+ x (%+ o j))) (py (%+ y (%- 11 j))))
             (if (%< (%- px x) 14)
-                (begin (plot rp px py pt-g7) (plot rp px (%+ py 1) pt-white))
+                (begin (plot rp px py g7) (plot rp px (%+ py 1) white))
                 nil))
           (set! j (%+ j 1))))
       (set! i (%+ i 1))))

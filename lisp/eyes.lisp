@@ -40,10 +40,10 @@
 ;; The mouse is in screen coordinates and the eyes are in the window's; this
 ;; is the only place in the application that knows where the window is.
 (define (target-x e)
-  (%- (if (%< (eyes-look-x e) 0) (mouse-x) (eyes-look-x e))
+  (%- (if (%< (eyes-look-x e) 0) (input:mouse-x) (eyes-look-x e))
       (win-x (eyes-window e))))
 (define (target-y e)
-  (%- (if (%< (eyes-look-y e) 0) (mouse-y) (eyes-look-y e))
+  (%- (if (%< (eyes-look-y e) 0) (input:mouse-y) (eyes-look-y e))
       (win-y (eyes-window e))))
 
 ;; Where a pupil sits when the eye is looking at a point: along the line to
@@ -62,10 +62,10 @@
 
 ;; ---------------------------------------------------------------- drawing
 (define (draw-eye e rp cx cy)
-  (fill-circle rp cx cy (eyes-rad e) pt-white)
-  (draw-circle rp cx cy (eyes-rad e) pt-black))
+  (fill-circle rp cx cy (eyes-rad e) white)
+  (draw-circle rp cx cy (eyes-rad e) black))
 
-(define (draw-pupil e rp x y) (fill-circle rp x y (eyes-pr e) pt-black))
+(define (draw-pupil e rp x y) (fill-circle rp x y (eyes-pr e) black))
 
 ;; Drawing goes through this pair's own window, which is what makes
 ;; `(look-at e 100 100)` from a prompt safe: it paints into that window's
@@ -77,7 +77,7 @@
   (place-eyes e)
   (let ((win (eyes-window e)))
     (fill-rect rp (win-inner-x win) (win-inner-y win)
-               (win-inner-w win) (win-inner-h win) pt-g3))
+               (win-inner-w win) (win-inner-h win) g3))
   (draw-eye e rp (eyes-lx e) (eyes-ly e))
   (draw-eye e rp (eyes-rx e) (eyes-ry e))
   ;; Both pupils are gone with the fill, so neither remembered position is
@@ -119,8 +119,8 @@
          (fresh (%< ox 0))
          (ax (if fresh nx ox))
          (ay (if fresh ny oy)))
-    (if fresh nil (fill-circle rp ox oy pr pt-white))
-    (fill-circle rp nx ny pr pt-black)
+    (if fresh nil (fill-circle rp ox oy pr white))
+    (fill-circle rp nx ny pr black)
     (let ((x0 (%- (if (%< ax nx) ax nx) pr))
           (y0 (%- (if (%< ay ny) ay ny) pr))
           (x1 (%+ (if (%> ax nx) ax nx) (%+ pr 1)))

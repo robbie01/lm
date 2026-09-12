@@ -620,7 +620,7 @@
     (i-lw a $t0 $zero lg-scratch0)
     (i-lw a $t2 $t0 0)
     (i-jr a $t2)
-    (set! *task-exit-stub* (asm-place a))
+    (set! *task-exit-stub* (place a))
     (%st-word! lg-scratch0 (%symbol-value 'task-finished))
     *task-exit-stub*))
 
@@ -1386,7 +1386,7 @@
 ;; A collection moved every pair, so the run a suspended task was holding
 ;; describes the wrong part of the heap. The cell gp names is kept: the task
 ;; may have been preempted between the room check and the two stores that
-;; fill the cell, and would finish its pair there. `gc-scan-run` has the
+;; fill the cell, and would finish its pair there. `scan-run` has the
 ;; collector treat that cell as a live pair, moving it and updating gp, and
 ;; here the run shrinks to that one cell; the next cons after it asks for a
 ;; fresh run.
@@ -1397,11 +1397,11 @@
           (poke (ctx-reg ctx reg-tp) (if (%= gp 0) 0 (%+ gp 8))))
         nil)))
 
-(define (gc-invalidate-runs)
+(define (invalidate-runs)
   (if *ready-list*
       (begin
-        (gc-scan-list-of *ready-list* drop-task-run)
-        (gc-scan-list-of *wait-list* drop-task-run))
+        (scan-list-of *ready-list* drop-task-run)
+        (scan-list-of *wait-list* drop-task-run))
       nil)
   nil)
 
@@ -1409,40 +1409,40 @@
 ;; conservatively: a task preempted mid-expression has live values in
 ;; registers whose types nothing recorded, and the compactor pins whatever
 ;; they reach. gp and tp are not guesses, they are the cons run, and are
-;; handled by `gc-scan-run`.
-(define (gc-scan-task task)
+;; handled by `scan-run`.
+(define (scan-task task)
   (let ((ctx (tc-context task)))
     (if (if ctx (%> ctx 0) nil)
         (begin
-          (gc-scan-frames (%ld-fixnum (%+ ctx (%* 4 reg-sp)))
+          (scan-frames (%ld-fixnum (%+ ctx (%* 4 reg-sp)))
                           (%ld-fixnum (%+ ctx (%* 4 reg-s0))))
-          (gc-scan-conservative ctx (ctx-reg ctx reg-gp))
-          (gc-scan-conservative (ctx-reg ctx reg-t0) (%+ ctx ctx-bytes))
-          (gc-scan-run ctx))
+          (scan-conservative ctx (ctx-reg ctx reg-gp))
+          (scan-conservative (ctx-reg ctx reg-t0) (%+ ctx ctx-bytes))
+          (scan-run ctx))
         nil)))
 
 ;; The cell at the front of a suspended task's run: nothing yet, or a pair the
 ;; task was interrupted in the middle of filling in. Kept as a pair like any
 ;; other, with gp rewritten to wherever it goes. A run with nothing left in it
 ;; is given up here and now.
-(define (gc-scan-run ctx)
+(define (scan-run ctx)
   (let ((gp (ctx-reg ctx reg-gp))
         (tp (ctx-reg ctx reg-tp)))
     (if (%< (%ld-fixnum gp) (%ld-fixnum tp))
-        (gc-slot gp)
+        (slot gp)
         (begin (poke gp 0) (poke tp 0)))))
 
-(define (gc-scan-list-of l fn)
+(define (scan-list-of l fn)
   (let ((p (list-first l)))
     (while p
       (%funcall fn p)
       (set! p (node-next p)))))
 
-(define (gc-extra-roots)
+(define (extra-roots)
   (if *ready-list*
       (begin
-        (gc-scan-list-of *ready-list* gc-scan-task)
-        (gc-scan-list-of *wait-list* gc-scan-task))
+        (scan-list-of *ready-list* scan-task)
+        (scan-list-of *wait-list* scan-task))
       nil))
 
 (define (task-count) *task-count*)

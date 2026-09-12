@@ -26,7 +26,7 @@
 
 (in-package input)
 
-(define *input-driver* nil)
+(define *driver* nil)
 (define *subscribers* nil)   ; the driver's own; only its task changes it
 (define *mouse-x* 0)
 (define *mouse-y* 0)
@@ -44,7 +44,7 @@
 ;; server masks the line and wakes the driver, and the driver turns the line
 ;; back on once it has emptied the queue; anything that arrived in between
 ;; raises it again at once.
-(define (input-poll)
+(define (poll)
   (let ((e (input-take)))
     (while e
       (publish (decode e))
@@ -92,7 +92,7 @@
     (dolist (p ps) (if (port-open? p) (set! keep (%cons p keep)) nil))
     (reverse keep)))
 
-(define (input-serve body)
+(define (serve body)
   (let ((op (%car body)))
     (cond ((%eq? op 'subscribe)
            (set! *subscribers* (%cons (cadr body) (remove-eq (cadr body) *subscribers*)))
@@ -105,16 +105,16 @@
            t)
           (else (error "input.driver: no such request:" op)))))
 
-;; Running exactly when it holds the device; see `disk-driver-running?`.
-(define (input-driver-running?)
-  (if *input-driver*
-      (%eq? (device-owner *input*) (server-task *input-driver*))
+;; Running exactly when it holds the device; see `disk:running?`.
+(define (running?)
+  (if *driver*
+      (%eq? (device-owner *input*) (server-task *driver*))
       nil))
 
-(define (start-input-driver)
-  (if (input-driver-running?)
-      *input-driver*
-      (let* ((s (make-server "input.driver" 20 (lambda (body) (input-serve body))))
+(define (start)
+  (if (running?)
+      *driver*
+      (let* ((s (make-server "input.driver" 20 (lambda (body) (serve body))))
              (task (server-task s))
              (port (server-port s))
              (int (make-interrupt "input" 0
@@ -126,39 +126,39 @@
         (set! *subscribers* nil)
         (input-interrupts! t)
         (claim-device-for *input* task)
-        (server-poll! s (lambda () (input-poll)))
+        (server-poll! s (lambda () (poll)))
         (add-int-server int-input int)
         (on-task-end task (lambda () (remove-int-server int-input int)))
-        (set! *input-driver* s)
+        (set! *driver* s)
         s)))
 
-(add-resident "input.driver" (lambda () (start-input-driver)))
+(add-resident "input.driver" (lambda () (start)))
 
 ;; ---------------------------------------------------------------- clients
 (define (driver-port)
-  (if *input-driver* (server-port *input-driver*) (error "input: there is no driver")))
+  (if *driver* (server-port *driver*) (error "input: there is no driver")))
 
 ;; A port that every event arrives on from now on, as a message whose body is
 ;; the event.
-(define (input-listen)
+(define (listen)
   (let ((port (make-port nil 0)))
     (request (driver-port) (list 'subscribe port))
     port))
 
-(define (input-unlisten port)
+(define (unlisten port)
   (request (driver-port) (list 'unsubscribe port))
   (delete-port port)
   nil)
 
 ;; The next event on a port, sleeping until there is one.
-(define (next-input port)
+(define (next-event port)
   (let ((m (get-message port)))
     (while (%null? m)
       (wait (port-signal port))
       (set! m (get-message port)))
     (message-body m)))
 
-(define (inject-input kind ascii code payload)
+(define (inject kind ascii code payload)
   (request (driver-port) (list 'inject kind ascii code payload)))
 
 ;; Where the pointer is, as of the last event the driver took, or straight

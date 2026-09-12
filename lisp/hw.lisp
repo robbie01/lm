@@ -590,7 +590,7 @@
 (define (make-bitmap-rastport bmp)
   (make-rastport-on bmp 0 0 (list (rect 0 0 (bm-w bmp) (bm-h bmp)))))
 
-;; The screen as a rastport. It carries the screen's size, so `attach-screen`
+;; The screen as a rastport. It carries the screen's size, so `gfx:attach-screen`
 ;; makes a fresh one after a resize.
 (define (screen-rastport)
   (if *screen-rp*

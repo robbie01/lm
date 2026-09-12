@@ -20,14 +20,14 @@
 
 (in-package gfx)
 
-(define *gfx-driver* nil)
+(define *driver* nil)
 
 ;; How many times a task has gone to sleep waiting for its blits.
 ;; `(drivers)` reads it.
-(define *blit-sleeps* 0)
+(define *sleeps* 0)
 
 ;; ---------------------------------------------------------------- the driver
-(define (gfx-serve body)
+(define (serve body)
   (let ((op (%car body)))
     (cond ((%eq? op 'screen) (show-screen (alloc-bitmap (cadr body) (caddr body))))
           ((%eq? op 'show) (show-screen *screen*))
@@ -63,16 +63,16 @@
         (gfx-colour! i (rgb v v v)))
       (set! i (%+ i 1)))))
 
-;; Running exactly when it holds the device; see `disk-driver-running?`.
-(define (gfx-driver-running?)
-  (if *gfx-driver*
-      (%eq? (device-owner *gfx*) (server-task *gfx-driver*))
+;; Running exactly when it holds the device; see `disk:running?`.
+(define (running?)
+  (if *driver*
+      (%eq? (device-owner *gfx*) (server-task *driver*))
       nil))
 
-(define (start-gfx-driver)
-  (if (gfx-driver-running?)
-      *gfx-driver*
-      (let* ((s (make-server "gfx.driver" 15 (lambda (body) (gfx-serve body))))
+(define (start)
+  (if (running?)
+      *driver*
+      (let* ((s (make-server "gfx.driver" 15 (lambda (body) (serve body))))
              (task (server-task s))
              (int (make-interrupt "blit" 0 (lambda (d) (blit-server d)) nil)))
         (detach-task task)
@@ -88,10 +88,10 @@
         (on-task-end task (lambda ()
                             (set-blit-sleep! nil)
                             (remove-int-server int-blit int)))
-        (set! *gfx-driver* s)
+        (set! *driver* s)
         s)))
 
-(add-resident "gfx.driver" (lambda () (start-gfx-driver)))
+(add-resident "gfx.driver" (lambda () (start)))
 
 ;; ---------------------------------------------------------------- completion
 ;; A task whose blit has not landed yet sleeps on its blit signal rather than
@@ -117,7 +117,7 @@
 ;; critical section may draw.
 (define (blit-sleep d)
   (let ((me (this-task)))
-        (set! *blit-sleeps* (%+ *blit-sleeps* 1))
+        (set! *sleeps* (%+ *sleeps* 1))
         (without-interrupts
           (set! *blit-waiters* (%cons (%cons me d) *blit-waiters*))
           (blit-irq-each! t))
@@ -140,11 +140,11 @@
 ;; Every call goes to the driver while one holds the display, and is done on
 ;; the spot while none does: before Exec is up, during a rebuild, or between
 ;; a driver ending and the next one starting.
-(define (gfx-port)
-  (if *gfx-driver* (server-port *gfx-driver*) (error "gfx: there is no driver")))
+(define (driver-port)
+  (if *driver* (server-port *driver*) (error "gfx: there is no driver")))
 
 (define (ask body)
-  (if (device-usable? *gfx*) (gfx-serve body) (request (gfx-port) body)))
+  (if (device-usable? *gfx*) (serve body) (request (driver-port) body)))
 
 (define (open-screen w h) (ask (list 'screen w h)))
 (define (attach-screen) (ask (list 'show)))

@@ -22,12 +22,12 @@
 
 (in-package console)
 
-(define *console-driver* nil)
+(define *driver* nil)
 (define *reader* nil)     ; the port typed input goes to
 (define *unread* nil)     ; bursts nobody had asked for yet, newest first
 
 ;; ---------------------------------------------------------------- the driver
-(define (console-serve body)
+(define (serve body)
   (let ((op (%car body)))
     (cond ((%eq? op 'write) (uart-string (cadr body)) t)
           ((%eq? op 'read)
@@ -40,7 +40,7 @@
 ;; The chip raises its line while bytes are waiting, so the interrupt server
 ;; masks it and wakes the driver, and the driver turns it back on once the
 ;; queue is empty, the same arrangement as the keyboard.
-(define (console-poll)
+(define (poll)
   (let ((s (take-typed)))
     (if s
         (if (if *reader* (port-open? *reader*) nil)
@@ -52,7 +52,7 @@
 
 ;; Everything waiting, as one string, or as much of it as fits in a chunk.
 ;; The rest stays in the chip, which raises its line again as soon as
-;; `console-poll` turns it back on, and arrives as the next string. Read
+;; `poll` turns it back on, and arrives as the next string. Read
 ;; into a buffer the driver keeps and copied out at the length it came to,
 ;; so that a pasted megabyte of source does not become a list of characters.
 (define typed-max 4096)
@@ -73,16 +73,16 @@
             (set! i (%+ i 1)))
           s))))
 
-;; Running exactly when it holds the line; see `disk-driver-running?`.
-(define (console-driver-running?)
-  (if *console-driver*
-      (%eq? (device-owner *serial*) (server-task *console-driver*))
+;; Running exactly when it holds the line; see `disk:running?`.
+(define (running?)
+  (if *driver*
+      (%eq? (device-owner *serial*) (server-task *driver*))
       nil))
 
-(define (start-console-driver)
-  (if (console-driver-running?)
-      *console-driver*
-      (let* ((s (make-server "console.driver" 12 (lambda (body) (console-serve body))))
+(define (start)
+  (if (running?)
+      *driver*
+      (let* ((s (make-server "console.driver" 12 (lambda (body) (serve body))))
              (task (server-task s))
              (port (server-port s))
              (int (make-interrupt "serial" 0
@@ -94,12 +94,12 @@
         (set! *unread* nil)
         (claim-device-for *serial* task)
         (serial-interrupts! t)
-        (server-poll! s (lambda () (console-poll)))
+        (server-poll! s (lambda () (poll)))
         (add-int-server int-uart int)
         (on-task-end task (lambda ()
                             (serial-interrupts! nil)
                             (remove-int-server int-uart int)))
-        (set! *console-driver* s)
+        (set! *driver* s)
         s)))
 
 ;; Started with the others, and the task that brought Exec up, the prompt on
@@ -107,8 +107,8 @@
 ;; this runs in it.
 (add-resident "console.driver"
               (lambda ()
-                (start-console-driver)
-                (use-stream! (console-stream))))
+                (start)
+                (use-stream! (open))))
 
 ;; ---------------------------------------------------------------- the stream
 ;; What the prompt on the serial line uses. Output collects into a line and
@@ -122,8 +122,8 @@
 ;; still in a buffer is a prompt nobody sees.
 (define line-max 200)
 
-(define (console-port)
-  (if *console-driver* (server-port *console-driver*) (error "console: there is no driver")))
+(define (driver-port)
+  (if *driver* (server-port *driver*) (error "console: there is no driver")))
 
 ;; Whether a line can go to the driver. Handing it over is a request, and a
 ;; request waits for its answer, so this is as much a question about where it
@@ -132,7 +132,7 @@
 ;; waiting is an error and a print is the last thing that should be one.
 ;; There, the line goes out raw.
 (define (can-ask?)
-  (if (console-driver-running?)
+  (if (running?)
       (if (%= 0 (%ld-fixnum lg-trapdepth))
           (if *in-interrupt* nil (interrupts-on?))
           nil)
@@ -143,11 +143,11 @@
 ;; way to wait for a key, and a read that has to wait inside a section is
 ;; refused by `wait` itself.
 (define (can-listen?)
-  (if (console-driver-running?)
+  (if (running?)
       (if (%= 0 (%ld-fixnum lg-trapdepth)) (if *in-interrupt* nil t) nil)
       nil))
 
-(define (console-stream)
+(define (open)
   (let ((out nil) (n 0)          ; the line so far, newest first, and its length
         (in nil) (pos 0)         ; the burst being read, and how far into it
         (port nil))              ; where the driver sends input, once asked
@@ -157,7 +157,7 @@
                  (let ((s (list->string (reverse out))))
                    (set! out nil)
                    (set! n 0)
-                   (if (can-ask?) (request (console-port) (list 'write s)) (uart-string s)))
+                   (if (can-ask?) (request (driver-port) (list 'write s)) (uart-string s)))
                  nil)))
           (listen
            ;; Ask for the input the first time it is wanted rather than when
@@ -167,7 +167,7 @@
              (if (if port nil (can-listen?))
                  (begin
                    (set! port (make-port nil 0))
-                   (request (console-port) (list 'read port)))
+                   (request (driver-port) (list 'read port)))
                  nil))))
       (make-stream
        (lambda (c)
@@ -195,7 +195,7 @@
                      (%string-ref in 0))
                    ;; With no driver the line is anybody's, and the raw read
                    ;; is the only read there is.
-                   (if (console-driver-running?) nil (uart-char))))))
+                   (if (running?) nil (uart-char))))))
        (lambda ()
          (%funcall flush)
          (%funcall listen)

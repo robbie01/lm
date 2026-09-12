@@ -11,7 +11,7 @@
 ;;;   (write block n bytes)   a status: n blocks, out of one
 ;;;   (flush)                 a status
 ;;;   (size)                  how many blocks the disk has
-;;;   (exclusive job)         the job's value; see `disk-exclusive`
+;;;   (exclusive job)         the job's value; see `exclusive`
 ;;;
 ;;; A status is 0 for done, 1 for no disk attached, 2 for a range that is not
 ;;; in memory, 3 for the host failing.
@@ -26,12 +26,12 @@
 
 ;; The running driver, and the port its completion interrupt notifies. Both
 ;; are replaced whenever a driver starts.
-(define *disk-driver* nil)
+(define *driver* nil)
 (define *disk-done* nil)
 
 ;; How many times a driver has gone to sleep on the controller. `(drivers)`
 ;; reads it.
-(define *disk-sleeps* 0)
+(define *sleeps* 0)
 
 ;; ---------------------------------------------------------------- transfers
 ;; Start one and watch the status until it is over: the only way with
@@ -47,7 +47,7 @@
 (define (transfer-sleeping cmd addr block n)
   (disk-go cmd addr block n)
   (while (disk-busy?)
-    (set! *disk-sleeps* (%+ *disk-sleeps* 1))
+    (set! *sleeps* (%+ *sleeps* 1))
     (wait (port-signal *disk-done*)))
   (disk-status))
 
@@ -58,7 +58,7 @@
       (error "disk:" n "blocks do not fit in" (bytes-length bytes) "bytes")))
 
 ;; ---------------------------------------------------------------- the driver
-(define (disk-serve body)
+(define (serve body)
   (let ((op (%car body)))
     (cond ((%eq? op 'read) (serve-bytes disk-cmd-read body))
           ((%eq? op 'write) (serve-bytes disk-cmd-write body))
@@ -80,15 +80,15 @@
 ;; A driver is running exactly when it holds the disk. That covers a driver
 ;; that ended, whose device came back when it did, and a resumed image, whose
 ;; driver belonged to an Exec that no longer exists.
-(define (disk-driver-running?)
-  (if *disk-driver*
-      (%eq? (device-owner *disk*) (server-task *disk-driver*))
+(define (running?)
+  (if *driver*
+      (%eq? (device-owner *disk*) (server-task *driver*))
       nil))
 
-(define (start-disk-driver)
-  (if (disk-driver-running?)
-      *disk-driver*
-      (let* ((s (make-server "disk.driver" 10 (lambda (body) (disk-serve body))))
+(define (start)
+  (if (running?)
+      *driver*
+      (let* ((s (make-server "disk.driver" 10 (lambda (body) (serve body))))
              (task (server-task s))
              (done (make-port-for task nil 0))
              (int (make-interrupt "disk" 0 (lambda (d) (notify done)) nil)))
@@ -102,38 +102,38 @@
         (add-int-server int-disk int)
         (on-task-end task (lambda () (remove-int-server int-disk int)))
         (set! *disk-done* done)
-        (set! *disk-driver* s)
+        (set! *driver* s)
         s)))
 
-(add-resident "disk.driver" (lambda () (start-disk-driver)))
+(add-resident "disk.driver" (lambda () (start)))
 
 ;; ---------------------------------------------------------------- clients
 ;; Every call goes to the driver while one holds the disk. While none does,
 ;; before Exec is up, during a rebuild, or after a driver has ended and before
 ;; another starts, the device is anybody's and the call does the transfer
 ;; itself.
-(define (disk-port)
-  (if *disk-driver* (server-port *disk-driver*) (error "disk: there is no driver")))
+(define (driver-port)
+  (if *driver* (server-port *driver*) (error "disk: there is no driver")))
 
-(define (disk-read block n bytes)
+(define (read-blocks block n bytes)
   (check-buffer n bytes)
   (if (device-usable? *disk*)
       (transfer disk-cmd-read (%addr-of bytes) block n)
-      (request (disk-port) (list 'read block n bytes))))
+      (request (driver-port) (list 'read block n bytes))))
 
-(define (disk-write block n bytes)
+(define (write-blocks block n bytes)
   (check-buffer n bytes)
   (if (device-usable? *disk*)
       (transfer disk-cmd-write (%addr-of bytes) block n)
-      (request (disk-port) (list 'write block n bytes))))
+      (request (driver-port) (list 'write block n bytes))))
 
-(define (disk-flush)
+(define (flush)
   (if (device-usable? *disk*)
       (transfer disk-cmd-flush 0 0 0)
-      (request (disk-port) (list 'flush))))
+      (request (driver-port) (list 'flush))))
 
-(define (disk-size)
-  (if (device-usable? *disk*) (disk-blocks) (request (disk-port) (list 'size))))
+(define (size)
+  (if (device-usable? *disk*) (disk-blocks) (request (driver-port) (list 'size))))
 
 ;; Run `job` with the disk and nothing else: in the task that holds the disk,
 ;; with interrupts off, so that no task and no interrupt server runs until it
@@ -142,12 +142,12 @@
 ;; value. The job must not wait for anything, because nothing will run to
 ;; wake it.
 ;;
-;; Inside the job, `disk-write-raw` writes memory by address. The job runs in
+;; Inside the job, `write-raw` writes memory by address. The job runs in
 ;; the driver's task, so the device lets it through; the same call from any
 ;; other task is refused.
-(define (disk-exclusive job)
+(define (exclusive job)
   (if (device-usable? *disk*)
       (without-interrupts (%funcall job))
-      (request (disk-port) (list 'exclusive job))))
+      (request (driver-port) (list 'exclusive job))))
 
-(define (disk-write-raw addr block n) (transfer disk-cmd-write addr block n))
+(define (write-raw addr block n) (transfer disk-cmd-write addr block n))

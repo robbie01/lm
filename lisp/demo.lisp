@@ -10,7 +10,7 @@
 (define (screen)
   (if *screen*
       *screen*
-      (open-screen screen-width screen-height)))
+      (gfx:open-screen screen-width screen-height)))
 
 ;; ---------------------------------------------------------------- balls
 ;; One task per ball, all of them drawing into one window. They coordinate
@@ -24,7 +24,7 @@
             (dy (if (%= 0 (%mod seed 3)) 2 -3))
             (r 8))
         (while t
-          (win-fill win x y r r pt-white)
+          (win-fill win x y r r white)
           (set! x (%+ x dx))
           (set! y (%+ y dy))
           ;; Turn round and step back inside, or the ball is one column out,
@@ -40,7 +40,7 @@
   (let* ((n (if (%cons? opts) (%car opts) 8))
          (win (make-demo-window 420 300 "Balls"))
          (i 0))
-    (win-fill win 0 0 (win-inner-w win) (win-inner-h win) pt-white)
+    (win-fill win 0 0 (win-inner-w win) (win-inner-h win) white)
     (while (%< i n)
       (add-task (string-append "ball" (number->string i))
                 0
@@ -84,7 +84,7 @@
         (while (%< x bw)
           (let* ((cr (%- (%/ (%* x (%* 3 fp-one)) bw) (%* 2 fp-one)))
                  (n (mandel-point cr ci limit)))
-            (win-plot win x y (if (%>= n limit) pt-black (%+ 16 (%mod (%* n 7) 200)))))
+            (win-plot win x y (if (%>= n limit) black (%+ 16 (%mod (%* n 7) 200)))))
           (set! x (%+ x 1))))
       (set! y (%+ y 1))
       (if (%= 0 (%mod y 16)) (present win) nil))
@@ -106,13 +106,13 @@
     (set! *life-w* w)
     (set! *life-h* h)
     (if *life-back* nil (set! *life-back* (alloc-pool (%* w h))))
-    (win-fill *life-win* 0 0 w h pt-white)
+    (win-fill *life-win* 0 0 w h white)
     (let ((y 1))
       (while (%< y (%- h 1))
         (let ((x 1))
           (while (%< x (%- w 1))
             (if (%< (%mod (random) 100) density)
-                (win-plot *life-win* x y pt-black)
+                (win-plot *life-win* x y black)
                 nil)
             (set! x (%+ x 1))))
         (set! y (%+ y 1)))))
@@ -151,13 +151,13 @@
         (while (%< x (%- w 1))
           (poke8 (%+ row x)
                  (if (%= 1 (peek8 (%+ *life-back* (%+ (%* y w) x))))
-                     pt-black pt-white))
+                     black white))
           (set! x (%+ x 1))))
       (set! y (%+ y 1))))
   (present *life-win*)
   nil)
 
-(define (live? p) (if (%= (peek8 p) pt-black) 1 0))
+(define (live? p) (if (%= (peek8 p) black) 1 0))
 
 (define (life . opts)
   (let ((n (if (%cons? opts) (%car opts) 60)))
@@ -638,67 +638,67 @@
     same))
 
 (define (drivers)
-  (num-check 'disk-driver-running (disk-driver-running?) t)
+  (num-check 'disk-driver-running (disk:running?) t)
   (num-check 'disk-held-by-its-driver
-             (%eq? (device-owner *disk*) (server-task *disk-driver*)) t)
+             (%eq? (device-owner *disk*) (server-task disk:*driver*)) t)
   (num-check 'disk-refused-to-everybody-else (device-usable? *disk*) nil)
   ;; Through the driver: out, back, and the same bytes.
   (let ((out (make-bytes 1024)) (in (make-bytes 1024)) (i 0))
     (while (%< i 1024)
       (bytes-set! out i (%logand (%+ (%* i 7) 3) 255))
       (set! i (%+ i 1)))
-    (let ((st (disk-write 40 2 out)))
+    (let ((st (disk:write-blocks 40 2 out)))
       (if (%= st 1)
           (begin
             (princ "drivers: no disk attached, so no transfers - start with --disk FILE")
             (newline))
           (begin
             (num-check 'write-through-the-driver st 0)
-            (num-check 'read-through-the-driver (disk-read 40 2 in) 0)
+            (num-check 'read-through-the-driver (disk:read-blocks 40 2 in) 0)
             (num-check 'the-same-bytes-came-back (bytes-same? out in) t)
             ;; And the machine runs while a transfer does: the driver sleeps
             ;; on the controller, and another task counts in the meantime.
             (let ((big (make-bytes (* 512 256)))
-                  (sleeps *disk-sleeps*)
+                  (sleeps disk:*sleeps*)
                   (counter (spawn "counter" 0
                                   (lambda ()
                                     (while t (set! *drv-count* (%+ *drv-count* 1)))))))
               (set! *drv-count* 0)
-              (num-check 'a-big-write (disk-write 100 256 big) 0)
-              (num-check 'the-driver-slept-through-it (%> *disk-sleeps* sleeps) t)
+              (num-check 'a-big-write (disk:write-blocks 100 256 big) 0)
+              (num-check 'the-driver-slept-through-it (%> disk:*sleeps* sleeps) t)
               (num-check 'another-task-ran-meanwhile (%> *drv-count* 0) t)
               (remove-task counter))))))
   ;; The keyboard and mouse. The driver is the one reader, and every
   ;; subscriber gets every event.
-  (num-check 'input-driver-running (input-driver-running?) t)
+  (num-check 'input-driver-running (input:running?) t)
   (num-check 'input-held-by-its-driver
-             (%eq? (device-owner *input*) (server-task *input-driver*)) t)
+             (%eq? (device-owner *input*) (server-task input:*driver*)) t)
   (num-check 'input-refused-to-everybody-else (device-usable? *input*) nil)
-  (let ((a (input-listen)) (b (input-listen)))
+  (let ((a (input:listen)) (b (input:listen)))
     ;; A key with no ascii, so that a workbench, if one is up, lets it go by.
-    (inject-input 1 0 200 0)
-    (let ((ea (next-input a)) (eb (next-input b)))
+    (input:inject 1 0 200 0)
+    (let ((ea (input:next-event a)) (eb (input:next-event b)))
       (num-check 'one-listener-hears
                  (list (%car ea) (cadr ea) (caddr ea) (cadddr ea))
-                 (list 'key 'down 0 200))
+                 (list 'input:key 'input:down 0 200))
       (num-check 'and-so-does-the-other (equal? ea eb) t))
-    (input-unlisten a)
-    (input-unlisten b))
+    (input:unlisten a)
+    (input:unlisten b))
   ;; The display. The driver holds the chip, the frame clock is a signal,
   ;; and a task whose blit is still running sleeps until the blitter wakes
   ;; it.
-  (num-check 'gfx-driver-running (gfx-driver-running?) t)
+  (num-check 'gfx-driver-running (gfx:running?) t)
   (num-check 'gfx-held-by-its-driver
-             (%eq? (device-owner *gfx*) (server-task *gfx-driver*)) t)
+             (%eq? (device-owner *gfx*) (server-task gfx:*driver*)) t)
   (num-check 'gfx-refused-to-everybody-else (device-usable? *gfx*) nil)
   (num-check 'wait-vblank-is-the-kernels (wait-vblank) sigf-vblank)
-  (let ((big (alloc-bitmap 1024 768)) (sleeps *blit-sleeps*))
+  (let ((big (alloc-bitmap 1024 768)) (sleeps gfx:*sleeps*))
     (bm-fill-rect big 0 0 1024 768 9)
     (blit-sync)
-    (num-check 'a-long-blit-is-slept-through (%> *blit-sleeps* sleeps) t)
+    (num-check 'a-long-blit-is-slept-through (%> gfx:*sleeps* sleeps) t)
     (num-check 'and-it-landed (%ld-byte (%addr-of (bm-pixels big))) 9))
   ;; The console: a driver holds the line, and this prompt reads through it.
-  (num-check 'console-driver-running (console-driver-running?) t)
+  (num-check 'console-driver-running (console:running?) t)
   (num-check 'the-prompt-reads-through-it (port-open? console::*reader*) t)
   ;; A handler that fails answers with a failure, and the server carries on.
   (princ "drivers: the error below is on purpose")
@@ -728,17 +728,17 @@
                (failure? (raw-request (server-port s) 'again)) t)
     (exec::free-signal me sig))
   ;; A driver that ends gives its device back, and the next one takes it.
-  (let ((old *disk-driver*))
+  (let ((old disk:*driver*))
     (remove-task (server-task old))
     (num-check 'a-dead-driver-gives-the-disk-back (device-owner *disk*) nil)
-    (num-check 'and-is-not-running (disk-driver-running?) nil)
-    (num-check 'with-no-driver-a-call-goes-direct (number? (disk-size)) t)
-    (start-disk-driver)
-    (num-check 'a-new-driver-takes-it (disk-driver-running?) t)
+    (num-check 'and-is-not-running (disk:running?) nil)
+    (num-check 'with-no-driver-a-call-goes-direct (number? (disk:size)) t)
+    (disk:start)
+    (num-check 'a-new-driver-takes-it (disk:running?) t)
     (num-check 'in-a-new-task
-               (%eq? (server-task *disk-driver*) (server-task old)) nil)
+               (%eq? (server-task disk:*driver*) (server-task old)) nil)
     (num-check 'with-one-interrupt-server
                (length (list-nodes (exec::int-vector int-disk))) 1)
-    (num-check 'and-it-answers (number? (disk-size)) t))
+    (num-check 'and-it-answers (number? (disk:size)) t))
   (princ "drivers: done (nothing above = all correct)")
   (newline))

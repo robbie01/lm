@@ -32,8 +32,6 @@
 (define trap-nest-max 8)
 (define trap-nest 0)
 
-(define (boot-alloc-pool n) (%alloc-pool n))
-
 ;; ---------------------------------------------------------------- reset
 ;; Placed at the base of code space, where the processor starts fetching.
 (define (emit-reset-stub)
@@ -62,9 +60,9 @@
     (i-srai a $t0 $a0 1)
     (i-li a $t1 mmio-base)
     (i-sw a $t0 $t1 0)
-    (asm-label a 'spin)
+    (label a 'spin)
     (i-j a 'spin)
-    (asm-place-at a *reset-addr*)
+    (place-at a *reset-addr*)
     a))
 
 ;; ---------------------------------------------------------------- allocator
@@ -108,7 +106,7 @@
     (i-lw a $t5 $sp stub-mask-off)
     (i-addi a $sp $sp stub-frame-size)
     (i-ret a)
-    (asm-place a)
+    (place a)
     (%st-fixnum! lg-stub-lo (asm-origin a))
     (%st-fixnum! lg-stub-hi (%+ (asm-origin a) (asm-len a)))
     a))
@@ -126,10 +124,10 @@
 ;; instruction. `lg-trapdepth` counts the traps in progress.
 (define (emit-trap-stub)
   (let ((a (make-assembler))
-        (outer (asm-gensym-label "trap-outer"))
-        (keepsp (asm-gensym-label "trap-keepsp"))
-        (nolink (asm-gensym-label "trap-nolink"))
-        (over (asm-gensym-label "trap-over")))
+        (outer (gensym-label "trap-outer"))
+        (keepsp (gensym-label "trap-keepsp"))
+        (nolink (gensym-label "trap-nolink"))
+        (over (gensym-label "trap-over")))
     ;; Swap the frame pointer into t0, which gives one register to work with
     ;; and destroys nothing: t0's own value is in mscratch now.
     (i-csrrw a $t0 csr-mscratch $t0)
@@ -156,7 +154,7 @@
     (i-lw a $t1 $zero lg-traptmp2)
     (i-sw a $t1 $t0 ctx-bytes)             ; the link, just past the registers
 
-    (asm-label a outer)
+    (label a outer)
     ;; t0 is the frame. Everything except t0 and t1, both of which are parked.
     (let ((r 1))
       (while (%< r 32)
@@ -180,7 +178,7 @@
     (i-addi a $t1 $t1 -1)
     (i-bnez a $t1 keepsp)
     (i-li a $sp (%+ trap-stack trap-stack-size))
-    (asm-label a keepsp)
+    (label a keepsp)
 
     ;; mcause has the interrupt flag in bit 31, which a fixnum cannot hold, so
     ;; the flag is moved down to bit 6 and the cause number kept in the low
@@ -227,7 +225,7 @@
     ;; back, so that its own way out finds what it expects.
     (i-lw a $t2 $t0 ctx-bytes)
     (i-csrrw a $zero csr-mscratch $t2)
-    (asm-label a nolink)
+    (label a nolink)
 
     (i-lw a $ra $t0 (ctx-off reg-zero))
     (i-csrrw a $zero csr-mepc $ra)
@@ -246,12 +244,12 @@
 
     ;; Traps all the way down: something in the handler faults on every
     ;; attempt. Stop the machine rather than write over frames still in use.
-    (asm-label a over)
+    (label a over)
     (i-li a $t0 mmio-base)
     (i-li a $t1 exit-trap-spiral)
     (i-sw a $t1 $t0 0)
 
-    (asm-place a)
+    (place a)
     a))
 
 ;; ---------------------------------------------------------------- assembly
@@ -269,10 +267,10 @@
 ;; allocated first is what runs first.
 (define (reserve-reset)
   (set! *reset-addr* (%alloc-code reset-reserve))
-  (set! trap-save (boot-alloc-pool ctx-bytes))
-  (set! trap-nest (boot-alloc-pool (%* trap-nest-stride trap-nest-max)))
-  (set! trap-stack (boot-alloc-pool trap-stack-size))
-  (set! boot-stack (boot-alloc-pool boot-stack-size))
+  (set! trap-save (%alloc-pool ctx-bytes))
+  (set! trap-nest (%alloc-pool (%* trap-nest-stride trap-nest-max)))
+  (set! trap-stack (%alloc-pool trap-stack-size))
+  (set! boot-stack (%alloc-pool boot-stack-size))
   (%st-fixnum! lg-trapsave trap-save)
   (%st-fixnum! lg-stacktop (%+ boot-stack boot-stack-size))
   (%st-fixnum! lg-stackbot boot-stack)

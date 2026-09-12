@@ -10,20 +10,6 @@
 
 (in-package wb)
 
-;; ---------------------------------------------------------------- palette
-;; A window's interior is white with black text; the workbench's own
-;; furniture is the Platinum grey ramp.
-(define wb-desktop pt-desktop)
-(define wb-face pt-g3)
-(define wb-shadow pt-g6)
-(define wb-light pt-white)
-(define wb-text pt-black)
-(define wb-back pt-white)
-(define wb-title-on pt-g3)
-(define wb-title-off pt-g3)
-(define wb-title-text-on pt-black)
-(define wb-title-text-off pt-g7)
-
 ;; ---------------------------------------------------------------- windows
 (defrecord (window win)
   x y w h title
@@ -36,9 +22,7 @@
   front)                  ; and the copy the screen is composited from
 
 (define *windows* nil)    ; front to back
-(define *wb-running* nil)
-
-(define title-height pt-title-h)
+(define *running* nil)
 
 ;; A window draws into a bitmap of its own, so two windows cannot reach each
 ;; other however wrong their arithmetic is, drawing needs no clipping region
@@ -73,10 +57,10 @@
 
 ;; Coordinates inside a window are the window's own: nothing here knows or
 ;; cares where on the screen it ends up.
-(define (win-inner-x w) pt-band)
+(define (win-inner-x w) band)
 (define (win-inner-y w) title-height)
-(define (win-inner-w w) (%- (win-w w) (%* 2 pt-band)))
-(define (win-inner-h w) (%- (win-h w) (%+ title-height pt-band)))
+(define (win-inner-w w) (%- (win-w w) (%* 2 band)))
+(define (win-inner-h w) (%- (win-h w) (%+ title-height band)))
 
 (define (front-window) (if (%cons? *windows*) (%car *windows*) nil))
 
@@ -170,17 +154,17 @@
 ;; its owner has not finished.
 (define (window-damage-frame w)
   (let ((ww (win-w w)) (h (win-h w)))
-    (window-damage-rect w 0 0 ww pt-title-h)
-    (window-damage-rect w 0 pt-title-h pt-band (%- h pt-title-h))
-    (window-damage-rect w (%- ww pt-band) pt-title-h pt-band (%- h pt-title-h))
-    (window-damage-rect w 0 (%- h pt-band) ww pt-band)))
+    (window-damage-rect w 0 0 ww title-height)
+    (window-damage-rect w 0 title-height band (%- h title-height))
+    (window-damage-rect w (%- ww band) title-height band (%- h title-height))
+    (window-damage-rect w 0 (%- h band) ww band)))
 
 ;; A raised edge: two lines and two colours.
 (define (draw-frame rp x y w h)
-  (draw-line rp x y (%+ x (%- w 1)) y wb-light)
-  (draw-line rp x y x (%+ y (%- h 1)) wb-light)
-  (draw-line rp (%+ x (%- w 1)) y (%+ x (%- w 1)) (%+ y (%- h 1)) wb-shadow)
-  (draw-line rp x (%+ y (%- h 1)) (%+ x (%- w 1)) (%+ y (%- h 1)) wb-shadow))
+  (draw-line rp x y (%+ x (%- w 1)) y white)
+  (draw-line rp x y x (%+ y (%- h 1)) white)
+  (draw-line rp (%+ x (%- w 1)) y (%+ x (%- w 1)) (%+ y (%- h 1)) g6)
+  (draw-line rp x (%+ y (%- h 1)) (%+ x (%- w 1)) (%+ y (%- h 1)) g6))
 
 ;; A window draws through its own rastport, which is clipped to its own
 ;; bitmap. The refresh closure is given the window, not the rastport: it may
@@ -192,7 +176,7 @@
         (front (%eq? win (front-window))))
     (window-frame rp win w h front)
     (fill-rect rp (win-inner-x win) (win-inner-y win)
-               (win-inner-w win) (win-inner-h win) wb-back)
+               (win-inner-w win) (win-inner-h win) white)
     (if (win-refresh win)
         (%funcall (win-refresh win) win)
         nil)
@@ -214,9 +198,9 @@
 ;; keeps the face and loses everything else: no stripes, no boxes, grey
 ;; text, a #55 outline.
 (define (window-frame rp win w h front)
-  (let* ((outline (if front pt-black pt-g10))
-         (close-x pt-box-x)
-         (zoom-x (%- w (%+ pt-box-x pt-box)))
+  (let* ((edge (if front black g10))
+         (close-x box-x)
+         (zoom-x (%- w (%+ box-x box-size)))
          (title (text-truncate (win-title win)
                                (%- (%- zoom-x close-x) 40)))
          (tw (text-width title))
@@ -224,41 +208,41 @@
                (if (%< c (%+ close-x 20)) (%+ close-x 20) c))))
     ;; The bands, not the whole rectangle: the interior belongs to whoever
     ;; owns the window.
-    (fill-rect rp 0 0 w pt-title-h pt-g3)
-    (fill-rect rp 0 pt-title-h pt-band (%- h pt-title-h) pt-g3)
-    (fill-rect rp (%- w pt-band) pt-title-h pt-band (%- h pt-title-h) pt-g3)
-    (fill-rect rp 0 (%- h pt-band) w pt-band pt-g3)
-    (pt-frame rp 0 0 w h outline)
+    (fill-rect rp 0 0 w title-height g3)
+    (fill-rect rp 0 title-height band (%- h title-height) g3)
+    (fill-rect rp (%- w band) title-height band (%- h title-height) g3)
+    (fill-rect rp 0 (%- h band) w band g3)
+    (outline rp 0 0 w h edge)
     (if front
         (begin
           ;; The raised bands: white outside, #99 inside.
-          (pt-hline rp 1 1 (%- w 2) pt-white)
-          (pt-vline rp 1 1 (%- h 2) pt-white)
-          (pt-vline rp (%- w 2) 2 (%- h 3) pt-g6)
-          (pt-hline rp 2 (%- h 2) (%- w 3) pt-g6)
-          (pt-hline rp 4 (%- pt-title-h 2) (%- w 8) pt-g6)
-          (pt-vline rp 4 (%- pt-title-h 2) (%- h (%+ pt-title-h 2)) pt-g6)
-          (pt-stripes rp (%+ close-x (%+ pt-box 5)) 4
-                      (%- (%- zoom-x 4) (%+ close-x (%+ pt-box 5)))
+          (hline rp 1 1 (%- w 2) white)
+          (vline rp 1 1 (%- h 2) white)
+          (vline rp (%- w 2) 2 (%- h 3) g6)
+          (hline rp 2 (%- h 2) (%- w 3) g6)
+          (hline rp 4 (%- title-height 2) (%- w 8) g6)
+          (vline rp 4 (%- title-height 2) (%- h (%+ title-height 2)) g6)
+          (stripes rp (%+ close-x (%+ box-size 5)) 4
+                      (%- (%- zoom-x 4) (%+ close-x (%+ box-size 5)))
                       (list (list (%- tx 7) (%+ (%+ tx tw) 7))))
-          (pt-title-box rp close-x pt-box-y 0)
-          (pt-title-box rp zoom-x pt-box-y 1)
-          (draw-text rp tx 4 title pt-black nil))
-        (draw-text rp tx 4 title pt-g7 nil))
+          (title-box rp close-x box-y 0)
+          (title-box rp zoom-x box-y 1)
+          (draw-text rp tx 4 title black nil))
+        (draw-text rp tx 4 title g7 nil))
     ;; The content border, one pixel of outline round the interior.
-    (pt-frame rp (%- (win-inner-x win) 1) (%- (win-inner-y win) 1)
-              (%+ (win-inner-w win) 2) (%+ (win-inner-h win) 2) outline)
+    (outline rp (%- (win-inner-x win) 1) (%- (win-inner-y win) 1)
+              (%+ (win-inner-w win) 2) (%+ (win-inner-h win) 2) edge)
     nil))
 
 (define (draw-desktop rp)
-  (fill-rect rp 0 0 (bm-w *screen*) (bm-h *screen*) pt-desktop)
+  (fill-rect rp 0 0 (bm-w *screen*) (bm-h *screen*) desktop)
   ;; A menu bar with nothing in the menus yet.
-  (fill-rect rp 0 0 (bm-w *screen*) pt-menubar-h pt-g2)
-  (pt-hline rp 0 (%- pt-menubar-h 1) (bm-w *screen*) pt-g6)
-  (draw-text rp pt-menubar-first-x 3 "Workbench" pt-black nil)
+  (fill-rect rp 0 0 (bm-w *screen*) menubar-height g2)
+  (hline rp 0 (%- menubar-height 1) (bm-w *screen*) g6)
+  (draw-text rp menubar-first-x 3 "Workbench" black nil)
   nil)
 
-;; ---------------------------------------------------------------- composite
+;; ---------------------------------------------------------------- composite-rect
 ;; Front to back, into the screen, over whatever was damaged, and every pixel
 ;; written once. A window is copied only where nothing in front of it lands,
 ;; its shadow likewise, and the desktop only where no window or shadow does.
@@ -272,7 +256,7 @@
 ;; nobody else's: one copy, with no region to work out and nothing made. A
 ;; window's footprint, shadow included, is what counts as touching, so that
 ;; a shadow falling across the damage sends it the long way round.
-(define (composite r)
+(define (composite-rect r)
   (let ((rx (rect-x r)) (ry (rect-y r))
         (rx2 (rect-x2 r)) (ry2 (rect-y2 r))
         (hit nil)                   ; the frontmost window r touches
@@ -333,7 +317,7 @@
                               (rect-x piece) (rect-y piece)
                               (rect-w piece) (rect-h piece))
                 (bm-fill-rect *screen* (rect-x piece) (rect-y piece)
-                              (rect-w piece) (rect-h piece) pt-black)))
+                              (rect-w piece) (rect-h piece) black)))
           (%cons i spoken-for))
         spoken-for)))
 
@@ -349,12 +333,12 @@
 
 ;; One pass of the compositor: take whatever damage has accumulated and pay
 ;; it.
-(define (wb-composite)
+(define (composite)
   (let ((ds (with-mutex *damage-lock* (let ((d *damage*)) (set! *damage* nil) d)))
         (screen (rect 0 0 (bm-w *screen*) (bm-h *screen*))))
     (dolist (d ds)
       (let ((i (rect-intersect d screen)))
-        (if i (composite i) nil)))
+        (if i (composite-rect i) nil)))
     nil))
 
 ;; Finished drawing: hand the frame over and wait until it has been shown.
@@ -365,7 +349,7 @@
   (wait-vblank))
 
 ;; Everything, from scratch.
-(define (wb-repaint)
+(define (repaint)
   (dolist (w *windows*)
     (window-draw w))
   (damage (rect 0 0 (bm-w *screen*) (bm-h *screen*)))
@@ -377,7 +361,7 @@
 
 ;; What happens when a window opens, closes, moves or comes forward. The
 ;; occlusion model is the compositor's, so this only says what changed.
-(define (wb-update)
+(define (update)
   (if (%eq? *front-was* (front-window))
       nil
       (begin
@@ -397,8 +381,8 @@
 (define (make-demo-window w h title)
   (let* ((n (length *windows*))
          (win (make-window (%+ 40 (%* n 24)) (%+ 40 (%* n 20))
-                           (%+ w (%* 2 pt-band))
-                           (%+ h (%+ pt-title-h pt-band))
+                           (%+ w (%* 2 band))
+                           (%+ h (%+ title-height band))
                            title)))
     (window-open win)
     win))
@@ -429,7 +413,7 @@
 (define (window-open win)
   (with-mutex *windows-lock* (set! *windows* (%cons win *windows*)))
   (window-draw win)
-  (wb-update)
+  (update)
   win)
 
 ;; The bitmaps are left where they are: a compositor holding the old window
@@ -441,7 +425,7 @@
   (let ((task (win-task win)))
     (if task (begin (remove-task task) (set-win-task! win nil)) nil))
   (footprint-damage win)
-  (wb-update)
+  (update)
   nil)
 
 (define (window-to-front win)
@@ -450,7 +434,7 @@
       (begin
         (with-mutex *windows-lock*
           (set! *windows* (%cons win (remove-eq win *windows*))))
-        (wb-update))))
+        (update))))
 
 (define (window-at x y)
   (let ((found nil))
@@ -475,10 +459,10 @@
 
 ;; The box `window-frame` draws at the left end of the title bar.
 (define (in-close-box? win x y)
-  (let ((bx (%+ (win-x win) pt-box-x))
-        (by (%+ (win-y win) pt-box-y)))
-    (if (if (%>= x bx) (%< x (%+ bx pt-box)) nil)
-        (if (%>= y by) (%< y (%+ by pt-box)) nil)
+  (let ((bx (%+ (win-x win) box-x))
+        (by (%+ (win-y win) box-y)))
+    (if (if (%>= x bx) (%< x (%+ bx box-size)) nil)
+        (if (%>= y by) (%< y (%+ by box-size)) nil)
         nil)))
 
 ;; ---------------------------------------------------------------- keys
@@ -542,7 +526,7 @@
                (win-inner-w win) (%- (win-inner-h win) mono-height))
     (fill-rect rp (win-inner-x win)
                (%+ (win-inner-y win) (%* (%- rows 1) mono-height))
-               (win-inner-w win) mono-height wb-back)
+               (win-inner-w win) mono-height white)
     (window-damage-rect win (win-inner-x win) (win-inner-y win)
                         (win-inner-w win) (win-inner-h win))
     (set-sh-row! sh (%- rows 1))
@@ -583,7 +567,7 @@
           (shell-poke sh (%char->int #\space))
           (fill-rect rp (shell-cell-x win (sh-col sh))
                      (shell-cell-y win (sh-row sh))
-                     mono-advance mono-height wb-back)
+                     mono-advance mono-height white)
           (shell-cell-done win sh))
         nil))
    (else
@@ -593,7 +577,7 @@
     (shell-poke sh (%char->int c))
     (draw-mono-char rp (shell-cell-x win (sh-col sh))
                (shell-cell-y win (sh-row sh))
-               c wb-text wb-back)
+               c black white)
     (shell-cell-done win sh)
     (set-sh-col! sh (%+ (sh-col sh) 1))))
   nil)
@@ -613,7 +597,7 @@
             (if (%= ch 32)
                 nil
                 (draw-mono-char rp (shell-cell-x win c) (shell-cell-y win r)
-                           (%int->char ch) wb-text nil)))
+                           (%int->char ch) black nil)))
           (set! c (%+ c 1))))
       (set! r (%+ r 1)))
     nil))
@@ -658,7 +642,7 @@
 (define *drag-dx* 0)
 (define *drag-dy* 0)
 
-(define (wb-button-down x y)
+(define (button-down x y)
   (let ((w (window-at x y)))
     (if (%null? w)
         nil
@@ -676,7 +660,7 @@
 ;; The pixels have not changed, only where they go: both ends are damaged,
 ;; what the window has uncovered and where it is now, footprints included so
 ;; that the shadow moves too.
-(define (wb-drag x y)
+(define (drag x y)
   (if *drag-win*
       (let ((nx (clamp (%- x *drag-dx*) 0
                        (%- (bm-w *screen*) (win-w *drag-win*))))
@@ -696,34 +680,34 @@
 
 ;; An event as input.driver sends it: `(key down ascii code mods)`, `(button
 ;; down n x y)`, `(mouse moved x y)` and so on.
-(define (wb-event e)
+(define (handle-event e)
   (let ((what (%car e)) (how (cadr e)))
     (cond
-     ((%eq? what 'key)
-      (if (%eq? how 'down)
+     ((%eq? what 'input:key)
+      (if (%eq? how 'input:down)
           (let ((a (caddr e)) (f (front-window)))
             (if (if f (%> a 0) nil) (window-push-key f a) nil))
           nil))
-     ((%eq? what 'button)
-      (if (%eq? how 'down)
-          (wb-button-down (cadddr e) (nth 4 e))
+     ((%eq? what 'input:button)
+      (if (%eq? how 'input:down)
+          (button-down (cadddr e) (nth 4 e))
           (set! *drag-win* nil)))
-     ((%eq? what 'mouse) (wb-drag (caddr e) (cadddr e)))
+     ((%eq? what 'input:mouse) (drag (caddr e) (cadddr e)))
      (else nil))))
 
 ;; The compositor: one pass a frame, and only over what changed.
-(define (wb-compositor-task)
-  (while *wb-running*
+(define (compositor-task)
+  (while *running*
     (wait-vblank)
-    (wb-composite))
+    (composite))
   nil)
 
 ;; One message per event from input.driver, and asleep in between.
-(define (wb-input-task)
-  (let ((port (input-listen)))
-    (while *wb-running*
-      (wb-event (next-input port)))
-    (input-unlisten port))
+(define (input-task)
+  (let ((port (input:listen)))
+    (while *running*
+      (handle-event (input:next-event port)))
+    (input:unlisten port))
   nil)
 
 ;; ---------------------------------------------------------------- startup
@@ -731,23 +715,23 @@
 ;; them: Exec is rebuilt from nothing, so the compositor, the input task and
 ;; every shell's prompt are gone. The workbench restarts, keeping the screen
 ;; it already has.
-(define (wb-resume)
-  (if *wb-running*
+(define (resume)
+  (if *running*
       (begin
-        (attach-screen)
+        (gfx:attach-screen)
         (workbench))
       nil))
 
 (define (workbench)
-  (if (%null? *screen*) (open-screen screen-width screen-height) nil)
+  (if (%null? *screen*) (gfx:open-screen screen-width screen-height) nil)
   (if (%null? *font*) (begin (font-init) (mono-init)) nil)
-  (platinum-palette)
+  (palette)
   (set! *windows* nil)
-  (set! *wb-running* t)
-  (set! *resume-fn* (lambda () (wb-resume)))
-  (wb-repaint)
-  (add-task "composite" 2 (lambda () (wb-compositor-task)))
-  (add-task "input" 1 (lambda () (wb-input-task)))
+  (set! *running* t)
+  (set! *resume-fn* (lambda () (resume)))
+  (repaint)
+  (add-task "composite-rect" 2 (lambda () (compositor-task)))
+  (add-task "input" 1 (lambda () (input-task)))
   (new-shell)
   (emit-str "workbench: a shell is open on the display")
   (newline)

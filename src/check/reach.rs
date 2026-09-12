@@ -168,7 +168,7 @@ pub fn run(path: &str, json: bool) -> i32 {
     let pair_high = (h.g(LG_CONS_PTR) - CONS_BASE) as u64;
 
     // Dead object space, split by whether it can leave the file. The writer
-    // skips a page of zeroes, and `gc-for-image` blanks every free block, so a
+    // skips a page of zeroes, and `collect-for-image` blanks every free block, so a
     // page with nothing live on it costs nothing. A page with one survivor on
     // it costs the whole page; compacting would reclaim that part.
     let obj_pages = (obj_high as usize + 4095) / 4096;

@@ -236,7 +236,7 @@
 
 (define (emit-literal c v reg)
   (let* ((a (cx-asm c))
-         (off (literal-offset (asm-literal a v))))
+         (off (literal-offset (literal a v))))
     (if (%>= off 2048)
         (error "compile: too many literals in" (cx-name c))
         nil)
@@ -257,13 +257,13 @@
   (let ((a (cx-asm c)))
     (if open
         nil
-        (let ((ok (asm-gensym-label "rec")))
+        (let ((ok (gensym-label "rec")))
           (i-ldxi a $t2 $a0 0 t-record)
           (emit-literal c type $t3)
           (i-beq a $t2 $t3 ok)
           (i-li a $a7 ecall-record)
           (i-ecall a)
-          (asm-label a ok)))))
+          (label a ok)))))
 
 (define (record-getter type open k)
   (lambda (c)
@@ -294,7 +294,7 @@
 ;; ---------------------------------------------------------------- variables
 ;; A location is (local n), (boxed-local n), (free n), (boxed-free n) or
 ;; (global sym).
-(define (resolve c sym)
+(define (location-of c sym)
   (let ((p (cx-lookup c sym)))
     (if p (%cdr p) (list 'global sym))))
 
@@ -396,13 +396,13 @@
 ;; takes exactly the live registers and ignores the rest.
 (define (emit-cons c car-reg cdr-reg dst . live)
   (let ((a (cx-asm c))
-        (ok (asm-gensym-label "cons"))
+        (ok (gensym-label "cons"))
         (mask (if (%cons? live) (%car live) 3)))
     (i-bltu a $gp $tp ok)
     (i-li a $t5 mask)
     (i-lw a $t6 $zero lg-gchook)
     (i-call-reg a $t6)
-    (asm-label a ok)
+    (label a ok)
     (i-sw a car-reg $gp 0)
     (i-sw a cdr-reg $gp 4)
     (i-mv a dst $gp)
@@ -415,7 +415,7 @@
 ;; True when a0 is a heap object whose header type is `type`. The tag check
 ;; comes first: reading a header off a fixnum would fault.
 (define (emit-type-test c type)
-  (let ((a (cx-asm c)) (no (asm-gensym-label "nt")))
+  (let ((a (cx-asm c)) (no (gensym-label "nt")))
     (i-andi a $t2 $a0 7)
     (i-addi a $t2 $t2 -4)
     (i-mv a $t3 $zero)
@@ -424,7 +424,7 @@
     (i-andi a $t3 $t3 255)
     (i-addi a $t3 $t3 (%- 0 type))
     (i-seqz a $t3 $t3)
-    (asm-label a no)
+    (label a no)
     (emit-bool-from-flag c $t3 $a0)))
 
 ;; The literal 't is resolved when this file is read, so it is the one symbol
@@ -437,14 +437,14 @@
 
 ;; ---------------------------------------------------------------- prologue
 (define (emit-prologue c nreq variadic)
-  (let ((a (cx-asm c)) (ok (asm-gensym-label "arity")))
+  (let ((a (cx-asm c)) (ok (gensym-label "arity")))
     ;; Arity is checked before the frame exists, so a bad call cannot corrupt
     ;; anything on the way to the report.
     (i-li a $t2 nreq)
     (if variadic (i-bge a $t1 $t2 ok) (i-beq a $t1 $t2 ok))
     (i-li a $a7 ecall-arity)
     (i-ecall a)
-    (asm-label a ok)
+    (label a ok)
     ;; A leaf builds nothing: it keeps its caller's code object in s11 and
     ;; picks up its own. sp does not move, s0 still names the caller's frame,
     ;; and ra survives because nothing here overwrites it.
@@ -735,14 +735,14 @@
   ;; Euclidean: the sign of the result follows the divisor.
   (definline '%mod 2
     (lambda (c)
-      (let ((a (cx-asm c)) (done (asm-gensym-label "mod")))
+      (let ((a (cx-asm c)) (done (gensym-label "mod")))
         (i-frem a $t2 $a0 $a1)
         (i-li a $t3 1)                  ; the fixnum zero
         (i-beq a $t2 $t3 done)
         (i-fxor a $t4 $t2 $a1)
         (i-bge a $t4 $zero done)
         (i-fadd a $t2 $t2 $a1)
-        (asm-label a done)
+        (label a done)
         (i-mv a $a0 $t2))))
 
   ;; ---- bitwise ----
@@ -759,28 +759,28 @@
   ;; shift by a written-down amount is one instruction; see emit-shift-const.
   (definline '%ash 2
     (lambda (c)
-      (let ((a (cx-asm c)) (right (asm-gensym-label "ash"))
-            (done (asm-gensym-label "ash")))
+      (let ((a (cx-asm c)) (right (gensym-label "ash"))
+            (done (gensym-label "ash")))
         (i-li a $t2 1)                  ; the fixnum zero
         (i-blt a $a1 $t2 right)
         (i-fsll a $a0 $a0 $a1)
         (i-j a done)
-        (asm-label a right)
+        (label a right)
         (i-fsub a $t2 $t2 $a1)
         (i-fsra a $a0 $a0 $t2)
-        (asm-label a done))))
+        (label a done))))
   (definline '%lsh 2
     (lambda (c)
-      (let ((a (cx-asm c)) (right (asm-gensym-label "lsh"))
-            (done (asm-gensym-label "lsh")))
+      (let ((a (cx-asm c)) (right (gensym-label "lsh"))
+            (done (gensym-label "lsh")))
         (i-li a $t2 1)
         (i-blt a $a1 $t2 right)
         (i-fsll a $a0 $a0 $a1)
         (i-j a done)
-        (asm-label a right)
+        (label a right)
         (i-fsub a $t2 $t2 $a1)
         (i-fsrl a $a0 $a0 $t2)
-        (asm-label a done))))
+        (label a done))))
 
   ;; ---- comparisons producing a value ----
   ;; `%eq?` compares identity on values of any kind. The numeric comparisons
@@ -1381,7 +1381,7 @@
 
 (define (compile-simple-into c form reg)
   (cond
-   ((%symbol? form) (emit-load c (resolve c form) reg))
+   ((%symbol? form) (emit-load c (location-of c form) reg))
    ((if (%cons? form) (%eq? (%car form) 'quote) nil)
     (emit-const c (cadr form) reg))
    (else (emit-const c form reg))))
@@ -1440,7 +1440,7 @@
       (set! i (%+ i 1)))
     (if op-on-stack
         (i-lw a $t0 $sp (%* 4 n))
-        (emit-load c (resolve c op) $t0))
+        (emit-load c (location-of c op) $t0))
     (i-li a $t1 n)
     (i-ldxi a $t2 $t0 clo-entry t-closure)
     (i-call-reg a $t2)
@@ -1484,7 +1484,7 @@
           (begin
             (if op-on-stack
                 (begin (i-lw a $t0 $sp 0) (i-addi a $sp $sp 4))
-                (emit-load c (resolve c op) $t0))
+                (emit-load c (location-of c op) $t0))
             (i-li a $t1 n)
             ;; The entry point is slot 0 of a closure, loaded with the
             ;; immediate-index instruction so that calling anything that is
@@ -1513,23 +1513,23 @@
   (let* ((a (cx-asm c))
          (saved-n (cx-nlocals c))
          (slot (cx-alloc-local c))
-         (count (asm-gensym-label "acount"))
-         (counted (asm-gensym-label "acounted"))
-         (many (asm-gensym-label "amany"))
-         (clear (asm-gensym-label "aclear"))
-         (fill (asm-gensym-label "afill"))
-         (done (asm-gensym-label "adone"))
+         (count (gensym-label "acount"))
+         (counted (gensym-label "acounted"))
+         (many (gensym-label "amany"))
+         (clear (gensym-label "aclear"))
+         (fill (gensym-label "afill"))
+         (done (gensym-label "adone"))
          (k 0))
     (i-mv a $t0 $a0)
     ;; the length, which is also the count the callee is told
     (i-li a $t1 0)
     (i-mv a $t3 $a1)
-    (asm-label a count)
+    (label a count)
     (i-beqz a $t3 counted)
     (i-cdr a $t3 $t3)
     (i-addi a $t1 $t1 1)
     (i-j a count)
-    (asm-label a counted)
+    (label a counted)
     (i-addi a $t4 $t1 -8)
     (i-blt a $zero $t4 many)
     ;; eight or fewer
@@ -1544,10 +1544,10 @@
           (i-call-reg a $t2)
           (i-j a done)))
     ;; more than eight: t4 words of stack, cleared a checked push at a time
-    (asm-label a many)
+    (label a many)
     (i-addi a $t3 $sp 1)
     (store-local c slot $t3)
-    (asm-label a clear)
+    (label a clear)
     (i-addi a $sp $sp -4)
     (i-sw a $zero $sp 0)
     (i-addi a $t4 $t4 -1)
@@ -1556,7 +1556,7 @@
     (i-mv a $t3 $a1)
     (while (%< k 8) (i-cdr a $t3 $t3) (set! k (%+ k 1)))
     (i-mv a $t4 $sp)
-    (asm-label a fill)
+    (label a fill)
     (i-car a $t5 $t3)
     (i-sw a $t5 $t4 0)
     (i-addi a $t4 $t4 4)
@@ -1567,21 +1567,21 @@
     (i-call-reg a $t2)
     (load-local c slot $t3)
     (i-addi a $sp $t3 -1)
-    (asm-label a done)
+    (label a done)
     (set-cx-nlocals! c saved-n)
     (if tail (emit-return c) nil)))
 
 ;; The first eight elements of the list in a1 into a0..a7, as far as it goes.
 ;; t3 takes the list before a1 is written.
 (define (emit-apply-registers c)
-  (let ((a (cx-asm c)) (end (asm-gensym-label "aregs")) (k 0))
+  (let ((a (cx-asm c)) (end (gensym-label "aregs")) (k 0))
     (i-mv a $t3 $a1)
     (while (%< k 8)
       (i-beqz a $t3 end)
       (i-car a (%+ $a0 k) $t3)
       (i-cdr a $t3 $t3)
       (set! k (%+ k 1)))
-    (asm-label a end)))
+    (label a end)))
 
 ;; ---------------------------------------------------------------- expressions
 (define (compile-expr c form tail)
@@ -1590,7 +1590,7 @@
      ;; ---- constants ----
      ((%null? form) (i-mv a $a0 $zero) (if tail (emit-return c) nil))
      ((%symbol? form)
-      (emit-load c (resolve c form) $a0)
+      (emit-load c (location-of c form) $a0)
       (if tail (emit-return c) nil))
      ((not (%cons? form))
       (emit-const c form $a0)
@@ -1661,16 +1661,16 @@
          (test (cadr form))
          (then (caddr form))
          (else-form (if (%cons? (cdddr form)) (cadddr form) nil))
-         (l-else (asm-gensym-label "else"))
-         (l-end (asm-gensym-label "endif")))
+         (l-else (gensym-label "else"))
+         (l-end (gensym-label "endif")))
     (emit-test-jump-false c test l-else)
     (compile-expr c then tail)
     (if tail
         nil                              ; the then branch already returned
         (i-j a l-end))
-    (asm-label a l-else)
+    (label a l-else)
     (compile-expr c else-form tail)
-    (if tail nil (asm-label a l-end))))
+    (if tail nil (label a l-end))))
 
 (define (compile-body c forms tail)
   (if (%null? forms)
@@ -1718,20 +1718,20 @@
 
 (define (compile-while c form tail)
   (let* ((a (cx-asm c))
-         (top (asm-gensym-label "while"))
-         (done (asm-gensym-label "wend")))
-    (asm-label a top)
+         (top (gensym-label "while"))
+         (done (gensym-label "wend")))
+    (label a top)
     (emit-test-jump-false c (cadr form) done)
     (dolist (x (cddr form)) (compile-expr c x nil))
     (i-j a top)
-    (asm-label a done)
+    (label a done)
     (i-mv a $a0 $zero)
     (if tail (emit-return c) nil)))
 
 (define (compile-set c form tail)
   (let ((name (cadr form)))
     (compile-expr c (caddr form) nil)
-    (emit-store c (resolve c name) $a0)
+    (emit-store c (location-of c name) $a0)
     (if tail (emit-return c) nil)))
 
 ;; An internal define makes a new local in the current frame.
@@ -1761,7 +1761,7 @@
          ;; A captured variable that lives in a box stays boxed inside the
          ;; closure, so the inner function has to know which of its free
          ;; variables to dereference.
-         (free-boxed (map (lambda (s) (boxed-location? (resolve c s))) free))
+         (free-boxed (map (lambda (s) (boxed-location? (location-of c s))) free))
          (entry-and-code (compile-function params body name free free-boxed))
          (entry (%car entry-and-code))
          (code (%cdr entry-and-code))
@@ -1775,7 +1775,7 @@
     (i-call-reg a $t2)
     ;; a0 is the fresh closure; fill in the captured values.
     (dolist (s free)
-      (emit-load-cell c (resolve c s) $t5)
+      (emit-load-cell c (location-of c s) $t5)
       (i-sw a $t5 $a0 (%* 4 (%+ clo-free i)))
       (set! i (%+ i 1)))))
 
@@ -1920,18 +1920,18 @@
         (set! i (%+ i 1))))
     (compile-body c expanded t)
     (finish-frame c)
-    (let ((entry (asm-place a)))
-      (%cons entry (asm-code-object a (cx-name c))))))
+    (let ((entry (place a)))
+      (%cons entry (code-object a (cx-name c))))))
 
 ;; Collect arguments nreq.. into a list. The eight argument registers are
 ;; spilled so the loop can index them uniformly with anything on the stack.
 (define (emit-rest-list c nreq slot)
   (let* ((a (cx-asm c))
          (spill (cx-nlocals c))
-         (loop (asm-gensym-label "rest"))
-         (done (asm-gensym-label "rdone"))
-         (from-reg (asm-gensym-label "rreg"))
-         (got (asm-gensym-label "rgot"))
+         (loop (gensym-label "rest"))
+         (done (gensym-label "rdone"))
+         (from-reg (gensym-label "rreg"))
+         (got (gensym-label "rgot"))
          (k 0))
     ;; Reserve eight slots for the spill.
     (while (%< k 8) (cx-alloc-local c) (set! k (%+ k 1)))
@@ -1942,7 +1942,7 @@
     (i-mv a $a2 $zero)                     ; the list under construction
     (i-addi a $t3 $t1 -1)                  ; i = nargs - 1
     (i-li a $t4 nreq)
-    (asm-label a loop)
+    (label a loop)
     (i-blt a $t3 $t4 done)
     (i-li a $t5 8)
     (i-blt a $t3 $t5 from-reg)
@@ -1951,15 +1951,15 @@
     (i-add a $t6 $t6 $s0)
     (i-lw a $a3 $t6 0)
     (i-j a got)
-    (asm-label a from-reg)
+    (label a from-reg)
     (i-slli a $t6 $t3 2)
     (i-sub a $t6 $s0 $t6)
     (i-lw a $a3 $t6 (local-off spill))
-    (asm-label a got)
+    (label a got)
     (emit-cons c $a3 $a2 $a2 12)
     (i-addi a $t3 $t3 -1)
     (i-j a loop)
-    (asm-label a done)
+    (label a done)
     (i-sw a $a2 $s0 (local-off slot))))
 
 ;; ---------------------------------------------------------------- top level

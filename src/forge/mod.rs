@@ -801,7 +801,7 @@ fn collect_before_saving(l: &mut Lisp, verbose: bool) -> u32 {
     // much of the heap has been used.
     l.h.set_g(LG_CONS_RUN, before);
     l.h.set_g(LG_CONSRUNEND, CONS_END);
-    match call_on_machine(l, "gc:gc-for-image", trap) {
+    match call_on_machine(l, "gc:collect-for-image", trap) {
         Some(v) => {
             let n = crate::heap::unfix(v) as u32;
             let _ = before;

@@ -34,20 +34,20 @@
 ;;
 ;; The section runs in the disk driver's task: a transfer inside a section
 ;; with interrupts off can only be watched, and only the task holding the
-;; controller may do that. `disk-exclusive` runs the job there, and this
+;; controller may do that. `disk:exclusive` runs the job there, and this
 ;; task sleeps until it answers with the blocks written, or minus the first
 ;; status that was not ok.
 (define (save-image-with top)
   (let* ((hdr (alloc-pool 512))
          (saved-top (%ld-word lg-toplevel))
          (result
-          (disk-exclusive
+          (disk:exclusive
             (lambda ()
               ;; Collect first and blank what was reclaimed: afterwards the
               ;; live pairs are one block at the bottom of cons space and
               ;; everything above it is zero, which is what makes an image
               ;; small.
-              (gc-for-image)
+              (collect-for-image)
               ;; And nothing in flight on the blitter. A descriptor saved
               ;; with its status at pending would come back to a chip that
               ;; was reset and will never write it back.
@@ -85,12 +85,12 @@
     (put-region hdr 2 code-base l2 k2)
     (put-region hdr 3 cons-base l3 k3)
     (put-region hdr 4 obj-base l4 k4)
-    (set! bad (first-bad bad (disk-write-raw 0 k0 (region-blocks l0))))
-    (set! bad (first-bad bad (disk-write-raw pool-base k1 (region-blocks l1))))
-    (set! bad (first-bad bad (disk-write-raw code-base k2 (region-blocks l2))))
-    (set! bad (first-bad bad (disk-write-raw cons-base k3 (region-blocks l3))))
-    (set! bad (first-bad bad (disk-write-raw obj-base k4 (region-blocks l4))))
-    (set! bad (first-bad bad (disk-write-raw hdr 0 1)))
+    (set! bad (first-bad bad (disk:write-raw 0 k0 (region-blocks l0))))
+    (set! bad (first-bad bad (disk:write-raw pool-base k1 (region-blocks l1))))
+    (set! bad (first-bad bad (disk:write-raw code-base k2 (region-blocks l2))))
+    (set! bad (first-bad bad (disk:write-raw cons-base k3 (region-blocks l3))))
+    (set! bad (first-bad bad (disk:write-raw obj-base k4 (region-blocks l4))))
+    (set! bad (first-bad bad (disk:write-raw hdr 0 1)))
     (if (%= bad 0) (%+ k4 (region-blocks l4)) (%- 0 bad))))
 
 (define (report-save result)
@@ -161,7 +161,7 @@
   (let ((hdr (fresh-become)))
     (forget-unused-packages)
     (%st-word! lg-package (find-package "user"))
-    (gc-for-image)
+    (collect-for-image)
     (let ((r (write-regions hdr)))
       (if (%< r 0)
           (begin

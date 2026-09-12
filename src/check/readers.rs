@@ -32,7 +32,7 @@ const CASES: &[(&str, &str, &str)] = &[
     // Reaching in from outside, by the two spellings.
     ("user", "lm:car", "(\"lm\" \"car\")"),
     ("user", "wb::draw-char", "(\"wb\" \"draw-char\")"),
-    ("gc", "wb::title-height", "(\"wb\" \"title-height\")"),
+    ("gc", "wb::damage-max", "(\"wb\" \"damage-max\")"),
     // A name no package has is interned in the reader's current package, so
     // the same name read in two packages is two symbols.
     ("user", "a-name-of-its-own", "(\"user\" \"a-name-of-its-own\")"),

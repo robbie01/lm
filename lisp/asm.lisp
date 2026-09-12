@@ -56,7 +56,7 @@
 ;; object. Code holds no object addresses: it loads an object from the code
 ;; object's literal vector, so the collector can move the object by updating
 ;; one word. A repeated object shares a slot.
-(define (asm-literal a obj)
+(define (literal a obj)
   (let ((lits (asm-literals a))
         (n (asm-nlits a))
         (found nil)
@@ -78,7 +78,7 @@
 ;; while a compiled function runs.
 (define (literal-offset i) (%* 4 (%+ code-lits i)))
 
-(define (asm-grow a need)
+(define (grow a need)
   (let ((buf (asm-buf a)))
     (if (%> need (%bytes-length buf))
         (let ((n (%bytes-length buf)))
@@ -90,18 +90,18 @@
             (set-asm-buf! a nb)))
         nil)))
 
-(define (asm-half a h)
+(define (half a h)
   (let ((len (asm-len a)))
-    (asm-grow a (%+ len 2))
+    (grow a (%+ len 2))
     (let ((buf (asm-buf a)))
       (%bytes-set! buf len (%logand h 255))
       (%bytes-set! buf (%+ len 1) (%logand (%lsh h -8) 255)))
     (set-asm-len! a (%+ len 2))))
 
 ;; One 32-bit instruction, low half first.
-(define (asm-word a lo hi)
+(define (word a lo hi)
   (let ((len (asm-len a)))
-    (asm-grow a (%+ len 4))
+    (grow a (%+ len 4))
     (let ((buf (asm-buf a)))
       (%bytes-set! buf len (%logand lo 255))
       (%bytes-set! buf (%+ len 1) (%logand (%lsh lo -8) 255))
@@ -110,15 +110,15 @@
     (set-asm-len! a (%+ len 4))))
 
 ;; ---------------------------------------------------------------- labels
-(define (asm-label a name)
+(define (label a name)
   (set-asm-labels! a (%cons (%cons name (asm-len a)) (asm-labels a)))
   name)
 
-(define (asm-label-offset a name)
+(define (label-offset a name)
   (let ((p (assq name (asm-labels a))))
     (if p (%cdr p) (error "assembler: undefined label" name))))
 
-(define (asm-fixup a kind . rest)
+(define (fixup a kind . rest)
   (set-asm-fixups! a (%cons (%cons kind (%cons (asm-len a) rest))
                             (asm-fixups a))))
 
@@ -127,7 +127,7 @@
 ;; placed, where an interned symbol would stay in the obarray for ever, and
 ;; it still reads as a name in an "undefined label" message.
 (define *label-count* 0)
-(define (asm-gensym-label prefix)
+(define (gensym-label prefix)
   (set! *label-count* (%+ *label-count* 1))
   (string-append prefix (number->string *label-count*)))
 
@@ -146,17 +146,17 @@
            (%logior (%lsh (%logand rs2 31) 4) (%lsh (%logand rs1 31) -1))))
 
 (define (i-r a f7 rd rs1 rs2 f3 op)
-  (asm-word a (enc-lo rs1 f3 rd op) (enc-hi f7 rs2 rs1)))
+  (word a (enc-lo rs1 f3 rd op) (enc-hi f7 rs2 rs1)))
 
 ;; imm[11:0] occupies bits 20..31, which is high bits 4..15.
 (define (i-i a rd rs1 imm f3 op)
-  (asm-word a
+  (word a
             (enc-lo rs1 f3 rd op)
             (%logior (%lsh (%logand imm #xfff) 4) (%lsh (%logand rs1 31) -1))))
 
 ;; imm[4:0] in bits 7..11, imm[11:5] in bits 25..31 (high 9..15).
 (define (i-s a rs1 rs2 imm f3 op)
-  (asm-word a
+  (word a
             (enc-lo rs1 f3 (%logand imm 31) op)
             (%logior (%lsh (%logand (%lsh imm -5) 127) 9)
                      (%logior (%lsh (%logand rs2 31) 4) (%lsh (%logand rs1 31) -1)))))
@@ -168,14 +168,14 @@
                            (%lsh (%logand (%lsh imm -1) 15) 1)))
         (f7-field (%logior (%logand (%lsh imm -5) 63)
                            (%lsh (%logand (%lsh imm -12) 1) 6))))
-    (asm-word a
+    (word a
               (enc-lo rs1 f3 rd-field op)
               (%logior (%lsh f7-field 9)
                        (%logior (%lsh (%logand rs2 31) 4) (%lsh (%logand rs1 31) -1))))))
 
 ;; imm20 occupies bits 12..31: the low half takes its bits 0..3.
 (define (i-u a rd imm20 op)
-  (asm-word a
+  (word a
             (%logior (%lsh (%logand imm20 15) 12)
                      (%logior (%lsh (%logand rd 31) 7) op))
             (%logand (%lsh imm20 -4) #xffff)))
@@ -267,7 +267,7 @@
   (if (%>= o 0) (if (%< o hi) (%= 0 (%logand o 3)) nil) nil))
 
 (define (c-ci a base rd v)
-  (asm-half a (%logior base
+  (half a (%logior base
                        (%logior (%lsh (%logand rd 31) 7)
                                 (%logior (%lsh (%logand v 31) 2)
                                          (%lsh (%logand v 32) 7))))))
@@ -275,22 +275,22 @@
 (define (i-c-addi a rd v) (c-ci a #x0001 rd v))
 (define (i-c-li a rd v)   (c-ci a #x4001 rd v))
 (define (i-c-mv a rd rs)
-  (asm-half a (%logior #x8002 (%logior (%lsh rd 7) (%lsh rs 2)))))
-(define (i-c-jr a rs)   (asm-half a (%logior #x8002 (%lsh rs 7))))
-(define (i-c-jalr a rs) (asm-half a (%logior #x9002 (%lsh rs 7))))
+  (half a (%logior #x8002 (%logior (%lsh rd 7) (%lsh rs 2)))))
+(define (i-c-jr a rs)   (half a (%logior #x8002 (%lsh rs 7))))
+(define (i-c-jalr a rs) (half a (%logior #x9002 (%lsh rs 7))))
 (define (i-c-lwsp a rd off)
-  (asm-half a (%logior #x4002
+  (half a (%logior #x4002
                        (%logior (%lsh rd 7)
                                 (%logior (%lsh (%logand off #x1c) 2)
                                          (%logior (%lsh (%logand off #x20) 7)
                                                   (%lsh (%logand off #xc0) -4)))))))
 (define (i-c-swsp a rs off)
-  (asm-half a (%logior #xc002
+  (half a (%logior #xc002
                        (%logior (%lsh rs 2)
                                 (%logior (%lsh (%logand off #x3c) 7)
                                          (%lsh (%logand off #xc0) 1))))))
 (define (c-mem a base rd rs1 off)
-  (asm-half a (%logior base
+  (half a (%logior base
                        (%logior (%lsh (%- rd 8) 2)
                                 (%logior (%lsh (%- rs1 8) 7)
                                          (%logior (%lsh (%logand off #x38) 7)
@@ -489,7 +489,7 @@
 ;; Label-relative forms record a fixup and are patched once every label is
 ;; placed. Sizes never change, so one pass of patching is enough.
 (define (i-branch a f3 rs1 rs2 label)
-  (asm-fixup a 'b f3 rs1 rs2 label)
+  (fixup a 'b f3 rs1 rs2 label)
   (i-b a rs1 rs2 0 f3 op-br))
 
 (define (i-beq a rs1 rs2 label)  (i-branch a 0 rs1 rs2 label))
@@ -504,23 +504,23 @@
 (define (i-bnez a rs label)      (i-branch a 1 rs $zero label))
 
 (define (i-j a label)
-  (asm-fixup a 'jal $zero label)
+  (fixup a 'jal $zero label)
   (enc-j a $zero 0 op-jal))
 
 (define (i-jal a rd label)
-  (asm-fixup a 'jal rd label)
+  (fixup a 'jal rd label)
   (enc-j a rd 0 op-jal))
 
 ;; The address of a label, as auipc and addi. Both halves stay wide:
-;; `asm-resolve` rewinds to this offset and writes them again.
+;; `resolve` rewinds to this offset and writes them again.
 (define (i-la a rd label)
-  (asm-fixup a 'la rd label)
+  (fixup a 'la rd label)
   (i-auipc a rd 0)
   (i-addi-w a rd rd 0))
 
 ;; ---------------------------------------------------------------- resolution
 ;; Each fixup is re-encoded in place by pointing the emitter at the patch site.
-(define (asm-resolve a)
+(define (resolve a)
   (let ((fixups (reverse (asm-fixups a))))
     (dolist (f fixups)
       (let* ((kind (%car f))
@@ -530,7 +530,7 @@
          ((%eq? kind 'b)
           (let* ((f3 (%car rest)) (rs1 (cadr rest)) (rs2 (caddr rest))
                  (label (cadddr rest))
-                 (delta (%- (asm-label-offset a label) off))
+                 (delta (%- (label-offset a label) off))
                  (save (asm-len a)))
             (if (if (%>= delta -4096) (%< delta 4096) nil)
                 nil
@@ -540,7 +540,7 @@
             (set-asm-len! a save)))
          ((%eq? kind 'jal)
           (let* ((rd (%car rest)) (label (cadr rest))
-                 (delta (%- (asm-label-offset a label) off))
+                 (delta (%- (label-offset a label) off))
                  (save (asm-len a)))
             (if (if (%>= delta -1048576) (%< delta 1048576) nil)
                 nil
@@ -550,7 +550,7 @@
             (set-asm-len! a save)))
          ((%eq? kind 'la)
           (let* ((rd (%car rest)) (label (cadr rest))
-                 (delta (%- (asm-label-offset a label) off))
+                 (delta (%- (label-offset a label) off))
                  (lo (%logand delta #xfff))
                  (lo-signed (if (%>= lo 2048) (%- lo 4096) lo))
                  (hi (%logand (%lsh (%- delta lo-signed) -12) #xfffff))
@@ -566,7 +566,7 @@
 ;; ---------------------------------------------------------------- placement
 ;; Code space is never compacted, so the address a function is placed at is
 ;; good for the life of the image.
-(define (asm-copy-out a addr)
+(define (copy-out a addr)
   (let ((len (asm-len a))
         (buf (asm-buf a))
         (i 0))
@@ -578,22 +578,22 @@
 ;; Place at an address reserved earlier. The reset stub is assembled last,
 ;; because it refers to everything else, but has to sit at the base of code
 ;; space, where the processor starts.
-(define (asm-place-at a addr)
+(define (place-at a addr)
   (set-asm-origin! a addr)
-  (asm-resolve a)
-  (asm-copy-out a addr))
+  (resolve a)
+  (copy-out a addr))
 
-(define (asm-place a)
-  (asm-resolve a)
+(define (place a)
+  (resolve a)
   (let ((addr (alloc-code (asm-len a))))
     (set-asm-origin! a addr)
-    (asm-copy-out a addr)))
+    (copy-out a addr)))
 
 ;; The assembled code as a heap object, which is how the collector sees both
 ;; the machine code and every literal it refers to. The literals list is
 ;; newest first, so it fills the vector from the far end. The name is what a
 ;; backtrace prints: every frame saves its caller's code object.
-(define (asm-code-object a name)
+(define (code-object a name)
   (let* ((n (asm-nlits a))
          (v (alloc-object t-code (%+ code-lits n)))
          (i (%- (%+ code-lits n) 1)))
