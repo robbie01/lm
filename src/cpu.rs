@@ -733,6 +733,9 @@ fn op_system(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
                     m.mstatus |= MSTATUS_MIE;
                 }
                 m.mstatus |= MSTATUS_MPIE;
+                m.tick(fuel);
+                let now = m.now;
+                m.note_mie(now);
                 let t = m.mepc;
                 m.fuel_left = fuel - 1;
                 m.pc = t;
@@ -823,6 +826,9 @@ fn op_ref(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         return m.fault(if store { C_SFAULT } else { C_LFAULT }, a, pc, fuel);
     }
     if store {
+        if let Some(old) = m.barrier_hit(a) {
+            return m.fault(C_BARRIER, old, pc, fuel);
+        }
         unsafe { m.wr32(a, r(m, rs2(w))) };
     } else {
         let d = unsafe { m.rd32(a) };
@@ -901,7 +907,12 @@ fn op_index(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
             let v = unsafe { m.rd32(a) };
             w_(m, rd(w), v);
         }
-        1 => unsafe { m.wr32(a, r(m, rd(w))) },
+        1 => {
+            if let Some(old) = m.barrier_hit(a) {
+                return m.fault(C_BARRIER, old, pc, fuel);
+            }
+            unsafe { m.wr32(a, r(m, rd(w))) }
+        }
         2 => {
             let v = unsafe { m.rd8(a) } as u32;
             w_(m, rd(w), v);

@@ -1174,11 +1174,13 @@
 ;; Something always has to be ready to run. Without this, a machine where
 ;; every task is waiting has an empty ready list and `switch-tasks` declines
 ;; to switch, so the task that just declared itself asleep carries on. It
-;; runs `wfi`, so an idle machine costs nothing.
+;; runs `wfi`, so an idle machine costs nothing; but a collection in
+;; progress is what an idle machine should be doing, so it does that first,
+;; a slice at a time, with interrupts on in between.
 (define (idle-task)
   (while t
     (set! *idle-count* (%+ *idle-count* 1))
-    (%wait-for-interrupt)))
+    (if (busy?) (step) (%wait-for-interrupt))))
 
 (define (idle-start)
   (if *idle-task*
@@ -1383,18 +1385,20 @@
 ;; tasks were suspended on. Nothing here may allocate: these run inside a
 ;; collection.
 
-;; A collection moved every pair, so the run a suspended task was holding
-;; describes the wrong part of the heap. The cell gp names is kept: the task
-;; may have been preempted between the room check and the two stores that
-;; fill the cell, and would finish its pair there. `scan-run` has the
-;; collector treat that cell as a live pair, moving it and updating gp, and
-;; here the run shrinks to that one cell; the next cons after it asks for a
-;; fresh run.
+;; A cycle has begun, or a compaction moved every pair: the run a suspended
+;; task was holding is not its own any more. The cell gp names is kept: the
+;; task may have been preempted between the room check and the two stores
+;; that fill the cell, and would finish its pair there. `scan-run` has the
+;; collector treat that cell as a live pair, and here the run shrinks to
+;; that one cell; the next cons after it asks for a fresh run. A run with
+;; nothing left is left with nothing: extending it would hand the task the
+;; cell past its end, which belongs to whoever got the next run.
 (define (drop-task-run task)
   (let ((ctx (tc-context task)))
     (if (if ctx (%> ctx 0) nil)
-        (let ((gp (%ld-fixnum (ctx-reg ctx reg-gp))))
-          (poke (ctx-reg ctx reg-tp) (if (%= gp 0) 0 (%+ gp 8))))
+        (let ((gp (%ld-fixnum (ctx-reg ctx reg-gp)))
+              (tp (%ld-fixnum (ctx-reg ctx reg-tp))))
+          (if (%< gp tp) (poke (ctx-reg ctx reg-tp) (%+ gp 8)) nil))
         nil)))
 
 (define (invalidate-runs)

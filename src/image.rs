@@ -11,7 +11,7 @@
 
 use crate::mach::Machine;
 use crate::map::*;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 
 pub const MAGIC: &[u8; 8] = b"LMIMAGE1";
 pub const PAGE: u32 = 4096;
@@ -70,8 +70,7 @@ pub struct Loaded {
 /// first block lists the regions; the rest is their contents.
 pub const SNAP_MAGIC: u32 = 0x3153_4D4C; // "LMS1", little-endian
 
-fn load_snapshot(m: &mut Machine, f: &mut std::fs::File) -> std::io::Result<Loaded> {
-    use std::io::Seek;
+fn load_snapshot(m: &mut Machine, f: &mut (impl Read + Seek)) -> std::io::Result<Loaded> {
     let mut head = vec![0u8; 512];
     f.rewind()?;
     f.read_exact(&mut head)?;
@@ -88,26 +87,33 @@ fn load_snapshot(m: &mut Machine, f: &mut std::fs::File) -> std::io::Result<Load
         let base = w(12 + i * 12);
         let len = w(16 + i * 12);
         let blk = w(20 + i * 12);
-        let nblocks = (len + 511) / 512;
-        f.seek(std::io::SeekFrom::Start(blk as u64 * 512))?;
-        let mut buf = vec![0u8; (nblocks * 512) as usize];
-        f.read_exact(&mut buf)?;
-        let s = base as usize;
-        let e = s + len as usize;
+        // The table comes from the file. A region is read straight into
+        // memory, and only if it fits: a length is not a size to allocate.
         let ram = m.ram_mut();
-        if e <= ram.len() {
-            ram[s..e].copy_from_slice(&buf[..len as usize]);
+        if len as usize > ram.len() || base as usize > ram.len() - len as usize {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "snapshot region lies outside memory",
+            ));
         }
+        f.seek(std::io::SeekFrom::Start(blk as u64 * 512))?;
+        let s = base as usize;
+        f.read_exact(&mut ram[s..s + len as usize])?;
     }
     Ok(Loaded { entry })
 }
 
 pub fn load(m: &mut Machine, path: &str) -> std::io::Result<Loaded> {
     let mut f = std::fs::File::open(path)?;
+    load_from(m, &mut f)
+}
+
+/// Load from anything readable: a file, or bytes in memory.
+pub fn load_from(m: &mut Machine, f: &mut (impl Read + Seek)) -> std::io::Result<Loaded> {
     let mut head = [0u8; 20];
     f.read_exact(&mut head)?;
     if u32::from_le_bytes(head[0..4].try_into().unwrap()) == SNAP_MAGIC {
-        return load_snapshot(m, &mut f);
+        return load_snapshot(m, f);
     }
     if &head[0..8] != MAGIC {
         return Err(std::io::Error::new(
@@ -124,6 +130,14 @@ pub fn load(m: &mut Machine, path: &str) -> std::io::Result<Loaded> {
     }
     let entry = u32::from_le_bytes(head[12..16].try_into().unwrap());
     let n = u32::from_le_bytes(head[16..20].try_into().unwrap()) as usize;
+    // Memory has this many pages, so no image has more; a count past it is
+    // damage, not a size to allocate.
+    if n > (RAM_SIZE / PAGE) as usize {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "image names more pages than memory holds",
+        ));
+    }
 
     let mut addrs = vec![0u32; n];
     let mut buf = vec![0u8; n * 4];

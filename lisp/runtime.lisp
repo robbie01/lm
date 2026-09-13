@@ -41,14 +41,18 @@
 (define (make-bytes-n n)
   (alloc-object t-bytes n))
 
-;; The allocator reaches the collector through two hooks rather than by name:
-;; the forge reads the prelude with a reader that has one namespace, so a
-;; name written here would be the prelude's and not the collector's.
+;; The allocator reaches the collector through three hooks rather than by
+;; name: the forge reads the prelude with a reader that has one namespace,
+;; so a name written here would be the prelude's and not the collector's.
 ;; Declared, not initialised: `install-allocator` fills them in before the
 ;; boot list runs, and a `(define ... nil)` would put a `(set! ... nil)` on
-;; the boot list that undid the installation.
+;; the boot list that undid the installation. The pacer is called with the
+;; size about to be allocated, before the critical section, and does the
+;; collector's share of work for it; the collector proper is the last resort
+;; when there is no room.
 (define *object-allocator*)
 (define *collector*)
+(define *pacer*)
 
 ;; A block between being taken and being a well formed object is in no state
 ;; to be collected: its header still says free, and the raw address held here
@@ -69,6 +73,7 @@
          (size (%logand (%+ (if (%= type t-record) (%lsh len 2) (object-payload type len))
                             11)
                         -8))
+         (paced (%funcall *pacer* size))
          (p (without-interrupts
               (let ((p (%funcall *object-allocator* size)))
                 (if (%= p 0)

@@ -179,6 +179,8 @@ RISC-V leaves causes 24 to 31 to the implementation:
 26   fixnum overflow
 27   division by zero
 28   stack overflow      sp went below the stack-limit CSR (0x7c0)
+29   write barrier       a checked store would overwrite the unmarked
+                         pointer in mtval; see the collector
 ```
 
 The handler decodes the instruction at the faulting pc and names the
@@ -332,30 +334,55 @@ there is marked abandoned and handed on.
 
 ## The collector
 
-Mark, then compact pairs in three passes: plan where every live pair goes,
-rewrite every pointer to its destination, slide. Forwarding is not stored per
-pair; each 64-byte block of cons space records where the free pointer had
-reached when the walk arrived, and a lookup replays the block with a
-popcount over the mark bitmap. Objects and code are marked and swept in
-place and never moved by the machine: the collector is written in the
-language it collects, and reaches its own functions and constants through
-objects.
+Mark, then sweep in place, in slices. A collection is a cycle:
 
-Roots are found precisely on Lisp stacks, from the frame chain. The
-allocator's slow path writes a mask of the live argument registers where the
-collector can read it. A task preempted mid-expression has live values in
-registers whose types nothing recorded; those thirty-two words are scanned
-conservatively and whatever they reach is pinned for that collection.
+- **start**: interrupts off for one short stretch. Every task's stack is
+  scanned precisely from its frame chain and its saved registers
+  conservatively, the globals are pushed, and the write barrier goes on.
+- **marking**: the mark stack is traced a slice at a time, about a hundred
+  thousand cycles each, with interrupts on in between. The idle task does it
+  when nothing else wants the processor; whoever is allocating does a share
+  in proportion to what it allocates.
+- **sweeping**: dead objects go into the free bins and dead runs of pairs
+  become runs for the allocator, a slice at a time, the barrier off.
 
-A collection runs with interrupts off, from the root scan to the last
-pointer update, and stops the world for its duration. It is scheduled by
-budget: when allocation since the last collection reaches twice the live
-data or 8 MiB, whichever is more. A rebuild does not collect at all until it
-writes its image.
+The write barrier is an instruction-level check in the processor (`gcmode`,
+CSR 0x7c1). While it is on, a checked store (`sref`, `sobj`, `stx`, `stxi`)
+that would overwrite a pointer whose mark bit is clear traps with cause 29
+before writing; the handler marks that pointer and the store re-executes. So
+the collector sees a snapshot: nothing reachable when the cycle began can be
+lost, because the last copy of a pointer cannot be overwritten unseen.
+Everything allocated during the cycle is black from the start, a run of
+pairs by marking the run when it is handed out, an object when it is taken,
+so nothing new needs tracing and the roots are scanned once. A plain `sw`
+does not go through the barrier, which is why every store the compiler emits
+into a heap object is a checked one, including a `set!` of a global.
 
-The image collection, `gc:collect-for-image`, also drops idle symbols from the
-obarray, collects, reattaches those still reachable, and blanks everything
-reclaimed, so the file is the size of what is in it.
+The allocator's slow path writes a mask of the live argument registers where
+the collector can read it, so a collection begun there is precise across the
+allocation. A task preempted mid-expression has live values in registers
+whose types nothing recorded; those thirty-two words are scanned
+conservatively and whatever they reach is pinned, which only the compactor
+honours.
+
+A cycle is scheduled by budget: when allocation since the last reaches
+twice the live data or 8 MiB, whichever is more. The longest stretch with
+interrupts off is a slice, a few hundred thousand cycles at most, whatever
+the heap holds: `lm --stats` reports it. A heap with no room left is
+collected to the end on the spot, and a rebuild does not collect at all
+until it writes its image.
+
+Objects and code are never moved by the machine: the collector is written in
+the language it collects, and reaches its own functions and constants
+through objects. Pairs are compacted only on the way into an image, by the
+three-pass compactor in gc.lisp: plan where every live pair goes, rewrite
+every pointer to its destination, slide. Forwarding is not stored per pair;
+each 64-byte block of cons space records where the free pointer had reached
+when the walk arrived, and a lookup replays the block with a popcount over
+the mark bitmap. The image collection, `gc:collect-for-image`, also drops
+idle symbols from the obarray, collects, compacts, reattaches the symbols
+still reachable, and blanks everything reclaimed, so the file is the size of
+what is in it.
 
 ## Building an image
 
@@ -557,8 +584,19 @@ lmdev inspect [IMG]   what is in an image, and that code holds no heap addresses
 lmdev reach [IMG]     what each package's symbols can reach
 lmdev eval EXPR       compile and run one expression
 lmdev repl            a prompt on the bootstrap interpreter
+lmdev fuzz            random input to the machine, the image loader and the
+                      bootstrap interpreter (--target, --seconds, --seed, --replay)
 lmforge rebuild --check   compile every source on the machine twice, then collect
 ```
+
+The fuzzer's targets are the parts that take bytes from outside and handle
+them with `unsafe`: random registers and code on a fresh machine, random
+bytes as an image, random text through the bootstrap reader and evaluator
+with the prelude loaded. Every input is written to `target/fuzz/last-*.bin`
+before it runs, so a crash leaves its input behind for `--replay`. The
+cargo-fuzz targets under `fuzz/` drive the same functions with coverage
+guidance (`cargo fuzz run exec|image|lisp`); they need libFuzzer, which
+links on Linux and macOS but not on Windows.
 
 The machine's own suites are typed at the prompt; `(drivers)` needs a disk:
 
@@ -580,6 +618,8 @@ LM_BLIT_GUARD=1       check every blit against the block it named
 LM_WATCH_ADDR=hex     report every store to an address (LM_WATCH_LEN bytes)
 LM_WATCH_HI=hex       report stores to one word, with the function that made them
 LM_WATCH_S2=1         report every change of the running task
+LM_TRACE_PAUSES=1     report, with a backtrace, every stretch with interrupts
+                      off longer than a millisecond of host time
 ```
 
 A screenshot of the workbench needs about four billion instructions of
@@ -593,10 +633,11 @@ screen.
 - Floats are boxed and the compiler does no arithmetic on them.
 - Bignums have no bitwise operations, and division is a bit at a time.
 - Open-coded operators and self-calls do not see a redefinition.
-- The machine never moves objects or code, so a long session can fragment
-  object space; only the forge compacts it, on the way into an image.
-- A collection stops the world for its duration, 30 to 110 million cycles
-  on a desktop with a few windows open.
+- The machine never moves objects, code or, between images, pairs, so a
+  long session can fragment the heap; holes in cons space smaller than 512
+  bytes wait for the compactor, which only an image gets.
+- Marking costs about 180 cycles a pair, and while a cycle is marking the
+  program allocating pays for it, a dozen cycles per byte allocated.
 - Thirty-two words per suspended task are scanned conservatively and pin
   what they reach.
 - Calls with more than eight arguments are never tail calls.

@@ -165,6 +165,7 @@
 (define cause-overflow #x1a)
 (define cause-divzero #x1b)
 (define cause-stack #x1c)
+(define cause-barrier #x1d)
 
 ;; ---- interrupt numbers, as mcause carries them ----
 (define irq-software #x3)

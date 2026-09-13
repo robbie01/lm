@@ -98,6 +98,12 @@ pub struct Lisp<'a> {
     pub h: Heap<'a>,
     pub s: Syms,
     pub depth: u32,
+    /// Evaluation steps left before evaluation stops with an error. The
+    /// fuzzer sets it; a build has no limit.
+    pub fuel: u64,
+    /// Refuse anything that reaches outside the interpreter: files, the
+    /// exit. For running text nobody wrote.
+    pub sandbox: bool,
     pub load_path: Vec<String>,
     pub trace_calls: bool,
     /// Build-time global bindings.
@@ -243,6 +249,8 @@ impl<'a> Lisp<'a> {
             h,
             s,
             depth: 0,
+            fuel: u64::MAX,
+            sandbox: false,
             load_path: vec!["lisp".into()],
             trace_calls: false,
             globals: Vec::new(),
@@ -339,6 +347,10 @@ impl<'a> Lisp<'a> {
             if PROF_TICK.load(Ordering::Relaxed) {
                 self.prof_sample();
             }
+            if self.fuel == 0 {
+                break Err(LErr::new("out of fuel"));
+            }
+            self.fuel -= 1;
             // self-evaluating
             if form == NIL || is_fixnum(form) || is_imm(form) {
                 break Ok(form);
@@ -1377,6 +1389,8 @@ impl<'a> Lisp<'a> {
             Prim::SetThisTaskX => NIL,
             Prim::SetStackLimitX => NIL,
             Prim::StackLimit => fix(0),
+            Prim::SetGcModeX => NIL,
+            Prim::Context => fix(0),
             Prim::Cycles => fix(0),
             Prim::Disable => NIL,
             Prim::RestoreInterrupts => NIL,
@@ -1622,6 +1636,9 @@ impl<'a> Lisp<'a> {
             }
             Prim::ReadFile => {
                 need!(1);
+                if self.sandbox {
+                    bail!("no files in the sandbox");
+                }
                 let path = self.h.str_of(a[0]);
                 match std::fs::read_to_string(&path) {
                     Ok(t) => self.h.string(&t),
@@ -1630,6 +1647,9 @@ impl<'a> Lisp<'a> {
             }
             Prim::Load => {
                 need!(1);
+                if self.sandbox {
+                    bail!("no files in the sandbox");
+                }
                 let n = self.h.str_of(a[0]);
                 return self.load(&n);
             }
@@ -1763,6 +1783,8 @@ prims! {
     ThisTask           "%this-task" 0;
     SetThisTaskX       "%set-this-task!" 1;
     SetStackLimitX     "%set-stack-limit!" 1;
+    SetGcModeX         "%set-gc-mode!" 1;
+    Context            "%context" 0;
     StackLimit         "%stack-limit" 0;
     Cycles             "%cycles" 0;
     Disable            "%disable" 0;

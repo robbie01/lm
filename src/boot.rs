@@ -90,6 +90,7 @@ pub fn boot(o: &Options) -> i32 {
         let len = std::env::var("LM_WATCH_LEN").ok().and_then(|s| s.parse().ok()).unwrap_or(128);
         (lo, len)
     });
+    m.trace_pauses = std::env::var_os("LM_TRACE_PAUSES").is_some();
     if std::env::var_os("LM_WATCH_S2").is_some() || m.watch_hi.is_some() || m.watch_addr.is_some() {
         m.table = &crate::cpu::WATCH_TABLE;
     }
@@ -122,6 +123,16 @@ pub fn boot(o: &Options) -> i32 {
             m.executed as f64 / running / 1e6,
             clock,
             100.0 * waiting as f64 / m.cycles.max(1) as f64
+        );
+        // How long the machine ever ran with interrupts off: the pause a
+        // collection, a critical section or a trap handler imposes on
+        // everything else.
+        eprintln!(
+            "[longest stretch with interrupts off: {} instructions ({:.1} ms of the machine's clock); {} stretches over {}]",
+            m.pause_max,
+            m.pause_max as f64 * 1000.0 / crate::dev::TIMER_HZ as f64,
+            m.pause_long,
+            crate::mach::PAUSE_LONG
         );
         if m.prof_on {
             eprint!("{}", crate::prof::report(&m.prof));

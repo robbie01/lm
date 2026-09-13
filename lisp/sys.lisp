@@ -48,6 +48,7 @@
         ((%= c cause-overflow) "fixnum overflow")
         ((%= c cause-divzero) "division by zero")
         ((%= c cause-stack) "stack overflow")
+        ((%= c cause-barrier) "write barrier")
         (else "trap")))
 
 ;; The trap stub hands over the cause with the interrupt flag moved from bit
@@ -75,7 +76,10 @@
   (if (%>= (%ld-fixnum lg-trapdepth) trap-nest-limit) (trap-spiral cause epc tval) nil)
   (if (interrupt? cause)
       (handle-interrupt (interrupt-number cause) ctx)
-      (cond ((%= cause cause-ecall) (handle-ecall epc ctx))
+      ;; The barrier first: while a collection is marking it is the commonest
+      ;; trap by far, and the store that took it is waiting to re-execute.
+      (cond ((%= cause cause-barrier) (barrier tval))
+            ((%= cause cause-ecall) (handle-ecall epc ctx))
             ((%= cause cause-wrong-type)
              (if (try-widen epc ctx) nil (check-trap cause epc tval ctx)))
             ((%= cause cause-range) (check-trap cause epc tval ctx))

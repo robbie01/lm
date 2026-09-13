@@ -35,3 +35,4 @@ pub mod forge;
 
 // ---- checking one ----
 pub mod check;
+pub mod fuzz;

@@ -55,6 +55,12 @@ pub const OBJ_END: u32 = 0x0E00_0000; // 64 MiB
 /// whatever a program wants a bitmap plane for.
 pub const FAST_BASE: u32 = 0x0E00_0000;
 
+/// The collector's mark bitmap: one bit per eight bytes of heap from
+/// `CONS_BASE`, bit i of the word at index i/32. The write barrier reads it
+/// (see `mach::CSR_GCMODE`), so the address is the machine's, not the
+/// collector's to choose: gc.lisp's `gc-bitmap` is this.
+pub const GC_BITMAP: u32 = FAST_BASE;
+
 pub const MMIO_BASE: u32 = 0xF000_0000;
 pub const MMIO_END: u32 = 0xF010_0000;
 

@@ -85,6 +85,33 @@ enum Cmd {
         /// Extra files to load before the prompt appears
         files: Vec<String>,
     },
+
+    /// Throw random input at the machine, the image loader and the bootstrap interpreter
+    ///
+    /// `exec` runs random code with random registers on a fresh machine;
+    /// `image` loads random bytes as an image and runs what came out; `lisp`
+    /// feeds random text to the bootstrap reader and evaluator with the
+    /// prelude loaded. Every input is written to target/fuzz/last-TARGET.bin
+    /// before it runs, so a crash leaves its input behind. This driver has no
+    /// coverage feedback; the cargo-fuzz targets under fuzz/ run the same
+    /// functions with it.
+    Fuzz {
+        /// exec, image, lisp, or all
+        #[arg(long, default_value = "all")]
+        target: String,
+
+        /// How long to run
+        #[arg(long, default_value_t = 60)]
+        seconds: u64,
+
+        /// Seed for the input generator; the same seed gives the same inputs
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+
+        /// Run this one saved input and stop
+        #[arg(long, value_name = "FILE")]
+        replay: Option<String>,
+    },
 }
 
 fn main() -> std::process::ExitCode {
@@ -109,6 +136,17 @@ fn main() -> std::process::ExitCode {
         Cmd::Inspect { image, names } => lm::check::inspect::run(&image, &names) == 0,
         Cmd::Reach { image, json } => lm::check::reach::run(&image, json) == 0,
         Cmd::Repl { files } => lm::forge::host_repl(&files) == 0,
+        Cmd::Fuzz { target, seconds, seed, replay } => {
+            // On a thread with room for the depth the reader and evaluator
+            // guard against, so that reaching the guard is what stops a deep
+            // input, not the host's stack.
+            std::thread::Builder::new()
+                .stack_size(256 << 20)
+                .spawn(move || lm::fuzz::run(&target, seconds, seed, replay.as_deref()))
+                .expect("fuzz thread")
+                .join()
+                .unwrap_or(false)
+        }
     };
     if ok {
         std::process::ExitCode::SUCCESS

@@ -18,7 +18,13 @@ pub struct Reader<'a, 'b> {
     pos: usize,
     pub file: String,
     pub line: u32,
+    /// Lists open at this point. The reader recurses on the host stack, one
+    /// frame per open list, and stops before the stack does.
+    depth: u32,
 }
+
+/// How deep lists may nest. The system's own sources reach a few dozen.
+pub const NEST_MAX: u32 = 4096;
 
 #[derive(Debug)]
 pub struct ReadErr {
@@ -43,6 +49,7 @@ impl<'a, 'b> Reader<'a, 'b> {
             pos: 0,
             file: file.to_string(),
             line: 1,
+            depth: 0,
         }
     }
 
@@ -116,6 +123,16 @@ impl<'a, 'b> Reader<'a, 'b> {
 
     /// Read one form, or None at end of input.
     pub fn read(&mut self) -> R<Option<V>> {
+        if self.depth >= NEST_MAX {
+            return self.err("nested too deeply");
+        }
+        self.depth += 1;
+        let r = self.read_form();
+        self.depth -= 1;
+        r
+    }
+
+    fn read_form(&mut self) -> R<Option<V>> {
         self.skip_space()?;
         let c = match self.peek() {
             None => return Ok(None),

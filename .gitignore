@@ -1,3 +1,4 @@
 target
 *.img
 *.ppm
+fuzz/Cargo.lock

@@ -120,7 +120,9 @@ pub fn write(m: &mut Machine, a: u32, f: u32, v: u32) {
             SYS_DEBUG => {
                 use std::io::Write;
                 let b = [v as u8];
-                let _ = std::io::stderr().write_all(&b);
+                if !m.uart.mute {
+                    let _ = std::io::stderr().write_all(&b);
+                }
             }
             SYS_INTREQ => m.intreq &= !v,
             SYS_INTENA => m.intena = v,

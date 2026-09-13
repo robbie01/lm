@@ -1,0 +1,44 @@
+[package]
+name = "lm-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Coverage-guided fuzzing of the targets in src/fuzz.rs, with cargo-fuzz:
+#
+#   cargo install cargo-fuzz
+#   cargo fuzz run exec      # random code and registers on the machine
+#   cargo fuzz run image     # random bytes as an image
+#   cargo fuzz run lisp      # random text to the bootstrap interpreter
+#
+# A crash is replayed with `lmdev fuzz --target T --replay FILE`.
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.lm]
+path = ".."
+
+[[bin]]
+name = "exec"
+path = "fuzz_targets/exec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "image"
+path = "fuzz_targets/image.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lisp"
+path = "fuzz_targets/lisp.rs"
+test = false
+doc = false
+bench = false

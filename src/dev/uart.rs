@@ -20,6 +20,9 @@ pub struct Uart {
     out: Vec<u8>,
     /// Set when stdin has reached end of file.
     pub eof: bool,
+    /// Discard output instead of printing it: for a machine running random
+    /// code under the fuzzer.
+    pub mute: bool,
 }
 
 impl Uart {
@@ -30,6 +33,7 @@ impl Uart {
             ctrl: 0,
             out: Vec::with_capacity(256),
             eof: false,
+            mute: false,
         }
     }
 
@@ -112,6 +116,10 @@ impl Uart {
     }
 
     pub fn flush(&mut self) {
+        if self.mute {
+            self.out.clear();
+            return;
+        }
         if !self.out.is_empty() {
             let mut o = std::io::stdout();
             let _ = o.write_all(&self.out);

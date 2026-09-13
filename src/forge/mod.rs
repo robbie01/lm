@@ -265,6 +265,7 @@ pub fn write_layout() {
     def!("cause-overflow", C_OVER);
     def!("cause-divzero", C_DIVZERO);
     def!("cause-stack", C_STACK);
+    def!("cause-barrier", C_BARRIER);
 
     s.push_str("\n;; ---- interrupt numbers, as mcause carries them ----\n");
     def!("irq-software", IRQ_SOFT);

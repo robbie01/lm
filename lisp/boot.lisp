@@ -207,6 +207,11 @@
     (i-csrrs a $a3 csr-mscratch $zero)
     (i-slli a $a3 $a3 1)
     (i-ori a $a3 $a3 1)
+    ;; The handler's frames end here. Its caller's frame pointer is in the
+    ;; saved context, and the collector finds the interrupted code's frames
+    ;; through that (`scan-trap-frames` in gc.lisp) rather than by walking
+    ;; from one stack into another.
+    (i-li a $s0 0)
     (i-lw a $t0 $zero lg-traphook)
     (i-li a $t1 4)
     (i-lw a $t2 $t0 0)

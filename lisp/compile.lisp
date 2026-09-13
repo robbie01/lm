@@ -381,10 +381,13 @@
       (let ((cr (closure-reg c $t6)))
         (i-lobj a $t6 cr (%* 4 (%+ clo-free (cadr loc)))))
       (i-sref a reg $t6 0))
+     ;; A checked store, not a plain `sw`: the write barrier watches
+     ;; checked stores, and a global's old value may be the last pointer to
+     ;; something the collector has not reached yet.
      (else
       (let ((sym (cadr loc)))
         (emit-literal c sym $t6)
-        (i-sw a reg $t6 (%* 4 sym-value)))))))
+        (i-sobj a reg $t6 (%* 4 sym-value)))))))
 
 ;; ---------------------------------------------------------------- allocation
 ;; Inline cons. gp is the bump pointer and tp the limit, so a fresh pair costs
@@ -1216,6 +1219,21 @@
     (lambda (c)
       (let ((a (cx-asm c)))
         (i-csrrs a $t2 csr-stklim $zero)
+        (i-slli a $a0 $t2 1)
+        (i-ori a $a0 $a0 1))))
+  ;; The write barrier: 1 to turn it on, 0 to turn it off. See `gc:start`.
+  (definline '%set-gc-mode! 1
+    (lambda (c)
+      (let ((a (cx-asm c)))
+        (i-srai a $t2 $a0 1)
+        (i-csrrw a $zero csr-gcmode $t2)
+        (i-mv a $a0 $zero))))
+  ;; The register context mscratch names: inside a trap, the frame the
+  ;; interrupted code was saved into. An address held as a fixnum.
+  (definline '%context 0
+    (lambda (c)
+      (let ((a (cx-asm c)))
+        (i-csrrs a $t2 csr-mscratch $zero)
         (i-slli a $a0 $t2 1)
         (i-ori a $a0 $a0 1))))
   (definline '%halt 1

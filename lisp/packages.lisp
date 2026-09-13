@@ -40,7 +40,7 @@
 ;; its interface is most of what it defines.
 (in-package lm)
 (export '(
-  alloc-object *object-allocator* *collector*
+  alloc-object *object-allocator* *collector* *pacer*
   ;; the memory map and object layout, generated from the Rust side
   clo-code clo-entry clo-free code-base code-lits code-name cons-base cons-limit dev-blit dev-disk dev-gfx dev-input dev-sys dev-timer dev-uart fast-base imm-unbound int-input int-soft int-vblank lg-bootlist lg-code-end lg-code-free lg-code-free-n lg-code-ptr lg-code-reg lg-code-reg-n lg-cons-free lg-cons-free-n lg-cons-ptr lg-cons-run lg-cons-run-end lg-errhandler lg-gccount lg-gchook lg-imgentry lg-obarray lg-obj-end lg-obj-free-n lg-obj-ptr lg-package lg-packages lg-pool-free lg-poolend lg-poolptr lg-refill lg-roots lg-scratch0 lg-scratch1 lg-scratch2 lg-scratch3 lg-stackbot lg-stacktop lg-startup lg-stub-hi lg-stub-lo lg-symcount lg-symlist lg-toplevel lg-trapdepth lg-traphook lg-trapsave lg-traptmp lg-traptmp2 mmio-base obj-base obj-bins obj-bin-count obj-limit pkg-name pkg-slots pkg-tag pkg-use pool-base pool-limit sym-exported sym-flags sym-function sym-macro sym-name sym-package sym-plist sym-slots sym-value t-bignum t-bytes t-closure t-code t-float t-free t-record t-string t-symbol t-vector
   ctx-words ctx-bytes
@@ -55,7 +55,7 @@
   ecall-arity ecall-oom ecall-error ecall-reschedule ecall-record
   cause-misaligned-fetch cause-fetch-fault cause-illegal cause-breakpoint
   cause-misaligned-load cause-load-fault cause-misaligned-store cause-store-fault
-  cause-ecall cause-wrong-type cause-range cause-overflow cause-divzero cause-stack
+  cause-ecall cause-wrong-type cause-range cause-overflow cause-divzero cause-stack cause-barrier
   irq-software irq-timer irq-external
   exit-ok exit-error exit-oom exit-gc-stack exit-gc-corrupt exit-trap-spiral exit-check-passed
   ;; the primitives
@@ -66,7 +66,7 @@
   %bignum? %enable %enable-interrupt-lines %eq? %error %eval %fixnum? %float? %flush
   %fluid-value %set-fluid-value!
   %frame-pointer %from-addr %funcall %gensym %halt %this-task %set-this-task! %int->char
-  %set-stack-limit! %stack-limit
+  %set-stack-limit! %stack-limit %set-gc-mode! %context
   %intern %ld-half %ld-fixnum %ld-byte %logand %logior %lognot %logxor %lsh %macro?
   %*o %+o %-o
   %macroexpand-1 %make-bytes %make-string %make-vector %mod %mulhi16 %newline %null?
@@ -156,6 +156,7 @@
   scan-conservative scan-frames in-stub? install-allocator obj-take
   refill-cons register-code room stub-args-off stub-frame-size
   stub-mask-off stub-raw-off
+  barrier busy? step pace
 ))
 
 (in-package hw)
@@ -202,6 +203,7 @@
   literal make-assembler asm-origin place place-at asm-buf asm-fixups
   asm-labels asm-nlits set-asm-len! set-asm-origin! csr-cycle
   csr-mcause csr-mepc csr-mie csr-mscratch csr-mstatus csr-mtval csr-mtvec csr-stklim
+  csr-gcmode
   i-add i-addi i-addi-w i-and i-andi i-beq i-beqz i-bge i-blt i-bltu i-bne
   i-bnez
   i-call-reg i-car i-cdr i-lref i-lobj i-sref i-sobj i-csrrci i-csrrs i-csrrsi i-csrrw i-div i-ecall

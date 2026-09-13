@@ -77,15 +77,34 @@ the screen it had. Anything a task was doing at the save is gone.
 
 Things that are known to be expensive, in the order they are likely to hurt.
 
-**The collector stops the world.** Interrupts are off from the root scan to
-the last pointer update. A collection is about 30 million cycles on a
-desktop with a few windows open and 110 million with the frontier full; the
-mouse does not move for that long. The update pass pays Lisp call overhead
-per pointer. The root scan and the pointer update walk Exec's lists and must
-hold interrupts off; the marking and the sweeps touch only the heap and
-could run with them on, which is the change that would turn the pause into
-a hitch. Beyond that, the cost is proportional to the live set and only a
-generational collector reduces it.
+**Marking is slow per pair.** The collector no longer stops the world: a
+cycle is marked and swept in slices of about a hundred thousand cycles with
+interrupts on in between, and the write barrier keeps it honest (see the
+README). But each slice still pays about 180 cycles a pair: `gc-push` is
+open-coded, yet the mark stack pointer is a global, read and written through
+its symbol several times per pair, and `gc-heap-pointer?` reloads the two
+frontiers each time. Keeping the stack pointer and the frontiers in
+registers across a slice would roughly halve the cost. Beyond that, the
+cost is proportional to the live set and only a generational collector
+reduces it.
+
+**The workbench waits for the blitter with interrupts off.** `lm --stats`
+now reports the longest stretch with interrupts off, and
+`LM_TRACE_PAUSES=1` names each one. With the balls demo running and a
+million pairs live, the longest is not the collector's: it is
+`bm-fill-rect` and `bm-blit-rect` taking a ring slot inside a critical
+section and spinning in `blit-sleep` until the chip has worked through the
+compositor's queue, about 2.3 million cycles. The compositor's own cons
+refill inside the same section waits with it. The wait should happen with
+interrupts on, or the slot should be taken without the wait.
+
+**Cons space fragments between images.** The sweep hands back holes of 512
+bytes and more; smaller ones are lost until the compactor runs, which is
+only on the way into an image. A long session with many small survivors
+scattered through cons space could run out of room with most of it dead. A
+compaction that runs in slices needs objects to move too, or a moving pass
+that tolerates the collector's own references; docs/moving-objects.md has
+the options.
 
 **Every character in a shell is a round trip.** `shell-putc` draws the cell,
 copies it into the window's front bitmap with a blit, and adds a damage

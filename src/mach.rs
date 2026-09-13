@@ -34,9 +34,23 @@ pub const C_DIVZERO: u32 = 27;
 /// The stack pointer was moved below `stklim`. mtval holds where it would have
 /// gone; sp itself is left as it was.
 pub const C_STACK: u32 = 28;
+/// The write barrier. With bit 0 of `gcmode` set, a checked store (`sref`,
+/// `sobj`, `stx`, `stxi`) that would overwrite a heap pointer whose mark bit
+/// is clear traps before writing. `mtval` carries the pointer being
+/// overwritten; the handler marks it and the store re-executes. This is what
+/// lets the collector mark while everything else runs: nothing reachable
+/// when marking began can be lost, because the last pointer to it cannot
+/// be overwritten without the collector seeing it first.
+pub const C_BARRIER: u32 = 29;
 /// A custom CSR: the lowest address the stack pointer may be moved down to.
 /// Zero means no limit.
 pub const CSR_STKLIM: u32 = 0x7c0;
+/// A custom CSR: bit 0 turns the write barrier on. The mark bits it consults
+/// are one per eight bytes of heap, from `CONS_BASE`, at `GC_BITMAP`.
+pub const CSR_GCMODE: u32 = 0x7c1;
+/// Stretches with interrupts off that last longer than this are counted as
+/// pauses: about a millisecond of host time.
+pub const PAUSE_LONG: u64 = 300_000;
 
 /// What `a7` carries when compiled code raises an ecall. The compiler emits
 /// these, `sys.lisp` reports them and the test bench names them, so they are
@@ -99,6 +113,7 @@ pub struct Machine {
     pub mtvec: u32,
     pub mscratch: u32,
     pub stklim: u32,
+    pub gcmode: u32,
     pub mepc: u32,
     pub mcause: u32,
     pub mtval: u32,
@@ -116,6 +131,18 @@ pub struct Machine {
     pub pace: Option<(std::time::Instant, u64)>,
     pub slept: f64,
     pub trap: (u32, u32, u32), // cause, tval, epc
+
+    /// The pause meter: how long the machine runs with interrupts off. The
+    /// cycle the current stretch began, or `u64::MAX` while interrupts are
+    /// on; the longest stretch seen; and how many exceeded `PAUSE_LONG`.
+    /// Measured from the first time interrupts were enabled, so that the
+    /// boot, which runs with them off, is not a pause.
+    pub mie_off_at: u64,
+    pub pause_max: u64,
+    pub pause_long: u64,
+    /// Report every stretch over `PAUSE_LONG` as it ends, with a backtrace
+    /// of where the machine was. Set from the environment at boot.
+    pub trace_pauses: bool,
 
     /// Dynamic instruction histogram. Slots 0..63 are dispatch tokens; the
     /// rest break down what a token alone cannot say. See `prof::NAMES`.
@@ -187,6 +214,7 @@ impl Machine {
             mtvec: 0,
             mscratch: 0,
             stklim: 0,
+            gcmode: 0,
             mepc: 0,
             mcause: 0,
             mtval: 0,
@@ -195,6 +223,10 @@ impl Machine {
             pace: None,
             slept: 0.0,
             trap: (0, 0, 0),
+            mie_off_at: u64::MAX,
+            pause_max: 0,
+            pause_long: 0,
+            trace_pauses: false,
             prof: Box::new([0; crate::prof::SLOTS]),
             watch: Box::default(),
             prof_on: false,
@@ -338,6 +370,7 @@ impl Machine {
             0x305 => self.mtvec,
             0x340 => self.mscratch,
             CSR_STKLIM => self.stklim,
+            CSR_GCMODE => self.gcmode,
             0x341 => self.mepc,
             0x342 => self.mcause,
             0x343 => self.mtval,
@@ -357,11 +390,16 @@ impl Machine {
 
     pub fn csr_write(&mut self, n: u32, v: u32) {
         match n {
-            0x300 => self.mstatus = v & (MSTATUS_MIE | MSTATUS_MPIE | (3 << 11)),
+            0x300 => {
+                self.mstatus = v & (MSTATUS_MIE | MSTATUS_MPIE | (3 << 11));
+                let now = self.now;
+                self.note_mie(now);
+            }
             0x304 => self.mie = v & (MIE_MSIE | MIE_MTIE | MIE_MEIE),
             0x305 => self.mtvec = v,
             0x340 => self.mscratch = v,
             CSR_STKLIM => self.stklim = v,
+            CSR_GCMODE => self.gcmode = v & 1,
             0x341 => self.mepc = v & !1,
             0x342 => self.mcause = v,
             0x343 => self.mtval = v,
@@ -419,6 +457,8 @@ impl Machine {
         self.mstatus &= !(MSTATUS_MIE | MSTATUS_MPIE);
         if was_enabled {
             self.mstatus |= MSTATUS_MPIE;
+            let now = self.cycles;
+            self.note_mie(now);
         }
         self.mstatus |= 3 << 11; // MPP = machine
         let base = self.mtvec & !3;
@@ -470,6 +510,58 @@ impl Machine {
     #[inline(always)]
     pub fn tick(&mut self, fuel: u32) {
         self.now = self.cycles + (self.fuel_start - fuel) as u64;
+    }
+
+    /// The interrupt-enable bit may have changed: keep the pause meter up
+    /// to date. `now` is the current cycle.
+    pub fn note_mie(&mut self, now: u64) {
+        if self.mstatus & MSTATUS_MIE != 0 {
+            if self.mie_off_at != u64::MAX {
+                let stretch = now.saturating_sub(self.mie_off_at);
+                if stretch > self.pause_max {
+                    self.pause_max = stretch;
+                }
+                if stretch > PAUSE_LONG {
+                    self.pause_long += 1;
+                    if self.trace_pauses {
+                        eprintln!(
+                            "[interrupts were off for {stretch} instructions, ending at pc {:#x} in {}]",
+                            self.pc,
+                            crate::cpu::watch_backtrace(self)
+                        );
+                    }
+                }
+            }
+            // Off again from the next disable; and a machine that has never
+            // enabled interrupts is still booting.
+            self.mie_off_at = u64::MAX - 1;
+        } else if self.mie_off_at == u64::MAX - 1 {
+            self.mie_off_at = now;
+        }
+    }
+
+    /// Whether a checked store at `a` must trap first: the barrier is on and
+    /// the word there is an unmarked heap pointer. Answers the pointer.
+    #[inline(always)]
+    pub fn barrier_hit(&self, a: u32) -> Option<u32> {
+        if self.gcmode & 1 == 0 {
+            return None;
+        }
+        let old = unsafe { self.rd32(a) };
+        // A pair (tag 0, not nil) or an object (tag 4), inside the heap.
+        let tag = old & 7;
+        if (tag != 0 && tag != 4) || old < CONS_BASE || old >= OBJ_END {
+            return None;
+        }
+        // An object's bit is at its header, four bytes below the pointer;
+        // the shift lands on the same bit either way.
+        let bit = (old - CONS_BASE) >> 3;
+        let word = unsafe { self.rd32(GC_BITMAP + ((bit >> 5) << 2)) };
+        if word & (1 << (bit & 31)) == 0 {
+            Some(old)
+        } else {
+            None
+        }
     }
 
     /// Number of instructions until the timer fires, saturating.
