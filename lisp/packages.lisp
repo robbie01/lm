@@ -82,7 +82,7 @@
   %vector? %wait-for-interrupt %write
   ;; the language and the library
   &optional &rest * *gensym-count* *in*
-  *out* *unbound* *await* + - / /= 1+ 1- < <= = > >= abs add2 alist->table
+  *out* %unbound *await* + - / /= 1+ 1- < <= = > >= abs add2 alist->table
   all-packages and any append append-map append2 apply apply-list ash
   assert assoc assq atom? await-char begin bit-set? boolean? bytes-length
   bytes-ref bytes-set! bytes? caadr caar cadddr caddr cadr car case cdadr
@@ -206,7 +206,7 @@
   csr-gcmode
   i-add i-addi i-addi-w i-and i-andi i-beq i-beqz i-bge i-blt i-bltu i-bne
   i-bnez
-  i-call-reg i-car i-cdr i-lref i-lobj i-sref i-sobj i-csrrci i-csrrs i-csrrsi i-csrrw i-div i-ecall
+  i-call-reg i-car i-cdr i-lref i-lobj i-lvar i-sref i-sobj i-csrrci i-csrrs i-csrrsi i-csrrw i-div i-ecall
   i-j i-jal i-jr i-lbu i-ldx i-ldxb i-ldxbi i-ldxi i-lhu i-li i-li-fixnum
   i-lw i-mret
   i-mul i-mv i-not i-or i-ori i-rem i-ret i-sb i-seqz i-set-car i-set-cdr

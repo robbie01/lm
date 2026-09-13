@@ -132,6 +132,9 @@ instruction.
 ```
 funct3 0   lref rd, off(rs1)    rs1 must be a pair (nil allowed)
 funct3 1   lobj rd, off(rs1)    rs1 must be an object
+funct3 2   lvar rd, off(rs1)    lobj, and the word loaded must not be the
+                                unbound marker: a variable read, which traps
+                                with the symbol in mtval if nothing was stored
 funct3 4   sref rs2, off(rs1)   rs1 must be a pair, and not nil
 funct3 5   sobj rs2, off(rs1)   rs1 must be an object
 ```
@@ -195,6 +198,8 @@ operation and the value:
 *** call: expected a function, got 5, at pc 105e7d8
 > (+ nil 1)
 *** +: expected a number, got nil, at pc 1053b90
+> (car undefined)
+*** unbound variable: undefined, at pc 10479a0
 > (ackermann 5 5)
 *** stack overflow at pc 10611c4, value 20f0f0
 ```
@@ -542,8 +547,9 @@ object. `(explore x)` opens the same outline on any object, and return or a
 double click on a row opens another explorer on what the row holds. The
 arrows move and open rows, and the wheel scrolls.
 
-The interface is set in Charcoal (the Virtue strike, 12 ppem) and shells in a
-5x7 face. A glyph is drawn with one wait for the blitter and then plain
+The interface is set in Charcoal (the Virtue strike, 12 ppem) and shells in
+MS Gothic's twelve-pixel halfwidth strike, six columns by twelve rows. A
+glyph is drawn with one wait for the blitter and then plain
 stores.
 
 ## Try it

@@ -494,8 +494,10 @@
 (define (key-event? ev) (%eq? (%car ev) 'input:key))
 
 ;; ---------------------------------------------------------------- shells
-;; A shell keeps characters, not pixels: a grid it can redraw from.
-(defrecord (shell sh) cols rows grid col row)
+;; A shell keeps characters, not pixels: a grid it can redraw from. `edit`
+;; is the line being typed, latest character first; `pending` is what has
+;; been finished and not yet read.
+(defrecord (shell sh) cols rows grid col row edit pending)
 
 (define (shell-clear sh)
   (let ((g (sh-grid sh)) (i 0))
@@ -511,6 +513,8 @@
     (set-sh-cols! v cols)
     (set-sh-rows! v rows)
     (set-sh-grid! v (make-bytes (%* cols rows)))
+    (set-sh-edit! v nil)
+    (set-sh-pending! v nil)
     (shell-clear v)
     v))
 
@@ -613,17 +617,51 @@
       (set! r (%+ r 1)))
     nil))
 
-;; Reading echoes: there is no terminal at the other end to do it.
+;; Reading is edited here: there is no terminal at the other end to do it.
+;; What is typed is echoed and kept until return, so backspace takes it back,
+;; character and cell both, and never past the prompt; the reader sees a
+;; line only once it is finished, with no editing keys in it.
 (define (shell-stream win sh)
   (make-stream
    (lambda (c) (shell-putc win sh c))
-   (lambda ()
-     (let ((ev (window-event win)))
-       (if (if ev (if (key-event? ev) (%> (cadr ev) 0) nil) nil)
-           (let ((c (%int->char (cadr ev)))) (shell-putc win sh c) c)
-           nil)))
+   (lambda () (shell-getc win sh))
    ;; Nothing to read: sleep until an event is sent.
    (lambda () (wait (port-signal (win-port win))))))
+
+;; The next character of a finished line, or nil when there is none, having
+;; taken in whatever keys have arrived.
+(define (shell-getc win sh)
+  (let ((got nil) (go t))
+    (while go
+      (if (%cons? (sh-pending sh))
+          (begin
+            (set! got (%car (sh-pending sh)))
+            (set-sh-pending! sh (%cdr (sh-pending sh)))
+            (set! go nil))
+          (let ((ev (window-event win)))
+            (cond ((%null? ev) (set! go nil))
+                  ((key-event? ev) (shell-key win sh (cadr ev)))
+                  (else nil)))))
+    got))
+
+(define (shell-key win sh code)
+  (cond
+   ((%<= code 0) nil)
+   ((if (%= code 8) t (%= code 127))
+    (if (%cons? (sh-edit sh))
+        (begin (set-sh-edit! sh (%cdr (sh-edit sh)))
+               (shell-putc win sh #\backspace))
+        nil))
+   ((if (%= code 13) t (%= code 10))
+    (shell-putc win sh #\newline)
+    (set-sh-pending! sh (append (sh-pending sh)
+                                (reverse (%cons #\newline (sh-edit sh)))))
+    (set-sh-edit! sh nil))
+   (else
+    (let ((c (%int->char code)))
+      (shell-putc win sh c)
+      (set-sh-edit! sh (%cons c (sh-edit sh))))))
+  nil)
 
 ;; A window with a prompt in it, and a task of its own to run the prompt.
 ;; The task makes the window's port as its first act, before it reads, so

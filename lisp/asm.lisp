@@ -335,6 +335,9 @@
 ;; offsets 0 and 4 of the same instruction.
 (define (i-lref a rd rs1 off)  (i-i a rd rs1 off 0 op-pair))
 (define (i-lobj a rd rs1 off)  (i-i a rd rs1 off 1 op-pair))
+;; lobj that traps instead of delivering the unbound marker: a variable's
+;; value cell.
+(define (i-lvar a rd rs1 off)  (i-i a rd rs1 off 2 op-pair))
 (define (i-sref a rs2 rs1 off) (i-s a rs1 rs2 off 4 op-pair))
 (define (i-sobj a rs2 rs1 off) (i-s a rs1 rs2 off 5 op-pair))
 

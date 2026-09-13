@@ -8,9 +8,6 @@
 
 (in-package lm)
 
-;; The immediate that marks a variable with no value yet: kind 1, payload 0.
-(define *unbound* (%from-addr (%logior (%lsh imm-unbound 3) 2)))
-
 ;; ---------------------------------------------------------------- allocation
 (define (object-payload type len)
   (cond ((%= type t-string) len)
@@ -206,7 +203,7 @@
 (define (alloc-symbol s)
   (let ((sym (alloc-object t-symbol sym-slots)))
     (%set-slot! sym sym-name s)
-    (%set-slot! sym sym-value *unbound*)
+    (%set-slot! sym sym-value (%unbound))
     (%set-slot! sym sym-function nil)
     (%set-slot! sym sym-plist nil)
     (%set-slot! sym sym-flags (%lsh (%ld-fixnum lg-symcount) 8))

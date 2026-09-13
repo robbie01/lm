@@ -93,7 +93,16 @@
           (emit-str "#<package ") (emit-str (package-name x)) (emit-ch #\>))
          (else (print-record x quoted depth))))
        (else (emit-str "#<object>")))))
-   (else (emit-str "#<immediate>"))))
+   (else (print-immediate x))))
+
+;; The immediates that are not characters: the marker of a variable with no
+;; value, the end of a file, and no value at all.
+(define (print-immediate x)
+  (let ((w (%addr-of x)))
+    (cond ((%= w (%logior (%lsh imm-unbound 3) 2)) (emit-str "#<unbound>"))
+          ((%= w (%logior (%lsh imm-eof 3) 2)) (emit-str "#<eof>"))
+          ((%= w (%logior (%lsh imm-void 3) 2)) (emit-str "#<void>"))
+          (else (emit-str "#<immediate ") (emit-str (number->hex w)) (emit-ch #\>)))))
 
 ;; (quote x) prints as 'x.
 (define (print-list x quoted depth)

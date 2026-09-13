@@ -41,7 +41,7 @@
 
 (define (symbol-parts s)
   (let ((acc nil))
-    (if (%eq? (symbol-value s) *unbound*)
+    (if (%eq? (symbol-value s) (%unbound))
         nil
         (set! acc (%cons (part "value" (symbol-value s)) acc)))
     (if (symbol-function s)

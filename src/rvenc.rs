@@ -338,6 +338,10 @@ pub fn lref(rd: u32, rs1: u32, off: i32) -> u32 {
 pub fn lobj(rd: u32, rs1: u32, off: i32) -> u32 {
     i_type(off, rs1, 1, rd, 0x0b)
 }
+/// `lobj` that traps instead of delivering the unbound marker.
+pub fn lvar(rd: u32, rs1: u32, off: i32) -> u32 {
+    i_type(off, rs1, 2, rd, 0x0b)
+}
 pub fn sref(rs2: u32, rs1: u32, off: i32) -> u32 {
     s_type(off, rs2, rs1, 4, 0x0b)
 }

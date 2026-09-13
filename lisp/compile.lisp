@@ -330,11 +330,13 @@
      ((%eq? kind 'boxed-free)
       (i-lobj a reg (closure-reg c $t6) (%* 4 (%+ clo-free (cadr loc))))
       (i-lref a reg reg 0))
+     ;; A global's value cell, through the load that refuses the unbound
+     ;; marker: a name nothing was stored in is an error where it is read.
      (else
       (let ((sym (cadr loc)))
         (note-global-ref sym)
         (emit-literal c sym $t6)
-        (i-lw a reg $t6 (%* 4 sym-value)))))))
+        (i-lvar a reg $t6 (%* 4 sym-value)))))))
 
 ;; Every global the compiler emits a reference to while the name is still
 ;; unbound is recorded, so a build can report a name compiled code will call
@@ -342,14 +344,14 @@
 (define *global-refs* nil)
 
 (define (note-global-ref sym)
-  (if (%eq? (%symbol-value sym) *unbound*)
+  (if (%eq? (%symbol-value sym) (%unbound))
       (if (memq sym *global-refs*)
           nil
           (set! *global-refs* (%cons sym *global-refs*)))
       nil))
 
 (define (undefined-globals)
-  (filter (lambda (s) (%eq? (%symbol-value s) *unbound*)) *global-refs*))
+  (filter (lambda (s) (%eq? (%symbol-value s) (%unbound))) *global-refs*))
 
 ;; A location's storage cell, without following a box. Capturing a boxed
 ;; variable takes the box itself, so that the closure and the frame go on
@@ -1196,6 +1198,10 @@
         (i-wfi a)
         (i-mv a $a0 $zero))))
 
+  ;; The immediate that marks a variable with no value yet. A constant, not
+  ;; a global: a global holding it could not be read.
+  (definline '%unbound 0
+    (lambda (c) (i-li (cx-asm c) $a0 (%logior (%lsh imm-unbound 3) 2))))
   ;; The cycle counter, narrowed to thirty bits so that it is a fixnum.
   ;; Differences up to 2^30 cycles come out right.
   (definline '%cycles 0
@@ -2009,13 +2015,13 @@
     (if e
         e
         (let ((v (make-vector 3 nil)))
-          (%vector-set! v 0 *unbound*)
+          (%vector-set! v 0 (%unbound))
           (table-set! *image* sym v)
           v))))
 
 (define (image-value sym)
   (if *image*
-      (let ((e (table-ref *image* sym nil))) (if e (%vector-ref e 0) *unbound*))
+      (let ((e (table-ref *image* sym nil))) (if e (%vector-ref e 0) (%unbound)))
       (%symbol-value sym)))
 
 (define (image-set-value! sym v)
@@ -2086,7 +2092,7 @@
                     (let ((expr (caddr form)))
                       (image-set-value! name (compile-time-eval expr))
                       (record-initialiser name expr))
-                    (if (%eq? (image-value name) *unbound*)
+                    (if (%eq? (image-value name) (%unbound))
                         (image-set-value! name nil)
                         nil))
                 name)))

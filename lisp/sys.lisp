@@ -191,14 +191,20 @@
         (else (emit-str (if (%= (%logand f 1) 1) "set-slot!" "slot")))))
 
 ;; nil reads as a pair of nils but has no cell to write to, so the store
-;; side rejects it and gets its own sentence.
+;; side rejects it and gets its own sentence. `lvar` reads a variable and
+;; traps on the unbound marker with the symbol in mtval.
 (define (emit-pair-fault w tval)
-  (emit-pair-op w)
   (cond
+   ((%= (insn-f3 w) 2)
+    (let ((x (%from-addr tval)))
+      (if (%symbol? x)
+          (begin (emit-str "unbound variable: ") (emit-str (%symbol-name x)))
+          (begin (emit-str "variable: expected a symbol, got ") (emit-value tval)))))
    ((%= (%logand (insn-f3 w) 1) 1)
+    (emit-pair-op w)
     (emit-str ": expected an object, got ") (emit-value tval))
-   ((%= tval 0) (emit-str ": nil has no cell to write"))
-   (else (emit-str ": expected a pair, got ") (emit-value tval))))
+   ((%= tval 0) (emit-pair-op w) (emit-str ": nil has no cell to write"))
+   (else (emit-pair-op w) (emit-str ": expected a pair, got ") (emit-value tval))))
 
 ;; Both operands are still in the registers the instruction named, so the
 ;; report can say what was indexed as well as what with. The immediate form
@@ -215,7 +221,7 @@
     (cond
      ;; Calling a name nothing was ever stored in: the value is the unbound
      ;; marker, an immediate.
-     ((if (%= ty t-closure) (%eq? obj *unbound*) nil)
+     ((if (%= ty t-closure) (%eq? obj (%unbound)) nil)
       (emit-str ": undefined function"))
      ((not (safe-object? obj))
       (emit-str ": expected ") (emit-type-name ty)

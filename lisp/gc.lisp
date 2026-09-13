@@ -1500,7 +1500,7 @@
 ;; the pool is not scanned: a list of them on the stack would be a root.
 
 (define (symbol-idle? s)
-  (if (%eq? (%symbol-value s) *unbound*)
+  (if (%eq? (%symbol-value s) (%unbound))
       (if (%symbol-function s)
           nil
           (if (%symbol-plist s)
@@ -1645,7 +1645,7 @@
 ;; is collected keeps them out of the file, and the test is what they hold.
 
 (define (symbol-holds-anything? s)
-  (if (%eq? (%symbol-value s) *unbound*)
+  (if (%eq? (%symbol-value s) (%unbound))
       (if (%symbol-function s) t (if (%symbol-plist s) t nil))
       t))
 

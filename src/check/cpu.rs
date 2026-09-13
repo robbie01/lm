@@ -767,6 +767,12 @@ fn cases() -> Vec<Case> {
         (3 << 8) | 3,
     );
     c(
+        "lvar reads a bound value",
+        vec(vec![addi(A2, ZERO, 111), sw(A2, A1, 0), lvar(A0, A1, 0)]),
+        A0,
+        111,
+    );
+    c(
         "sobj at a slot",
         vec(vec![addi(A3, ZERO, 88), sobj(A3, A1, 4), lw(A0, A1, 4)]),
         A0,
@@ -913,6 +919,17 @@ pub fn run_all() -> bool {
 
         let (cause, _) = trap(vec![lobj(A0, ZERO, 0)]);
         extra.push(("lobj refuses nil", cause == C_TYPE));
+
+        // lvar is lobj for a variable's cell: it delivers any value but the
+        // unbound marker, and names the object it was reading through.
+        let mut v = vec![];
+        li32(&mut v, A3, 0x3004);
+        v.push(addi(A2, ZERO, crate::heap::UNBOUND as i32));
+        v.push(sw(A2, A3, 0));
+        v.push(lvar(A0, A3, 0));
+        let (cause, tval) = trap(v);
+        extra.push(("lvar refuses the unbound marker", cause == C_TYPE));
+        extra.push(("...naming the variable", tval == 0x3004));
 
         let (cause, _) = trap(vec![addi(A3, ZERO, 77), sref(A3, ZERO, 0)]);
         extra.push(("a store through nil still traps", cause == C_TYPE));

@@ -1392,6 +1392,7 @@ impl<'a> Lisp<'a> {
             Prim::SetGcModeX => NIL,
             Prim::Context => fix(0),
             Prim::Cycles => fix(0),
+            Prim::Unbound => UNBOUND,
             Prim::Disable => NIL,
             Prim::RestoreInterrupts => NIL,
             Prim::EnableAfterTrap => NIL,
@@ -1787,6 +1788,7 @@ prims! {
     Context            "%context" 0;
     StackLimit         "%stack-limit" 0;
     Cycles             "%cycles" 0;
+    Unbound            "%unbound" 0;
     Disable            "%disable" 0;
     RestoreInterrupts  "%restore-interrupts" 1;
     EnableAfterTrap    "%enable-after-trap" 0;

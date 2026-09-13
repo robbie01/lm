@@ -806,12 +806,18 @@ fn op_bad(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 #[inline(never)]
 fn op_ref(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let f = f3(w);
-    if f & 3 > 1 {
-        return illegal(m, w, pc, fuel);
-    }
+    // funct3 2 is `lvar`: an object load that also refuses to deliver the
+    // unbound marker, so that a variable nothing was ever stored in is a
+    // trap at the load and not a value that travels.
+    let (store, want_object, checked) = match f {
+        0 => (false, false, false),
+        1 => (false, true, false),
+        2 => (false, true, true),
+        4 => (true, false, false),
+        5 => (true, true, false),
+        _ => return illegal(m, w, pc, fuel),
+    };
     let v = r(m, rs1(w));
-    let store = f & 4 != 0;
-    let want_object = f & 1 != 0;
     let ok = if want_object {
         v & 7 == 4
     } else {
@@ -832,6 +838,9 @@ fn op_ref(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         unsafe { m.wr32(a, r(m, rs2(w))) };
     } else {
         let d = unsafe { m.rd32(a) };
+        if checked && d == crate::heap::UNBOUND {
+            return m.fault(C_TYPE, v, pc, fuel);
+        }
         w_(m, rd(w), d);
     }
     next!(m, pc.wrapping_add(4), fuel - 1)

@@ -188,7 +188,7 @@
          ;; table's empty slots are marked by a value held in a global, and
          ;; the image's marker is not this machine's.
          (entries (table->alist image))
-         (unbound *unbound*)
+         (unbound (%unbound))
          (macro-bit sym-macro)
          ;; Claimed now, above where the pool is about to end: in memory for
          ;; the write, and not in the file.
