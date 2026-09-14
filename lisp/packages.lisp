@@ -152,7 +152,7 @@
 (export '(
   alloc-code forget-package forget-unused-packages frame-ok?
   cons-chunk gc collect extra-roots collect-for-image
-  invalidate-runs slot
+  invalidate-runs note-run! take-owed-run slot
   scan-conservative scan-frames in-stub? install-allocator obj-take
   refill-cons register-code room stub-args-off stub-frame-size
   stub-mask-off stub-raw-off
@@ -182,7 +182,7 @@
   fill-circle check-colour
   fill-rect free-pool
   rgb
-  int-ack int-disable int-enable int-pending int-raise millis
+  int-ack int-disable int-enable int-pending int-raise millis timer-hz
   peek peek8 plot poke poke8
   *input* input-take input-inject input-interrupts!
   input-mouse-x input-mouse-y input-buttons input-mods
@@ -260,7 +260,7 @@
   make-port make-port-for delete-port
   make-message message-body set-message-body! delete-message
   put-message get-message wait-port reply-message port-ready? wait-ports notify
-  sleep wait-timeout
+  sleep wait-timeout now-ms
   request send make-server server-port server-task
   spawn task-children task-parent remove-children
   reply-port

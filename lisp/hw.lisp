@@ -143,9 +143,13 @@
 
 ;; The timebase is the retired instruction count, so the same program
 ;; produces the same schedule on every run.
-;; Read as a fixnum, which drops the top bit: no allocation and no critical
-;; section, so the timer interrupt can ask too. It wraps after twelve days.
+;; The host's clock, in milliseconds since boot, read as a fixnum: for pacing
+;; something to the host, not for deadlines, which exec keeps on the machine's
+;; own ticks (`now-ms`). No allocation and no critical section.
 (define (millis) (%ld-fixnum (dev-reg *timer* tmr-wall)))
+
+;; Cycles per second of the machine's clock.
+(define (timer-hz) (%ld-fixnum (dev-reg *timer* tmr-freq)))
 
 ;; Fire n ticks from now. The compare is 64 bits: the high half is written
 ;; first so a wrap cannot leave a compare in the past, and both halves go out

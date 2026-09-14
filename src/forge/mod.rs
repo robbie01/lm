@@ -37,13 +37,22 @@ use crate::map::*;
 pub fn rebuild(from: &str, out: &str, verbose: bool, check: bool) -> i32 {
     write_layout();
     let mut sources = String::new();
+    let mut sources1 = String::new();
     let mut bytes = 0usize;
+    let gcverbose = std::env::var_os("LM_GCVERBOSE").is_some();
     for f in SYSTEM {
         match std::fs::read_to_string(f) {
             Ok(t) => {
                 bytes += t.len();
                 sources.push_str(&t);
                 sources.push('\n');
+                sources1.push_str(&t);
+                sources1.push('\n');
+                // The first pass redefines the collector's globals, so the
+                // verbose flag is set again right after gc.lisp is compiled.
+                if gcverbose && f.ends_with("gc.lisp") {
+                    sources1.push_str("(set! gc::*verbose* t)\n");
+                }
             }
             Err(e) => {
                 eprintln!("lm: cannot read {f}: {e}");
@@ -52,9 +61,16 @@ pub fn rebuild(from: &str, out: &str, verbose: bool, check: bool) -> i32 {
         }
     }
     let mut script = String::new();
+    // LM_GCVERBOSE=1: the collector reports every cycle of the rebuild.
+    if std::env::var_os("LM_GCVERBOSE").is_some() {
+        script.push_str("(set! gc::*verbose* t)\n");
+    }
     script.push_str("(sys:rebuild)\n");
-    script.push_str(&sources);
+    script.push_str(&sources1);
     script.push_str("\nsys:rebuild-end\n");
+    if gcverbose {
+        script.push_str("(set! gc::*verbose* t)\n");
+    }
     // With --verbose, the second pass names every form as it takes it: when
     // a rebuild goes wrong, that is where it went wrong.
     if verbose {

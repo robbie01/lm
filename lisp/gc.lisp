@@ -77,6 +77,13 @@
 
 (define *mark-sp* 0)
 (define *run-last* 0)
+;; The bytes of the run handed out last, charged to the collector at the next
+;; refill: a run is paid for once it has been used up, not when it is given.
+;; Runs are per task, so exec.lisp replaces these two to keep the debt on the
+;; task that was handed the run; before there are tasks, one cell does.
+(define *run-owed* 0)
+(define (note-run! bytes) (set! *run-owed* bytes))
+(define (take-owed-run) (let ((b *run-owed*)) (set! *run-owed* 0) b))
 (define *count* 0)
 (define *cycles* 0)
 (define *verbose* nil)
@@ -553,6 +560,9 @@
 (define *slice-max-kind* 0)  ; and what the longest was
 (define *barriers* 0)        ; barrier traps taken
 (define *t-start* 0)         ; the cycle counter when the cycle began
+;; instrumentation: cycles per slice kind, small holes, dead pairs inside live words, refills
+(define *t-mark* 0) (define *t-code* 0) (define *t-objects* 0) (define *t-pairs* 0) (define *t-clear* 0)
+(define *small-holes* 0) (define *inner-dead* 0) (define *refills* 0)
 
 (define kind-start 1)
 (define kind-mark 2)
@@ -580,6 +590,12 @@
 (defsubst (note-slice t0)
   (let ((d (%logand (%- (%cycles) t0) 1073741823)))
     (set! *slices* (%+ *slices* 1))
+    (cond ((%= *slice-kind* kind-mark) (set! *t-mark* (%+ *t-mark* d)))
+          ((%= *slice-kind* kind-code) (set! *t-code* (%+ *t-code* d)))
+          ((%= *slice-kind* kind-objects) (set! *t-objects* (%+ *t-objects* d)))
+          ((%= *slice-kind* kind-pairs) (set! *t-pairs* (%+ *t-pairs* d)))
+          ((%= *slice-kind* kind-clear) (set! *t-clear* (%+ *t-clear* d)))
+          (else nil))
     (if (%> d *slice-max*)
         (begin (set! *slice-max* d) (set! *slice-max-kind* *slice-kind*))
         nil)))
@@ -605,6 +621,8 @@
     (set! *mark-sp* 0)
     (set! *pinned* 0)
     (set! *slices* 0)
+    (set! *t-mark* 0) (set! *t-code* 0) (set! *t-objects* 0) (set! *t-pairs* 0) (set! *t-clear* 0)
+    (set! *small-holes* 0) (set! *inner-dead* 0)
     (set! *slice-max* 0)
     (set! *slice-kind* kind-start)
     (set! *barriers* 0)
@@ -739,10 +757,12 @@
                 (begin
                   (if (%>= (%- p hole) gap-min)
                       (begin (gc-add-run hole p) (set! holes (%+ holes (%- p hole))))
-                      nil)
+                      (set! *small-holes* (%+ *small-holes* (%- p hole))))
                   (set! hole 0))
                 nil)
-            (set! live (%+ live (%lsh (gc-word-live mp) 3)))
+            (let ((wl (%lsh (gc-word-live mp) 3)))
+              (set! live (%+ live wl))
+              (set! *inner-dead* (%+ *inner-dead* (%- 256 wl))))
             (if *keep-marks* nil (%st-fixnum! mp 0))))
       (set! p (%+ p 256))
       (set! mp (%+ mp 4)))
@@ -802,7 +822,8 @@
   (let ((spent (%logand (%- (%cycles) *t-start*) 1073741823)))
     (set! *cycles* (%+ *cycles* spent))
     (set! *phase* phase-idle)
-    (if *verbose* (report spent) nil)))
+    (if *verbose* (report spent) nil)
+    (set! *refills* 0)))
 
 ;; Straight to the serial line: no allocation inside a collection.
 (define (report spent)
@@ -827,6 +848,16 @@
   (uart-string " barrier traps; next after ")
   (uart-num *budget*)
   (uart-string " bytes]")
+  (uart-nl)
+  (uart-string "  [phases: mark ") (uart-num *t-mark*)
+  (uart-string " code ") (uart-num *t-code*)
+  (uart-string " objects ") (uart-num *t-objects*)
+  (uart-string " pairs ") (uart-num *t-pairs*)
+  (uart-string " clear ") (uart-num *t-clear*)
+  (uart-string "; small holes ") (uart-num *small-holes*)
+  (uart-string " bytes, dead in live words ") (uart-num *inner-dead*)
+  (uart-string " bytes, refills since last ") (uart-num *refills*)
+  (uart-string "]")
   (uart-nl))
 
 ;; ---------------------------------------------------------------- stepping
@@ -937,7 +968,9 @@
 ;; while marking is black from the start; at any other time its bits are
 ;; cleared, which is what keeps the map zero above the frontier.
 (define (hand-out-run start end)
+  (set! *refills* (%+ *refills* 1))
   (set! *cons-given* (%+ *cons-given* (%- end start)))
+  (note-run! (%- end start))
   (if (%= *phase* phase-marking) (mark-range start end) (clear-range start end))
   (%st-fixnum! lg-cons-run start)
   (%st-fixnum! lg-cons-run-end end)
@@ -965,9 +998,12 @@
 ;; Called from the assembly stub when the inline allocator runs out of run.
 ;; Every caller-saved register was spilled on the way in, so the collector
 ;; can see them. The collector gets its share of work first, with interrupts
-;; as they were; then the run, with them off.
+;; as they were; then the run, with them off. The share is for the run just
+;; used up, whatever its size: a sweep hole of a few pairs is not a chunk,
+;; and a task's first run is paid for when it asks for its second, so a
+;; fresh task is not stalled on its first cons by a collection in progress.
 (define (refill-cons)
-  (pace cons-chunk)
+  (pace (take-owed-run))
   (without-interrupts
     (if (next-run)
         nil

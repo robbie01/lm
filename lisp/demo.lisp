@@ -408,9 +408,9 @@
     ;; Waiting for a moment. A sleep takes at least what it asked for; a
     ;; wait that times out answers 0; a signal that comes first answers
     ;; itself, and the deadline it beat does not wake the next wait.
-    (let ((t0 (millis)))
+    (let ((t0 (now-ms)))
       (sleep 30)
-      (num-check 'slept-long-enough (>= (- (millis) t0) 30) t))
+      (num-check 'slept-long-enough (>= (- (now-ms) t0) 30) t))
     (num-check 'timed-out (wait-timeout 65536 20) 0)
     (let ((me (this-task)))
       (add-task "knocker" 0 (lambda () (sleep 10) (signal me 65536)))

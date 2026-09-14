@@ -139,6 +139,7 @@
   held                           ; the mutexes it owns, newest first
   blocked-on                     ; the mutex it is waiting for, if any
   mx-next                        ; and who is behind it in that mutex's queue
+  run-owed                       ; bytes of cons run handed to it, unpaid; see gc.lisp
   gen)                           ; which Exec it belongs to: see `task-alive?`
 
 (define ts-invalid 0)
@@ -268,8 +269,19 @@
 ;; Choose the next task and point mscratch at its context. Called only from
 ;; inside the trap handler, with the outgoing task's registers already saved.
 (define (switch-tasks)
-  (let ((cur (this-task)))
-    (let ((next (remove-head (ready-list))))
+  (let* ((cur (this-task))
+         (head (list-first (ready-list)))
+         ;; A task still able to run keeps the processor against anything
+         ;; less urgent: the tick is for its equals, in turn, and its
+         ;; betters. Without this the idle task, always ready, took every
+         ;; other quantum from a busy machine.
+         (next (if (if head
+                       (if (%= (tc-state cur) ts-run)
+                           (%< (node-pri head) (node-pri cur))
+                           nil)
+                       nil)
+                   nil
+                   (remove-head (ready-list)))))
           (if (%null? next)
               nil
               (begin
@@ -286,7 +298,7 @@
                 (%set-stack-limit! (task-stack-limit next))
                 ;; Only now, with the context switched away, is a dead task's
                 ;; stack safe to give back.
-                (if *reaped* (reap-tasks) nil))))
+                (if *reaped* (reap-tasks) nil)))
     nil))
 
 ;; ---------------------------------------------------------------- signals
@@ -386,12 +398,24 @@
       got)))
 
 ;; ---------------------------------------------------------------- time
-;; A task can wait for a moment as well as for a signal. Deadlines are in
-;; milliseconds of the machine's clock, kept on one list soonest first, and
-;; the timer interrupt, which fires every quantum anyway, signals whoever's
-;; has passed. So a deadline is met within a quantum of when it was set,
-;; which is the scheduler's own resolution; a task that draws waits for the
-;; vertical blank instead, which is finer and in step with the screen.
+;; A task can wait for a moment as well as for a signal. Time here is the
+;; machine's own: the timer interrupt fires every quantum, and counting the
+;; ticks gives a clock that runs at the same rate in idle jumps and under
+;; load, and the same on every run. Deadlines are ticks, on one list soonest
+;; first, and the interrupt signals whoever's has passed, so a deadline is
+;; met within a quantum of when it was set, the scheduler's own resolution.
+;; A task that draws waits for the vertical blank instead, which is finer and
+;; in step with the screen. `millis` in hw is the host's clock, for pacing
+;; to the host, and is not this.
+(define *ticks* 0)                     ; timer interrupts since Exec started
+(define *ms-per-tick* 10)              ; set from the quantum at exec-init
+
+(define (now-ms) (%* *ticks* *ms-per-tick*))
+
+(define (ticks-for ms)
+  (let ((n (%/ (%+ ms (%- *ms-per-tick* 1)) *ms-per-tick*)))
+    (if (%< n 1) 1 n)))
+
 (define *deadlines* nil)               ; ((when . task) ...)
 
 (define (add-deadline! task when)
@@ -412,7 +436,7 @@
 ;; From the timer interrupt, with interrupts off: allocates nothing.
 (define (fire-deadlines)
   (if (%cons? *deadlines*)
-      (let ((now (millis)))
+      (let ((now *ticks*))
         (while (if (%cons? *deadlines*) (%<= (%car (%car *deadlines*)) now) nil)
           (signal (%cdr (%car *deadlines*)) sigf-timer)
           (set! *deadlines* (%cdr *deadlines*))))
@@ -426,7 +450,7 @@
     (without-interrupts
       ;; a timer signal left from an earlier wait must not end this one early
       (set-tc-sigrecvd! me (%logand (tc-sigrecvd me) (%lognot sigf-timer)))
-      (add-deadline! me (%+ (millis) ms)))
+      (add-deadline! me (%+ *ticks* (ticks-for ms))))
     (let ((got (wait (%logior mask sigf-timer))))
       (without-interrupts
         (drop-deadline! me)
@@ -458,6 +482,7 @@
 ;; A fresh record's slots hold nil, and nil is not the fixnum zero, so
 ;; anything counted or masked is set before it is read.
 (define (zero-task-counters! task)
+  (set-tc-run-owed! task 0)
   (set-tc-sigwait! task 0)
   (set-tc-sigrecvd! task 0)
   (set-tc-switches! task 0)
@@ -1315,6 +1340,7 @@
    ((%= n irq-timer)
     (set! *disp-count* (%+ *disp-count* 1))
     (timer-set-in *quantum*)
+    (set! *ticks* (%+ *ticks* 1))
     (fire-deadlines)
     (switch-tasks))
    ((%= n irq-external)
@@ -1375,6 +1401,8 @@
       (%vector-set! *int-vectors* i (new-list))
       (set! i (%+ i 1))))
   (set! *quantum* default-quantum)
+  (set! *ticks* 0)
+  (set! *ms-per-tick* (%/ *quantum* (%/ (timer-hz) 1000)))
   ;; The code that is already running becomes task zero. Its context is the
   ;; block the trap stub has been using all along.
   (let ((boot (tc-alloc)))
@@ -1478,6 +1506,18 @@
         (scan-list-of *wait-list* drop-task-run))
       nil)
   nil)
+
+;; The run a task was handed is owed by that task, not by whoever refills
+;; next; see `refill-cons` in gc.lisp. Before there are tasks, gc's own cell.
+(define (note-run! bytes)
+  (let ((me (this-task)))
+    (if me (set-tc-run-owed! me bytes) (set! gc::*run-owed* bytes))))
+
+(define (take-owed-run)
+  (let ((me (this-task)))
+    (if me
+        (let ((b (tc-run-owed me))) (set-tc-run-owed! me 0) b)
+        (let ((b gc::*run-owed*)) (set! gc::*run-owed* 0) b))))
 
 ;; A suspended task's stack, precisely, and its saved registers,
 ;; conservatively: a task preempted mid-expression has live values in
