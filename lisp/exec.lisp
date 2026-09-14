@@ -290,15 +290,28 @@
     nil))
 
 ;; ---------------------------------------------------------------- signals
-;; Signals 0..15 are reserved, as Exec reserves them; 16..29 are for
-;; allocation. Bit 30 is not: a mask is a fixnum, and a fixnum with bit 30 set
-;; is negative, which the tests below would misread. What comes back is the
-;; mask, because that is what `signal` and `wait` take. The failure is raised
-;; outside the critical section, because an error abandons the stack and
-;; would abandon the section with it.
+;; Three bits are fixed, the same in every task, so that waking every waiter
+;; is a walk of the wait list: the vertical blank, the blitter, and a mutex
+;; handed over. Every other bit from 0 to 29 is for allocation. Bit 30 is
+;; not: a mask is a fixnum, and a fixnum with bit 30 set is negative, which
+;; the tests below would misread.
+(define sigb-vblank 5)
+(define sigf-vblank (%lsh 1 sigb-vblank))
+(define sigb-blit 7)                   ; your blits have landed; see gfx.lisp
+(define sigf-blit (%lsh 1 sigb-blit))
+(define sigb-mutex 8)                  ; you have been handed a mutex
+(define sigf-mutex (%lsh 1 sigb-mutex))
+(define sigb-timer 9)                  ; your deadline has passed; see `wait-timeout`
+(define sigf-timer (%lsh 1 sigb-timer))
+(define sig-reserved
+  (%logior sigf-vblank (%logior sigf-blit (%logior sigf-mutex sigf-timer))))
+
+;; What comes back is the mask, because that is what `signal` and `wait`
+;; take. The failure is raised outside the critical section, because an
+;; error abandons the stack and would abandon the section with it.
 (define (alloc-signal task)
   (let ((got (without-interrupts
-               (let ((alloc (tc-sigalloc task)) (n 16) (g -1))
+               (let ((alloc (tc-sigalloc task)) (n 0) (g -1))
                  (while (if (%< n 30) (%< g 0) nil)
                    (if (%= 0 (%logand alloc (%lsh 1 n)))
                        (begin
@@ -372,6 +385,56 @@
       (%restore-interrupts entry)
       got)))
 
+;; ---------------------------------------------------------------- time
+;; A task can wait for a moment as well as for a signal. Deadlines are in
+;; milliseconds of the machine's clock, kept on one list soonest first, and
+;; the timer interrupt, which fires every quantum anyway, signals whoever's
+;; has passed. So a deadline is met within a quantum of when it was set,
+;; which is the scheduler's own resolution; a task that draws waits for the
+;; vertical blank instead, which is finer and in step with the screen.
+(define *deadlines* nil)               ; ((when . task) ...)
+
+(define (add-deadline! task when)
+  (let ((cell (%cons (%cons when task) nil)))
+    (if (if (%cons? *deadlines*) (%< (%car (%car *deadlines*)) when) nil)
+        (let ((p *deadlines*))
+          (while (if (%cons? (%cdr p)) (%<= (%car (%car (%cdr p))) when) nil)
+            (set! p (%cdr p)))
+          (%set-cdr! cell (%cdr p))
+          (%set-cdr! p cell))
+        (begin (%set-cdr! cell *deadlines*) (set! *deadlines* cell)))))
+
+(define (drop-deadline! task)
+  (let ((keep nil))
+    (dolist (d *deadlines*) (if (%eq? (%cdr d) task) nil (set! keep (%cons d keep))))
+    (set! *deadlines* (reverse keep))))
+
+;; From the timer interrupt, with interrupts off: allocates nothing.
+(define (fire-deadlines)
+  (if (%cons? *deadlines*)
+      (let ((now (millis)))
+        (while (if (%cons? *deadlines*) (%<= (%car (%car *deadlines*)) now) nil)
+          (signal (%cdr (%car *deadlines*)) sigf-timer)
+          (set! *deadlines* (%cdr *deadlines*))))
+      nil))
+
+;; `wait`, but for at most `ms` milliseconds: answers the signals that came,
+;; and 0 if the time passed first.
+(define (wait-timeout mask ms)
+  (sleep-check "wait-timeout:")
+  (let ((me (this-task)))
+    (without-interrupts
+      ;; a timer signal left from an earlier wait must not end this one early
+      (set-tc-sigrecvd! me (%logand (tc-sigrecvd me) (%lognot sigf-timer)))
+      (add-deadline! me (%+ (millis) ms)))
+    (let ((got (wait (%logior mask sigf-timer))))
+      (without-interrupts
+        (drop-deadline! me)
+        (set-tc-sigrecvd! me (%logand (tc-sigrecvd me) (%lognot sigf-timer))))
+      (%logand got mask))))
+
+(define (sleep ms) (wait-timeout 0 ms) nil)
+
 ;; ---------------------------------------------------------------- tasks
 ;; Slot 0 of a closure holds a raw code address, so it is read with %addr-of
 ;; rather than %from-addr: the word is already an address.
@@ -423,7 +486,7 @@
     (set-tc-fn! task fn)
     (set-tc-binds! task binds)
     (set-tc-quantum! task default-quantum)
-    (set-tc-sigalloc! task 65535)
+    (set-tc-sigalloc! task sig-reserved)
     ;; The context is built to look as though the task had just been
     ;; interrupted on the first instruction of its function.
     (poke (ctx-pc ctx) (closure-entry fn))
@@ -617,11 +680,11 @@
 (define (build-task-exit-stub)
   (let ((a (make-assembler)))
     (i-li a $t1 0)
-    (i-lw a $t0 $zero lg-scratch0)
+    (i-lw a $t0 $zero lg-task-exit)
     (i-lw a $t2 $t0 0)
     (i-jr a $t2)
     (set! *task-exit-stub* (place a))
-    (%st-word! lg-scratch0 (%symbol-value 'task-finished))
+    (%st-word! lg-task-exit (%symbol-value 'task-finished))
     *task-exit-stub*))
 
 ;; ---------------------------------------------------------------- ports
@@ -842,13 +905,25 @@
 
 (define (port-ready? p) (if (list-empty? (mp-msglist p)) nil t))
 
-;; `select`: the first port with something on it. Not fair: a busy port can
-;; starve a quiet one.
+;; `select`: a port with something on it. The scan starts one port further
+;; along on each call, so a busy port cannot starve a quiet one.
+(define *select-turn* 0)
+
 (define (wait-ports ports)
-  (let ((mask 0) (hit nil))
+  (let ((mask 0) (hit nil) (n (length ports)))
+    (if (%= n 0) (error "wait-ports: no ports") nil)
     (dolist (p ports) (set! mask (%logior mask (mp-sigmask p))))
     (while (%null? hit)
-      (dolist (p ports) (if (if hit nil (port-ready? p)) (set! hit p) nil))
+      (let ((start (%rem *select-turn* n)) (i 0) (before nil))
+        (set! *select-turn* (%logand (%+ *select-turn* 1) 1073741823))
+        (dolist (p ports)
+          (if (port-ready? p)
+              (if (%< i start)
+                  (if before nil (set! before p))
+                  (if hit nil (set! hit p)))
+              nil)
+          (set! i (%+ i 1)))
+        (if hit nil (set! hit before)))
       (if hit nil (wait mask)))
     hit))
 
@@ -872,9 +947,6 @@
 ;; instructions it takes; it never sleeps there.
 
 (defrecord (mutex mx) name owner count head next-held abandoned repair)
-
-(define sigb-mutex 8)                  ; you have been handed a mutex
-(define sigf-mutex (%lsh 1 sigb-mutex))
 
 ;; `repair`, if given, is a function of the mutex, run by the first task to
 ;; take it after it was abandoned.
@@ -1145,11 +1217,7 @@
 
 ;; ---------------------------------------------------------------- vblank
 ;; One signal bit, the same in every task, so that waking every waiter is a
-;; walk of the wait list. `alloc-signal` hands out bits from 16 up.
-(define sigb-vblank 5)
-(define sigf-vblank (%lsh 1 sigb-vblank))
-(define sigb-blit 7)                   ; your blits have landed; see gfx.lisp
-(define sigf-blit (%lsh 1 sigb-blit))
+;; walk of the wait list; `sigf-vblank` is defined with the other fixed bits.
 (define *vblank-int* nil)
 (define *vblank-count* 0)
 
@@ -1247,6 +1315,7 @@
    ((%= n irq-timer)
     (set! *disp-count* (%+ *disp-count* 1))
     (timer-set-in *quantum*)
+    (fire-deadlines)
     (switch-tasks))
    ((%= n irq-external)
     ;; Ask the chips which line it was, run every server on it, then
@@ -1298,6 +1367,7 @@
   (set! *task-count* 0)
   (set! *ready-list* (new-list))
   (set! *wait-list* (new-list))
+  (set! *deadlines* nil)
   (set! *port-list* (new-list))
   (set! *int-vectors* (make-vector-n 8 nil))
   (let ((i 0))
@@ -1318,7 +1388,7 @@
     (set-tc-context! boot (%ld-fixnum lg-trapsave))
     (set-tc-splower! boot (%ld-fixnum lg-stackbot))
     (set-tc-spupper! boot (%ld-fixnum lg-stacktop))
-    (set-tc-sigalloc! boot 65535)
+    (set-tc-sigalloc! boot sig-reserved)
     ;; Task zero takes whatever was bound before there were tasks.
     (set-tc-binds! boot *boot-binds*)
     (set! *boot-binds* nil)

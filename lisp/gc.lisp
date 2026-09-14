@@ -431,7 +431,7 @@
   (slot lg-traphook)
   (slot lg-refill)
   (slot lg-startup)
-  (slot lg-scratch0)
+  (slot lg-task-exit)
   ;; The running task is a register, so there is no slot to rewrite; it is a
   ;; record, which does not move, so marking is the whole job.
   (if *updating* nil (gc-push (%this-task)))

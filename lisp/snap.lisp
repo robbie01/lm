@@ -203,7 +203,7 @@
     (%st-word! lg-bootlist thunks)
     (%st-word! lg-errhandler nil)
     (%st-word! lg-startup nil)
-    (%st-word! lg-scratch0 nil)
+    (%st-word! lg-task-exit nil)
     ;; And its allocator, which the kickstart would install first thing:
     ;; nothing since the symbols changed has allocated, and from here on
     ;; anything may.

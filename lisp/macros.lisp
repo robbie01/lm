@@ -214,9 +214,11 @@
           ((memq head '(get)) `(put ,(car args) ,(cadr args) ,val))
           ((memq head '(symbol-value %symbol-value))
            `(%set-symbol-value! ,(car args) ,val))
-          ((memq head '(peek32 %ld-fixnum)) `(%st-fixnum! ,(car args) ,val))
-          ((memq head '(peek8 %ld-byte)) `(%st-byte! ,(car args) ,val))
-          ((memq head '(peek16 %ld-half)) `(%st-half! ,(car args) ,val))
+          ((memq head '(peek)) `(poke ,(car args) ,val))
+          ((memq head '(peek8)) `(poke8 ,(car args) ,val))
+          ((memq head '(%ld-fixnum)) `(%st-fixnum! ,(car args) ,val))
+          ((memq head '(%ld-byte)) `(%st-byte! ,(car args) ,val))
+          ((memq head '(%ld-half)) `(%st-half! ,(car args) ,val))
           (else (error "setf does not know how to write to" head)))))
 
 ;; ---------------------------------------------------------------- misc sugar

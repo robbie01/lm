@@ -87,9 +87,9 @@
 ;;
 ;; The location is read once, with one access, and taken apart in a scratch
 ;; cell: two half-word loads would read a device register twice, and a
-;; half-word store would write one lane. `lg-scratch3` is not scanned by the
+;; half-word store would write one lane. `lg-raw-word` is not scanned by the
 ;; collector; what sits here is a raw word.
-(define peek-scratch lg-scratch3)
+(define peek-scratch lg-raw-word)
 
 ;; Neither of these widens by trapping: they are reachable from interrupt
 ;; servers, and build the object directly.
@@ -143,7 +143,9 @@
 
 ;; The timebase is the retired instruction count, so the same program
 ;; produces the same schedule on every run.
-(define (millis) (peek (dev-reg *timer* tmr-wall)))
+;; Read as a fixnum, which drops the top bit: no allocation and no critical
+;; section, so the timer interrupt can ask too. It wraps after twelve days.
+(define (millis) (%ld-fixnum (dev-reg *timer* tmr-wall)))
 
 ;; Fire n ticks from now. The compare is 64 bits: the high half is written
 ;; first so a wrap cannot leave a compare in the past, and both halves go out

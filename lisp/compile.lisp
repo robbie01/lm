@@ -1353,9 +1353,50 @@
                ((%eq? op '%>=) (i-flt a $t2 $a0 $a1) (i-bnez a $t2 label))
                ((%eq? op '%=) (i-feq a $t2 $a0 $a1) (i-beqz a $t2 label))
                (else (i-bne a $a0 $a1 label)))))))
+     ;; An `if` in a test position is `and`, `or` or `not` spelled out, and
+     ;; is walked rather than built: each arm's test becomes its own branch.
+     ;; `and` expands to (if a b nil), `or` to (if a a b) through a binding,
+     ;; and the kernel's hand-nested (if (if a b nil) c nil) is the same shape.
+     ((if (%cons? form) (%eq? (%car form) 'if) nil)
+      (emit-if-test-jump-false c form label))
      (else
       (compile-expr c form nil)
       (i-beqz a $a0 label)))))
+
+;; The `if` case of the above: jump to `fail` when (if test then else) is
+;; false, without building its value.
+(define (emit-if-test-jump-false c form fail)
+  (let* ((a (cx-asm c))
+         (test (cadr form))
+         (then (caddr form))
+         (else-form (if (%cons? (cdddr form)) (cadddr form) nil))
+         (l-else (gensym-label "tor"))
+         (l-end (gensym-label "tend")))
+    (cond
+     ;; (if a b nil): both must hold
+     ((%null? else-form)
+      (emit-test-jump-false c test fail)
+      (emit-test-jump-false c then fail))
+     ;; (if a a b): either will do
+     ((if (%symbol? test) (%eq? test then) nil)
+      (emit-test-jump-false c test l-else)
+      (i-j a l-end)
+      (label a l-else)
+      (emit-test-jump-false c else-form fail)
+      (label a l-end))
+     ;; (if a nil b): the first must fail and the second hold
+     ((%null? then)
+      (emit-test-jump-false c test l-else)
+      (i-j a fail)
+      (label a l-else)
+      (emit-test-jump-false c else-form fail))
+     (else
+      (emit-test-jump-false c test l-else)
+      (emit-test-jump-false c then fail)
+      (i-j a l-end)
+      (label a l-else)
+      (emit-test-jump-false c else-form fail)
+      (label a l-end)))))
 
 ;; ---------------------------------------------------------------- arguments
 ;; Simple arguments go straight to their register. Anything that can run code

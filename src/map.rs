@@ -132,10 +132,10 @@ globals! {
     LG_STUBLO     = 0xac, "stub-lo";     // extent of the cons refill stub,
     LG_STUBHI     = 0xb0, "stub-hi";     // which is not a lisp frame
     LG_STARTUP    = 0x98, "startup";     // closure run before the repl
-    LG_SCRATCH0   = 0x9c, "scratch0";
-    LG_SCRATCH1   = 0xa0, "scratch1";
-    LG_SCRATCH2   = 0xa4, "scratch2";
-    LG_SCRATCH3   = 0xa8, "scratch3";
+    LG_TASKEXIT   = 0x9c, "task-exit";   // the closure a task returns into
+    LG_TRAPENTRY  = 0xa0, "trap-entry";  // the forge's trap stub, for its collection
+    LG_BOOTARG    = 0xa4, "boot-arg";    // the forge's trampoline argument
+    LG_RAWWORD    = 0xa8, "raw-word";    // a raw 32-bit word in transit; not scanned
     LG_SYMCOUNT   = 0xc4, "symcount";    // symbols interned so far: the next
                                          // symbol's identity, and its hash
     LG_POOLFREE   = 0xc8, "pool-free";   // free list head, exec pool

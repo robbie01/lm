@@ -55,7 +55,7 @@ const TAGGED_GLOBALS: &[u32] = &[
     LG_TRAPHOOK,
     LG_REFILL,
     LG_STARTUP,
-    LG_SCRATCH0,
+    LG_TASKEXIT,
 ];
 
 struct Plan {

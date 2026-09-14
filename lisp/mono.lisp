@@ -180,12 +180,3 @@
             nil))
       (set! row (%+ row 1)))
     nil))
-
-(define (draw-mono rp x y s fg bg)
-  (let ((i 0) (n (string-length s)))
-    (while (%< i n)
-      (draw-mono-char rp (%+ x (%* i mono-advance)) y (string-ref s i) fg bg)
-      (set! i (%+ i 1)))
-    nil))
-
-(define (mono-width s) (%* (string-length s) mono-advance))

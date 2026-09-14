@@ -622,7 +622,7 @@ pub fn build(out: &str, verbose: bool) -> i32 {
             // (reset trap refill); the trap stub's address is stashed where
             // collect_before_saving can find it.
             let trap = crate::heap::unfix(l.h.cadr(v)) as u32;
-            l.h.set_g(LG_SCRATCH3, trap);
+            l.h.set_g(LG_TRAPENTRY, trap);
             crate::heap::unfix(l.h.car(v)) as u32
         }
         Err(e) => {
@@ -747,8 +747,8 @@ fn call_on_machine(l: &mut Lisp, name: &str, entry_stub: u32) -> Option<u32> {
     // instruction stream. This trampoline is dead code once the build is over,
     // but a pointer sitting in code space is a pointer the collector cannot
     // see, and `lm inspect` checks that there are none.
-    l.h.set_g(LG_SCRATCH2, closure);
-    c.push(lw(T0, ZERO, LG_SCRATCH2 as i32));
+    l.h.set_g(LG_BOOTARG, closure);
+    c.push(lw(T0, ZERO, LG_BOOTARG as i32));
     c.push(addi(T1, ZERO, 0));
     c.push(lw(T2, T0, 0));
     c.push(jalr(RA, T2, 0));
@@ -796,7 +796,7 @@ fn blank_run_scratch(l: &mut Lisp) {
 }
 
 fn collect_before_saving(l: &mut Lisp, verbose: bool) -> u32 {
-    let trap = l.h.g(LG_SCRATCH3);
+    let trap = l.h.g(LG_TRAPENTRY);
     let before = l.h.g(LG_CONS_PTR);
     // Everything up to now was allocated by the forge's own bump pointer. The
     // machine's allocator lives in a register, so hand it a run that starts

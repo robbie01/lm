@@ -141,18 +141,3 @@
   (hline rp (%+ x 1) (%+ y 12) 12 white)
   nil)
 
-;; ---------------------------------------------------------------- grow box
-(define (grow-box rp x y)
-  (fill-rect rp x y 15 15 g3)
-  (raised rp x y 15 15)
-  (let ((i 0))
-    (while (%< i 3)
-      (let ((o (%+ 3 (%* i 4))) (j 0))
-        (while (%< j 9)
-          (let ((px (%+ x (%+ o j))) (py (%+ y (%- 11 j))))
-            (if (%< (%- px x) 14)
-                (begin (plot rp px py g7) (plot rp px (%+ py 1) white))
-                nil))
-          (set! j (%+ j 1))))
-      (set! i (%+ i 1))))
-  nil)

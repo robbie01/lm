@@ -10,10 +10,14 @@
 
 (define *peeked* nil)
 
+;; `*peeked*` holds one character looked at and not taken, or a list of
+;; them: `skip-space` has to look past a `#` to see whether a comment follows,
+;; and puts both back when one does not.
 (define (read-char-or-nil)
-  (if *peeked*
-      (let ((c *peeked*)) (set! *peeked* nil) c)
-      (get-char)))
+  (cond ((%null? *peeked*) (get-char))
+        ((%cons? *peeked*)
+         (let ((c (%car *peeked*))) (set! *peeked* (%cdr *peeked*)) c))
+        (else (let ((c *peeked*)) (set! *peeked* nil) c))))
 
 ;; Reading from a console never ends: when nothing is there yet, wait. Reading
 ;; from a string does end, and then a character that is not coming is nil.
@@ -31,11 +35,12 @@
 ;; The next character, left where it is. The stream usually has one ready, and
 ;; then this asks once rather than going through `wait-char`.
 (define (peek-char)
-  (if *peeked*
-      *peeked*
-      (let ((c (get-char)))
-        (set! *peeked* (if c c (wait-char)))
-        *peeked*)))
+  (cond ((%cons? *peeked*) (%car *peeked*))
+        (*peeked* *peeked*)
+        (else
+         (let ((c (get-char)))
+           (set! *peeked* (if c c (wait-char)))
+           *peeked*))))
 
 ;; End of input ends a token as a space does. Whitespace is never above the
 ;; space character, so a letter is settled by one comparison.
@@ -65,7 +70,30 @@
                 (if (%null? d)
                     (set! going nil)
                     (if (%eq? d #\newline) (set! going nil) nil))))))
+         ;; `#|` opens a block comment, which nests, and `#;` comments out
+         ;; the datum after it. Any other `#` starts a datum and goes back.
+         ((%eq? c #\#)
+          (read-char-or-nil)
+          (let ((d (peek-char)))
+            (cond ((%eq? d #\|) (read-char-or-nil) (skip-block-comment))
+                  ((%eq? d #\;) (read-char-or-nil) (read-form))
+                  (else (set! *peeked* (%cons #\# (%cons d nil)))
+                        (set! go nil)))))
          (else (set! go nil)))))))
+
+;; After `#|`: to the matching `|#`, counting the ones opened inside.
+(define (skip-block-comment)
+  (let ((depth 1))
+    (while (%> depth 0)
+      (let ((d (wait-char)))
+        (cond ((%null? d) (error "end of input inside #| |#"))
+              ((if (%eq? d #\|) (%eq? (peek-char) #\#) nil)
+               (read-char-or-nil)
+               (set! depth (%- depth 1)))
+              ((if (%eq? d #\#) (%eq? (peek-char) #\|) nil)
+               (read-char-or-nil)
+               (set! depth (%+ depth 1)))
+              (else nil))))))
 
 (define (read-form)
   (skip-space)
