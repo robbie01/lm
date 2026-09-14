@@ -214,6 +214,9 @@ context block at the outermost level, and a frame from an array of eight
 below that. A trap inside the handler is normal, because the handler's own
 arithmetic may widen. Nine deep halts the machine with exit code 9.
 
+What the machine checks and what it does not, and what would make the
+unchecked path high-friction, is in [docs/memory-safety.md](docs/memory-safety.md).
+
 ## Memory
 
 ```
@@ -445,10 +448,10 @@ the timer interrupt; a task that blocks asks for a reschedule with an
 `ecall`, so the switch always happens inside the handler. Which task is
 running is the register `s2`.
 
-**Signals.** Bits 0 to 15 are reserved and 16 to 29 are allocated with
-`alloc-signal`; bit 30 would make a mask negative. Three are fixed:
-`sigf-vblank` (5), `sigf-blit` (7) and `sigf-mutex` (8), the same bit in
-every task, so waking every waiter is a walk of the wait list.
+**Signals.** Three bits are fixed: `sigf-vblank` (5), `sigf-blit` (7) and
+`sigf-mutex` (8), the same bit in every task, so waking every waiter is a
+walk of the wait list. Every other bit from 0 to 29 is allocated with
+`alloc-signal`; bit 30 would make a mask negative.
 
 **Servers.** A driver is a task with a port. `make-server` makes the task,
 gives it its port and only then starts it; `request` sends and waits for the
@@ -469,6 +472,12 @@ queue in priority order and are handed it directly, a waiter lends the owner
 its priority, and a wait that would close a circle is an error naming the
 circle. A task that ends holding a mutex, or whose stack an error abandons
 inside `with-mutex`, has it taken away, and the next taker is told.
+
+**Time.** `sleep` waits for a number of milliseconds of the machine's clock,
+and `wait-timeout` is `wait` with a deadline, answering 0 if the time passed
+first. Deadlines sit on one list and the timer interrupt, which fires every
+quantum anyway, signals whoever's has come, so they are met within a quantum.
+A task that draws waits for the vertical blank instead.
 
 **Idle.** The idle task is always ready and runs `wfi`, so a machine where
 every task is waiting costs nothing.
@@ -585,6 +594,7 @@ lmdev cpu             processor conformance
 lmdev asm             the Lisp assembler against an independent Rust encoder
 lmdev compiler        end-to-end: source in, machine code out, run, compare
 lmdev readers         name resolution: use lists, pkg:name, pkg::name
+lmdev check [IMG]     boot an image headless and run the machine's own suites
 lmdev bench           measure the interpreter
 lmdev inspect [IMG]   what is in an image, and that code holds no heap addresses
 lmdev reach [IMG]     what each package's symbols can reach
@@ -604,7 +614,11 @@ cargo-fuzz targets under `fuzz/` drive the same functions with coverage
 guidance (`cargo fuzz run exec|image|lisp`); they need libFuzzer, which
 links on Linux and macOS but not on Windows.
 
-The machine's own suites are typed at the prompt; `(drivers)` needs a disk:
+The machine's own suites are Lisp, typed at the prompt. `lmdev check` boots
+an image headless with a scratch disk and types `(check)`, which runs every
+one of them, counts, and halts the machine with the verdict as its exit
+code; `lmdev all` includes it when `kick.img` is there. By hand, each suite
+is a function, and `(drivers)` needs a disk:
 
 ```
 lm kick.img --no-window --batch --disk scratch.disk \
