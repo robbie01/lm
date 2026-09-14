@@ -43,18 +43,26 @@ quotient, 2^30, as an overflow and the handler widens it, so `%/` and
 user in the tree; bignum.lisp is compiled only, so any of them is a local
 change when one appears.
 
-**No memory copy or fill primitive. WONTFIX**, until measured. Five
-byte-at-a-time loops, not four. Two of them are amortised or bounded; the
-two that could matter are the console burst copy and the shell scroll. A
-`bytes-copy!` in core.lisp over word loads with byte ends is forty lines
-and needs no new syntax. *Trigger:* either of those two in a profile.
+**No memory copy or fill primitive. WONTFIX**, measured. Five
+byte-at-a-time loops, not four. A byte loop moves 4,096 bytes in 98
+thousand cycles, 24 a byte; the same with word loads and stores takes 31
+thousand, 7.5 a byte; `list->string` of that many characters is 149
+thousand. A console burst is one of those every 4 KiB of source, a shell
+scroll moves 1,920 bytes and is 6% of printing a screenful. Three
+milliseconds a burst is not a primitive's worth. A `bytes-copy!` in
+core.lisp over word loads with byte ends is forty lines when one is.
 
 **Exec has no timed wait. RESOLVED.** `sleep` and `wait-timeout`. Deadlines
 sit on one list, soonest first, and the timer interrupt, which fires every
 quantum anyway, signals whoever's has come on the fixed bit `sigf-timer`.
 `wait-timeout` answers the signals that arrived and 0 if the time passed
 first, and clears the timer bit around itself so an old deadline cannot
-end a later wait. Resolution is a quantum, the scheduler's own.
+end a later wait. Resolution is a quantum, the scheduler's own. Time is the
+machine's: the ticks of that interrupt, which run at the same rate in idle
+jumps and under load and the same on every run; `now-ms` reads it. The
+timer chip's `millis` turned out to be the host's clock, which made a first
+version of this wait hundreds of machine seconds for one host second, and
+is now documented as the host's, for pacing to the host only.
 
 **`wait-ports` is not fair. RESOLVED** for fairness: the scan starts one
 port further along on each call, so a busy port cannot starve a quiet one.
@@ -96,13 +104,20 @@ window's refresh under a fresh task is a wb.lisp-only change.
 
 ## Performance risks
 
-**Marking is slow per pair. WONTFIX**, until measured. The diagnosis holds:
-the mark stack pointer is a Lisp global read and written through its
-symbol, and its store goes through the barrier-checked path. The cheapest
-route is not the one the item proposed: make `*mark-sp*` a machine global
-in the low memory map and read it with `%ld-fixnum`, one instruction each
-way, four edits, no restructuring. *Trigger:* marking in a profile of
-something that matters.
+**Marking is slow per pair. WONTFIX**, measured. Marking costs 187 cycles a
+pair marked, exactly the comment's figure, and sweeping 1.8 to 2.8 a pair.
+The diagnosis was wrong, though: an opcode profile of a run that is 91%
+marking puts 20.7% of it in frame loads and stores and 9.1% in literal
+loads of the globals and constants the loop names, and the symbol read and
+barrier store of `*mark-sp*` are a small part of that. Making it a machine
+global was tried and is a loss, 7.7% more cycles per collection, because a
+layout name compiles to the same two instructions as any global and the
+tagged load comes on top; caching the frontiers in locals is a loss of 4.6%
+for the same reason, a local in a non-leaf being a frame slot. The lever is
+register allocation, below. Where it stands: 64% of a synthetic cons churn,
+2.8% of a rebuild, and none of `(check)`, which runs no collection at all
+and is not a collector benchmark. The collector's report now splits its
+cycles by phase, since its "of N cycles" was elapsed time and misled.
 
 **The workbench waits for the blitter with interrupts off. RESOLVED**, as
 stale. wb.lisp has no critical section at all; the compositor copies from
@@ -112,36 +127,56 @@ on the way into an image, when nothing else runs. The spin, when it
 happens, is in `blit-wait-descriptor`, not `blit-sleep`. The measurement
 predates the collector that does not stop the world.
 
-What the same instrument finds now is the collector's pacing. A fresh
-task's first cons is handed a 256 KiB run and charged the whole of it as
-collector debt, so with a cycle in progress that first cons runs about 3.8
-million cycles of marking before the task continues; inside a critical
-section the cap of two slices is applied per allocation, not per section,
-so a task that conses for an error message there holds interrupts off for
-one to two million instructions. The suites were made to wait for
-conditions rather than fixed times because of it. **WONTFIX** for now: the
-machine is correct and the cost is bounded. *Trigger:* a task's start
-being visibly slow, or the pause meter mattering.
+**A run is charged to the collector when it is handed out. RESOLVED.** What
+the same instrument found instead was the collector's pacing: every refill
+charged a whole 256 KiB chunk of collector debt, whatever the run's size,
+and to whichever task asked, so a fresh task's first cons during a cycle
+ran 3.8 million cycles of marking before it continued, a task erroring
+inside a critical section held interrupts off for a million instructions,
+and a sweep hole of a few pairs cost as much as a chunk; a rebuild's second
+cycle charged 605 refills, most of them holes, at a chunk each. A run is
+now charged when it has been used up, for its own size, to the task that
+was handed it: 42 thousand cycles for that first cons, and the erroring
+task ends within a vertical blank instead of six.
 
-**Cons space fragments between images. WONTFIX**, until measured. The
-failure is hypothetical. Before building sliced compaction, try the
-one-constant experiment: `gap-min` is 512 bytes and the run machinery has
-no minimum of its own, so lowering it recovers most of the loss with no
-mechanism. Note that a smaller run means more refills, and each refill is
-charged a whole chunk of collector debt; the two should be changed
-together.
+**The scheduler gave the idle task every other quantum. RESOLVED.** Found
+while measuring: `switch-tasks` took the head of the ready list without
+comparing priorities, and the idle task is always on it, so a busy task at
+any priority was swapped out every tick for a quantum of `wfi`. A hundred
+thousand calls of an empty function cost 4.74 million cycles with 19 idle
+switches; they cost 2.32 million with none now. A task that can still run
+keeps the processor against anything less urgent.
 
-**Every character in a shell is a round trip. WONTFIX**, until it hurts.
-The batching the item asks for is already in console.lisp for the serial
-stream and is the template. *Trigger:* printing a screenful in a shell
-being visibly slow.
+**Cons space fragments between images. WONTFIX**, measured. The sweep was
+instrumented to total the holes it leaves below `gap-min`: one map word of
+32 pairs here and there, 0.01% of the bytes freed in a churn, 0.6 to 1% in
+a rebuild. Lowering `gap-min` to 64 recovers them all and changes nothing
+else. The loss that is real is inside live map words, dead pairs beside
+live ones that no hole can hand out: 5 to 7% of a rebuild's freed bytes,
+and 47% in a workload built to scatter survivors. Only the compactor
+recovers that, and the compactor runs on the way into an image. `gap-min`
+stays at 512; the instrumentation stays in the verbose report.
+
+**Every character in a shell is a round trip. RESOLVED.** Measured first:
+15,100 instructions a character, 28 million a screenful of 80 by 24, half
+of it the glyph loop at 76 instructions a pixel, a third the per-cell blit,
+damage under the mutex and the compositor's share, the rest scrolling.
+Two changes: a shell hands over a run of cells on a row, when the row
+changes, when it scrolls, or when it turns to its keyboard, instead of a
+cell at a time; and a cell that lies inside the clip is drawn foreground
+and background in one pass of six stores a row, with no fill blit. Eight
+screenfuls: 226 million instructions before, 72 million after.
 
 **Console output is a request per line and a check per character.
-WONTFIX.** The cost is higher than stated, since `interrupts-on?` is two
-CSR operations, but the check is the correctness of the raw path: a print
-from a handler or a critical section must go out raw and in order. Hoisting
-it to once per line is safe, since nothing in the character loop changes
-the answer, and is the fix when it is measured.
+WONTFIX**, measured. `can-ask?` is 159 cycles a call, most of it the two
+device-ownership lookups in `running?` and the two CSR operations of
+`interrupts-on?`; the character path is 198 cycles and the check is two
+thirds of it; a line's request is 13,200 cycles, not 9,700; a character
+costs 375 instructions all in, a 2,000-character print 0.75 million. The
+check is the correctness of the raw path, a print from a handler or a
+critical section going out raw and in order, and hoisting it to once a
+line, which is safe, would save a third of a line. Not worth a subtlety
+at these numbers.
 
 **`bm-plot` and `bm-point` wait for the blitter per pixel. RESOLVED**, as
 not a risk. The fast path is documented beside them: `blit-sync` once, then
@@ -155,61 +190,86 @@ Filling outside needs the collector to know an object is under
 construction, since a slice can see it. *Trigger:* a large vector made at
 run time.
 
-**Printing a symbol hashes its name. WONTFIX**, until measured. The fast
-path is an `eq?` on the symbol's package against the current one plus a
-shadow check, which is the common case; the full question must still be
-asked when it is not, because it is exactly whether the reader reads the
-name back as this symbol.
+**Printing a symbol hashes its name. WONTFIX**, measured. Writing a symbol
+costs 1,350 cycles, of which `find-visible` is 880, two thirds; a string
+costs 550 and a fixnum 1,600, most of that `number->string`. A thousand
+symbols is 67 milliseconds of the machine's clock. The fast path, an `eq?`
+on the symbol's package against the current one plus a shadow check, would
+take 60% off; the full question must still be asked when it fails, because
+it is exactly whether the reader reads the name back as this symbol.
 
-**The obarray does not grow. WONTFIX.** 1,021 buckets against a few
-thousand symbols; growth is the walk snap.lisp already does to rebuild it,
-triggered on the count. *Trigger:* a session that interns tens of
-thousands.
+**The obarray does not grow. WONTFIX**, measured. 3,015 symbols in 1,021
+buckets: chains average 2.95, the longest is 9, 50 buckets are empty, and
+interning a new name costs 2,400 to 2,600 cycles. After 20,000 more the
+chains average 22.7, the longest is 41, and a new name costs 3,100 to
+5,000, a miss through every used package 20,600. A cost that grows by a
+factor of two to three at that size, with no cliff, does not need growth
+yet. It would be the walk snap.lisp already does to rebuild the table,
+triggered on the count.
 
 **Bignum arithmetic costs a trap per operation. WONTFIX**, as design. The
 trapping `+` is what makes a fixnum add one instruction, and fixnums are
 the overwhelming case. This is a warning to users and stays one.
 
-**Compositing allocates. WONTFIX.** The common case, damage inside one
-window, is one copy and no allocation, and was added deliberately. A
-pool-backed scratch region for the multi-window case is a fair amount of
-mechanism for the rare case. Measure how many damage rectangles fall
-through before building it.
+**Compositing allocates. RESOLVED**, in the part that was a mistake. Counted
+under the balls and eyes demos, the one-copy path was taken by 20% of
+damage rectangles with the drawing window in front and 1% with it behind.
+The cause in front: `present` damaged the window's footprint, which
+includes the shadow it throws, and a footprint is by construction never
+wholly inside the window, so the fast path could not apply to the very
+thing it was written for. A present now damages the window itself, since
+its shadow falls on what is behind and does not change with what is
+inside: 94% one-copy with the window in front, and a fifth fewer
+instructions for the same scene. Behind another window the long way round
+is the right way, and stays; the allocation there is 111 thousand
+instructions a call and not worth a scratch region.
 
-**`asm:literal` is linear. WONTFIX.** Build-time only, and quadratic only
-in the few very large functions. A cap on the scan with duplicates past it
-is two lines if it ever matters.
+**`asm:literal` is linear. WONTFIX**, measured. Over a whole library build
+it is called 14,937 times and makes 134,236 comparisons, nine a call; the
+largest function has 220 literals. Nothing to do.
 
 **On the host. WONTFIX.** Neither the unconditional scanout nor the
 `prof_on` test is measurable against dispatch, as the item says. The
 scanout is capped at 83 Hz and the flag is a perfectly predicted branch.
 
-**In the forge, the prelude files are read twice. WONTFIX.** They are read
-by two different readers into two different namespaces: the Rust reader
-knows no packages, `read.lisp` does, so the same text interns to different
-symbols on the two passes and the obvious cache is unsound. The large
-reader cost was already removed when sources went through a byte buffer.
+**In the forge, the prelude files are read twice. WONTFIX**, measured.
+Reading is 54% of a 3.1 second build, but not where the item put it: the
+Rust reader takes two milliseconds over its 655 forms, and the rest is
+`read.lisp` running interpreted, with interning and package lookup half of
+that. The two readings are by different readers into different
+namespaces, the Rust one knowing no packages, so the same text interns to
+different symbols and a cache of forms is unsound. The lever, if a build
+ever needs to be faster than three seconds, is the interpreted reader.
 
 ## Compiler
 
-**Register allocation across calls. WONTFIX.** It means an intermediate
-representation in a single-pass emitter that runs on the machine and must
-stay interpretable by the forge. The leaf optimisation already takes the
-easy two thirds. *Trigger:* `LM_FNPROF` showing spills where it matters.
+**Register allocation across calls. WONTFIX**, measured. Frame loads and
+stores are 8.1% of the instructions of the suite run, not a quarter to a
+third, with no spills at all; the collector's mark loop is the worst case
+at 20.7%, plus 9.1% in literal loads of the names it uses. It would mean
+an intermediate representation in a single-pass emitter that runs on the
+machine and must stay interpretable by the forge, for a fifth of the
+collector and a twelfth of everything else.
 
-**A leaf that allocates keeps a frame. WONTFIX**, for now. The fix the item
-names is right and small, adding `t0` to the allocator's live mask, but
-`t0` is also the closure register a leaf keeps, the refill stub is emitted
-at build time only, and `check-leaf` must learn that the stub call is not a
-call. Three small things that interact in the one piece of code that
-cannot be tested incrementally. *Trigger:* a measured leaf that allocates
-in a hot loop.
+**A leaf that allocates keeps a frame. WONTFIX**, measured. Of 2,828
+functions the library build compiles, 1,010 are leaves and 21 more would be
+but for allocating: `reverse`, `cons`, `revappend`, `string->list`,
+`make-list`, `iota`, the assembler's `label` and `literal`, and a dozen
+others, none of which appears in a profile of the suite run. The fix the
+item names is right and small, adding `t0` to the allocator's live mask,
+but `t0` is also the closure register a leaf keeps, the refill stub is
+emitted at build time only, and `check-leaf` must learn that the stub call
+is not a call: three things that interact in the one piece of code that
+cannot be tested incrementally, for 21 functions.
 
 **`%ld-half` and `%st-half!` are four instructions each. WONTFIX**, with the
 reason corrected. The blocker is not encoding space: custom-2 has nearly
 all of its funct7 space free, and custom-1's funct3 6 and 7 are the unused
 `ldxbi` and `stxbi`, exactly where a tagged half-word load and store would
-go. *Trigger:* the collector's run-skipping test in a profile.
+go. Measured: the pair sweep, where the test lives, is 1.5% to 11% of a
+collection depending on how much is dead, and a one-instruction load would
+take a tenth off the sweep, 0.2% to 1.3% of a collection. Not worth an
+opcode.
 
 **Compressed branches and jumps are not emitted. WONTFIX.** A fixpoint
 relaxation pass in a compiler that runs on the machine, to save 1.6% of the
@@ -221,11 +281,12 @@ collector's frame walker reads; laying it out upward is a handful of
 constants and the worst class of bug if one of them is wrong. If ever
 attempted, `rebuild --check` with `gc-verify` on is the gate.
 
-**Records cost about nine percent of code space. WONTFIX.** Understated:
-26 records, 173 fields, about four hundred emitted functions. But the
-definitions are load-bearing in the forge, where they are interpreted
-before any inline exists, so suppressing them needs the two-pass build to
-know which are only ever called. *Trigger:* code space mattering.
+**Records cost about nine percent of code space. WONTFIX**, measured and
+confirmed: 395 accessor, predicate and allocator functions hold 50.5 KiB of
+the image's 527 KiB of code, 9.4%. The definitions are load-bearing in the
+forge, where they are interpreted before any inline exists, so suppressing
+them needs the two-pass build to know which are only ever called. Code
+space is 16 MiB and 3% used.
 
 ## Instructions with no users
 

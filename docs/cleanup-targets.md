@@ -19,8 +19,10 @@ knows 130 `%` primitives and no plain ones, so the prelude and the three
 files the forge interprets have no choice. So the two vocabularies are the
 checked language and the raw one, and the `%` is the mark that says which.
 That mark is worth keeping, and worth enforcing: see memory-safety.md.
-*Trigger:* if a plain `(< i n)` in a test position ever shows in a profile,
-the fusable set can take the plain comparison names in about ten lines.
+Measured: the system's sources have no plain comparison in a test position
+at all, 230 `%<` against none, so there is nothing for a profile to show;
+if user code ever wants it, the fusable set can take the plain names in
+about ten lines.
 
 **`if` always spells its else. RESOLVED.** It never had to. `compile-if`
 and the interpreter both read a missing else as nil, and `when` and
@@ -119,7 +121,8 @@ fixed, vblank, blit, mutex and timer, and `sig-reserved` names them; every
 other bit from 0 to 29 is allocated.
 
 **Timing is missing. RESOLVED.** `sleep` and `wait-timeout`, on a deadline
-list the timer interrupt walks every quantum.
+list the timer interrupt walks every quantum, in the machine's own ticks;
+`now-ms` reads them. The chip's `millis` is the host's clock and says so.
 
 ## The chips and the workbench
 

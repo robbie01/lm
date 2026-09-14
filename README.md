@@ -475,9 +475,12 @@ inside `with-mutex`, has it taken away, and the next taker is told.
 
 **Time.** `sleep` waits for a number of milliseconds of the machine's clock,
 and `wait-timeout` is `wait` with a deadline, answering 0 if the time passed
-first. Deadlines sit on one list and the timer interrupt, which fires every
-quantum anyway, signals whoever's has come, so they are met within a quantum.
-A task that draws waits for the vertical blank instead.
+first. The clock is the count of timer interrupts, `now-ms`, which runs at
+the same rate whether the machine is busy or idling through a jump, and the
+same on every run; `millis` is the host's clock, for pacing to the host.
+Deadlines sit on one list and the timer interrupt signals whoever's has come,
+so they are met within a quantum. A task that draws waits for the vertical
+blank instead.
 
 **Idle.** The idle task is always ready and runs `wfi`, so a machine where
 every task is waiting costs nothing.
