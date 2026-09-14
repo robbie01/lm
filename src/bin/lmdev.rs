@@ -41,7 +41,18 @@ enum Cmd {
     /// Name resolution: what a package can see, and what pkg:name reaches
     Readers,
 
-    /// Run every suite
+    /// The machine's own suites: boot an image headless and type (check)
+    ///
+    /// Every check is counted on the machine, which halts with exit code 0
+    /// if all held and 1 if not. A scratch disk is attached so that the
+    /// disk driver's suite runs too.
+    Check {
+        /// Image to boot
+        #[arg(default_value = "kick.img")]
+        image: String,
+    },
+
+    /// Run every suite, and the machine's own if kick.img is there
     All,
 
     /// Measure the interpreter
@@ -121,12 +132,19 @@ fn main() -> std::process::ExitCode {
         Cmd::Asm => lm::check::asm::run(),
         Cmd::Compiler { verbose } => lm::check::compiler::run_all(verbose),
         Cmd::Readers => lm::check::readers::run(),
+        Cmd::Check { image } => run_check(&image),
         Cmd::All => {
             let a = lm::check::cpu::run_all();
             let b = lm::check::asm::run();
             let c = lm::check::compiler::run_all(false);
             let d = lm::check::readers::run();
-            a && b && c && d
+            let e = if std::path::Path::new("kick.img").exists() {
+                run_check("kick.img")
+            } else {
+                println!("check: no kick.img here, skipped (lmforge build makes one)");
+                true
+            };
+            a && b && c && d && e
         }
         Cmd::Bench => {
             lm::check::cpu::bench();
@@ -153,4 +171,21 @@ fn main() -> std::process::ExitCode {
     } else {
         std::process::ExitCode::FAILURE
     }
+}
+
+/// Boot `image` headless with a scratch disk attached and type `(check)`,
+/// which runs every suite on the machine and halts with the verdict as the
+/// exit code.
+fn run_check(image: &str) -> bool {
+    let disk = std::path::Path::new("target").join("check.disk");
+    let _ = std::fs::create_dir_all("target");
+    let o = lm::boot::Options {
+        image: image.to_string(),
+        window: false,
+        script: Some("(check)\n".to_string()),
+        interactive: false,
+        disk: Some(disk.to_string_lossy().into_owned()),
+        ..Default::default()
+    };
+    lm::boot::boot(&o) == 0
 }

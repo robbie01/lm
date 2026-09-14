@@ -209,6 +209,7 @@
   (emit-str "  (balls 6)              six tasks, one window\n")
   (emit-str "  (mandelbrot)           fixed point, straight to the bitmap\n")
   (emit-str "  (life 200)             life, with the blitter for the copy\n")
+  (emit-str "  (check)                every suite, counted; the machine stops with the verdict\n")
   (emit-str "  (numbers) (words) (nesting) (talking) (locking) (blitting)\n")
   (emit-str "  (devices) (drivers)    check one part of the machine each\n")
   (emit-str "  (save-image)           write this machine to the disk\n")
@@ -220,11 +221,27 @@
 ;; that outgrows thirty-one bits becomes a bignum, a bignum that shrinks back
 ;; becomes a fixnum again, and nothing in between has to be asked which it is
 ;; holding, so the cases here are the boundaries.
+(define *check-count* 0)
+(define *check-failures* 0)
+
 (define (num-check name got want)
+  (set! *check-count* (+ *check-count* 1))
   (if (equal? got want)
       nil
-      (begin (princ "FAIL ") (princ name) (princ ": got ") (princ got)
+      (begin (set! *check-failures* (+ *check-failures* 1))
+             (princ "FAIL ") (princ name) (princ ": got ") (princ got)
              (princ ", wanted ") (princ want) (newline))))
+
+;; Every suite, counted, and then the machine stops: exit code 0 if every
+;; check held and 1 if not. `lmdev check` boots an image and types this.
+(define (check)
+  (set! *check-count* 0)
+  (set! *check-failures* 0)
+  (numbers) (words) (nesting) (talking) (locking) (blitting) (devices)
+  (drivers)
+  (princ *check-count*) (princ " checks, ")
+  (princ *check-failures*) (princ " failed") (newline)
+  (%halt (if (= *check-failures* 0) exit-ok exit-error)))
 
 (define (fact n) (if (= n 0) 1 (* n (fact (- n 1)))))
 
@@ -386,7 +403,19 @@
 
     ;; An interrupt server does not draw: this is a task.
     (num-check 'blitter-is-task-context
-               (if hw::*in-interrupt* 'in-interrupt 'task) 'task))
+               (if hw::*in-interrupt* 'in-interrupt 'task) 'task)
+
+    ;; Waiting for a moment. A sleep takes at least what it asked for; a
+    ;; wait that times out answers 0; a signal that comes first answers
+    ;; itself, and the deadline it beat does not wake the next wait.
+    (let ((t0 (millis)))
+      (sleep 30)
+      (num-check 'slept-long-enough (>= (- (millis) t0) 30) t))
+    (num-check 'timed-out (wait-timeout 65536 20) 0)
+    (let ((me (this-task)))
+      (add-task "knocker" 0 (lambda () (sleep 10) (signal me 65536)))
+      (num-check 'signal-beat-the-clock (wait-timeout 65536 1000) 65536)
+      (num-check 'old-deadline-forgotten (wait-timeout 65536 40) 0)))
   (princ "talking: done (nothing above = all correct)")
   (newline))
 
@@ -398,13 +427,36 @@
 ;; What should be an error is tried in a task of its own, which ends when the
 ;; error comes. Checking that the task ended, and what it left behind, is how
 ;; this can watch an error happen and carry on.
-(define (lk-ended? task) (%= (exec::tc-state task) exec::ts-removed))
+;;
+;; Nothing here waits a fixed time. Every wait is for the condition about to
+;; be checked, bounded so that a task which never gets there fails its check
+;; instead of hanging the test. How long a task takes to get anywhere depends
+;; on what else the machine is doing: with a collection in progress, a fresh
+;; task's first cons pays the collector for its whole run.
+(define lk-patience 1200)   ; vblanks: twenty seconds of the machine's clock
 
-(define (lk-settle) (wait-vblank) (wait-vblank) (wait-vblank))
+;; Waits until `pred` holds, or patience runs out. Answers what `pred` does.
+(define (lk-until pred)
+  (let ((n 0))
+    (while (if (pred) nil (< n lk-patience))
+      (wait-vblank)
+      (set! n (+ n 1)))
+    (pred)))
+
+(define (lk-ended? task) (%= (exec::tc-state task) exec::ts-removed))
+(define (lk-asleep? task) (%= (exec::tc-state task) exec::ts-wait))
+(define (lk-queued-on? task m) (eq? (exec::tc-blocked-on task) m))
+
+(define (lk-wait-ended task) (lk-until (lambda () (lk-ended? task))))
+(define (lk-wait-queued task m) (lk-until (lambda () (lk-queued-on? task m))))
+
+;; Asleep in `wait`, holding `m`.
+(define (lk-wait-holding task m)
+  (lk-until (lambda () (if (lk-asleep? task) (eq? (mutex-owner m) task) nil))))
 
 (define (lk-try name thunk)
   (let ((task (add-task name 0 thunk)))
-    (lk-settle)
+    (lk-wait-ended task)
     task))
 
 (define (locking)
@@ -439,12 +491,12 @@
 
     ;; Handed over directly: the waiter wakes holding it.
     (mutex-lock m)
-    (let ((got nil))
-      (add-task "waiter" 0 (lambda () (mutex-lock m) (set! got t) (mutex-unlock m)))
-      (lk-settle)
+    (let* ((got nil)
+           (waiter (add-task "waiter" 0 (lambda () (mutex-lock m) (set! got t) (mutex-unlock m)))))
+      (num-check 'waiter-queues (lk-wait-queued waiter m) t)
       (num-check 'waiter-waits got nil)
       (mutex-unlock m)
-      (lk-settle)
+      (num-check 'waiter-ends (lk-wait-ended waiter) t)
       (num-check 'waiter-got-it got t)
       (num-check 'waiter-let-go (mutex-owner m) nil))
 
@@ -468,13 +520,13 @@
     ;; Given away on purpose.
     (let ((h (make-mutex "gift"))
           (taker (add-task "taker" 0 (lambda () (wait 65536)))))
-      (lk-settle)
+      (num-check 'taker-sleeps (lk-until (lambda () (lk-asleep? taker))) t)
       (mutex-lock h)
       (mutex-hand-over h taker)
       (num-check 'handed-over (eq? (mutex-owner h) taker) t)
       (num-check 'gone-from-me (eq? (mutex-owner h) me) nil)
       (signal taker 65536)
-      (lk-settle)
+      (num-check 'taker-ends (lk-wait-ended taker) t)
       (num-check 'taker-ended-holding-it (mutex-lock h) 'abandoned)
       (mutex-unlock h))
 
@@ -490,27 +542,26 @@
            (two (add-task "two" 0 (lambda ()
                                     (mutex-lock m2) (wait 65536)
                                     (mutex-lock m1)))))
-      (lk-settle)
+      (num-check 'one-holds-m1 (lk-wait-holding one m1) t)
+      (num-check 'two-holds-m2 (lk-wait-holding two m2) t)
       (signal one 65536)
-      (lk-settle)
+      (num-check 'one-queues-on-m2 (lk-wait-queued one m2) t)
       (signal two 65536)
-      (lk-settle)
-      (num-check 'circle-refused (lk-ended? two) t)
-      (num-check 'circle-broken (lk-ended? one) t)
+      (num-check 'circle-refused (lk-wait-ended two) t)
+      (num-check 'circle-broken (lk-wait-ended one) t)
       (num-check 'm1-free (mutex-owner m1) nil))
 
     ;; A waiter lends its priority to the owner, and the owner gives it back.
     (let* ((p (make-mutex "pri"))
            (low (add-task "low" 0 (lambda () (mutex-lock p) (wait 65536) (mutex-unlock p))))
            (high nil))
-      (lk-settle)
+      (num-check 'low-holds-it (lk-wait-holding low p) t)
       (set! high (add-task "high" 5 (lambda () (mutex-lock p) (mutex-unlock p))))
-      (lk-settle)
+      (num-check 'high-queues (lk-wait-queued high p) t)
       (num-check 'lent (exec::node-pri low) 5)
       (signal low 65536)
-      (lk-settle)
-      (num-check 'given-back (exec::node-pri low) 0)
-      (num-check 'high-got-it (lk-ended? high) t)))
+      (num-check 'high-got-it (lk-wait-ended high) t)
+      (num-check 'given-back (exec::node-pri low) 0)))
   (princ "locking: done (nothing above = all correct)")
   (newline))
 
