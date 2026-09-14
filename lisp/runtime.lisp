@@ -7,6 +7,7 @@
 ;;; would be a circle.
 
 (in-package lm)
+(unsafe-file)                 ; the object system and the allocator: raw throughout
 
 ;; ---------------------------------------------------------------- allocation
 (define (object-payload type len)
@@ -172,6 +173,17 @@
   (%set-slot! s sym-flags
               (%logior (%slot s sym-flags) sym-exported))
   s)
+
+;; A name the compiler refuses outside an `unsafe` form or an unsafe file: a
+;; raw memory operation, or a function that hands out raw memory. The mark
+;; is a bit in the symbol, so any package can mark its own.
+(define (symbol-unsafe? s)
+  (if (%= 0 (%logand (%slot s sym-flags) sym-unsafe)) nil t))
+
+(define (unsafe-names names)
+  (dolist (s names)
+    (%set-slot! s sym-flags (%logior (%slot s sym-flags) sym-unsafe)))
+  nil)
 
 ;; ---------------------------------------------------------------- symbols
 ;; While a fresh image is being compiled, every symbol a lookup answers is

@@ -41,6 +41,7 @@
 ;;; inside a run and only crossing to the next one costs a call.
 
 (in-package gc)
+(unsafe-file)
 
 ;; ---------------------------------------------------------------- geometry
 (define gc-heap-lo cons-base)
@@ -1749,3 +1750,6 @@
   (without-interrupts (if (%= *phase* phase-idle) (start-cycle) nil))
   (while (busy?) (step))
   (%ld-fixnum lg-cons-free-n))
+
+;; A root walker takes a raw address, and code space is handed out raw.
+(unsafe-names (quote (slot alloc-code)))

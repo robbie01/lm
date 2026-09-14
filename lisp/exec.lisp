@@ -16,6 +16,7 @@
 ;;; so switching tasks is pointing mscratch at a different task's context.
 
 (in-package exec)
+(unsafe-file)
 
 ;; ---------------------------------------------------------------- Node
 ;; Everything on one of Exec's lists starts with the same four slots. A task

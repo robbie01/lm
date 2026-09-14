@@ -73,9 +73,10 @@
 ;; holding. It cannot be collected while the transfer runs, because the
 ;; caller is blocked with the request in hand; and objects never move.
 (define (serve-bytes cmd body)
+  (unsafe
   (let ((block (cadr body)) (n (caddr body)) (bytes (cadddr body)))
     (check-buffer n bytes)
-    (transfer-sleeping cmd (%addr-of bytes) block n)))
+    (transfer-sleeping cmd (%addr-of bytes) block n))))
 
 ;; A driver is running exactly when it holds the disk. That covers a driver
 ;; that ended, whose device came back when it did, and a resumed image, whose
@@ -116,16 +117,18 @@
   (if *driver* (server-port *driver*) (error "disk: there is no driver")))
 
 (define (read-blocks block n bytes)
+  (unsafe
   (check-buffer n bytes)
   (if (device-usable? *disk*)
       (transfer disk-cmd-read (%addr-of bytes) block n)
-      (request (driver-port) (list 'read block n bytes))))
+      (request (driver-port) (list 'read block n bytes)))))
 
 (define (write-blocks block n bytes)
+  (unsafe
   (check-buffer n bytes)
   (if (device-usable? *disk*)
       (transfer disk-cmd-write (%addr-of bytes) block n)
-      (request (driver-port) (list 'write block n bytes))))
+      (request (driver-port) (list 'write block n bytes)))))
 
 (define (flush)
   (if (device-usable? *disk*)

@@ -8,6 +8,12 @@
 
 (in-package lm)
 
+;; `(unsafe-file)` at the top of a file, after its `in-package`, tells the
+;; compiler that everything to the next `in-package` may say raw things
+;; without an `unsafe` form around each. It does nothing when run: the
+;; compiler takes it as a directive and compiles nothing for it.
+(define (unsafe-file) nil)
+
 ;; ---------------------------------------------------------------- identity
 (define (not x) (if x nil t))
 (define (eq? a b) (%eq? a b))
@@ -517,12 +523,13 @@
 ;; numeric equality has to be asked for them; fixnums are always `eq?`,
 ;; because every result that fits is demoted to one.
 (define (eqv? a b)
+  (unsafe
   (cond
    ((%eq? a b) t)
    ((%bignum? a) (if (%bignum? b) (%= a b) nil))
    ((%float? a)
     (if (%float? b) (%= (%ld-fixnum (%addr-of a)) (%ld-fixnum (%addr-of b))) nil))
-   (else nil)))
+   (else nil))))
 
 (define (equal? a b)
   (if (%eq? a b)

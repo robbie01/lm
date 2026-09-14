@@ -1,6 +1,6 @@
 ;;; macros.lisp - the rest of the language.
 ;;;
-;;; The interpreter and the compiler know nine special forms between them.
+;;; The interpreter and the compiler know ten special forms between them.
 ;;; Everything else a program writes with is a macro here, so there is one
 ;;; definition of what `cond` means and the two evaluators cannot disagree.
 ;;;
@@ -283,7 +283,7 @@
 (define (shape-fields s) (cdddr s))
 
 ;; The type of a record, or nil for anything that is not one.
-(define (record-tag r) (if (%record? r) (%slot r 0) nil))
+(define (record-tag r) (if (%record? r) (%record-ref r 0) nil))
 
 ;; `open` and `include` are read in whichever package the declaration is in,
 ;; so they are matched by name rather than made into exported symbols.
@@ -355,7 +355,7 @@
       ;; A fresh record is zeroed, and zero reads as nil, so only the fields
       ;; that start as something else are written.
       (dolist (v inits)
-        (if v (set! body (append body (list (list '%set-slot! 'r k v)))) nil)
+        (if v (set! body (append body (list (list '%record-set! 'r k v)))) nil)
         (set! k (%+ k 1)))
       (set! out
             (list
@@ -363,7 +363,7 @@
              (list 'define (list (intern-in pkg (string-append (symbol-name type) "?"))
                                  'x)
                    (list 'if (list '%record? 'x)
-                         (list '%eq? (list '%slot 'x 0) (list 'quote type))
+                         (list '%eq? (list '%record-ref 'x 0) (list 'quote type))
                          nil))
              (list 'define (list (intern-in pkg (string-append prefix "alloc")))
                    (append (list 'let (list (list 'r (list 'make-record n
@@ -513,7 +513,8 @@
 ;; and `abort-to-repl` re-establishes the interrupt state.
 (defmacro without-interrupts body
   (let ((saved (gensym)) (result (gensym)))
-    `(let ((,saved (%disable)))
-       (let ((,result (begin ,@body)))
-         (%restore-interrupts ,saved)
-         ,result))))
+    `(unsafe
+       (let ((,saved (%disable)))
+         (let ((,result (begin ,@body)))
+           (%restore-interrupts ,saved)
+           ,result)))))

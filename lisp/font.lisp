@@ -188,6 +188,7 @@
 ;; blitter per glyph, after the background fill has been issued, and then
 ;; plain stores. Clipped to the rastport's region and to the bitmap.
 (define (glyph-rows i ox py ink fg bmp x0 y0 x1 y1)
+  (unsafe
   (let ((row 0))
     (while (%< row font-height)
       (let ((gy (%+ py row)))
@@ -203,7 +204,7 @@
                 (set! col (%+ col 1))))
             nil))
       (set! row (%+ row 1)))
-    nil))
+    nil)))
 
 ;; `bg` is a colour to fill the cell with first, or nil to leave what is
 ;; there, which is what drawing over pinstripes needs. Answers the advance.

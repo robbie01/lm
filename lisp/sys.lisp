@@ -2,6 +2,7 @@
 ;;; and what the machine does when it wakes up.
 
 (in-package sys)
+(unsafe-file)
 
 ;; ---------------------------------------------------------------- banner
 (define system-name "LM")

@@ -102,6 +102,7 @@
 (define *life-h* 0)
 
 (define (life-seed density)
+  (unsafe
   (let ((w (win-inner-w *life-win*)) (h (win-inner-h *life-win*)))
     (set! *life-w* w)
     (set! *life-h* h)
@@ -116,12 +117,13 @@
                 nil)
             (set! x (%+ x 1))))
         (set! y (%+ y 1)))))
-  'seeded)
+  'seeded))
 
 ;; Direct loads and stores into the bitmap, so the blitter's work on it has
 ;; to have landed first: the window was filled by a blit, and a blit is not
 ;; done when it returns.
 (define (life-step)
+  (unsafe
   (blit-sync)
   (let ((y 1)
         (w *life-w*)
@@ -155,9 +157,10 @@
           (set! x (%+ x 1))))
       (set! y (%+ y 1))))
   (present *life-win*)
-  nil)
+  nil))
 
-(define (live? p) (if (%= (peek8 p) black) 1 0))
+(define (live? p)
+  (unsafe (if (%= (peek8 p) black) 1 0)))
 
 (define (life . opts)
   (let ((n (if (%cons? opts) (%car opts) 60)))
@@ -172,6 +175,7 @@
 ;; ---------------------------------------------------------------- self-test
 ;; Compile a function on the machine, time it, and run it.
 (define (selftest)
+  (unsafe
   (emit-str "compiling a function on the machine...\n")
   (let ((t0 (%cycles)))
     (eval '(define (ackermann m n)
@@ -190,7 +194,7 @@
   (emit-str "  code space now ")
   (emit-str (number->string (%lsh (%- (%ld-fixnum lg-code-ptr) code-base) -10)))
   (emit-str "k\n")
-  'ok)
+  'ok))
 
 (define (help)
   (emit-str "\n")
@@ -235,13 +239,14 @@
 ;; Every suite, counted, and then the machine stops: exit code 0 if every
 ;; check held and 1 if not. `lmdev check` boots an image and types this.
 (define (check)
+  (unsafe
   (set! *check-count* 0)
   (set! *check-failures* 0)
   (numbers) (words) (nesting) (talking) (locking) (blitting) (devices)
   (drivers)
   (princ *check-count*) (princ " checks, ")
   (princ *check-failures*) (princ " failed") (newline)
-  (%halt (if (= *check-failures* 0) exit-ok exit-error)))
+  (%halt (if (= *check-failures* 0) exit-ok exit-error))))
 
 (define (fact n) (if (= n 0) 1 (* n (fact (- n 1)))))
 
@@ -289,6 +294,7 @@
 ;; the same word signed, and `poke` takes either and stores the low
 ;; thirty-two bits, so a word read one way goes back unchanged.
 (define (words)
+  (unsafe
   (let ((p (alloc-pool 32)))
     ;; a word with its top bit set, built out of halves so nothing has to
     ;; represent it on the way in
@@ -315,7 +321,7 @@
     (num-check 'raw-load (%ld-fixnum p) 12345)
     (free-pool p))
   (princ "words: done (nothing above = all correct)")
-  (newline))
+  (newline)))
 
 ;; ---------------------------------------------------------------- nesting
 ;; A trap taken while the trap handler is already running. The server below
@@ -327,6 +333,7 @@
 (define *nest-int* nil)
 
 (define (nesting . opts)
+  (unsafe
   (let ((n (if (%cons? opts) (%car opts) 300)))
     (set! *nest-hits* 0)
     (set! *nest-last* 0)
@@ -346,7 +353,7 @@
     (num-check 'depth-unwound (peek lg-trapdepth) 0)
     (princ "nesting: ") (princ *nest-hits*)
     (princ " traps taken inside the trap handler, all of them survived")
-    (newline)))
+    (newline))))
 
 ;; ---------------------------------------------------------------- talking
 ;; `(talking)` exercises the way tasks reach anything they do not own: by
@@ -571,6 +578,7 @@
 ;; is what every drawing task does and what the collector does to clear its
 ;; maps.
 (define (blitting)
+  (unsafe
   (let* ((a (alloc-bitmap 256 256))
          (b (alloc-bitmap 256 256))
          (pa (%addr-of (bm-pixels a)))
@@ -626,7 +634,7 @@
           (set! v (%- v 1)))
         (num-check 'twenty-through-a-ring-of-eight ok t))))
   (princ "blitting: done (nothing above = all correct)")
-  (newline))
+  (newline)))
 
 ;; ---------------------------------------------------------------- devices
 ;; `(devices)` checks device ownership. A device is a value: holding it is
@@ -691,6 +699,7 @@
     same))
 
 (define (drivers)
+  (unsafe
   (num-check 'disk-driver-running (disk:running?) t)
   (num-check 'disk-held-by-its-driver
              (%eq? (device-owner *disk*) (server-task disk:*driver*)) t)
@@ -794,4 +803,4 @@
                (length (list-nodes (exec::int-vector int-disk))) 1)
     (num-check 'and-it-answers (number? (disk:size)) t))
   (princ "drivers: done (nothing above = all correct)")
-  (newline))
+  (newline)))

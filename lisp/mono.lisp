@@ -187,6 +187,7 @@
 ;; The whole cell, foreground and background in one pass and no fill blit:
 ;; six stores a row, which is what a shell printing a screenful needs.
 (define (mono-cell-draw ch px py fg bg bmp)
+  (unsafe
   (let* ((i (%- (%char->int ch) mono-first))
          (font *mono*)
          (base (%* i mono-cell))
@@ -204,9 +205,10 @@
         (%st-byte! (%+ addr 5) (if (%= 0 (%logand bits 1)) bg fg)))
       (set! addr (%+ addr pitch))
       (set! row (%+ row 1)))
-    nil))
+    nil)))
 
 (define (mono-rows ch px py fg bmp x0 y0 x1 y1)
+  (unsafe
   (let ((row 0))
     (while (%< row mono-cell)
       (let ((gy (%+ py row)))
@@ -222,4 +224,4 @@
                 (set! col (%+ col 1))))
             nil))
       (set! row (%+ row 1)))
-    nil))
+    nil)))

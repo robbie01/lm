@@ -98,6 +98,13 @@ fn cases() -> Vec<Case> {
         Case("(%ash 1 10)", "1024"),
         Case("(%ash -16 -2)", "-4"),
         Case("(%lsh 256 -4)", "16"),
+        // ---- the raw vocabulary needs an unsafe form; the checked one checks ----
+        Case("(unsafe (%ld-word 0))", "nil"),
+        Case("(%ld-word 0)", "COMPILE ERROR: unsafe"),
+        Case("(define (f) peek8) (f)", "COMPILE ERROR: unsafe"),
+        Case("(vector-length 5)", "TRAP: wrong type: 0xb"),
+        Case("(%symbol-value 5)", "TRAP: wrong type: 0xb"),
+        Case("(without-interrupts 7)", "7"),
         // Constants at the edge of the fixnum range: the tagged form of these
         // does not fit in a fixnum, so the assembler has to build it without
         // ever forming it.
@@ -520,7 +527,10 @@ pub fn run_all(verbose: bool) -> bool {
         // A trap whose value is a heap address cannot be spelled out, since
         // the address depends on everything compiled before it. Matching the
         // prefix checks which trap fired.
-        if got == want || (want.starts_with("TRAP:") && got.starts_with(want)) {
+        if got == want
+            || (want.starts_with("TRAP:") && got.starts_with(want))
+            || (want.starts_with("COMPILE ERROR:") && got.starts_with(want))
+        {
             pass += 1;
         } else {
             fail += 1;

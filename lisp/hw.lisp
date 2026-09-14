@@ -7,6 +7,7 @@
 ;;; `dev-reg` is the only way to turn the two into an address.
 
 (in-package hw)
+(unsafe-file)
 
 (define (dev-addr dev reg) (%+ mmio-base (%+ (%lsh dev 12) reg)))
 
@@ -909,3 +910,7 @@
       (set! n (%+ n (pool-size p)))
       (set! p (pool-next p)))
     n))
+
+;; What hands out raw memory or writes it: needs an `unsafe` around the call.
+(unsafe-names (quote (peek poke peek8 poke8 peek-signed alloc-pool free-pool
+                      dev-reg bm-addr bm-at blit-descriptor blit-go)))

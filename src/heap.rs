@@ -127,6 +127,9 @@ pub const SYM_PACKAGE: u32 = 5;
 /// and reads; bit 1 says the package it belongs to has made it public.
 pub const SYM_MACRO: i32 = 1;
 pub const SYM_EXPORTED: i32 = 2;
+/// Bit 2 says the name is a raw operation or a function that hands out raw
+/// memory: the compiler refuses it outside an `unsafe` form or file.
+pub const SYM_UNSAFE: i32 = 4;
 
 /// A package: a name, and the list of packages whose exports it inherits.
 /// What a package holds is not stored here: the obarray is keyed by package

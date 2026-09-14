@@ -6,9 +6,11 @@
 //! builds is already in the form the machine expects: there is no separate
 //! "host object" world and no conversion step.
 //!
-//! There are nine special forms. Everything else (let*, cond, case, and, or,
-//! when, unless, do, dolist, defun, quasiquote) is a macro written in Lisp,
-//! so the interpreter and the compiler cannot disagree about the language.
+//! There are ten special forms, the tenth being `unsafe`, which is `begin` to
+//! the interpreter and a permission to the compiler. Everything else (let*,
+//! cond, case, and, or, when, unless, do, dolist, defun, quasiquote) is a
+//! macro written in Lisp, so the interpreter and the compiler cannot disagree
+//! about the language.
 
 #![allow(dead_code)]
 
@@ -88,6 +90,7 @@ pub struct Syms {
     pub while_: V,
     pub let_: V,
     pub defmacro: V,
+    pub unsafe_: V,
     pub t: V,
     pub optional: V,
     pub rest: V,
@@ -237,6 +240,7 @@ impl<'a> Lisp<'a> {
             while_: h.intern("while"),
             let_: h.intern("let"),
             defmacro: h.intern("defmacro"),
+            unsafe_: h.intern("unsafe"),
             t: h.intern("t"),
             optional: h.intern("&optional"),
             rest: h.intern("&rest"),
@@ -414,7 +418,9 @@ impl<'a> Lisp<'a> {
                     let body = self.h.cdr(args);
                     break Ok(self.make_closure(params, body, &env, NIL));
                 }
-                if head == self.s.begin {
+                // `unsafe` is `begin` here: the compiler is what checks that a raw
+                // operation is inside one, and the interpreter runs the compiler.
+                if head == self.s.begin || head == self.s.unsafe_ {
                     if args == NIL {
                         break Ok(NIL);
                     }

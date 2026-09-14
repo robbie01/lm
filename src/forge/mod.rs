@@ -83,7 +83,7 @@ pub fn rebuild(from: &str, out: &str, verbose: bool, check: bool) -> i32 {
     // times, and then collects, which is the moment a rebuilt heap has to
     // survive.
     if check {
-        script.push_str(&format!("(gc)\n(+ 1 2)\n(%halt {})\n", crate::mach::EXIT_CHECK_PASSED));
+        script.push_str(&format!("(gc)\n(+ 1 2)\n(unsafe (%halt {}))\n", crate::mach::EXIT_CHECK_PASSED));
     } else {
         script.push_str("(snap:save-fresh)\n");
     }
@@ -229,6 +229,7 @@ pub fn write_layout() {
     def!("sym-package", SYM_PACKAGE);
     def!("sym-macro", SYM_MACRO as u32);
     def!("sym-exported", SYM_EXPORTED as u32);
+    def!("sym-unsafe", SYM_UNSAFE as u32);
     def!("pkg-tag", PKG_TAG);
     def!("pkg-name", PKG_NAME);
     def!("pkg-use", PKG_USE);

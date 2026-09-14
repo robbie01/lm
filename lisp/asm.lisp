@@ -571,13 +571,14 @@
 ;; Code space is never compacted, so the address a function is placed at is
 ;; good for the life of the image.
 (define (copy-out a addr)
+  (unsafe
   (let ((len (asm-len a))
         (buf (asm-buf a))
         (i 0))
     (while (%< i len)
       (%st-byte! (%+ addr i) (%bytes-ref buf i))
       (set! i (%+ i 1)))
-    addr))
+    addr)))
 
 ;; Place at an address reserved earlier. The reset stub is assembled last,
 ;; because it refers to everything else, but has to sit at the base of code
@@ -588,16 +589,18 @@
   (copy-out a addr))
 
 (define (place a)
+  (unsafe
   (resolve a)
   (let ((addr (alloc-code (asm-len a))))
     (set-asm-origin! a addr)
-    (copy-out a addr)))
+    (copy-out a addr))))
 
 ;; The assembled code as a heap object, which is how the collector sees both
 ;; the machine code and every literal it refers to. The literals list is
 ;; newest first, so it fills the vector from the far end. The name is what a
 ;; backtrace prints: every frame saves its caller's code object.
 (define (code-object a name)
+  (unsafe
   (let* ((n (asm-nlits a))
          (v (alloc-object t-code (%+ code-lits n)))
          (i (%- (%+ code-lits n) 1)))
@@ -610,4 +613,4 @@
     ;; Code space has no headers to walk, so the collector finds code through
     ;; the registry.
     (register-code v)
-    v))
+    v)))

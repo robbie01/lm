@@ -42,7 +42,7 @@
 (export '(
   alloc-object *object-allocator* *collector* *pacer*
   ;; the memory map and object layout, generated from the Rust side
-  clo-code clo-entry clo-free code-base code-lits code-name cons-base cons-limit dev-blit dev-disk dev-gfx dev-input dev-sys dev-timer dev-uart fast-base imm-unbound int-input int-soft int-vblank lg-bootlist lg-code-end lg-code-free lg-code-free-n lg-code-ptr lg-code-reg lg-code-reg-n lg-cons-free lg-cons-free-n lg-cons-ptr lg-cons-run lg-cons-run-end lg-errhandler lg-gccount lg-gchook lg-imgentry lg-obarray lg-obj-end lg-obj-free-n lg-obj-ptr lg-package lg-packages lg-pool-free lg-poolend lg-poolptr lg-refill lg-roots lg-boot-arg lg-raw-word lg-task-exit lg-trap-entry lg-stackbot lg-stacktop lg-startup lg-stub-hi lg-stub-lo lg-symcount lg-symlist lg-toplevel lg-trapdepth lg-traphook lg-trapsave lg-traptmp lg-traptmp2 mmio-base obj-base obj-bins obj-bin-count obj-limit pkg-name pkg-slots pkg-tag pkg-use pool-base pool-limit sym-exported sym-flags sym-function sym-macro sym-name sym-package sym-plist sym-slots sym-value t-bignum t-bytes t-closure t-code t-float t-free t-record t-string t-symbol t-vector
+  clo-code clo-entry clo-free code-base code-lits code-name cons-base cons-limit dev-blit dev-disk dev-gfx dev-input dev-sys dev-timer dev-uart fast-base imm-unbound int-input int-soft int-vblank lg-bootlist lg-code-end lg-code-free lg-code-free-n lg-code-ptr lg-code-reg lg-code-reg-n lg-cons-free lg-cons-free-n lg-cons-ptr lg-cons-run lg-cons-run-end lg-errhandler lg-gccount lg-gchook lg-imgentry lg-obarray lg-obj-end lg-obj-free-n lg-obj-ptr lg-package lg-packages lg-pool-free lg-poolend lg-poolptr lg-refill lg-roots lg-boot-arg lg-raw-word lg-task-exit lg-trap-entry lg-stackbot lg-stacktop lg-startup lg-stub-hi lg-stub-lo lg-symcount lg-symlist lg-toplevel lg-trapdepth lg-traphook lg-trapsave lg-traptmp lg-traptmp2 mmio-base obj-base obj-bins obj-bin-count obj-limit pkg-name pkg-slots pkg-tag pkg-use pool-base pool-limit sym-exported sym-flags sym-function sym-macro sym-name sym-package sym-plist sym-slots sym-unsafe sym-value t-bignum t-bytes t-closure t-code t-float t-free t-record t-string t-symbol t-vector
   ctx-words ctx-bytes
   reg-zero reg-ra reg-sp reg-gp reg-tp reg-t0 reg-t1 reg-t2
   reg-s0 reg-s1 reg-a0 reg-a1 reg-a2 reg-a3 reg-a4 reg-a5
@@ -97,6 +97,7 @@
   defrecord record-shape record-shape! record-forms record-field record-tag
   set-record-field! record-fault shape-prefix shape-open? shape-fields word?
   *record-shapes* *record-inline-hook*
+  unsafe unsafe-file unsafe-names symbol-unsafe?
   digit->int display display-to-string do dolist dotimes else emit-ch
   emit-code-label emit-name emit-str eq-hash eq? equal? eqv? error even?
   clamp isqrt

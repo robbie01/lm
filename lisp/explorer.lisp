@@ -15,13 +15,14 @@
 ;; ---------------------------------------------------------------- printing
 ;; What a row says about an object: its printed form, cut to fit.
 (define (brief x)
+  (unsafe
   (let ((s (cond ((code-object? x)
                   (string-append "#<code " (display-to-string (%slot x code-name)) ">"))
                  ((package? x) (string-append "#<package " (package-name x) ">"))
                  (else (write-to-string x)))))
     (if (%> (string-length s) label-max)
         (string-append (substring s 0 label-max) "...")
-        s)))
+        s))))
 
 (define (labelled name x) (string-append name ": " (brief x)))
 
@@ -62,11 +63,12 @@
 (define (symbol<? a b) (string<? (symbol-name a) (symbol-name b)))
 
 (define (package-symbols p)
+  (unsafe
   (let ((acc nil) (l (%ld-word lg-symlist)))
     (while (%cons? l)
       (if (%eq? (symbol-package (%car l)) p) (set! acc (%cons (%car l) acc)) nil)
       (set! l (%cdr l)))
-    (sort acc symbol<?)))
+    (sort acc symbol<?))))
 
 (define (package-parts p)
   (map (lambda (s) (list (symbol-name s) s t)) (package-symbols p)))
@@ -92,6 +94,7 @@
 
 ;; A record's fields by name when its shape is known, by index otherwise.
 (define (record-parts r)
+  (unsafe
   (let* ((shape (record-shape (record-tag r)))
          (fields (if shape (shape-fields shape) nil))
          (n (%obj-len r))
@@ -104,9 +107,10 @@
         (set! acc (%cons (part name (%slot r i)) acc)))
       (if (%cons? fields) (set! fields (%cdr fields)) nil)
       (set! i (%+ i 1)))
-    (reverse acc)))
+    (reverse acc))))
 
 (define (closure-parts c)
+  (unsafe
   (let ((acc (list (part "code" (%slot c clo-code))))
         (i clo-free)
         (n (%obj-len c)))
@@ -115,9 +119,10 @@
                              (%slot c i))
                        acc))
       (set! i (%+ i 1)))
-    (reverse acc)))
+    (reverse acc))))
 
 (define (code-parts c)
+  (unsafe
   (let ((acc (list (list (string-append "entry: " (number->hex (%ld-fixnum (%addr-of c)))) nil nil)
                    (list (string-append "bytes: " (number->string (%ld-fixnum (%+ (%addr-of c) 4)))) nil nil)
                    (part "name" (%slot c code-name))))
@@ -128,7 +133,7 @@
                              (%slot c i))
                        acc))
       (set! i (%+ i 1)))
-    (reverse acc)))
+    (reverse acc))))
 
 (define (parts x)
   (cond ((%cons? x) (list-parts x))

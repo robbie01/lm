@@ -23,6 +23,7 @@
 ;;; view of the same array, in the same order.
 
 (in-package lm)
+(unsafe-file)                 ; limbs are read and written as raw half-words throughout
 
 (define bn-hmask 65535)
 (define bn-hbits 16)

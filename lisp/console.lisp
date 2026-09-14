@@ -132,20 +132,22 @@
 ;; waiting is an error and a print is the last thing that should be one.
 ;; There, the line goes out raw.
 (define (can-ask?)
+  (unsafe
   (if (running?)
       (if (%= 0 (%ld-fixnum lg-trapdepth))
           (if *in-interrupt* nil (interrupts-on?))
           nil)
-      nil))
+      nil)))
 
 ;; Whether a read can. The same, except that a critical section is no bar
 ;; here: the driver owns the receive side, so while it is up there is no raw
 ;; way to wait for a key, and a read that has to wait inside a section is
 ;; refused by `wait` itself.
 (define (can-listen?)
+  (unsafe
   (if (running?)
       (if (%= 0 (%ld-fixnum lg-trapdepth)) (if *in-interrupt* nil t) nil)
-      nil))
+      nil)))
 
 (define (open)
   (let ((out nil) (n 0)          ; the line so far, newest first, and its length
@@ -201,4 +203,4 @@
          (%funcall listen)
          (if (if port (can-listen?) nil)
              (wait (port-signal port))
-             (%wait-for-interrupt)))))))
+             (unsafe (%wait-for-interrupt))))))))

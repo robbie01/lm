@@ -18,11 +18,13 @@
 (define *await* nil)
 
 ;; The raw serial line takes and gives characters, not their codes.
-(define (out-char c) (%st-fixnum! uart-data (%char->int c)))
+(define (out-char c)
+  (unsafe (%st-fixnum! uart-data (%char->int c))))
 
 (define (uart-char)
+  (unsafe
   (let ((v (%ld-fixnum uart-data)))
-    (if (%= v -1) nil (%int->char v))))
+    (if (%= v -1) nil (%int->char v)))))
 
 (define (emit-ch c)
   (if *out* (%funcall *out* c) (out-char c)))
@@ -33,7 +35,8 @@
 
 ;; Give the processor away until input might have arrived.
 (define (await-char)
-  (if *await* (%funcall *await*) (%wait-for-interrupt)))
+  (unsafe
+  (if *await* (%funcall *await*) (%wait-for-interrupt))))
 
 (defrecord stream put get await)
 

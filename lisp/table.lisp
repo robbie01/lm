@@ -18,11 +18,12 @@
 ;; else by address. Objects never move, so an address is stable; if that ever
 ;; changes, every table has to be rehashed after a collection.
 (define (eq-hash k)
+  (unsafe
   (cond ((%symbol? k) (symbol-index k))
         ((%fixnum? k) k)
         ((%char? k) (%char->int k))
         ((%null? k) 0)
-        (else (%lsh (%addr-of k) -3))))
+        (else (%lsh (%addr-of k) -3)))))
 
 (define (make-table . opts)
   (let* ((cap (if (%cons? opts) (%car opts) 8))

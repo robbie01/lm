@@ -403,7 +403,8 @@
 
 ;; Where a row of the interior starts, for the things that walk memory.
 (define (win-row win y)
-  (bm-at (window-bitmap win) (win-inner-x win) (%+ y (win-inner-y win))))
+  (unsafe
+  (bm-at (window-bitmap win) (win-inner-x win) (%+ y (win-inner-y win)))))
 
 ;; The window list is read by the compositor and written by whoever opens,
 ;; closes or raises a window. It is never changed in place: every change

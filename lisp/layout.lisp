@@ -94,6 +94,7 @@
 (define sym-package #x5)
 (define sym-macro #x1)
 (define sym-exported #x2)
+(define sym-unsafe #x4)
 (define pkg-tag #x0)
 (define pkg-name #x1)
 (define pkg-use #x2)

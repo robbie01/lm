@@ -9,6 +9,7 @@
 ;;; themselves, each rounded up to a whole number of blocks.
 
 (in-package snap)
+(unsafe-file)
 
 (define snap-magic 827542860)     ; "LMS1" as a little-endian word
 (define snap-header-blocks 1)

@@ -40,6 +40,7 @@
 ;;;   sys.lisp turns into a sentence naming it.
 
 (in-package compiler)
+(unsafe-file)                 ; it walks symbols, code and closures by slot
 
 (define frame-fixed 20)
 (define (local-off n) (%- (%- 0 frame-fixed) (%* 4 n)))
@@ -908,24 +909,27 @@
     (lambda (c)
       (i-stx (cx-asm c) $a2 $a0 $a1 t-vector)
       (i-mv (cx-asm c) $a0 $a2)))
+  ;; The header is read through `lobj`, which checks the tag for the same
+  ;; price as the plain load: a fixnum handed to `vector-length` is a typed
+  ;; error, not the word before some address.
   (definline '%vector-length 1
     (lambda (c)
       (let ((a (cx-asm c)))
-        (i-lw a $t2 $a0 -4)
+        (i-lobj a $t2 $a0 -4)
         (i-srli a $t2 $t2 8)
         (i-slli a $a0 $t2 1)
         (i-ori a $a0 $a0 1))))
   (definline '%string-length 1
     (lambda (c)
       (let ((a (cx-asm c)))
-        (i-lw a $t2 $a0 -4)
+        (i-lobj a $t2 $a0 -4)
         (i-srli a $t2 $t2 8)
         (i-slli a $a0 $t2 1)
         (i-ori a $a0 $a0 1))))
   (definline '%bytes-length 1
     (lambda (c)
       (let ((a (cx-asm c)))
-        (i-lw a $t2 $a0 -4)
+        (i-lobj a $t2 $a0 -4)
         (i-srli a $t2 $t2 8)
         (i-slli a $a0 $t2 1)
         (i-ori a $a0 $a0 1))))
@@ -1085,42 +1089,44 @@
         (i-mv a $a0 $zero))))
 
   ;; ---- symbols ----
+  ;; Through the typed indexed access, so the one instruction also checks
+  ;; that it was given a symbol: these are in the checked vocabulary.
   (definline '%symbol-name 1
-    (lambda (c) (i-lobj (cx-asm c) $a0 $a0 (%* 4 sym-name))))
+    (lambda (c) (i-ldxi (cx-asm c) $a0 $a0 sym-name t-symbol)))
   (definline '%symbol-value 1
-    (lambda (c) (i-lobj (cx-asm c) $a0 $a0 (%* 4 sym-value))))
+    (lambda (c) (i-ldxi (cx-asm c) $a0 $a0 sym-value t-symbol)))
   ;; What a reference to this name sees, and how to change it. On the machine
   ;; that is the symbol's value cell, so these are `%symbol-value` again. They
   ;; are spelled apart because the forge's interpreter keeps its own globals
   ;; in a map of its own, and a fluid binding has to land in the world doing
   ;; the reading.
   (definline '%fluid-value 1
-    (lambda (c) (i-lobj (cx-asm c) $a0 $a0 (%* 4 sym-value))))
+    (lambda (c) (i-ldxi (cx-asm c) $a0 $a0 sym-value t-symbol)))
   (definline '%set-fluid-value! 2
     (lambda (c)
-      (i-sobj (cx-asm c) $a1 $a0 (%* 4 sym-value))
+      (i-stxi (cx-asm c) $a1 $a0 sym-value t-symbol)
       (i-mv (cx-asm c) $a0 $a1)))
   (definline '%set-symbol-value! 2
     (lambda (c)
-      (i-sobj (cx-asm c) $a1 $a0 (%* 4 sym-value))
+      (i-stxi (cx-asm c) $a1 $a0 sym-value t-symbol)
       (i-mv (cx-asm c) $a0 $a1)))
   (definline '%symbol-function 1
-    (lambda (c) (i-lobj (cx-asm c) $a0 $a0 (%* 4 sym-function))))
+    (lambda (c) (i-ldxi (cx-asm c) $a0 $a0 sym-function t-symbol)))
   (definline '%set-symbol-function! 2
     (lambda (c)
-      (i-sobj (cx-asm c) $a1 $a0 (%* 4 sym-function))
+      (i-stxi (cx-asm c) $a1 $a0 sym-function t-symbol)
       (i-mv (cx-asm c) $a0 $a1)))
   (definline '%symbol-plist 1
-    (lambda (c) (i-lobj (cx-asm c) $a0 $a0 (%* 4 sym-plist))))
+    (lambda (c) (i-ldxi (cx-asm c) $a0 $a0 sym-plist t-symbol)))
   (definline '%set-symbol-plist! 2
     (lambda (c)
-      (i-sobj (cx-asm c) $a1 $a0 (%* 4 sym-plist))
+      (i-stxi (cx-asm c) $a1 $a0 sym-plist t-symbol)
       (i-mv (cx-asm c) $a0 $a1)))
   (definline '%symbol-flags 1
-    (lambda (c) (i-lobj (cx-asm c) $a0 $a0 (%* 4 sym-flags))))
+    (lambda (c) (i-ldxi (cx-asm c) $a0 $a0 sym-flags t-symbol)))
   (definline '%set-symbol-flags! 2
     (lambda (c)
-      (i-sobj (cx-asm c) $a1 $a0 (%* 4 sym-flags))
+      (i-stxi (cx-asm c) $a1 $a0 sym-flags t-symbol)
       (i-mv (cx-asm c) $a0 $a1)))
 
   ;; ---- machine ----
@@ -1649,12 +1655,44 @@
     (label a end)))
 
 ;; ---------------------------------------------------------------- expressions
+;; ---------------------------------------------------------------- unsafe
+;; A raw operation, or a function that hands out raw memory, is a name with
+;; the `sym-unsafe` bit (see `unsafe-names`). The compiler refuses to compile
+;; a call to one, or a reference to one as a value, unless the site is inside
+;; an `unsafe` form or the file said `(unsafe-file)` at its top. So the raw
+;; vocabulary is still there, but every place it is used says so, and can
+;; be found. What is not raw cannot fault the machine: it can only get a
+;; typed error.
+(define *unsafe-ok* nil)     ; inside an `unsafe` form, while it compiles
+(define *unsafe-file* nil)   ; after `(unsafe-file)`, until the next `in-package`
+
+(define (unsafe-allowed?) (if *unsafe-ok* t *unsafe-file*))
+
+(define *unsafe-warn* nil)   ; report and carry on, for an audit of a build
+
+(define (check-unsafe c name)
+  (cond ((unsafe-allowed?) nil)
+        (*unsafe-warn*
+         (display (list 'UNSAFE name 'in (cx-name c))) (newline))
+        (else
+         (error "unsafe: not inside an unsafe form:" name "in" (cx-name c)))))
+
+(define (compile-unsafe c form tail)
+  (let ((saved *unsafe-ok*))
+    (set! *unsafe-ok* t)
+    (compile-body c (%cdr form) tail)
+    (set! *unsafe-ok* saved)
+    nil))
+
 (define (compile-expr c form tail)
   (let ((a (cx-asm c)))
     (cond
      ;; ---- constants ----
      ((%null? form) (i-mv a $a0 $zero) (if tail (emit-return c) nil))
      ((%symbol? form)
+      (if (if (cx-lookup c form) nil (symbol-unsafe? form))
+          (check-unsafe c form)
+          nil)
       (emit-load c (location-of c form) $a0)
       (if tail (emit-return c) nil))
      ((not (%cons? form))
@@ -1663,6 +1701,12 @@
 
      (else
       (let ((h (%car form)))
+        ;; Whatever the head turns out to be, an open-coded operation, an
+        ;; operator with a constant, an indexed access or a call, a raw name
+        ;; is refused here unless the site is allowed to say it.
+        (if (if (%symbol? h) (if (cx-lookup c h) nil (symbol-unsafe? h)) nil)
+            (check-unsafe c h)
+            nil)
         (cond
          ((%eq? h 'quote)
           (emit-const c (cadr form) $a0)
@@ -1670,6 +1714,7 @@
 
          ((%eq? h 'if) (compile-if c form tail))
          ((%eq? h 'begin) (compile-body c (%cdr form) tail))
+         ((%eq? h 'unsafe) (compile-unsafe c form tail))
          ((%eq? h 'let) (compile-let c form tail))
          ((%eq? h 'while) (compile-while c form tail))
          ((%eq? h 'set!) (compile-set c form tail))
@@ -1875,6 +1920,7 @@
          ((%eq? h 'define) nil)         ; and an inner define may be one
          ((%eq? h 'if) (leaf-body? (%cdr form) bound))
          ((%eq? h 'begin) (leaf-body? (%cdr form) bound))
+         ((%eq? h 'unsafe) (leaf-body? (%cdr form) bound))
          ((%eq? h 'while) (leaf-body? (%cdr form) bound))
          ((%eq? h 'set!) (leaf-body? (cddr form) bound))
          ((%eq? h 'let)
@@ -2101,10 +2147,19 @@
 ;; `defrecord` is a macro, so that the interpreter has one to expand. Here it
 ;; is caught before expansion: the compiler registers the shape so that the
 ;; accessors are open-coded from here on.
+;; Three forms are directives to the compiler as much as code. `in-package`
+;; ends an unsafe file, and is then compiled as usual; `(unsafe-file)`
+;; begins one and compiles to nothing; `unsafe-names` marks its names now,
+;; for the code compiled after it here, as well as at boot for the machine.
 (define (compile-top form)
-  (if (if (%cons? form) (%eq? (%car form) 'defrecord) nil)
-      (compile-defrecord form)
-      (compile-top-1 form)))
+  (set! *unsafe-ok* nil)
+  (let ((h (if (%cons? form) (%car form) nil)))
+    (cond
+     ((%eq? h 'defrecord) (compile-defrecord form))
+     ((%eq? h 'in-package) (set! *unsafe-file* nil) (compile-top-1 form))
+     ((%eq? h 'unsafe-file) (set! *unsafe-file* t) 'unsafe-file)
+     ((%eq? h 'unsafe-names) (compile-time-eval form) (compile-top-1 form))
+     (else (compile-top-1 form)))))
 
 (define (compile-top-1 form)
   (set! form (macroexpand form))
@@ -2172,6 +2227,19 @@
     type))
 
 (setup-intrinsics)
+
+;; The raw vocabulary: what can read or write any word of RAM, forge a
+;; pointer from a number, or set the machine's own state. Every checked
+;; operation is not here, and neither are the reads that only hand out an
+;; address as a number, which cannot be followed without one of these.
+(unsafe-names
+ '(%ld-word %st-word! %ld-half %st-half! %ld-fixnum %st-fixnum!
+   %ld-byte %st-byte! %bit-ref %bit-set! %addr-of %from-addr
+   %slot %set-slot!
+   %set-context! %set-stack-limit! %set-gc-mode! %set-this-task!
+   %ecall %halt %disable %enable %restore-interrupts %enable-after-trap
+   %enable-interrupt-lines %wait-for-interrupt
+   %sync-cons-run %reload-cons-run))
 
 ;; From here on a record's accessors are open-coded as the record is
 ;; declared. The shapes declared before this line get done now.

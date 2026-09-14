@@ -11,11 +11,12 @@
 ;; function and a backtrace line say the same thing. These emit rather than
 ;; build a string: reporting an error must not allocate.
 (define (code-object? v)
+  (unsafe
   (if (%object? v)
       (if (%>= (%addr-of v) obj-base)
           (if (%< (%addr-of v) obj-limit) (%= (%obj-type v) t-code) nil)
           nil)
-      nil))
+      nil)))
 
 ;; A symbol for a named function; (lambda . home) for one that never had a
 ;; name, so an anonymous frame still says where it came from.
@@ -26,7 +27,8 @@
         (else (emit-str "anonymous"))))
 
 (define (emit-code-label c)
-  (if (code-object? c) (emit-name (%slot c code-name)) (emit-str "?")))
+  (unsafe
+  (if (code-object? c) (emit-name (%slot c code-name)) (emit-str "?"))))
 
 ;; Bare if the current package would read the name back as this symbol,
 ;; qualified otherwise, with two colons for one that was never exported. An
@@ -65,6 +67,7 @@
   (emit-ch #\"))
 
 (define (print-obj x quoted depth)
+  (unsafe
   (cond
    ((%> depth 32) (emit-str "..."))
    ((%null? x) (emit-str "nil"))
@@ -93,16 +96,17 @@
           (emit-str "#<package ") (emit-str (package-name x)) (emit-ch #\>))
          (else (print-record x quoted depth))))
        (else (emit-str "#<object>")))))
-   (else (print-immediate x))))
+   (else (print-immediate x)))))
 
 ;; The immediates that are not characters: the marker of a variable with no
 ;; value, the end of a file, and no value at all.
 (define (print-immediate x)
+  (unsafe
   (let ((w (%addr-of x)))
     (cond ((%= w (%logior (%lsh imm-unbound 3) 2)) (emit-str "#<unbound>"))
           ((%= w (%logior (%lsh imm-eof 3) 2)) (emit-str "#<eof>"))
           ((%= w (%logior (%lsh imm-void 3) 2)) (emit-str "#<void>"))
-          (else (emit-str "#<immediate ") (emit-str (number->hex w)) (emit-ch #\>)))))
+          (else (emit-str "#<immediate ") (emit-str (number->hex w)) (emit-ch #\>))))))
 
 ;; (quote x) prints as 'x.
 (define (print-list x quoted depth)
@@ -140,6 +144,7 @@
 ;; its type: records point at each other, a task at its parent, every node
 ;; at its neighbours, and following them would print the whole kernel.
 (define (print-record r quoted depth)
+  (unsafe
   (emit-str "#[")
   (if (%> depth 0)
       (begin
@@ -150,7 +155,7 @@
           (if (%> i 0) (space) nil)
           (print-obj (%slot r i) quoted (%+ depth 1))
           (set! i (%+ i 1)))))
-  (emit-ch #\]))
+  (emit-ch #\])))
 
 (define (write x) (print-obj x t 0) x)
 (define (display x) (print-obj x nil 0) x)
@@ -165,6 +170,7 @@
 ;; the trap handler prints a backtrace and restarts the prompt, or ends the
 ;; task.
 (define (error . args)
+  (unsafe
   (emit-str "error: ")
   (let ((first t))
     (dolist (a args)
@@ -172,7 +178,7 @@
       (if (%string? a) (emit-str a) (write a))))
   (newline)
   (let ((h (%ld-word lg-errhandler)))
-    (if h (%funcall h args) (%halt exit-error))))
+    (if h (%funcall h args) (%halt exit-error)))))
 
 (define (warn . args)
   (emit-str "warning: ")
