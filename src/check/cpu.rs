@@ -969,6 +969,60 @@ pub fn run_all() -> bool {
     }
 
     {
+        // A byte object's header counts bytes. A word access through the
+        // "any type" form is bounded by the same payload, so word 1 of a
+        // ten-byte object is inside it and word 2 is not: the bound is
+        // converted to whole words, not read as one.
+        let index_trap = |i: u32| -> (u32, u32) {
+            let mut m = Machine::new();
+            let mut code = vec![];
+            li32(&mut code, A0, 0x2000);
+            code.push(csrrw(ZERO, 0x305, A0));
+            li32(&mut code, A1, 0x3004);
+            li32(&mut code, A2, (10 << 8) | 4); // ten bytes, type bytes
+            code.push(sw(A2, A1, -4));
+            code.push(addi(A3, ZERO, ((i << 1) | 1) as i32));
+            code.push(ldx(A0, A1, A3, 0));
+            let end = emit(&mut m, BASE, &code);
+            m.poke32(end, jal(ZERO, 0));
+            let h = vec![csrrs(A1, 0x342, ZERO), csrrs(A2, 0x343, ZERO), jal(ZERO, 0)];
+            emit(&mut m, 0x2000, &h);
+            m.pc = BASE;
+            m.mtimecmp = u64::MAX;
+            m.gfx.next_vbl = u64::MAX;
+            run::run(&mut m, 60);
+            (m.x[A1 as usize], m.x[A2 as usize])
+        };
+        // No trap leaves a1 as the object pointer the code loaded into it.
+        extra.push(("a word inside a byte object is read", index_trap(1).0 == 0x3004));
+        let (cause, tval) = index_trap(2);
+        extra.push(("a word past a byte object traps", cause == C_RANGE));
+        extra.push(("...naming the index", tval == 5));
+    }
+
+    {
+        // -2^30 / -1 is 2^30, the one quotient that does not fit a fixnum.
+        // Division has no separate trapping form, so the plain one traps
+        // there rather than wrap to -2^30, and the handler widens it.
+        let mut m = Machine::new();
+        let mut code = vec![];
+        li32(&mut code, A0, 0x2000);
+        code.push(csrrw(ZERO, 0x305, A0));
+        li32(&mut code, A3, (((-(1i32 << 30)) << 1) | 1) as u32);
+        code.push(addi(A4, ZERO, -1)); // the fixnum -1
+        code.push(fdiv(A0, A3, A4));
+        let end = emit(&mut m, BASE, &code);
+        m.poke32(end, jal(ZERO, 0));
+        let h = vec![csrrs(A1, 0x342, ZERO), jal(ZERO, 0)];
+        emit(&mut m, 0x2000, &h);
+        m.pc = BASE;
+        m.mtimecmp = u64::MAX;
+        m.gfx.next_vbl = u64::MAX;
+        run::run(&mut m, 60);
+        extra.push(("fdiv traps on the one overflowing quotient", m.x[A1 as usize] == C_OVER));
+    }
+
+    {
         // funct7 names the type the access requires, so reading a string as a
         // vector is caught rather than reinterpreted.
         let mut m = Machine::new();

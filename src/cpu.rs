@@ -899,7 +899,20 @@ fn op_index(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         }
         (idx as i32) >> 1
     };
-    if i < 0 || (i as u32) >= hdr >> 8 {
+    // The header counts elements of the object's own size: bytes for a
+    // string or a byte object, words for everything else. An access of the
+    // other size is bounded by the same payload, so the count is converted
+    // rather than trusted; without this a word access through the "any
+    // type" form reaches up to three words past a byte object.
+    let len = hdr >> 8;
+    let ty = hdr & 255;
+    let byte_payload = ty == crate::heap::T_STRING || ty == crate::heap::T_BYTES;
+    let bound = match (f & 2 == 0, byte_payload) {
+        (true, true) => len >> 2,   // word access to a byte payload
+        (false, false) => len << 2, // byte access to a word payload
+        _ => len,
+    };
+    if i < 0 || (i as u32) >= bound {
         return m.fault(C_RANGE, ((i as u32) << 1) | 1, pc, fuel);
     }
     let a = if f & 2 == 0 {
@@ -998,7 +1011,10 @@ fn op_fixnum(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
                             return m.fault(C_DIVZERO, a, pc, fuel);
                         }
                         // A fixnum is never i32::MIN, so neither of these can
-                        // overflow the way i32::MIN / -1 does.
+                        // overflow the way i32::MIN / -1 does; but -2^30 / -1
+                        // is 2^30, one past the fixnum range, and division
+                        // has no separate trapping form, so it is checked
+                        // below whichever bank it came from.
                         if f == 3 {
                             (x / y) as i64
                         } else {
@@ -1006,7 +1022,7 @@ fn op_fixnum(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
                         }
                     }
                 };
-                if f7 == 0x20 && (n < FIX_MIN || n > FIX_MAX) {
+                if (f7 == 0x20 || f == 3) && (n < FIX_MIN || n > FIX_MAX) {
                     return m.fault(C_OVER, tag(n as i32), pc, fuel);
                 }
                 tag(n as i32)
