@@ -143,10 +143,12 @@
   (bm-blit-rect (win-bm win) (win-front win) x y x y w h)
   (damage (rect (%+ (win-x win) x) (%+ (win-y win) y) w h)))
 
-;; All of it, and the shadow it throws.
+;; All of it. Not the shadow it throws: that falls on whatever is behind and
+;; does not change with what is inside, and damage that stays within the
+;; window is what lets the compositor copy it in one piece.
 (define (window-damage w)
   (bm-blit-rect (win-bm w) (win-front w) 0 0 0 0 (win-w w) (win-h w))
-  (damage (window-footprint w)))
+  (damage (rect (win-x w) (win-y w) (win-w w) (win-h w))))
 
 ;; The frame and nothing inside it: the title bar and the three bands, which
 ;; is everything `window-frame` draws. Coming forward or losing the front
@@ -497,7 +499,8 @@
 ;; A shell keeps characters, not pixels: a grid it can redraw from. `edit`
 ;; is the line being typed, latest character first; `pending` is what has
 ;; been finished and not yet read.
-(defrecord (shell sh) cols rows grid col row edit pending)
+(defrecord (shell sh) cols rows grid col row edit pending
+  dirty-row dirty-c0 dirty-c1)      ; cells drawn and not yet handed over, or row -1
 
 (define (shell-clear sh)
   (let ((g (sh-grid sh)) (i 0))
@@ -515,6 +518,7 @@
     (set-sh-grid! v (make-bytes (%* cols rows)))
     (set-sh-edit! v nil)
     (set-sh-pending! v nil)
+    (set-sh-dirty-row! v -1)
     (shell-clear v)
     v))
 
@@ -545,6 +549,7 @@
     (window-damage-rect win (win-inner-x win) (win-inner-y win)
                         (win-inner-w win) (win-inner-h win))
     (set-sh-row! sh (%- rows 1))
+    (set-sh-dirty-row! sh -1)
     nil))
 
 (define (shell-newline rp win sh)
@@ -567,9 +572,32 @@
   (shell-putc-1 (window-rastport win) win sh c)
   nil)
 
-(define (shell-cell-done win sh)
-  (window-damage-rect win (shell-cell-x win (sh-col sh)) (shell-cell-y win (sh-row sh))
-                      mono-advance mono-height))
+;; What has been drawn and not yet handed over: a run of cells on one row.
+;; Handing over a cell at a time was a blit and a mutex per character; a run
+;; goes over when the row changes, when the shell turns to its keyboard, and
+;; when it scrolls, whose own hand-over covers everything.
+(define (shell-flush win sh)
+  (if (%>= (sh-dirty-row sh) 0)
+      (window-damage-rect win (shell-cell-x win (sh-dirty-c0 sh))
+                          (shell-cell-y win (sh-dirty-row sh))
+                          (%* (%- (sh-dirty-c1 sh) (sh-dirty-c0 sh)) mono-advance)
+                          mono-height)
+      nil)
+  (set-sh-dirty-row! sh -1)
+  nil)
+
+(define (shell-mark win sh)
+  (let ((row (sh-row sh)) (col (sh-col sh)))
+    (if (%= row (sh-dirty-row sh))
+        (begin
+          (if (%< col (sh-dirty-c0 sh)) (set-sh-dirty-c0! sh col) nil)
+          (if (%>= col (sh-dirty-c1 sh)) (set-sh-dirty-c1! sh (%+ col 1)) nil))
+        (begin
+          (shell-flush win sh)
+          (set-sh-dirty-row! sh row)
+          (set-sh-dirty-c0! sh col)
+          (set-sh-dirty-c1! sh (%+ col 1))))
+    nil))
 
 (define (shell-putc-1 rp win sh c)
   (cond
@@ -583,7 +611,7 @@
           (fill-rect rp (shell-cell-x win (sh-col sh))
                      (shell-cell-y win (sh-row sh))
                      mono-advance mono-height white)
-          (shell-cell-done win sh))
+          (shell-mark win sh))
         nil))
    (else
     (if (%>= (sh-col sh) (sh-cols sh))
@@ -593,7 +621,7 @@
     (draw-mono-char rp (shell-cell-x win (sh-col sh))
                (shell-cell-y win (sh-row sh))
                c black white)
-    (shell-cell-done win sh)
+    (shell-mark win sh)
     (set-sh-col! sh (%+ (sh-col sh) 1))))
   nil)
 
@@ -624,9 +652,10 @@
 (define (shell-stream win sh)
   (make-stream
    (lambda (c) (shell-putc win sh c))
-   (lambda () (shell-getc win sh))
-   ;; Nothing to read: sleep until an event is sent.
-   (lambda () (wait (port-signal (win-port win))))))
+   (lambda () (shell-flush win sh) (shell-getc win sh))
+   ;; Nothing to read: what was printed goes over first, then sleep until an
+   ;; event is sent.
+   (lambda () (shell-flush win sh) (wait (port-signal (win-port win))))))
 
 ;; The next character of a finished line, or nil when there is none, having
 ;; taken in whatever keys have arrived.

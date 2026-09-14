@@ -155,12 +155,55 @@
   (let ((bmp (rp-bitmap rp))
         (px (%+ x (rp-origin-x rp)))
         (py (%+ y (rp-origin-y rp))))
-    (if bg (fill-rect rp x y mono-advance mono-height bg) nil)
-    (blit-sync)
-    (dolist (cr (rp-region rp))
-      (mono-rows ch px py fg bmp
-                 (max2 (rect-x cr) 0) (max2 (rect-y cr) 0)
-                 (min2 (rect-x2 cr) (bm-w bmp)) (min2 (rect-y2 cr) (bm-h bmp))))
+    (if (if bg (mono-cell-inside? rp px py bmp) nil)
+        (begin
+          (check-colour bg)
+          (blit-sync)
+          (mono-cell-draw ch px py fg bg bmp))
+        (begin
+          (if bg (fill-rect rp x y mono-advance mono-height bg) nil)
+          (blit-sync)
+          (dolist (cr (rp-region rp))
+            (mono-rows ch px py fg bmp
+                       (max2 (rect-x cr) 0) (max2 (rect-y cr) 0)
+                       (min2 (rect-x2 cr) (bm-w bmp)) (min2 (rect-y2 cr) (bm-h bmp))))))
+    nil))
+
+;; Whether a cell at px, py lies inside one rectangle of the clip and inside
+;; the bitmap, so that it needs no clipping at all.
+(define (mono-cell-inside? rp px py bmp)
+  (let ((r (rp-region rp)))
+    (if (if (%cons? r) (%null? (%cdr r)) nil)
+        (let ((cr (%car r)))
+          (if (%>= px (max2 (rect-x cr) 0))
+              (if (%>= py (max2 (rect-y cr) 0))
+                  (if (%<= (%+ px mono-columns) (min2 (rect-x2 cr) (bm-w bmp)))
+                      (%<= (%+ py mono-cell) (min2 (rect-y2 cr) (bm-h bmp)))
+                      nil)
+                  nil)
+              nil))
+        nil)))
+
+;; The whole cell, foreground and background in one pass and no fill blit:
+;; six stores a row, which is what a shell printing a screenful needs.
+(define (mono-cell-draw ch px py fg bg bmp)
+  (let* ((i (%- (%char->int ch) mono-first))
+         (font *mono*)
+         (base (%* i mono-cell))
+         (known (if font (if (%>= i 0) (%<= (%+ base mono-cell) (bytes-length font)) nil) nil))
+         (addr (bm-at bmp px py))
+         (pitch (bm-w bmp))
+         (row 0))
+    (while (%< row mono-cell)
+      (let ((bits (if known (%bytes-ref font (%+ base row)) 0)))
+        (%st-byte! addr (if (%= 0 (%logand bits 32)) bg fg))
+        (%st-byte! (%+ addr 1) (if (%= 0 (%logand bits 16)) bg fg))
+        (%st-byte! (%+ addr 2) (if (%= 0 (%logand bits 8)) bg fg))
+        (%st-byte! (%+ addr 3) (if (%= 0 (%logand bits 4)) bg fg))
+        (%st-byte! (%+ addr 4) (if (%= 0 (%logand bits 2)) bg fg))
+        (%st-byte! (%+ addr 5) (if (%= 0 (%logand bits 1)) bg fg)))
+      (set! addr (%+ addr pitch))
+      (set! row (%+ row 1)))
     nil))
 
 (define (mono-rows ch px py fg bmp x0 y0 x1 y1)
