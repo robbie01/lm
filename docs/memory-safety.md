@@ -17,7 +17,7 @@ typed error with a report, never a corrupted heap. The unsafe acts exist,
 because the collector, the kernel and the drivers need them, and the whole
 question is how they are named and how far they reach.
 
-The target is one sentence: **code that does not say it is raw cannot fault
+The target is one sentence: **code that does not say it is unsafe cannot fault
 the machine.** It can get a typed error; it cannot reach a load or store
 fault, cannot forge a pointer, cannot write past an object, cannot write a
 heap word the collector will not see.
@@ -53,9 +53,11 @@ backtrace, and the task ends. Nothing inside RAM is ever refused.
 ## The raw vocabulary
 
 These are the operations that can produce an invalid access. All of them
-are intrinsics in `lm`, all are exported, and all are reachable unqualified
-from `user` and from every application package, because every package uses
-`lm`. The `%` prefix marks them by convention; nothing enforces it.
+are intrinsics in `lm` or functions in `hw` and `gc`, all are exported, and
+all are reachable unqualified from `user` and from every application
+package, because every package uses `lm`. Each carries the `sym-unsafe` bit
+in its symbol, and the compiler refuses it outside an `unsafe` form or an
+unsafe file; see below.
 
 | what | checks | on a bad argument |
 |---|---|---|
@@ -65,16 +67,19 @@ from `user` and from every application package, because every package uses
 | `%addr-of` | none | any pointer becomes an integer |
 | `%from-addr` | none | any integer becomes a pointer, which every checked instruction then trusts |
 | `%slot` `%set-slot!` | object tag and bound, any type | a closure's raw entry word read as a value |
-| the symbol accessors, `%symbol-value` and the rest | object tag only | on a one-slot record, a write three words past its end |
-| `%vector-length` `%string-length` `%bytes-length` | none | a fixnum's neighbour read as a header |
 | `%set-context!` `%set-stack-limit!` `%set-gc-mode!` `%ecall` `%disable` `%enable` `%sync-cons-run` `%reload-cons-run` `%set-this-task!` `%halt` | none | arbitrary machine state |
 | `alloc-pool` `free-pool` | a header tag on free | a freed block reused under a holder; never scanned |
-| `dev-reg` and the blitter's descriptors | ownership of the device | a DMA anywhere in RAM |
+| `dev-reg`, `bm-at`, `bm-addr`, and the blitter's descriptors | ownership of the device | a DMA anywhere in RAM |
+| `slot`, `alloc-code` in gc | none | a root walk of any address; code space handed out raw |
 
-Outside the kernel files these are used in snap.lisp (49 sites), demo.lisp
-(46), explorer.lisp and print.lisp (walking objects with `%slot`),
-bignum.lisp, and a few in the drivers and the fonts. The UI stack, wb, ui,
-platinum and eyes, uses none of them: it draws through `hw`'s checked
+Where they are said: the collector, the kernel, the chips, the trap
+handler, the image writer, the object system, the bignums, the compiler
+and the assembler's code writer are unsafe files. Outside those there are
+about forty sites, each inside an `unsafe` form: the printer and the
+explorer walking objects by slot, the fonts storing glyph pixels, the
+drivers handing a buffer's address to a chip, the console's raw wait, and
+the demos and suites that exercise raw memory on purpose. The UI stack, wb,
+ui, platinum and eyes, has one, `win-row`: it draws through `hw`'s checked
 bitmap functions, which is the design working.
 
 The raw stores also bypass the write barrier, which is consulted only by
@@ -86,7 +91,18 @@ wrong, and nothing today refuses it.
 
 ## Closed now
 
-Two holes in the checked vocabulary, both in the processor:
+**The raw vocabulary has to be named as such.** Every raw operation and
+every function that hands out raw memory carries the `sym-unsafe` bit in
+its symbol, set by `unsafe-names`, and the compiler refuses a call to one,
+or a reference to one as a value, unless the site is inside an `unsafe`
+form or the file said `(unsafe-file)` after its `in-package`. `unsafe` is
+`begin` to the interpreter and a permission to the compiler; the marks are
+in the symbol, so a package marks its own. The Rust bargain exactly: the
+unsafe act is still there, it is greppable, and it cannot be reached by
+accident. The machine's own compiler enforces it on a rebuild of itself.
+
+Three holes in the checked vocabulary, all in the instructions the
+compiler emits:
 
 - The indexed-access bound used the header's count as a word count for
   every type. A string or byte object counts bytes, so a word access through
@@ -96,26 +112,19 @@ Two holes in the checked vocabulary, both in the processor:
 - `-2^30 / -1` is `2^30`, the one quotient that does not fit a fixnum, and
   plain division wrapped it to `-2^30` silently. It now traps as an
   overflow and is widened, so `%/` and `quotient` agree.
+- The symbol accessors checked only that they had an object, so a setter
+  handed a small record wrote past its end; they now go through the typed
+  indexed access, which checks for a symbol in the same one instruction.
+  The three length reads had no check at all, and a fixnum handed to
+  `vector-length` read the word before some address; they now read the
+  header through the tag-checked load, at the same cost. Both are in the
+  checked vocabulary as a result.
 
 ## What would make it safe by default
 
 In order of how much safety each buys for its cost.
 
-**1. A raw vocabulary that has to be named as such.** The mark exists; make
-it mean something. The compiler knows every raw intrinsic by symbol, so
-refusing to open-code one unless the site says it is raw is one check in
-`inline-entry`: a flag on the emitter entry, and a special form or macro
-`(raw ...)` that binds a compile-time flag while its body is compiled. The
-kernel files that are raw throughout, gc, hw, exec, sys, snap, bignum, the
-compiler and the assembler, declare it once per file. Everything else
-writes `(raw (%st-word! p v))` at the site, the way Rust writes `unsafe`,
-and a `%from-addr` outside one is a compile error naming the form. This is
-the Rust bargain exactly: the unsafe act is still there, it is greppable,
-and it cannot be reached by accident. The bootstrap interpreter needs
-nothing, since `raw` expands to `begin` for it. Cost: a table of about
-forty names and thirty lines of compiler.
-
-**2. Refuse the wild store into the heap.** The barrier already inspects
+**1. Refuse the wild store into the heap.** The barrier already inspects
 every checked store; a second mode bit in the same CSR would have the
 processor refuse a plain store, `sw`, `sh`, `sb` and the tagged forms, whose
 address lies in cons or object space. Compiled code never stores into a
@@ -126,15 +135,7 @@ around a mark. Then no raw store from any task can corrupt a heap word, and
 the raw stores keep their purpose, the pool and the chips. Cost: one range
 test on the plain store path while the bit is set.
 
-**3. Type the symbol accessors.** They are `lobj` loads with an offset,
-checking only that the base is an object. The immediate-index form of
-custom-1 checks the type and the bound in the same one instruction, so
-`%symbol-value` and the rest can pass `t-symbol` and cost nothing more.
-`lvar`, the variable read that also refuses the unbound marker, stays as
-it is. The length forms, `%vector-length` and its two siblings, want the
-same treatment: a typed load of the header.
-
-**4. Poison the pool on free.** A freed block is reused under whoever still
+**2. Poison the pool on free.** A freed block is reused under whoever still
 holds its address, silently. Filling a freed block with an object-tagged
 pointer that lies outside RAM, `#xFEEDFEEC` say, makes the first checked
 use of stale memory a load fault naming the value, rather than a quiet
@@ -142,7 +143,7 @@ read of someone else's stack. The cost is a fill per free, most of them
 task stacks at task end, which happens in the switch; measure before
 deciding whether it can be unconditional.
 
-**5. Make the blitter's guard the chip's behaviour.** `LM_BLIT_GUARD`
+**3. Make the blitter's guard the chip's behaviour.** `LM_BLIT_GUARD`
 already checks that a transfer stays inside the one pool block or object
 it named and prints when it does not. As the default, refusing the
 transfer and setting a status bit, it turns a wrong descriptor into a
@@ -151,13 +152,12 @@ has the same shape: it checks the extent against RAM in 64 bits, and could
 check that the address is inside a byte object, since that is all the
 driver ever hands it.
 
-**6. Audit `%from-addr`.** It is the one primitive that manufactures a
+**4. Audit `%from-addr`.** It is the one primitive that manufactures a
 pointer, and every checked instruction downstream trusts what it made. Its
-uses are few and all in the kernel; with item 1 in place they are all
-inside `raw`, and the list of them is the list of places a bad pointer can
-enter the checked world.
+uses are few and all in unsafe files or forms, and the list of them is the
+list of places a bad pointer can enter the checked world.
 
-**7. State the invariant as a fuzz target.** The exec fuzzer proves random
+**5. State the invariant as a fuzz target.** The exec fuzzer proves random
 code cannot reach the host. A Lisp-level target would generate programs
 from the checked vocabulary only and assert that none reaches a fatal
 trap: no load fault, no store fault, no misaligned fetch, only typed

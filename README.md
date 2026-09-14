@@ -333,6 +333,21 @@ and `sat+` with their `-` and `*` forms. A machine word is not a fixnum:
 `peek` reads a word unsigned, `peek-signed` reads it signed, and `poke`
 stores the low 32 bits of either.
 
+**Unsafe.** The ordinary vocabulary is checked by the processor: a wrong
+argument is a typed error, never a corrupted word. The raw vocabulary, the
+loads and stores through an address, `%addr-of` and `%from-addr`, `%slot`,
+the machine-state instructions, and the functions that hand out raw memory
+such as `peek`, `poke`, `alloc-pool` and `dev-reg`, is marked: each such name
+carries a bit in its symbol, and the compiler refuses a call to one, or a
+reference to one as a value, unless the site is inside an `unsafe` form or
+the file said `(unsafe-file)` after its `in-package`. The collector, the
+kernel, the chips and the object system are unsafe files; everything else
+writes `(unsafe ...)` at the place it says a raw thing, so every such place
+can be found. `unsafe-names` marks a package's own raw functions. The rule
+in one sentence: code that does not say it is unsafe cannot fault the
+machine. What is checked and what is not is in
+[docs/memory-safety.md](docs/memory-safety.md).
+
 **Errors.** There is no condition system. `error` prints its message and
 traps; the handler composes a report with a backtrace into a string, then
 rewrites the faulting task's context so that it returns into the prompt's

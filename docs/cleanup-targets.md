@@ -18,7 +18,9 @@ immediate-index forms are keyed on the `%` names. The bootstrap interpreter
 knows 130 `%` primitives and no plain ones, so the prelude and the three
 files the forge interprets have no choice. So the two vocabularies are the
 checked language and the raw one, and the `%` is the mark that says which.
-That mark is worth keeping, and worth enforcing: see memory-safety.md.
+That mark is now enforced: the raw names carry a bit in the symbol and
+the compiler refuses them outside an `unsafe` form or file; see
+memory-safety.md.
 Measured: the system's sources have no plain comparison in a test position
 at all, 230 `%<` against none, so there is nothing for a profile to show;
 if user code ever wants it, the fusable set can take the plain names in
