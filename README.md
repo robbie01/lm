@@ -40,7 +40,7 @@ interpreter nor the tests.
 |---|---|
 | `src/cpu.rs` | token-threaded RV32IMC core with the custom opcodes |
 | `src/mach.rs` `src/run.rs` | registers, memory, CSRs, traps, the outer loop |
-| `src/dev/` | uart, timer, display, blitter, input, block storage, the host window |
+| `src/dev/` | uart, timer, display, blitter, input, block storage, the host window and the box filter it draws the display with |
 | `src/heap.rs` `src/image.rs` | object memory and the image format |
 | `src/map.rs` | the memory map and the low-memory globals |
 | `src/boot.rs` | loading an image and letting it run |
@@ -78,6 +78,7 @@ interpreter nor the tests.
 | `src/check/asm.rs` | the Lisp assembler against an independent Rust encoder |
 | `src/check/compiler.rs` | source in, machine code out, run, compare |
 | `src/check/readers.rs` | name resolution across packages |
+| `src/check/display.rs` | the window's box filter, on this host's GPU, against its definition |
 | `src/check/inspect.rs` | what is in an image |
 | `src/check/reach.rs` | what each package's symbols can reach |
 
@@ -537,6 +538,20 @@ Anything that reads or writes pixels directly calls `blit-sync` first.
 
 Details of the model are in [docs/drivers.md](docs/drivers.md).
 
+**The host window** is winit and wgpu. The window keeps the main thread and
+the machine runs on a thread of its own: at a vertical blank the machine
+hands over the frame and takes the input that has arrived, and the window
+draws at the display's pace, so dragging or resizing it does not stop the
+machine. The display is drawn as large as the window allows without
+changing its shape, with a box filter: a window pixel is the average of the
+display's pixels over its square, each counting for the area it covers, and
+averaged as light. At a whole-number scale that copies the display's pixels;
+at any other every display pixel still covers the same area of the window,
+and only the window pixels across an edge between two are a mixture of
+them. `--scale N` opens the window at N times the display's size as the
+desktop scales sizes, and `WGPU_BACKEND=vulkan`, `dx12`, `metal` or `gl`
+chooses what it draws with.
+
 ## The workbench
 
 `(workbench)` opens a desktop in the Platinum appearance with a shell in a
@@ -612,6 +627,8 @@ lmdev cpu             processor conformance
 lmdev asm             the Lisp assembler against an independent Rust encoder
 lmdev compiler        end-to-end: source in, machine code out, run, compare
 lmdev readers         name resolution: use lists, pkg:name, pkg::name
+lmdev display         the window's box filter on this host's GPU, pixel for pixel
+                      against its definition
 lmdev check [IMG]     boot an image headless and run the machine's own suites
 lmdev bench           measure the interpreter
 lmdev inspect [IMG]   what is in an image, and that code holds no heap addresses

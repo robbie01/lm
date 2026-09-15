@@ -50,8 +50,13 @@ pub struct Gfx {
 /// A frame sink. Keeps the window toolkit out of the device model, so
 /// headless runs need no display.
 pub trait Present {
-    fn show(&mut self, buf: &[u32], w: usize, h: usize) -> bool;
+    /// Hand over a `w` by `h` frame of xRGB words. The sink may keep the
+    /// buffer and give back another to convert the next frame into. False
+    /// once the window has been closed.
+    fn show(&mut self, frame: &mut Vec<u32>, w: usize, h: usize) -> bool;
+    /// The window's size in host pixels.
     fn size(&self) -> (u32, u32);
+    /// Move the input that has arrived into the input chip.
     fn pump(&mut self, ev: &mut crate::dev::input::Input);
 }
 
@@ -182,7 +187,8 @@ impl Gfx {
         if self.win.is_none() {
             return true;
         }
-        // Do not spend more host time on redraw than the host can absorb.
+        // Converting a frame takes the machine's own thread; do not convert
+        // many more than a display can show.
         let due = self.force || self.last_present.elapsed().as_micros() >= 12_000;
         if !due {
             if let Some(w) = self.win.as_mut() {
@@ -199,7 +205,7 @@ impl Gfx {
         if self.scan.len() < w * h {
             return true;
         }
-        win.show(&self.scan, w, h)
+        win.show(&mut self.scan, w, h)
     }
 
     /// Chip RAM the bitmap must fit inside, for the allocator's benefit.

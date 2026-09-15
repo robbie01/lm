@@ -3,6 +3,7 @@
 //! hardware with plain `poke`/`peek` and no bit-fiddling in the compiler.
 
 pub mod blit;
+pub mod boxfilter;
 pub mod disk;
 pub mod gfx;
 pub mod input;

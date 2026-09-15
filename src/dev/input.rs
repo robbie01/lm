@@ -6,7 +6,10 @@
 //!     a key        bits 27..20 ascii, when the key has one
 //!                  bits 19..12 raw key code
 //!     the pointer  bits 27..16 y, bits 15..4 x, bits 3..0 the button
-//!     the wheel    bits 11..0  the step
+//!     the wheel    bits 11..0  steps, one a notch, positive away from the user
+//!
+//! A key held down repeats as more key-down events. The host's pointer
+//! moves are gathered into one between any two other events.
 //!
 //! Mouse position is a register rather than an event, because a pointer polls
 //! it.
@@ -31,6 +34,26 @@ pub const EV_BUTTONDOWN: u32 = 4;
 pub const EV_BUTTONUP: u32 = 5;
 pub const EV_WHEEL: u32 = 6;
 
+/// Events the queue holds; one more drops the oldest.
+pub const QUEUE_MAX: usize = 512;
+
+/// A key or wheel event, packed as the queue holds it.
+pub fn event_word(kind: u32, ascii: u32, code: u32, payload: u32) -> u32 {
+    (kind << 28) | ((ascii & 0xff) << 20) | ((code & 0xff) << 12) | (payload & 0xfff)
+}
+
+/// A pointer event, carrying the position where it happened. The position
+/// registers give the current position, which differs from the event's
+/// when the event is taken off the queue late.
+pub fn pointer_word(kind: u32, x: u32, y: u32, button: u32) -> u32 {
+    (kind << 28) | ((y & 0xfff) << 16) | ((x & 0xfff) << 4) | (button & 0xf)
+}
+
+/// The kind of a packed event.
+pub fn word_kind(w: u32) -> u32 {
+    w >> 28
+}
+
 pub struct Input {
     q: VecDeque<u32>,
     pub mx: u32,
@@ -52,19 +75,9 @@ impl Input {
         }
     }
 
-    pub fn push(&mut self, kind: u32, ascii: u32, code: u32, payload: u32) {
-        self.push_word((kind << 28) | ((ascii & 0xff) << 20) | ((code & 0xff) << 12) | (payload & 0xfff));
-    }
-
-    /// A pointer event, carrying the position where it happened. The position
-    /// registers give the current position, which differs from the event's
-    /// when the event is taken off the queue late.
-    pub fn push_mouse(&mut self, kind: u32, x: u32, y: u32, button: u32) {
-        self.push_word((kind << 28) | ((y & 0xfff) << 16) | ((x & 0xfff) << 4) | (button & 0xf));
-    }
-
-    fn push_word(&mut self, w: u32) {
-        if self.q.len() >= 512 {
+    /// Queue a packed event.
+    pub fn push(&mut self, w: u32) {
+        if self.q.len() >= QUEUE_MAX {
             self.q.pop_front();
         }
         self.q.push_back(w);
@@ -91,7 +104,7 @@ impl Input {
         match reg {
             I_CTRL => self.ctrl = v,
             I_EVENT => self.q.clear(),
-            I_INJECT => self.push_word(v),
+            I_INJECT => self.push(v),
             _ => {}
         }
     }

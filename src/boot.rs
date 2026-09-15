@@ -1,13 +1,13 @@
 //! Booting an image: load it, attach the peripherals, run.
 
-use crate::dev::gfx::Present;
+use crate::dev::win::Host;
 use crate::image;
 use crate::mach::{Machine, Stop};
 use crate::run;
 
 pub struct Options {
     pub image: String,
-    pub window: bool,
+    /// The window's size, in multiples of the display's; see `boot_in_window`.
     pub scale: u32,
     pub script: Option<String>,
     pub interactive: bool,
@@ -24,7 +24,6 @@ impl Default for Options {
     fn default() -> Options {
         Options {
             image: "kick.img".into(),
-            window: true,
             scale: 1,
             script: None,
             interactive: true,
@@ -39,7 +38,23 @@ impl Default for Options {
     }
 }
 
+/// Boot and run headless.
 pub fn boot(o: &Options) -> i32 {
+    run_machine(o, None)
+}
+
+/// Boot and run with a window onto the display, or headless where there can
+/// be no window, saying why. The window's event loop keeps this thread and
+/// the machine gets one of its own.
+///
+/// Only `lm` opens a window, so only `lm` carries the window's code.
+pub fn boot_in_window(o: &Options) -> i32 {
+    crate::dev::win::run(|host| run_machine(o, Some(host)))
+}
+
+/// Boot and run, on whichever thread this is. `host`, when there is one, is
+/// where the window comes from.
+fn run_machine(o: &Options, host: Option<Host>) -> i32 {
     let mut m = Machine::new();
     let loaded = match image::load(&mut m, &o.image) {
         Ok(l) => l,
@@ -67,9 +82,9 @@ pub fn boot(o: &Options) -> i32 {
         m.uart.attach_stdin();
     }
 
-    if o.window {
-        match crate::dev::win::HostWindow::open("LM", 640, 400, o.scale) {
-            Ok(w) => m.gfx.win = Some(Box::new(w) as Box<dyn Present>),
+    if let Some(host) = host {
+        match host.open("LM", m.gfx.width, m.gfx.height, o.scale) {
+            Ok(w) => m.gfx.win = Some(Box::new(w)),
             Err(e) => eprintln!("lm: no window ({e}); running headless"),
         }
     }

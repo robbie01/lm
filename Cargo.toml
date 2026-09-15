@@ -25,10 +25,14 @@ name = "lmdev"
 path = "src/bin/lmdev.rs"
 
 [dependencies]
+bytemuck = "1"
 clap = { version = "4", features = ["derive"] }
-minifb = { version = "0.27", default-features = false, features = ["x11"] }
 num-bigint = "0.5.1"
 num-traits = "0.2.19"
+pollster = "1"
+# Every native backend, and no browser one.
+wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "wgsl", "dx12", "metal", "vulkan", "gles"] }
+winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11"] }
 
 [profile.release]
 opt-level = 3

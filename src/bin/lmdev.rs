@@ -41,6 +41,13 @@ enum Cmd {
     /// Name resolution: what a package can see, and what pkg:name reaches
     Readers,
 
+    /// The box filter the window scales the display with, on this host's GPU
+    ///
+    /// Every pixel drawn is compared with the filter's definition computed in
+    /// double precision, at scales below one, of one, whole and fractional.
+    /// Skipped where there is no graphics adapter.
+    Display,
+
     /// The machine's own suites: boot an image headless and type (check)
     ///
     /// Every check is counted on the machine, which halts with exit code 0
@@ -132,19 +139,21 @@ fn main() -> std::process::ExitCode {
         Cmd::Asm => lm::check::asm::run(),
         Cmd::Compiler { verbose } => lm::check::compiler::run_all(verbose),
         Cmd::Readers => lm::check::readers::run(),
+        Cmd::Display => lm::check::display::run(),
         Cmd::Check { image } => run_check(&image),
         Cmd::All => {
             let a = lm::check::cpu::run_all();
             let b = lm::check::asm::run();
             let c = lm::check::compiler::run_all(false);
             let d = lm::check::readers::run();
-            let e = if std::path::Path::new("kick.img").exists() {
+            let e = lm::check::display::run();
+            let f = if std::path::Path::new("kick.img").exists() {
                 run_check("kick.img")
             } else {
                 println!("check: no kick.img here, skipped (lmforge build makes one)");
                 true
             };
-            a && b && c && d && e
+            a && b && c && d && e && f
         }
         Cmd::Bench => {
             lm::check::cpu::bench();
@@ -181,7 +190,6 @@ fn run_check(image: &str) -> bool {
     let _ = std::fs::create_dir_all("target");
     let o = lm::boot::Options {
         image: image.to_string(),
-        window: false,
         script: Some("(check)\n".to_string()),
         interactive: false,
         disk: Some(disk.to_string_lossy().into_owned()),

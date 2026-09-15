@@ -25,7 +25,11 @@ struct Cli {
     #[arg(long)]
     no_window: bool,
 
-    /// Scale the display window: 1, 2 or 4
+    /// Open the display window at 1 to 4 times the display's size
+    ///
+    /// The window can be resized. The display is drawn as large as the window
+    /// allows without changing its shape, with every pixel covering the same
+    /// area of the window.
     #[arg(long, value_name = "N", default_value_t = 1,
           value_parser = clap::value_parser!(u32).range(1..=4))]
     scale: u32,
@@ -104,7 +108,6 @@ fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     let o = boot::Options {
         image: cli.image,
-        window: !cli.no_window,
         scale: cli.scale,
         // A newline is appended: the reader needs a delimiter after the last
         // token, and a script ending in `bye` without one would wait for ever.
@@ -119,7 +122,8 @@ fn main() -> std::process::ExitCode {
         screenshot: cli.shot,
         trace_traps: cli.trace_traps,
     };
-    match boot::boot(&o) {
+    let code = if cli.no_window { boot::boot(&o) } else { boot::boot_in_window(&o) };
+    match code {
         0 => std::process::ExitCode::SUCCESS,
         n => std::process::ExitCode::from(n as u8),
     }

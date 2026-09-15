@@ -98,7 +98,6 @@ pub fn rebuild(from: &str, out: &str, verbose: bool, check: bool) -> i32 {
     }
     let o = crate::boot::Options {
         image: from.to_string(),
-        window: false,
         scale: 1,
         script: Some(script),
         interactive: false,
