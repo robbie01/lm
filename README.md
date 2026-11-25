@@ -522,11 +522,15 @@ allocator's mask of live registers, the conservative scan of a suspended
 task's registers and the pins it left, and the rule that kept every word
 between `sp` and the closure slot a tagged value.
 
-A tagged capability is the collector's when it is a pair, based in cons
-space with no HD and sixteen bytes long; an object, with HD and its header
-in object space; or code, with EX, which keeps the code object that owns its
-block alive through the block's header. A run, a stack, a device page or a
-pool block is somebody else's.
+A tagged capability keeps alive the block its base lies in, whatever its
+length: based in cons space without HD, the pair at its base rounded down to
+16; based in object space, the object whose block holds the granule below its
+base, found by an object-start map beside the mark bitmap. A capability
+narrowed to a car or to a vector's slot keeps its pair or its vector, and the
+processor's barrier and both compactors follow the same rule. Code, with EX,
+keeps the code object that owns its block alive through the block's header.
+A stack, a device page or a pool block is somebody else's; a task's cons run
+keeps at most the one pair at its base.
 
 Free memory holds no tags. The sweep zeroes every dead object that could
 hold a pointer and every dead stretch of pairs, so an allocator's stores

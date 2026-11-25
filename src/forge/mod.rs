@@ -182,6 +182,9 @@ pub fn write_layout() {
     def!("obj-limit", OBJ_END);
     def!("fast-base", FAST_BASE);
     def!("gc-bitmap", GC_BITMAP);
+    def!("obj-starts", OBJ_STARTS);
+    def!("obj-starts-ready", OBJ_STARTS_READY);
+    def!("obj-starts-magic", OBJ_STARTS_MAGIC);
     def!("kick-base", KICK_BASE);
     def!("reset-reserve", RESET_RESERVE);
     // The first word of an image the machine writes itself, which is how the

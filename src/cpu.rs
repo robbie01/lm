@@ -1143,13 +1143,18 @@ fn inc_cap(m: &mut Machine, pc: u32, fuel: u32, d: u32, s: u32, off: u32) -> Res
 
 /// `csetbounds`: bounds from `cs1`'s address for `len` bytes, refusing to
 /// round if `exact`. A request inside the window below 256 bytes is exact
-/// and its own window.
+/// and its own window, unless `cs1` is headed: whether the result keeps HD
+/// is `Cap::set_bounds`'s to say.
 #[inline(always)]
 fn csetbounds(m: &mut Machine, d: u32, s: u32, len: u32, exact: bool, pc: u32, fuel: u32) -> Result<(), Stop> {
     let k = (s & 31) as usize;
     let hh = hw(m, s);
     let a = r(m, s);
-    if hh & (READY | TAG | M_OT) == READY | TAG && len < 256 && in_win(a, m.wb[k], m.wl[k], len) {
+    if hh & (READY | TAG | M_OT) == READY | TAG
+        && (hh as u32) & (P_HD << PERM_SHIFT) == 0
+        && len < 256
+        && in_win(a, m.wb[k], m.wl[k], len)
+    {
         let t = a.wrapping_add(len);
         let meta = (hh as u32 & !BOUNDS_MASK) | ((t & 0xff) << 10) | (a & 0x3ff);
         wcw(m, d, a, meta as u64 | TAG, a, len);

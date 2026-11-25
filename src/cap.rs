@@ -271,7 +271,12 @@ impl Cap {
             return None;
         }
         let (bounds, exact) = encode(self.addr, top);
-        Some((Cap { addr: self.addr, meta: (self.meta & !BOUNDS_MASK) | bounds, tag: true }, exact))
+        // HD says the base is an object's payload with its header below it.
+        // Only the root mints one: narrowing anything else to a new base
+        // leaves the object, and the result loses HD.
+        let whole = self.base() == 0 && self.top() == 1 << 32;
+        let meta = if whole || self.addr == self.base() { self.meta } else { self.meta & !(P_HD << PERM_SHIFT) };
+        Some((Cap { addr: self.addr, meta: (meta & !BOUNDS_MASK) | bounds, tag: true }, exact))
     }
 
     /// Keep only the permissions in `mask`. A sealed capability loses its
@@ -429,6 +434,15 @@ mod tests {
                 assert_eq!(e.perms(), P_ALL);
             }
         }
+    }
+
+    #[test]
+    fn moving_the_base_drops_hd() {
+        let obj = Cap::ROOT.with_addr(0x0A00_0008).with_bounds_exact(64).unwrap();
+        assert!(obj.perms() & P_HD != 0);
+        assert!(obj.with_bounds_exact(16).unwrap().perms() & P_HD != 0);
+        let inner = obj.with_addr(0x0A00_0018).with_bounds_exact(16).unwrap();
+        assert_eq!(inner.perms() & P_HD, 0);
     }
 
     #[test]

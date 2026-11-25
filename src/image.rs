@@ -179,6 +179,9 @@ pub fn load(m: &mut Machine, path: &str) -> std::io::Result<Loaded> {
 
 /// Load from anything readable: a file, or bytes in memory.
 pub fn load_from(m: &mut Machine, f: &mut (impl Read + Seek)) -> std::io::Result<Loaded> {
+    // Object space is about to change under the object-start map, which the
+    // first collection then builds again.
+    m.poke32(crate::map::OBJ_STARTS_READY, 0);
     load_any(m, f).map_err(truncated)
 }
 
