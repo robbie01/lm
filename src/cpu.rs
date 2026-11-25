@@ -333,7 +333,7 @@ fn cb_imm(w: u32) -> u32 {
 
 // ------------------------------------------------------------------- dispatch
 #[inline(always)]
-fn token(w: u32) -> u32 {
+pub(crate) fn token(w: u32) -> u32 {
     if w & 3 == 3 {
         32 + ((w >> 2) & 31)
     } else {

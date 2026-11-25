@@ -2,8 +2,6 @@
 //! the Xlm instructions. Used to build test programs and as the reference
 //! the Lisp assembler is differential-tested against.
 
-#![allow(dead_code)]
-
 pub const ZERO: u32 = 0;
 pub const RA: u32 = 1;
 pub const SP: u32 = 2;
