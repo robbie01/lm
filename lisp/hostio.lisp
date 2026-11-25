@@ -40,7 +40,6 @@
       nil))
 (define (expand-macro form) (%macroexpand-1 form))
 (define (alloc-object type len) (%alloc-obj type len))
-(define (alloc-code n) (%alloc-code n))
 
 (define *compile-trace* nil)
 
