@@ -315,9 +315,9 @@
     nil))
 
 ;; ---------------------------------------------------------------- signals
-;; Three bits are fixed, the same in every task, so that waking every waiter
-;; is a walk of the wait list: the vertical blank, the blitter, and a mutex
-;; handed over. Every other bit from 0 to 30 is for allocation. Bit 31 is
+;; Four bits are fixed, the same in every task, so that waking every waiter
+;; is a walk of the wait list: the vertical blank, the blitter, a mutex
+;; handed over, and a deadline passed. Every other bit from 0 to 30 is for allocation. Bit 31 is
 ;; not: a mask is a fixnum, and a fixnum with bit 31 set is negative, which
 ;; the tests below would misread.
 (define sigb-vblank 5)
@@ -679,19 +679,28 @@
       (dolist (p (list-nodes (ready-list))) (set! acc (%cons p acc)))
       (%cons (this-task) (reverse acc)))))
 
+;; A column `width` wide: numbers to the right of it, words to the left.
+(define (emit-spaces n)
+  (while (%> n 0) (emit-ch #\space) (set! n (%- n 1))))
+
+(define (emit-right s width)
+  (emit-spaces (%- width (%string-length s)))
+  (emit-str s))
+
+(define (emit-left s width)
+  (emit-str s)
+  (emit-spaces (%- width (%string-length s))))
+
 (define (tasks)
-  (emit-str "  pri  state    switches  name\n")
-  (let ((show (lambda (p)
-                (emit-str "  ")
-                (emit-str (number->string (node-pri p)))
-                (emit-str "    ")
-                (emit-str (task-state-name (tc-state p)))
-                (emit-str "     ")
-                (emit-str (number->string (tc-switches p)))
-                (emit-str "  ")
-                (emit-str (task-name p))
-                (emit-str "\n"))))
-    (dolist (p (task-snapshot)) (%funcall show p)))
+  (emit-str "   pri  state    switches  name\n")
+  (dolist (p (task-snapshot))
+    (emit-right (number->string (node-pri p)) 6)
+    (emit-str "  ")
+    (emit-left (task-state-name (tc-state p)) 7)
+    (emit-right (number->string (tc-switches p)) 10)
+    (emit-str "  ")
+    (emit-str (task-name p))
+    (emit-str "\n"))
   nil)
 
 ;; The stub a task returns to when its function finishes. It cannot be a Lisp
@@ -1536,9 +1545,8 @@
         (let ((b (tc-run-owed me))) (set-tc-run-owed! me 0) b)
         (let ((b gc::*run-owed*)) (set! gc::*run-owed* 0) b))))
 
-;; A suspended task's saved registers and its stack from the saved sp to the
-;; top, scanned precisely: a granule holds a pointer exactly when its tag is
-;; set, whatever the code that left it there was in the middle of.
+;; A suspended task's saved registers, and its stack from the saved sp to
+;; the top.
 (define (scan-task task)
   (let ((ctx (tc-context task)))
     (if ctx (scan-context ctx) nil)))

@@ -19,7 +19,7 @@
 ;; ---------------------------------------------------------------- context
 ;; 32 capability slots of 8 bytes: slot 0 is the pc, slots 1..31 are x1..x31.
 ;; `ctx-bytes` and the `reg-*` names come from the generated layout.
-(define (ctx-off n) (%* 8 n))
+(define (ctx-off n) (%* value-bytes n))
 
 ;; The special capability registers the stubs reach with `cspecialrw` are
 ;; the layout's `scr-*`. nil has `perms-nil`: it may load and nothing else,
@@ -189,9 +189,8 @@
     (i-csrrs a $a2 csr-mtval $zero)
     (i-cspecialrw a $a3 scr-mscratchc $zero)
     ;; The handler's frames end here. The interrupted code's frame pointer
-    ;; and stack pointer are in the saved context, and the collector scans
-    ;; its stack from that (`each-trap-context` in gc.lisp) rather than by
-    ;; walking from one stack into another.
+    ;; and stack pointer are in the saved context, where the collector finds
+    ;; its stack (`each-trap-context` in gc.lisp).
     (i-mv a $s0 $zero)
     (i-lc a $t0 $zero lg-traphook)
     (i-li a $t1 4)

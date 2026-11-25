@@ -17,8 +17,7 @@
 ;;; bytes, holds a pointer if and only if its tag is set. The roots are the
 ;;; tagged granules of low memory, of every stack from its stack pointer to its
 ;;; top, and of every saved register context. Marking an object is pushing
-;;; every tagged granule of its payload. Nothing is guessed, so nothing is
-;;; pinned.
+;;; every tagged granule of its payload.
 ;;;
 ;;; A tagged capability is the collector's business when it is a pair, its
 ;;; base in cons space, no HD, sixteen bytes long; or an object, with HD and
@@ -256,18 +255,21 @@
             0)
         0)))
 
-;; The header of the code object that owns the block whose code starts at
-;; `base`, or 0. A code block's header is two granules below its code: its
-;; size, then its code object (see `alloc-code`).
-(define (code-owner base)
+;; The code object that owns the block whose code starts at `base`, or nil.
+;; A code block's header is two granules below its code: its size, then its
+;; code object once registered (see `alloc-code`).
+(define (code-object-at base)
   (if (%>= base (%+ code-base 16))
       (if (%< base (%ld-word lg-code-ptr))
           (let ((o (%ld-cap (%- base 8))))
-            (if (%cap-tag? o)
-                (if (%= 0 (%logand (%cap-perms o) perm-hd)) 0 (object-header (%cap-base o)))
-                0))
-          0)
-      0))
+            (if (%cap-tag? o) (if (%= 0 (%logand (%cap-perms o) perm-hd)) nil o) nil))
+          nil)
+      nil))
+
+;; The header of that code object, or 0.
+(define (code-owner base)
+  (let ((o (code-object-at base)))
+    (if o (object-header (%cap-base o)) 0)))
 
 ;; Where the mark bit for a tagged capability lives: a pair's own address, an
 ;; object's header, a code capability's code object's header; or 0 when the
@@ -357,6 +359,14 @@
       (set! depth (%- depth 1))
       (if (%> depth 0) (set! ctx (%addr-of (%ld-cap (%+ ctx ctx-bytes)))) nil))))
 
+;; A context a trap saved. A trap inside the handler interrupted code on the
+;; trap stack, which `roots` scans from where it stands, so only a context
+;; on another stack has its stack scanned here.
+(define (scan-trap-context ctx)
+  (let* ((a (%addr-of ctx)) (sp (%ld-cap (%+ a (%lsh reg-sp 3)))))
+    (scan-granules a (%+ a ctx-bytes))
+    (if (%= (%cap-base sp) (%cap-base (%stack-pointer))) nil (scan-stack sp))))
+
 ;; Replaced by exec.lisp once the kernel is up, to scan every other task's
 ;; context with `scan-context`.
 (define (extra-roots) nil)
@@ -369,7 +379,7 @@
   ;; This task's own stack, from where it stands.
   (scan-stack (%stack-pointer))
   ;; Whatever a trap interrupted, if this is inside one.
-  (each-trap-context scan-context)
+  (each-trap-context scan-trap-context)
   ;; Every other task.
   (extra-roots))
 
