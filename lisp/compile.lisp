@@ -239,8 +239,9 @@
     r))
 
 ;; ---------------------------------------------------------------- constants
-;; nil is tp. A fixnum is the integer itself, and a character is its code
-;; retagged; neither is a pointer, so neither needs the literal vector.
+;; nil is tp, a fixnum is the integer itself, and a character is its code
+;; retagged. Anything else is loaded from one of the code object's literal
+;; slots, so the code holds no address and the collector sees the value.
 (define (emit-const c v reg)
   (let ((a (cx-asm c)))
     (cond
@@ -249,9 +250,48 @@
      ((%char? v)
       (i-li a reg (%char->int v))
       (i-retag a reg reg kind-fixnum kind-char))
-     ;; Anything else is loaded from the code object's literal slots, so the
-     ;; collector sees it there and the code holds no address.
-     (else (emit-literal c v reg)))))
+     (else (emit-literal c (freeze v) reg)))))
+
+;; A constant is read-only all the way down: the literal and every pair,
+;; vector, string, byte object and bignum inside it lose SD and SC, so
+;; (set-car! '(1 2) 3) and a store into the tail of a quoted list are both
+;; refused. LM stays, because a load through a capability without it would
+;; strip the symbols inside too, and (car '(a)) would not be eq? to 'a.
+;; Symbols, records, closures and code objects are left as they are.
+;;
+;; Freezing rewrites the constant in place, so every literal that names an
+;; object is the same capability, eq? to every other however many code
+;; objects hold it. A capability to the object taken before it was compiled,
+;; which only a macro splicing a live object into a quote can have, keeps
+;; its permissions and is not eq? to the literal: it is a different
+;; authority over the same object.
+(define (frozen v) (%cap-and-perms v (%lognot (%logior perm-sd perm-sc))))
+
+(define (writable? v) (%> (%logand (%cap-perms v) perm-sd) 0))
+
+(define (freeze v)
+  (cond
+   ((%cons? v)
+    ;; Along the spine by iteration, into each car by recursion.
+    (let ((p v))
+      (while (if (%cons? p) (writable? p) nil)
+        (%set-car! p (freeze (%car p)))
+        (let ((next (%cdr p)))
+          (%set-cdr! p (if (%cons? next) (frozen next) (freeze next)))
+          (set! p next))))
+    (frozen v))
+   ((%vector? v)
+    (if (writable? v)
+        (let ((i 0) (n (%vector-length v)))
+          (while (%< i n)
+            (%vector-set! v i (freeze (%vector-ref v i)))
+            (set! i (%+ i 1))))
+        nil)
+    (frozen v))
+   ((%string? v) (frozen v))
+   ((%bytes? v) (frozen v))
+   ((%bignum? v) (frozen v))
+   (else v)))
 
 (define (emit-literal c v reg)
   (let* ((a (cx-asm c))

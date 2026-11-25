@@ -908,6 +908,17 @@
                t)
     (num-check 'nor-will-the-processor
                (refused? (lambda () (unsafe (%slot f clo-code))))
-               t))
+               t)
+    ;; A quoted constant is read-only all the way down, and the symbols in it
+    ;; are the symbols themselves.
+    (let ((k '(a (1 2) "s" #(3))))
+      (num-check 'a-constant-is-read-only (refused? (lambda () (set-car! k 1))) t)
+      (num-check 'and-so-is-its-tail (refused? (lambda () (set-car! (cdr k) 1))) t)
+      (num-check 'and-what-it-holds
+                 (list (refused? (lambda () (set-car! (cadr k) 9)))
+                       (refused? (lambda () (string-set! (caddr k) 0 #\z)))
+                       (refused? (lambda () (vector-set! (cadddr k) 0 9))))
+                 (list t t t))
+      (num-check 'but-its-symbols-are-not (eq? (car k) 'a) t)))
   (princ "capabilities: done (nothing above = all correct)")
   (newline))
