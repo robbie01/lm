@@ -29,7 +29,7 @@ chain of descriptors.
 
 ## The two numbers that shape the design
 
-Measured under the workbench:
+Measured under the workbench, before the port to capabilities:
 
     a request round trip (send, block, reply, wake)      9,680 cycles
     a small blit, all in (clip, take a descriptor,         850 cycles
@@ -37,11 +37,12 @@ Measured under the workbench:
     of which talking to the chip                           137 cycles
     one composite pass, 66 blits                       783,454 cycles
 
-A message is eleven times a whole small blit and seventy times the part that
-talks to the chip. So the unit of work sent to a driver is a whole
-operation, never a primitive. Where a client needs the hardware inside its
-own hot loop, messaging is the wrong tool and the safety has to come from
-the arguments.
+A message was eleven times a whole small blit and seventy times the part
+that talks to the chip. After the port a round trip at the prompt, to a
+server that answers at once, is 7,060 cycles, which changes nothing below.
+The unit of work sent to a driver is a whole operation, never a primitive.
+Where a client needs the hardware inside its own hot loop, messaging is the
+wrong tool and the safety has to come from the arguments.
 
 ## Enforcement is the processor
 
@@ -219,10 +220,13 @@ directly.
   and the chips can write anywhere, and so can the blitter and the disk
   controller on behalf of whoever programmed them; what keeps that to those
   few files is that programming them is an unsafe name.
+- Capabilities do not reach the chips. The blitter and the disk controller
+  follow the numbers in a descriptor or a request, so a wrong one written by
+  privileged code lands anywhere in RAM; `LM_BLIT_GUARD` checks blits, and
+  is off by default.
 - Ports have no priority, so a low-priority client's request sits in front
-  of a high-priority client's.
-- `wait-ports` answers the first ready port, so a busy client can starve a
-  quiet one.
+  of a high-priority client's. `wait-ports` starts its scan one port further
+  along on each call, so a busy client cannot starve a quiet one.
 - A message costs about an eighth of its round trip in allocation. A driver
   on a warm path should keep a message per client rather than make one per
   call.

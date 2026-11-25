@@ -43,14 +43,16 @@ them; `defsubst` copies a Lisp body and has 27 uses, all raw bit-twiddling
 in the collector and the bignums. `defrecord` already is the one
 declaration on the definition that says open-code this.
 
-**Six ways to read a word. WONTFIX**, with one repair. `peek`/`poke` are
-the checked, widening pair for everyone: a critical section, a bounce
-through `lg-raw-word`, a bignum for a word with the top bit set. The `%ld-*`
-and `%st-*` forms are the raw ones, a single instruction that checks only
-that the address is a fixnum, for the collector and the chips where the
-word is known. Two sets, named for what they check, is the irreducible
-number. `setter-form` referred to `peek16` and `peek32`, which never
-existed; it now writes through `poke` and `poke8` and the raw stores.
+**Six ways to read a word. RESOLVED** by the port. A machine word is a
+fixnum, so the widening, the bounce through `lg-raw-word` and the signed and
+unsigned families are gone with it: `peek` is `%ld-word`, `poke` is
+`%st-word!` that refuses anything but a fixnum, and every one of them is a
+single instruction through DDC, which the processor refuses to code without
+SR. What is left is two sets named for their authority, not their checks:
+the loads and stores by number, which are unsafe, and `%cap-ld-word` and
+its kin, which load and store within a capability already held and are
+not. `setter-form` writes through `poke`, `poke8`, the raw stores and the
+capability stores.
 
 **Record prefixes are abbreviations. WONTFIX.** The abbreviated ones are
 the hot ones: `cx-` has 207 accessor sites, `win-` 167, `bm-` 89, `tc-` 65,
@@ -120,7 +122,7 @@ right place.
 
 **Signals 0 to 15 are reserved for nothing. RESOLVED.** Four bits are
 fixed, vblank, blit, mutex and timer, and `sig-reserved` names them; every
-other bit from 0 to 29 is allocated.
+other bit from 0 to 30 is allocated, now that a mask is a 32-bit fixnum.
 
 **Timing is missing. RESOLVED.** `sleep` and `wait-timeout`, on a deadline
 list the timer interrupt walks every quantum, in the machine's own ticks;
@@ -175,15 +177,16 @@ another one does.
 **Unused instructions. WONTFIX**, as keep. `fori` is emitted by
 `emit-or-const`, so the item was wrong about it. `fltu`, `ldxbi` and
 `stxbi` are tested encodings that cost nothing at run time; `ldxbi` and
-`stxbi` are also the two free slots in custom-1 where a tagged half-word
-load and store would go if `%ld-half` ever matters, which is the collector's
-run-skipping test.
+`stxbi` are the byte forms of custom-1 with an immediate index. They were
+held as the slots for a tagged half-word load for the collector's
+run-skipping test; since the port that test reads a whole word of the mark
+map, and a half-word by number is one instruction anyway, `lhu.ddc`.
 
 **The `lg-scratch` cells. RESOLVED.** They are `lg-task-exit`,
-`lg-trap-entry`, `lg-boot-arg` and `lg-raw-word`, at the same addresses.
-`scratch3` had two unrelated jobs, the forge's trap entry and `peek`'s
-staging word; they are two cells now, the second taking the one that was
-empty.
+`lg-trap-entry` and `lg-boot-arg`. `scratch3` had two unrelated jobs, the
+forge's trap entry and `peek`'s staging word; they became two cells, and
+the staging word went with the port, a word being a fixnum. Every low
+global is an 8-byte slot now, numbered in `src/map.rs`.
 
 **The tests live in the demo file. RESOLVED.** `num-check` counts; `(check)`
 runs every suite and halts the machine with the verdict as its exit code;

@@ -1,174 +1,204 @@
 # Memory safety
 
-What the machine checks, what it does not, and what it would take to make
-the unchecked path high-friction and constrained, so that the machine is
-safe by default. This is about what the language lets you say, not about
-who may say it: there is one address space, every task can reach every
-symbol, and that stays.
+What the processor guarantees, what `unsafe` still means, what is left
+unchecked, and what became of the proposals this note used to make. This is
+about what the language lets you say and what the processor lets you do,
+not about who may say it: there is one address space, every task can reach
+every symbol, and that stays.
 
 ## The principle
 
-Safety here is scoping, not checking, as [drivers.md](drivers.md) says of
+Safety here is scoping, not supervision, as [drivers.md](drivers.md) says of
 the devices: a thing is safe because the ordinary vocabulary cannot express
-the unsafe act, not because a supervisor catches it. The processor does the
-checking that costs nothing, in the instructions the compiler emits for the
-ordinary vocabulary, and everything the ordinary vocabulary produces is a
-typed error with a report, never a corrupted heap. The unsafe acts exist,
-because the collector, the kernel and the drivers need them, and the whole
-question is how they are named and how far they reach.
+the unsafe act, not because a supervisor catches it. Since the port to
+capabilities the scoping is the processor's. A program reaches memory only
+through capabilities it was handed, every capability is bounded, and the one
+that is not, the root, is reachable only from code compiled `unsafe`.
 
-The target is one sentence: **code that does not say it is unsafe cannot fault
-the machine.** It can get a typed error; it cannot reach a load or store
-fault, cannot forge a pointer, cannot write past an object, cannot write a
-heap word the collector will not see.
+The sentence this note is about: **code that does not say it is unsafe
+reaches only what it was handed.** It can get a typed error or a refused
+access, each a report naming the value; it cannot forge a pointer, cannot
+write past an object, cannot write an object's header, and cannot lose a
+pointer the collector needs to see.
 
-## What is checked today
+## What the processor guarantees
 
-The four custom opcodes check as they form an address, at no extra cost:
+**Spatial safety, by bounds.** Every load and store through a capability is
+checked against its bounds, its permissions, its tag and its seal, in the
+same comparison that the fast path of the core already makes. The capability
+to an object is bounded to exactly its payload, so the header is out of
+reach and an access one byte past the end is a length fault. A pair is its
+sixteen bytes, a bitmap's pixels their byte object, a device its 4 KiB
+page, a task's stack its stack and a cons run its run. Indexed access checks
+the index against the length in the header and the address against the
+bounds, so a header that lied could not reach past the object either.
+Narrowing is the only direction: `csetbounds` refuses a region outside the
+capability it starts from.
 
-- `car`, `cdr`, `set-car!`, `set-cdr!` check the pair tag; a store refuses
-  nil.
-- `vector-ref`, `string-ref`, `bytes-ref` and their setters, and every
-  record accessor, check the object tag, the type in the header, that the
-  index is a fixnum, and the bound. A record accessor also checks the
-  record's own type word.
-- A call loads the entry through a typed index, so calling a non-function
-  is a typed error; arity is checked in the prologue.
-- Fixnum arithmetic checks both operands; `+`, `-` and `*` trap on overflow
-  and are widened.
-- The stack limit is a register the scheduler sets per task; a frame that
-  would cross it traps before it is built.
-- A store into the first eight bytes, nil's cell, is refused by the machine.
-- The write barrier watches every checked store while a collection is
-  marking.
+**Unforgeability, by tags.** A granule's tag is out of band, and only a
+capability store from a tagged register sets it. Integer instructions write
+untagged results, data stores clear the tags they touch, and a capability
+moved outside what its bounds can represent loses its tag. So a pointer
+cannot be made from its bits; the one way to make a capability from a number
+is `%from-addr`, which reads DDC, which needs SR.
 
-There is no unchecked vector, string or byte access at all: the plain names
-compile to the checked instructions and the `%` names are the same
-instructions.
+**Encapsulation, by sealing.** Every closure is sealed. It can be called,
+with `jcl`, which unseals it into the callee's `t0`, and it cannot be loaded
+from, stored into, narrowed or moved; its free variables are the closure's
+own code's. A return address is a sentry: it can be jumped to, at its own
+address, and nothing else. Opening a sealed capability by other means takes
+an SE authority, and the only one is the root.
 
-Every failure of the raw vocabulary, a load or store outside RAM, a
-misaligned fetch, an illegal instruction, is a fatal trap: a report, a
-backtrace, and the task ends. Nothing inside RAM is ever refused.
+**Immutability, by permission.** nil is the read-only cell at address 0, so
+`(set-car! nil 1)` is refused by the capability, not by a test. A capability
+with SD dropped refuses stores, and one with LM dropped hands out read-only
+capabilities to everything loaded through it, so read-only is deep. A
+string or a byte object cannot hold a capability, because it has no SC.
 
-## The raw vocabulary
+**Privilege, by SR.** Writing a CSR, reading a machine-level one, touching
+a special capability register, `mret`, `wfi`, and every load and store by
+number through DDC fault without SR in PCC. The compiler gives SR only to
+code compiled in an unsafe file or containing an `unsafe` form.
 
-These are the operations that can produce an invalid access. All of them
-are intrinsics in `lm` or functions in `hw` and `gc`, all are exported, and
-all are reachable unqualified from `user` and from every application
-package, because every package uses `lm`. Each carries the `sym-unsafe` bit
-in its symbol, and the compiler refuses it outside an `unsafe` form or an
-unsafe file; see below.
+**And what the Lisp instructions always checked.** `car`, `cdr`, `set-car!`
+and `set-cdr!` check for a pair; the indexed forms check the type in the
+header, that the index is a fixnum, and the bound; a call checks for a
+closure and the prologue the arity; fixnum arithmetic checks both operands
+and widens on overflow; the stack limit stops a frame before it is built;
+and the write barrier now watches every store, raw or checked, while a
+collection is marking.
 
-| what | checks | on a bad argument |
+`(capabilities)` checks each of these at the prompt.
+
+## What `unsafe` means now
+
+Two things, the second new with the port. The compiler refuses a raw name
+outside an `unsafe` form or an unsafe file, as it did before: every raw
+operation and every function that hands out raw memory carries the
+`sym-unsafe` bit in its symbol, set by `unsafe-names`. And the code compiled
+from such a site carries SR in its entry capability, so the processor
+refuses the raw act to code that did not say it, however that code was
+made. `unsafe` is `begin` to the interpreter and a permission to the
+compiler and the processor.
+
+| what | reaches | on a bad argument |
 |---|---|---|
-| `%ld-word` `%st-word!` `%ld-half` `%st-half!` | none | reads or writes any RAM word, live heap and code included |
-| `%ld-fixnum` `%st-fixnum!` `%ld-byte` `%st-byte!`, and `peek`/`poke` over them | the address is a fixnum | the same |
-| `%bit-ref` `%bit-set!` | none, the bit index unbounded | the same |
-| `%addr-of` | none | any pointer becomes an integer |
-| `%from-addr` | none | any integer becomes a pointer, which every checked instruction then trusts |
-| `%slot` `%set-slot!` | object tag and bound, any type | a closure's raw entry word read as a value |
-| `%set-context!` `%set-stack-limit!` `%set-gc-mode!` `%ecall` `%disable` `%enable` `%cons-run` `%set-cons-run!` `%set-this-task!` `%halt` | none | arbitrary machine state |
-| `alloc-pool` `free-pool` | a header tag on free | a freed block reused under a holder; never scanned |
-| `dev-reg`, `bm-at`, `bm-addr`, and the blitter's descriptors | ownership of the device | a DMA anywhere in RAM |
-| `slot`, `alloc-code` in gc | none | a root walk of any address; code space handed out raw |
+| `%root`, `%from-addr` | the root, or the root at an address | any capability at all, every permission |
+| `%ld-word` `%st-word!` `%ld-half` `%st-half!` `%ld-byte` `%st-byte!` `%ld-cap` `%st-cap!`, and `peek`/`poke` over them | memory by number, through DDC | any RAM word, live heap, headers and code included |
+| `%bit-ref` `%bit-set!` | a bit by number | the same |
+| `%slot` `%set-slot!` | any type of object, by index | a closure's slots, if it has been opened |
+| `open-closure` | a closure unsealed with the root | its free variables and entry |
+| `%set-context!` `%set-stack-limit!` `%set-gc-mode!` `%ecall` `%disable` `%enable` `%cons-run` `%set-cons-run!` `%set-this-task!` `%halt` | the machine's own state | arbitrary machine state |
+| `alloc-pool` `free-pool` | pool memory, by number | a freed block reused under a holder; never traced |
+| `dev-page` `dev-ld` `dev-st!` `disk-go` `blit-descriptor` `blit-go` | a device; DMA | a transfer anywhere in RAM |
+| `alloc-code`, `register-code`, `refill-cons-run` in gc | code space, the collector's tables | the collector's invariants |
 
-Where they are said: the collector, the kernel, the chips, the trap
-handler, the image writer, the object system, the bignums, the compiler
-and the assembler's code writer are unsafe files. Outside those there are
-about forty sites, each inside an `unsafe` form: the printer and the
-explorer walking objects by slot, the fonts storing glyph pixels, the
-drivers handing a buffer's address to a chip, the console's raw wait, and
-the demos and suites that exercise raw memory on purpose. The UI stack, wb,
-ui, platinum and eyes, has one, `win-row`: it draws through `hw`'s checked
-bitmap functions, which is the design working.
+What left the list with the port: `%addr-of` is safe, because a number is
+no authority; the operations on a capability already held, `%cap-ld`,
+`%cap-st!`, the field readers, narrowing, dropping permissions and sealing,
+are safe, because they cannot reach past it; `%ld-fixnum` and `%st-fixnum!`
+are gone, a word being a fixnum.
 
-The raw stores also bypass the write barrier, which is consulted only by
-the checked stores. A pointer overwritten through `%st-word!` during a
-mark is lost. That is fine for what the raw stores are for, pool memory,
-device registers and the low globals, none of which hold heap pointers the
-collector needs to see; it is the wild store into the heap that would be
-wrong, and nothing today refuses it.
+Where it is said: the collector, the kernel, the chips, the trap handler,
+the image writer, the core runtime, the bignums and the compiler are unsafe
+files. Outside those there are about forty sites, each inside an `unsafe`
+form: the printer and the explorer walking objects by slot and opening
+closures, the console's raw line and its wait, the disk driver handing a
+buffer's address to the controller, the assembler copying code into code
+space, and the suites that exercise raw memory on purpose. The UI stack, wb,
+ui, platinum, eyes and the fonts, has none: glyphs and plots store into a
+bitmap's pixels through their byte object, which is the design working.
 
-## Closed now
+## What remains unchecked
 
-**The raw vocabulary has to be named as such.** Every raw operation and
-every function that hands out raw memory carries the `sym-unsafe` bit in
-its symbol, set by `unsafe-names`, and the compiler refuses a call to one,
-or a reference to one as a value, unless the site is inside an `unsafe`
-form or the file said `(unsafe-file)` after its `in-package`. `unsafe` is
-`begin` to the interpreter and a permission to the compiler; the marks are
-in the symbol, so a package marks its own. The Rust bargain exactly: the
-unsafe act is still there, it is greppable, and it cannot be reached by
-accident. The machine's own compiler enforces it on a rebuild of itself.
+**Temporal safety of the pool.** The collector's heap is temporally safe: a
+block is freed only when no tag anywhere names it, and whatever in it could
+hold a pointer is zeroed as it is freed. The pool is not the collector's. `alloc-pool` hands out a block by
+number, a task's stack and context are capabilities derived from the root
+over pool blocks, and `free-pool` gives a block back without finding what
+still names it. A stale stack or context capability, or a stale address
+used through DDC, reaches whatever the block holds next. There is no
+revocation. `alloc-pool` zeroes the block it hands out, so the new owner
+never sees the old one's data, but the old owner can see the new one's.
 
-Three holes in the checked vocabulary, all in the instructions the
-compiler emits:
+**DMA by address.** The blitter and the disk controller follow numbers, not
+capabilities: a descriptor's source and destination and a disk request's
+buffer are addresses that privileged code writes. The rectangle calls take
+bitmaps and the disk driver takes byte objects and checks the blocks fit,
+so the addresses come from objects; nothing in the chips checks it.
+`LM_BLIT_GUARD` checks every transfer against the block it named, and is
+off by default.
 
-- The indexed-access bound used the header's count as a word count for
-  every type. A string or byte object counts bytes, so a word access through
-  the any-type form, which is what `%slot` is, passed the check up to three
-  words past the object and read or wrote there. The count is now
-  converted to the size of the access.
-- `-2^30 / -1` is `2^30`, the one quotient that does not fit a fixnum, and
-  plain division wrapped it to `-2^30` silently. It now traps as an
-  overflow and is widened, so `%/` and `quotient` agree.
-- The symbol accessors checked only that they had an object, so a setter
-  handed a small record wrote past its end; they now go through the typed
-  indexed access, which checks for a symbol in the same one instruction.
-  The three length reads had no check at all, and a fixnum handed to
-  `vector-length` read the word before some address; they now read the
-  header through the tag-checked load, at the same cost. Both are in the
-  checked vocabulary as a result.
+**Inside `unsafe`.** Code with SR has the root, and the root reaches
+everything: an object's header, the nil cell, a sealed closure's slots, code
+space. The write barrier still sees a raw store, so a pointer cannot be lost
+during a mark, but a raw store can still corrupt one. Headers are written
+only by the allocators and the collector, through DDC.
 
-## What would make it safe by default
+**Stale frame slots.** A frame's local slots are not cleared on entry, so a
+slot an earlier call left tagged is a root until it is written. The
+collector checks an object's header before believing a stack slot; the
+cost is floating garbage, not a wrong pointer.
 
-In order of how much safety each buys for its cost.
+## The old proposals
 
-**1. Refuse the wild store into the heap.** The barrier already inspects
-every checked store; a second mode bit in the same CSR would have the
-processor refuse a plain store, `sw`, `sh`, `sb` and the tagged forms, whose
-address lies in cons or object space. Compiled code never stores into a
-heap object except through a checked store, so ordinary code never trips
-it; the collector and the image writer, which write headers and free-list
-links raw, clear the bit around their sweeps, the way they set the barrier
-around a mark. Then no raw store from any task can corrupt a heap word, and
-the raw stores keep their purpose, the pool and the chips. Cost: one range
-test on the plain store path while the bit is set.
+**1. Refuse the wild store into the heap. CLOSED** outside `unsafe`, by
+the processor: a store by number needs SR, so code that did not say
+`unsafe` has no way to name a heap word it was not handed. The barrier now
+checks every store, raw or checked, so a raw store during a mark can no
+longer lose a pointer. A store from `unsafe` code through the root into the
+heap is still possible, by design: the collector and the image writer are
+made of such stores.
 
-**2. Poison the pool on free.** A freed block is reused under whoever still
-holds its address, silently. Filling a freed block with an object-tagged
-pointer that lies outside RAM, `#xFEEDFEEC` say, makes the first checked
-use of stale memory a load fault naming the value, rather than a quiet
-read of someone else's stack. The cost is a fill per free, most of them
-task stacks at task end, which happens in the switch; measure before
-deciding whether it can be unconditional.
+**2. Poison the pool on free. OPEN**, and its shape has changed. Filling a
+freed block with a bad pointer was a way to make a stale use fault; with
+capabilities, the fault comes from the capability, not the contents. The
+real fix is revocation: on `free-pool`, find every tagged capability whose
+bounds lie in the block and clear its tag, which the tags make exact, as
+the pair compactor's walk over memory already does. The cost is a walk of
+the roots and the heap per free, most of them task stacks at task end;
+batching frees into the sweep is the shape to measure.
 
-**3. Make the blitter's guard the chip's behaviour.** `LM_BLIT_GUARD`
-already checks that a transfer stays inside the one pool block or object
-it named and prints when it does not. As the default, refusing the
-transfer and setting a status bit, it turns a wrong descriptor into a
-reported failure instead of a scribble across the heap. The disk engine
-has the same shape: it checks the extent against RAM in 64 bits, and could
-check that the address is inside a byte object, since that is all the
-driver ever hands it.
+**3. Make the blitter's guard the chip's behaviour. OPEN.** As before:
+`LM_BLIT_GUARD` as the default, refusing the transfer and setting a status
+bit, turns a wrong descriptor into a reported failure. Capabilities do not
+reach the chips, so this is still the only check there could be. The disk
+engine checks its extent against RAM in 64 bits, and could check that the
+address is inside a byte object, since that is all the driver hands it.
 
-**4. Audit `%from-addr`.** It is the one primitive that manufactures a
-pointer, and every checked instruction downstream trusts what it made. Its
-uses are few and all in unsafe files or forms, and the list of them is the
-list of places a bad pointer can enter the checked world.
+**4. Audit `%from-addr`. RESOLVED.** It reads DDC and sets an address, so
+it faults in code without SR, and the compiler refuses its name outside
+`unsafe`. The list of places a pointer can be made from a number is the
+list of unsafe files and forms, and the processor enforces it.
 
-**5. State the invariant as a fuzz target.** The exec fuzzer proves random
-code cannot reach the host. A Lisp-level target would generate programs
-from the checked vocabulary only and assert that none reaches a fatal
-trap: no load fault, no store fault, no misaligned fetch, only typed
-errors. That is the sentence at the top of this note, made checkable, and
-with item 1 it is checkable by construction: a program with no `raw` in it
-cannot name anything that faults.
+**5. State the invariant as a fuzz target. OPEN.** The exec fuzzer already
+hands random code random capabilities, bounds and permissions included, and
+takes SR away from PCC, and asserts that nothing reaches the host. A
+Lisp-level target would generate programs from the checked vocabulary only
+and assert that each ends in a value or a report: no fault outside the
+typed errors and the refused accesses, and no corrupted heap after.
+
+## Closed before the port
+
+**The raw vocabulary has to be named as such.** The `sym-unsafe` bit and
+the compiler's refusal, above. The machine's own compiler enforces it on a
+rebuild of itself.
+
+Three holes in the checked vocabulary, all in the instructions the compiler
+emits: the indexed bound used a byte object's count as a word count, so a
+word access through `%slot` passed up to three words past the end; the one
+quotient that did not fit a fixnum wrapped silently; and the symbol
+accessors and the three length reads checked less than their names said.
+All three were fixed then, and the port made each structural: the bound is
+now checked again by the capability, every quotient that leaves 32 bits
+traps, and a symbol slot or a length is read through a typed instruction
+whose object is bounded.
 
 ## What this is not
 
 There is no MMU and no supervisor, by design, and this does not add one.
 Every task keeps its reach into every symbol, every package and every
-device it owns. The friction proposed is at the point of writing the code,
-in the name it has to say, and in the processor refusing the few acts that
-nothing ordinary ever needs.
+device it owns. CHERI is what lets one address space be safe without
+either: the friction is at the point of writing the code, in the name it has
+to say, and in the processor refusing the acts that nothing ordinary ever
+needs.

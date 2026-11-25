@@ -7,6 +7,11 @@ means it was weighed and decided against, and says why; where something
 would reopen it, the trigger is named. Fixed problems are not kept here
 beyond their verdict; the git history has them.
 
+The machine has since been ported to CHERI capabilities
+([cheri.md](cheri.md)). Figures were measured before the port unless an
+item says otherwise; the port changed some costs and none of the verdicts
+below except where an item is marked as resolved by it.
+
 ## API gaps
 
 **No condition system. WONTFIX**, as design; see cleanup-targets.md. Of the
@@ -37,9 +42,10 @@ at which point software floats in Lisp, the way bignums are done, are the
 shape.
 
 **Bignums. RESOLVED** in the part that was wrong, **WONTFIX** in the rest.
-`(%/ -1073741824 -1)` no longer wraps: the processor traps that one
-quotient, 2^30, as an overflow and the handler widens it, so `%/` and
-`quotient` agree. Bitwise operations, `gcd` and a faster division have no
+The one quotient that does not fit a fixnum no longer wraps: the processor
+traps it as an overflow and the handler widens it, so `%/` and `quotient`
+agree. With 32-bit fixnums that quotient is `(quotient -2147483648 -1)`,
+2^31. Bitwise operations, `gcd` and a faster division have no
 user in the tree; bignum.lisp is compiled only, so any of them is a local
 change when one appears.
 
@@ -75,7 +81,10 @@ through the "any object" form reached up to three words past the object,
 reading and writing. The count is now converted to the access size. The
 type looseness that remains is the point of the form: the printer and the
 explorer walk objects by index, and `%slot` is the raw accessor that lets
-them. It belongs in the raw vocabulary; see memory-safety.md.
+them. It belongs in the raw vocabulary; see memory-safety.md. Since the
+port the capability's bounds check every such access a second time, and a
+sealed closure is refused outright, so the printer opens one through the
+root first.
 
 **The reader has no block comments. RESOLVED.** `#| |#` nests and `#;`
 comments out the datum after it, both handled where whitespace is, so a
@@ -117,7 +126,10 @@ for the same reason, a local in a non-leaf being a frame slot. The lever is
 register allocation, below. Where it stands: 64% of a synthetic cons churn,
 2.8% of a rebuild, and none of `(check)`, which runs no collection at all
 and is not a collector benchmark. The collector's report now splits its
-cycles by phase, since its "of N cycles" was elapsed time and misled.
+cycles by phase, since its "of N cycles" was elapsed time and misled. After
+the port, marking a list of a million pairs costs about 220 cycles a pair:
+a pair is now two capability granules, each tested for a tag and classified
+by its bounds and permissions rather than its low bits.
 
 **The workbench waits for the blitter with interrupts off. RESOLVED**, as
 stale. wb.lisp has no critical section at all; the compositor copies from
@@ -149,7 +161,7 @@ keeps the processor against anything less urgent.
 
 **Cons space fragments between images. WONTFIX**, measured. The sweep was
 instrumented to total the holes it leaves below `gap-min`: one map word of
-32 pairs here and there, 0.01% of the bytes freed in a churn, 0.6 to 1% in
+32 pairs (16 since the port, a pair being 16 bytes) here and there, 0.01% of the bytes freed in a churn, 0.6 to 1% in
 a rebuild. Lowering `gap-min` to 64 recovers them all and changes nothing
 else. The loss that is real is inside live map words, dead pairs beside
 live ones that no hole can hand out: 5 to 7% of a rebuild's freed bytes,
@@ -329,35 +341,32 @@ an intermediate representation in a single-pass emitter that runs on the
 machine and must stay interpretable by the forge, for a fifth of the
 collector and a twelfth of everything else.
 
-**A leaf that allocates keeps a frame. WONTFIX**, measured. Of 2,828
-functions the library build compiles, 1,010 are leaves and 21 more would be
-but for allocating: `reverse`, `cons`, `revappend`, `string->list`,
-`make-list`, `iota`, the assembler's `label` and `literal`, and a dozen
-others, none of which appears in a profile of the suite run. The fix the
-item names is right and small, adding `t0` to the allocator's live mask,
-but `t0` is also the closure register a leaf keeps, the refill stub is
-emitted at build time only, and `check-leaf` must learn that the stub call
-is not a call: three things that interact in the one piece of code that
-cannot be tested incrementally, for 21 functions.
+**A leaf that allocates keeps a frame. RESOLVED** by the port. Of 2,828
+functions the library build compiled, 1,010 were leaves and 21 more would
+have been but for allocating, `reverse`, `cons`, `revappend` and the like;
+the fix needed `t0` in the allocator's live mask and a refill stub that
+`check-leaf` would not take for a call. The port removed all three: a pair
+is four instructions from `gp` with no call, a used-up run is refilled from
+the trap handler, which sees every register exactly, and there is no live
+mask. A leaf may cons. Building a closure is still a call.
 
-**`%ld-half` and `%st-half!` are four instructions each. WONTFIX**, with the
-reason corrected. The blocker is not encoding space: custom-2 has nearly
-all of its funct7 space free, and custom-1's funct3 6 and 7 are the unused
-`ldxbi` and `stxbi`, exactly where a tagged half-word load and store would
-go. Measured: the pair sweep, where the test lives, is 1.5% to 11% of a
-collection depending on how much is dead, and a one-instruction load would
-take a tenth off the sweep, 0.2% to 1.3% of a collection. Not worth an
-opcode.
+**`%ld-half` and `%st-half!` are four instructions each. RESOLVED** by the
+port. They are `lhu.ddc` and `sh.ddc`, one instruction each through DDC,
+like every load and store by number. custom-2 is now CHERI's.
 
 **Compressed branches and jumps are not emitted. WONTFIX.** A fixpoint
 relaxation pass in a compiler that runs on the machine, to save 1.6% of the
 image, and the compiler's condition results land in `t2`, which the
 compressed branches cannot name. The weakest item in the file.
 
-**`c.lw` and `c.sw` rarely apply. WONTFIX.** The frame layout is what the
-collector's frame walker reads; laying it out upward is a handful of
-constants and the worst class of bug if one of them is wrong. If ever
-attempted, `rebuild --check` with `gc-verify` on is the gate.
+**`c.lc` and `c.sc` rarely apply. WONTFIX**, with the reason changed by the
+port. Frame slots are below `s0`, where the compressed capability loads and
+stores, which take only positive multiples of 8, cannot reach them. The
+collector no longer reads the frame layout, since a stack is scanned granule
+by granule, but the backtrace and the processor's own watch tools still do,
+and laying the frame out upward is a handful of constants and the worst
+class of bug if one of them is wrong. If ever attempted,
+`rebuild --check` is the gate.
 
 **Records cost about nine percent of code space. WONTFIX**, measured and
 confirmed: 395 accessor, predicate and allocator functions hold 50.5 KiB of
@@ -371,19 +380,23 @@ space is 16 MiB and 3% used.
 **`fltu`, `ldxbi`, `stxbi`, `fori`. RESOLVED**, as a decision to keep. `fori`
 has a user, `emit-or-const`, so the item was wrong about it. The other
 three are tested encodings costing nothing; `fltu` documents the intent for
-address compares, and `ldxbi`/`stxbi` are the free slots the half-word item
-above would spend.
+unsigned compares, and `ldxbi`/`stxbi` are the byte forms with an immediate
+index. The half-word item above no longer needs their slots.
 
 ## Held ISA ideas
 
 **An allocation instruction. WONTFIX**, held. The item's own objection is
 decisive: it puts an allocation policy into the instruction set, and that
-policy has already changed once.
+policy has already changed once. The port made it moot for pairs:
+`csetboundsimm` on the run capability in `gp` is the bump's limit check and
+the new pair's bounds in one instruction, with no policy in it.
 
-**A "what type is this" instruction. WONTFIX**, held. There is room for it,
-but the 48 dispatch sites already start from one header read, so it saves
-the tag extraction and not the dispatch; the win would need a jump-table
-emitter.
+**A "what type is this" instruction. RESOLVED** by the port. A tag can no
+longer be read from a pointer's low bits, so the port added `vkind`, which
+answers a value's kind in one instruction: its metadata if untagged, nil, a
+pair, an object by header type, or any other capability. Every type
+predicate the compiler emits is `vkind` and a compare. A jump-table emitter,
+which the dispatch sites would need to win more, is still not written.
 
 **Compare-immediate-and-branch. WONTFIX**, held. A new branch format breaks
 every tool that walks the encoding, including the compiler's own
@@ -392,8 +405,9 @@ instruction-width scanner, for 2.8%.
 ## Images
 
 **Code space is never compacted. RESOLVED** for the path that ships: the
-forge's `compact_code` exists and `lmforge rebuild` runs it, relocating
-every closure entry, so a rebuilt image carries no holes. An image from
+forge's `compact_code` exists and `lmforge rebuild` runs it, moving each
+block whole with its header and deriving every capability into a moved
+block afresh, so a rebuilt image carries no holes. An image from
 `(save-image)` is not compacted, and cannot be, because its stacks hold
 return addresses; that is the same fact as the resume item above, and is
 by design.
@@ -406,4 +420,6 @@ of an image.
 
 **The desktop needs roughly four billion instructions. RESOLVED**, as a
 note that stays: it is in the README, and a truncated run leaving a
-half-composited screen is correct behaviour observed early.
+half-composited screen is correct behaviour observed early. The figure is
+now about eight million: `(workbench)` with `--budget` 8,000,000 gives the
+finished desktop and 5,000,000 a screen not yet drawn.
