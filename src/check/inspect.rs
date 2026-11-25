@@ -19,8 +19,8 @@ struct Census {
 
 /// A capability that names a pair or an object must name a live one: a pair
 /// in cons space below the bump pointer, an object whose header is a live
-/// header in object space. Code space holds machine code and never a
-/// capability, and neither does a string or a byte object.
+/// header in object space. Code space holds machine code, and no capability
+/// but each block's owner; a string or a byte object holds none at all.
 fn census(h: &Heap) -> Census {
     let mut c = Census::default();
     let (cons_hi, obj_hi, code_hi) = (h.g(LG_CONS_PTR), h.g(LG_OBJ_PTR), h.g(LG_CODE_PTR));
@@ -28,7 +28,11 @@ fn census(h: &Heap) -> Census {
     for at in h.tagged() {
         let v = h.ldc(at);
         if (CODE_BASE..code_hi).contains(&at) {
-            c.wrong.push((at, "a capability in code space".into()));
+            if owns(h, v, at) {
+                c.objects += 1;
+            } else {
+                c.wrong.push((at, format!("a capability in code space, {}", h.write(v))));
+            }
             continue;
         }
         let i = byte_objects.partition_point(|s| s.0 <= at);
@@ -57,6 +61,15 @@ fn census(h: &Heap) -> Census {
         }
     }
     c
+}
+
+/// Whether the capability `v` at `at` is the owner in a code block's header:
+/// the code object whose code starts in the next granule.
+fn owns(h: &Heap, v: V, at: u32) -> bool {
+    h.is_type(v, T_CODE) && {
+        let entry = h.slot(v, CODE_ENTRY);
+        entry.tag && entry.base() == at + 8
+    }
 }
 
 /// Where the payload of every string and byte object lies, in address order.
@@ -112,12 +125,8 @@ pub fn run(path: &str, names: &[String]) -> i32 {
         (h.g(LG_OBJ_PTR) - OBJ_BASE) / 1024,
         (h.g(LG_CONS_PTR) - CONS_BASE) / PAIR_BYTES
     );
-    let run = h.gv(LG_CONS_RUN);
     println!(
-        "  cons run {:#x}..{:#x} at {:#x}, boot list {} thunks, obarray {:#x}",
-        run.base(),
-        run.top(),
-        run.addr,
+        "  boot list {} thunks, obarray {:#x}",
         h.list_len(h.gv(LG_BOOTLIST)),
         h.gv(LG_OBARRAY).addr
     );
@@ -148,9 +157,9 @@ pub fn run(path: &str, names: &[String]) -> i32 {
 
     // Invariant: code holds no heap addresses. A pointer is a tagged
     // capability, and code space is machine code reached through its code
-    // objects, so a tag in code space is a pointer compiled into an
-    // instruction stream; an integer there can name nothing. Every other
-    // capability must name what it says it does.
+    // objects, so a tag in code space other than a block's owner is a
+    // pointer compiled into an instruction stream; an integer there can name
+    // nothing. Every other capability must name what it says it does.
     let c = census(&h);
     println!(
         "  {} capabilities: {} nil, {} to pairs, {} to objects, {} raw",

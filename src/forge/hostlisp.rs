@@ -1189,10 +1189,6 @@ impl<'a> Lisp<'a> {
                     None => bail!("{name} wants numbers"),
                 }
             }
-            Prim::Mulhi16 => {
-                need!(2);
-                fix(((n!(0) as u32).wrapping_mul(n!(1) as u32) >> 16) as i32)
-            }
             Prim::Sub => {
                 need!(2);
                 fix(n!(0).wrapping_sub(n!(1)))
@@ -1653,8 +1649,13 @@ impl<'a> Lisp<'a> {
             Prim::FramePointer => fix(0),
             Prim::WaitForInterrupt => NIL,
             Prim::Ecall => NIL,
-            Prim::SyncConsRun => NIL,
-            Prim::ReloadConsRun => NIL,
+            // The forge conses by bumping its own pointer, so the run it
+            // answers is the empty one a task starts on.
+            Prim::ConsRun => empty_cons_run(),
+            Prim::SetConsRunX => {
+                need!(1);
+                a[0]
+            }
             Prim::SetContextX => NIL,
             Prim::EnableInterruptLines => NIL,
             Prim::ThisTask => NIL,
@@ -1978,7 +1979,6 @@ prims! {
     AddO               "%+o" 2;
     SubO               "%-o" 2;
     MulO               "%*o" 2;
-    Mulhi16            "%mulhi16" 2;
     Rem                "%rem" 2;
     NumEq              "%=" 2;
     Lt                 "%<" 2;
@@ -2063,8 +2063,8 @@ prims! {
     FramePointer       "%frame-pointer" 0;
     WaitForInterrupt   "%wait-for-interrupt" 0;
     Ecall              "%ecall" 1;
-    SyncConsRun        "%sync-cons-run" 0;
-    ReloadConsRun      "%reload-cons-run" 0;
+    ConsRun            "%cons-run" 0;
+    SetConsRunX        "%set-cons-run!" 1;
     SetContextX        "%set-context!" 1;
     EnableInterruptLines "%enable-interrupt-lines" 0;
     ThisTask           "%this-task" 0;

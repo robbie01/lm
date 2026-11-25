@@ -813,9 +813,9 @@ pub fn build(out: &str, verbose: bool) -> i32 {
 ///
 /// The registers are set as a call through `jcl` leaves them: the closure
 /// unsealed in `t0`, no arguments, a return sentry in `ra`, and PCC the
-/// closure's entry. `sp` is the boot stack, `gp` a cons run that starts
-/// where the forge's own bump pointer stopped, `tp` nil, and the trap vector
-/// and the trap frame are the image's own. The function returns into a stub
+/// closure's entry. `sp` is the boot stack, `gp` the empty cons run, so the
+/// first pair faults into a refill, `tp` and `s2` nil, there being no task,
+/// and the trap vector and the trap frame are the image's own. The function returns into a stub
 /// of three instructions that halts the machine.
 fn call_on_machine(l: &mut Lisp, name: &str, trap: u32) -> Option<V> {
     use crate::cap::{Cap, OT_SENTRY, P_EX, P_SR};
@@ -848,15 +848,15 @@ fn call_on_machine(l: &mut Lisp, name: &str, trap: u32) -> Option<V> {
     };
     let ret = cap_to(halt, 4 * halt_code.len() as u32, P_EX | P_SR).seal(OT_SENTRY);
     let sp = stack.with_addr(l.h.g(LG_STACKTOP));
-    let gp = l.h.gv(LG_CONS_RUN);
     let entry = l.h.slot(closure, CLO_ENTRY);
     let m = &mut *l.h.m;
     for r in 1..32 {
         m.set_reg(r, Cap::NULL);
     }
     m.set_reg(SP, sp);
-    m.set_reg(GP, gp);
+    m.set_reg(GP, empty_cons_run());
     m.set_reg(TP, NIL);
+    m.set_reg(S2, NIL);
     m.set_reg(T0, closure.unseal());
     m.set_reg(T1, fix(0));
     m.set_reg(RA, ret);
@@ -901,16 +901,6 @@ fn blank_run_scratch(l: &mut Lisp) {
 /// answer how many bytes of dead object space it blanked.
 fn collect_before_saving(l: &mut Lisp, verbose: bool) -> u32 {
     let trap = l.h.g(LG_TRAPENTRY);
-    // Everything up to now was allocated by the forge's own bump pointer. The
-    // machine's allocator is a capability in gp, so hand it a run that starts
-    // exactly where the forge stopped and goes to the end of cons space: the
-    // collector reads gp to find out how much of the heap has been used.
-    let before = l.h.g(LG_CONS_PTR);
-    let Some(run) = crate::cap::Cap::root().with_addr(before).with_bounds(CONS_END - before) else {
-        eprintln!("lm: cons space is full");
-        return 0;
-    };
-    l.h.set_gv(LG_CONS_RUN, run);
     match call_on_machine(l, "gc:collect-for-image", trap) {
         Some(v) => {
             let n = unfix(v) as u32;
