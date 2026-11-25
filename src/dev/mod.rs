@@ -34,9 +34,11 @@ pub const TMR_CMPHI: u32 = 0x0c;
 pub const TMR_FREQ: u32 = 0x10; // r: ticks per second
 pub const TMR_WALL: u32 = 0x14; // r: host milliseconds since boot
 
-/// Nominal clock. The timebase is the retired-instruction count, so this is
-/// how many instructions the system calls "one second".
-pub const TIMER_HZ: u32 = 20_000_000;
+/// The machine's clock: a 200 MHz part. The timebase is the retired
+/// instruction count, so this is how many instructions the system calls one
+/// second, and the vertical blank, the timer and the chips' costs are all
+/// counted against it.
+pub const TIMER_HZ: u32 = 200_000_000;
 
 #[inline(never)]
 pub fn read(m: &mut Machine, a: u32, f: u32) -> u32 {

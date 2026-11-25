@@ -66,9 +66,10 @@
 
 ;; ---------------------------------------------------------------- damage
 ;; What the compositor owes the screen: a short list of rectangles covering
-;; everything anybody has changed since it last ran. A whole screen is
-;; 786,432 pixels and the blitter is charged one cycle each, which is more
-;; than two frames at sixty hertz, so only what moved is composited.
+;; everything anybody has changed since it last ran. Copying a whole screen
+;; of 786,432 pixels takes the blitter four hundred thousand cycles, an eighth
+;; of a frame that every task drawing shares, so only what moved is
+;; composited.
 (define *damage* nil)      ; a list of rectangles, newest first
 (define damage-max 32)     ; beyond which a new one joins its nearest
 

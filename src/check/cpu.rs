@@ -1176,7 +1176,7 @@ pub fn run_all() -> bool {
         emit(&mut m, KICK_BASE, &code);
         m.mtimecmp = u64::MAX;
         m.gfx.next_vbl = u64::MAX;
-        run::run(&mut m, 5000);
+        run::run(&mut m, 50_000);
         let r = |x: u32| m.x[x as usize];
         let on_host = std::fs::read(&path)
             .map(|b| b.len() == 4 * 512 && (0..512).all(|i| b[3 * 512 + i] == (i * 7 + 3) as u8))

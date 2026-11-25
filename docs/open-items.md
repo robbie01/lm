@@ -297,17 +297,22 @@ too small to read. The window follows the display's size.
 **A shell's last column lay on its frame. RESOLVED.** 62 columns in an
 interior 61 wide.
 
-**A windowed machine is held to its nominal 20 MHz. WONTFIX**, as a
-decision about what the machine is. `pace` sleeps off the machine's lead
-over the wall clock at each idle while the lead is under 50 ms, which holds
-every frame to 333 thousand instructions of the machine's clock: an
-explorer redraw is 14 ms, a new shell 87 ms, a printed line 2 ms, whatever
-the host could do. Bursts longer than 50 ms run at host speed. Letting
-every busy stretch run free would make interaction about twenty times
-faster on a current host, but a task drawing each frame would then run at
-a rate set by its load, and raising `TIMER_HZ` would speed the blitter with
-the processor. *Trigger:* deciding the windowed machine is not a preview
-of the 20 MHz part.
+**A windowed machine is held to its nominal 20 MHz. RESOLVED**, by a
+decision about what the machine is: a 200 MHz part. `TIMER_HZ` is two
+hundred million, so a frame is 3.33 million cycles, and `pace` holds a busy
+frame to that, which is more than this host's 150 to 180 MIPS: interaction
+runs at host speed. The tick stays a hundredth of a second, its quantum now
+read from the clock, so `now-ms` and `sleep` mean what they did. The
+blitter is a bus master on the processor's bus and keeps its cost in
+cycles, so it is ten times faster with the part, 800 MB/s; the disk's speed
+is its medium's and keeps its time, 80 MB/s and 10 microseconds a command,
+ten times the cycles. Measured with `examples/latency.rs`, at gaps that do
+not divide a frame, before and after: an arrow key in the explorer 34.4 ms
+to 14.1 on average; the wheel over an opened package 35.9 to 20.7, and the
+last step to its frame 114 ms to 8; a new shell, from return to its last
+frame, 57 to 14; a drag 12.6 to 7.1; a key in a shell 10.2 and 10.3, which
+is the frame. The idle host is unchanged, 1.7% of a core over a run that
+includes the boot: an idle frame is the same 10.6 thousand instructions.
 
 **Loops compile to about twelve instructions a turn. WONTFIX** here.
 `zero-words` is twelve a word, six of them register moves, and zeroing a
