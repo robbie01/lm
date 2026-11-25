@@ -680,6 +680,9 @@ LM_WATCH_HI=hex       report stores to one word, with the function that made the
 LM_WATCH_S2=1         report every change of the running task
 LM_TRACE_PAUSES=1     report, with a backtrace, every stretch with interrupts
                       off longer than a millisecond of host time
+cargo run --release --example latency -- type|explorer|wheel|drag [GAP] [N]
+                      wall time from scripted host input to the changed frame,
+                      through the run loop and pacing a window gets
 ```
 
 A screenshot of the workbench needs about four billion instructions of
