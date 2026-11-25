@@ -49,9 +49,10 @@
     win))
 
 ;; ---------------------------------------------------------------- mandelbrot
-;; Fixed point with twelve fractional bits. A fixnum holds thirty bits and
-;; the intermediate products here reach twenty-eight, which is why the escape
-;; radius is checked against four rather than something more generous.
+;; Fixed point with twelve fractional bits. A fixnum holds thirty-one bits and
+;; a sign, and the intermediate products here reach twenty-eight, which is why
+;; the escape radius is checked against four rather than something more
+;; generous.
 (define fp-bits 12)
 (define fp-one 4096)
 
@@ -102,11 +103,10 @@
 (define *life-h* 0)
 
 (define (life-seed density)
-  (unsafe
   (let ((w (win-inner-w *life-win*)) (h (win-inner-h *life-win*)))
     (set! *life-w* w)
     (set! *life-h* h)
-    (if *life-back* nil (set! *life-back* (alloc-pool (%* w h))))
+    (set! *life-back* (make-bytes (%* w h)))
     (win-fill *life-win* 0 0 w h white)
     (let ((y 1))
       (while (%< y (%- h 1))
@@ -117,17 +117,18 @@
                 nil)
             (set! x (%+ x 1))))
         (set! y (%+ y 1)))))
-  'seeded))
+  'seeded)
 
-;; Direct loads and stores into the bitmap, so the blitter's work on it has
-;; to have landed first: the window was filled by a blit, and a blit is not
-;; done when it returns.
+;; Direct loads and stores into the bitmap's pixels, so the blitter's work on
+;; them has to have landed first: the window was filled by a blit, and a blit
+;; is not done when it returns.
 (define (life-step)
-  (unsafe
   (blit-sync)
   (let ((y 1)
         (w *life-w*)
         (h *life-h*)
+        (back *life-back*)
+        (pixels (bm-pixels (window-bitmap *life-win*)))
         (stride (win-w *life-win*)))
     (while (%< y (%- h 1))
       (let ((x 1) (row (win-row *life-win* y)))
@@ -135,15 +136,15 @@
           (let* ((p (%+ row x))
                  (up (%- p stride))
                  (dn (%+ p stride))
-                 (n (%+ (%+ (%+ (live? (%- up 1)) (live? up))
-                            (%+ (live? (%+ up 1)) (live? (%- p 1))))
-                        (%+ (%+ (live? (%+ p 1)) (live? (%- dn 1)))
-                            (%+ (live? dn) (live? (%+ dn 1))))))
-                 (alive (live? p)))
-            (poke8 (%+ *life-back* (%+ (%* y w) x))
-                   (if (%= alive 1)
-                       (if (if (%= n 2) t (%= n 3)) 1 0)
-                       (if (%= n 3) 1 0))))
+                 (n (%+ (%+ (%+ (live? pixels (%- up 1)) (live? pixels up))
+                            (%+ (live? pixels (%+ up 1)) (live? pixels (%- p 1))))
+                        (%+ (%+ (live? pixels (%+ p 1)) (live? pixels (%- dn 1)))
+                            (%+ (live? pixels dn) (live? pixels (%+ dn 1))))))
+                 (alive (live? pixels p)))
+            (bytes-set! back (%+ (%* y w) x)
+                        (if (%= alive 1)
+                            (if (if (%= n 2) t (%= n 3)) 1 0)
+                            (if (%= n 3) 1 0))))
           (set! x (%+ x 1))))
       (set! y (%+ y 1)))
     ;; And back, a row at a time: the board is w wide and the bitmap is not.
@@ -151,16 +152,14 @@
     (while (%< y (%- h 1))
       (let ((x 1) (row (win-row *life-win* y)))
         (while (%< x (%- w 1))
-          (poke8 (%+ row x)
-                 (if (%= 1 (peek8 (%+ *life-back* (%+ (%* y w) x))))
-                     black white))
+          (bytes-set! pixels (%+ row x)
+                      (if (%= 1 (bytes-ref back (%+ (%* y w) x))) black white))
           (set! x (%+ x 1))))
       (set! y (%+ y 1))))
   (present *life-win*)
-  nil))
+  nil)
 
-(define (live? p)
-  (unsafe (if (%= (peek8 p) black) 1 0)))
+(define (live? pixels i) (if (%= (bytes-ref pixels i) black) 1 0))
 
 (define (life . opts)
   (let ((n (if (%cons? opts) (%car opts) 60)))
@@ -192,7 +191,7 @@
     (emit-str (number->string (%- (%cycles) t1)))
     (emit-str " cycles\n"))
   (emit-str "  code space now ")
-  (emit-str (number->string (%lsh (%- (%ld-fixnum lg-code-ptr) code-base) -10)))
+  (emit-str (number->string (%lsh (%- (%ld-word lg-code-ptr) code-base) -10)))
   (emit-str "k\n")
   'ok))
 
@@ -215,14 +214,15 @@
   (emit-str "  (life 200)             life, with the blitter for the copy\n")
   (emit-str "  (check)                every suite, counted; the machine stops with the verdict\n")
   (emit-str "  (numbers) (words) (nesting) (talking) (locking) (blitting)\n")
-  (emit-str "  (devices) (drivers)    check one part of the machine each\n")
+  (emit-str "  (devices) (drivers) (capabilities)\n")
+  (emit-str "                         check one part of the machine each\n")
   (emit-str "  (save-image)           write this machine to the disk\n")
   (emit-str "  bye                    stop the machine\n")
   nil)
 
 ;; ---------------------------------------------------------------- numbers
 ;; `(numbers)` checks that arithmetic is one thing rather than two. A fixnum
-;; that outgrows thirty-one bits becomes a bignum, a bignum that shrinks back
+;; that outgrows thirty-two bits becomes a bignum, a bignum that shrinks back
 ;; becomes a fixnum again, and nothing in between has to be asked which it is
 ;; holding, so the cases here are the boundaries.
 (define *check-count* 0)
@@ -243,7 +243,7 @@
   (set! *check-count* 0)
   (set! *check-failures* 0)
   (numbers) (words) (nesting) (talking) (locking) (blitting) (devices)
-  (drivers)
+  (drivers) (capabilities)
   (princ *check-count*) (princ " checks, ")
   (princ *check-failures*) (princ " failed") (newline)
   (%halt (if (= *check-failures* 0) exit-ok exit-error))))
@@ -252,12 +252,14 @@
 
 (define (numbers)
   (num-check 'small (+ 2 3) 5)
-  (num-check 'promote (+ 1073741823 1) 1073741824)
-  (num-check 'demote (- (+ 1073741823 1) 1) 1073741823)
+  (num-check 'most-positive most-positive-fixnum 2147483647)
+  (num-check 'promote (+ 2147483647 1) 2147483648)
+  (num-check 'demote (- (+ 2147483647 1) 1) 2147483647)
   ;; and it really is a fixnum again, not a bignum that prints small
-  (num-check 'demoted-is-fixnum (%fixnum? (- (+ 1073741823 1) 1)) t)
-  (num-check 'most-negative (- 0 -1073741824) 1073741824)
-  (num-check 'most-negative-print (number->string -1073741824) "-1073741824")
+  (num-check 'demoted-is-fixnum (%fixnum? (- (+ 2147483647 1) 1)) t)
+  (num-check 'below-most-negative (- -2147483648 1) -2147483649)
+  (num-check 'most-negative (- 0 -2147483648) 2147483648)
+  (num-check 'most-negative-print (number->string -2147483648) "-2147483648")
   (num-check 'literal 12345678901234567890 (* 1234567890123456789 10))
   (num-check 'fact-20 (fact 20) 2432902008176640000)
   (num-check 'fact-25 (fact 25) 15511210043330985984000000)
@@ -282,43 +284,41 @@
   (num-check 'not-eq (eq? (fact 25) (fact 25)) nil)
   (num-check 'sort (sort (list (fact 21) 5 (fact 20)) num-lt)
              (list 5 (fact 20) (fact 21)))
-  (num-check 'wrapping (wrap+ 1073741823 1) -1073741824)
+  (num-check 'wrapping (wrap+ 2147483647 1) -2147483648)
   (num-check 'saturating (sat* 1000000 1000000) most-positive-fixnum)
   (princ "numbers: done (nothing above = all correct)")
   (newline))
 
 ;; ---------------------------------------------------------------- words
-;; `(words)` checks the other half of the number question: a location holds
-;; thirty-two bits and a fixnum has thirty-one, so reading one has to say
-;; which number it means. `peek` reads a word unsigned, `peek-signed` reads
-;; the same word signed, and `poke` takes either and stores the low
-;; thirty-two bits, so a word read one way goes back unchanged.
+;; `(words)` checks the other half of the number question: a machine word is
+;; a fixnum. `peek` reads the word at an address as a number from -2^31 to
+;; 2^31-1 and `poke` stores one back unchanged, so no word needs a bignum on
+;; the way in or out, and a value that is not a word is refused rather than
+;; cut down to one.
 (define (words)
   (unsafe
-  (let ((p (alloc-pool 32)))
-    ;; a word with its top bit set, built out of halves so nothing has to
-    ;; represent it on the way in
-    (%st-half! p 0)
-    (%st-half! (%+ p 2) 32768)
-    (num-check 'top-bit (peek p) 2147483648)
-    (num-check 'top-bit-signed (peek-signed p) -2147483648)
-    (poke p 4294967295)
-    (num-check 'all-ones (peek p) 4294967295)
-    (num-check 'all-ones-signed (peek-signed p) -1)
+  (let ((p (alloc-pool 16)))
+    ;; a word with its top bit set, built a byte at a time, is the most
+    ;; negative fixnum
+    (poke p 0)
+    (poke8 (%+ p 3) 128)
+    (num-check 'top-bit (peek p) -2147483648)
+    (num-check 'top-bit-is-fixnum (%fixnum? (peek p)) t)
     (poke p -1)
-    (num-check 'poke-negative (peek p) 4294967295)
-    (poke p 12345)
-    (num-check 'small (peek p) 12345)
-    (num-check 'small-is-fixnum (%fixnum? (peek p)) t)
-    (poke p 1073741824)
-    (num-check 'one-past-fixnum (peek p) 1073741824)
-    (num-check 'one-past-signed (peek-signed p) 1073741824)
-    (poke p 2147483648)
-    (num-check 'round-trip (peek p) 2147483648)
-    ;; and the raw form: the low thirty-one bits, sign extended, in one
-    ;; instruction
-    (poke p 12345)
-    (num-check 'raw-load (%ld-fixnum p) 12345)
+    (num-check 'all-ones (peek p) -1)
+    (num-check 'all-ones-top-byte (peek8 (%+ p 3)) 255)
+    (poke p 2147483647)
+    (num-check 'most-positive (peek p) 2147483647)
+    (poke p #x12345678)
+    (num-check 'little-endian
+               (list (peek8 p) (peek8 (%+ p 1)) (peek8 (%+ p 2)) (peek8 (%+ p 3)))
+               (list #x78 #x56 #x34 #x12))
+    (num-check 'peek-is-the-load (%ld-word p) #x12345678)
+    (princ "words: the errors below are on purpose")
+    (newline)
+    (num-check 'wider-than-a-word-is-refused (refused? (lambda () (poke p 2147483648))) t)
+    (num-check 'not-a-number-is-refused (refused? (lambda () (poke p "word"))) t)
+    (num-check 'a-refused-poke-stores-nothing (peek p) #x12345678)
     (free-pool p))
   (princ "words: done (nothing above = all correct)")
   (newline)))
@@ -577,27 +577,28 @@
 ;; it means what it says: two blits in a row through one task's descriptors
 ;; is what every drawing task does and what the collector does to clear its
 ;; maps.
+
+;; The first pixel of a bitmap, read without waiting for the blitter.
+(define (first-pixel b) (bytes-ref (bm-pixels b) 0))
+
 (define (blitting)
-  (unsafe
-  (let* ((a (alloc-bitmap 256 256))
-         (b (alloc-bitmap 256 256))
-         (pa (%addr-of (bm-pixels a)))
-         (pb (%addr-of (bm-pixels b))))
+  (let ((a (alloc-bitmap 256 256))
+        (b (alloc-bitmap 256 256)))
     ;; A blit is not done when it returns: read too early and you see the
     ;; old pixel.
-    (%st-byte! pa 7)
+    (bytes-set! (bm-pixels a) 0 7)
     (bm-fill-rect a 0 0 256 256 42)
-    (num-check 'not-landed-yet (%ld-byte pa) 7)
+    (num-check 'not-landed-yet (first-pixel a) 7)
     (blit-sync)
-    (num-check 'landed-after-sync (%ld-byte pa) 42)
+    (num-check 'landed-after-sync (first-pixel a) 42)
     ;; Back to back. The second commit waits for the first, and the first
     ;; one's write-back must not mark the second done.
-    (%st-byte! pb 9)
+    (bytes-set! (bm-pixels b) 0 9)
     (bm-fill-rect a 0 0 256 256 1)
     (bm-fill-rect b 0 0 256 256 2)
     (blit-sync)
-    (num-check 'second-of-two-landed (%ld-byte pb) 2)
-    (num-check 'first-of-two-landed (%ld-byte pa) 1)
+    (num-check 'second-of-two-landed (first-pixel b) 2)
+    (num-check 'first-of-two-landed (first-pixel a) 1)
     ;; A big one does not hold the machine up while it runs: the commit is a
     ;; few hundred cycles, and the transfer happens while others run.
     (let ((big (alloc-bitmap 1024 768)))
@@ -606,7 +607,7 @@
         (bm-fill-rect big 0 0 1024 768 5)
         (num-check 'big-commit-is-quick (%< (%- (%cycles) t0) 10000) t))
       (blit-sync)
-      (num-check 'big-landed (%ld-byte (%addr-of (bm-pixels big))) 5))
+      (num-check 'big-landed (first-pixel big) 5))
     ;; A chain: a blit queued behind a big one does not wait for it, and the
     ;; two land in order.
     (let ((big (alloc-bitmap 1024 768)) (small (alloc-bitmap 16 16)))
@@ -617,8 +618,8 @@
         (num-check 'queued-behind-a-big-one-is-quick (%< (%- (%cycles) t0) 5000) t))
       (num-check 'and-the-big-one-still-running (blit-busy?) t)
       (blit-sync)
-      (num-check 'the-queued-one-landed (%ld-byte (%addr-of (bm-pixels small))) 7)
-      (num-check 'after-the-big-one (%ld-byte (%addr-of (bm-pixels big))) 6))
+      (num-check 'the-queued-one-landed (first-pixel small) 7)
+      (num-check 'after-the-big-one (first-pixel big) 6))
     ;; More blits than a ring has descriptors: taking one waits for the chip
     ;; to be done with it, and every one of them lands.
     (let ((bs nil) (i 0))
@@ -630,11 +631,11 @@
       (blit-sync)
       (let ((ok t) (v 20))
         (dolist (b bs)
-          (if (%= (%ld-byte (%addr-of (bm-pixels b))) v) nil (set! ok nil))
+          (if (%= (first-pixel b) v) nil (set! ok nil))
           (set! v (%- v 1)))
         (num-check 'twenty-through-a-ring-of-eight ok t))))
   (princ "blitting: done (nothing above = all correct)")
-  (newline)))
+  (newline))
 
 ;; ---------------------------------------------------------------- devices
 ;; `(devices)` checks device ownership. A device is a value: holding it is
@@ -699,7 +700,6 @@
     same))
 
 (define (drivers)
-  (unsafe
   (num-check 'disk-driver-running (disk:running?) t)
   (num-check 'disk-held-by-its-driver
              (%eq? (device-owner *disk*) (server-task disk:*driver*)) t)
@@ -758,7 +758,7 @@
     (bm-fill-rect big 0 0 1024 768 9)
     (blit-sync)
     (num-check 'a-long-blit-is-slept-through (%> gfx:*sleeps* sleeps) t)
-    (num-check 'and-it-landed (%ld-byte (%addr-of (bm-pixels big))) 9))
+    (num-check 'and-it-landed (first-pixel big) 9))
   ;; The console: a driver holds the line, and this prompt reads through it.
   (num-check 'console-driver-running (console:running?) t)
   (num-check 'the-prompt-reads-through-it (port-open? console::*reader*) t)
@@ -803,4 +803,103 @@
                (length (list-nodes (exec::int-vector int-disk))) 1)
     (num-check 'and-it-answers (number? (disk:size)) t))
   (princ "drivers: done (nothing above = all correct)")
-  (newline)))
+  (newline))
+
+;; ---------------------------------------------------------------- capabilities
+;; `(capabilities)` checks what the processor guarantees a program that says
+;; nothing unsafe. Every value is a capability: a pointer has a tag, bounds
+;; that are exactly its object and the permissions it was made with; a number
+;; has no tag; and identity is the whole capability, not its address. What
+;; should be refused is tried in a probe of its own, so that this can watch
+;; the error happen and carry on.
+
+;; Whether running `thunk` is an error. It runs in a server's handler, where
+;; an error answers this task with a failure instead of ending it.
+(define (refused? thunk)
+  (let* ((s (make-server "probe" 0 (lambda (th) (th) 'ran)))
+         (r (raw-request (server-port s) thunk)))
+    (remove-task (server-task s))
+    (failure? r)))
+
+(define (capabilities)
+  (let* ((v (vector 1 2 3))
+         (w (%cap-and-perms v (lognot perm-sd)))
+         (p (cons 1 2))
+         (b (make-bytes 8))
+         (narrow (%cap-bounds-exact b 4))
+         (f (let ((n 5)) (lambda () n)))
+         (opened (unsafe (%cap-unseal f (%from-addr otype-closure))))
+         (page (unsafe (dev-page hw::*sys*))))
+    ;; nil is the read-only cell at address 0, and not the number 0.
+    (num-check 'nil-is-not-zero (eq? nil 0) nil)
+    (num-check 'nil-is-the-cell-at-zero
+               (list (%cap-tag? nil) (%addr-of nil) (%cap-len nil))
+               (list t 0 (* 2 value-bytes)))
+    (num-check 'nil-is-read-only (logand (%cap-perms nil) (logior perm-sd perm-sc)) 0)
+    (num-check 'nil-holds-nil (list (car nil) (cdr nil)) (list nil nil))
+    ;; A number is an untagged capability whose metadata says which kind.
+    (num-check 'a-fixnum-is-untagged
+               (list (%cap-tag? 5) (%cap-high 5) (%addr-of 5))
+               (list nil 0 5))
+    (num-check 'a-character-is-untagged (list (%cap-tag? #\A) (%cap-high #\A)) (list nil 1))
+    (num-check 'fixnums-are-thirty-two-bits
+               (list (fixnum? 2147483647) (fixnum? -2147483648) (fixnum? (+ 2147483647 1)))
+               (list t t nil))
+    ;; Identity is exact: the same address with other permissions, or the
+    ;; same payload as another kind, is another value.
+    (num-check 'eq-is-the-whole-capability (list (eq? v v) (eq? v w)) (list t nil))
+    (num-check 'with-the-same-address (%= (%addr-of v) (%addr-of w)) t)
+    (num-check 'a-character-is-not-its-code (list (eq? #\A 65) (%addr-of #\A)) (list nil 65))
+    ;; What the readers say about a capability.
+    (num-check 'a-vector-is-its-slots
+               (list (%cap-base v) (%cap-len v) (%cap-top v) (%cap-offset v))
+               (list (%addr-of v) (* 3 value-bytes) (+ (%addr-of v) (* 3 value-bytes)) 0))
+    (num-check 'an-object-is-headed (logand (%cap-perms v) perm-hd) perm-hd)
+    (num-check 'a-pair-is-two-slots-and-unheaded
+               (list (%cap-len p) (logand (%cap-perms p) perm-hd))
+               (list (* 2 value-bytes) 0))
+    (num-check 'bytes-hold-no-capabilities
+               (list (%cap-len b) (logand (%cap-perms b) (logior perm-lc perm-sc)))
+               (list 8 0))
+    (num-check 'narrowed (list (%cap-base narrow) (%cap-len narrow)) (list (%addr-of b) 4))
+    (num-check 'a-device-is-its-page
+               (list (%cap-len page) (%cap-perms page))
+               (list hw::device-page-bytes (logior perm-ld perm-sd)))
+    (num-check 'inside-the-bounds-reads (%cap-ld-word b 4) 0)
+    ;; A closure is sealed: calling it is the only way in, unless the escape
+    ;; hatch opens it.
+    (num-check 'a-closure-is-sealed (list (%cap-sealed? f) (%cap-otype f)) (list t otype-closure))
+    (num-check 'calling-it-opens-it (f) 5)
+    (num-check 'the-escape-hatch-opens-it
+               (list (%cap-sealed? opened) (code-object? (unsafe (%slot opened clo-code))))
+               (list nil t))
+    ;; A pointer cannot be made from its bits.
+    (let ((forged (%cap-set-high (%addr-of v) (%cap-high v))))
+      (num-check 'bits-are-not-a-pointer (list (%cap-tag? forged) (eq? forged v)) (list nil nil)))
+    ;; A capability store keeps the tag, and any other store clears it.
+    (unsafe
+     (let ((m (alloc-pool 16)))
+       (%st-cap! m v)
+       (num-check 'a-capability-store-keeps-the-tag (eq? (%ld-cap m) v) t)
+       (%st-word! m (%addr-of v))
+       (num-check 'a-word-store-clears-it (%cap-tag? (%ld-cap m)) nil)
+       (free-pool m)))
+    (princ "capabilities: the errors below are on purpose")
+    (newline)
+    (num-check 'storing-into-nil-is-refused (refused? (lambda () (set-car! nil 1))) t)
+    (num-check 'and-nil-still-holds-nil (car nil) nil)
+    (num-check 'a-dropped-permission-is-gone (refused? (lambda () (vector-set! w 0 9))) t)
+    (vector-set! v 0 9)
+    (num-check 'and-the-original-still-has-it (vector-ref w 0) 9)
+    (num-check 'past-the-bounds-is-refused (refused? (lambda () (%cap-ld-word b 8))) t)
+    (num-check 'a-store-past-them-too (refused? (lambda () (%cap-st-byte! b 8 1))) t)
+    (num-check 'narrowed-is-refused-beyond (refused? (lambda () (%cap-ld-word narrow 4))) t)
+    (num-check 'past-a-device-page-is-refused (refused? (lambda () (%cap-ld-word page hw::device-page-bytes))) t)
+    (num-check 'the-compiler-will-not-open-a-closure
+               (refused? (lambda () (eval '(lambda (g) (%slot g 1)))))
+               t)
+    (num-check 'nor-will-the-processor
+               (refused? (lambda () (unsafe (%slot f clo-code))))
+               t))
+  (princ "capabilities: done (nothing above = all correct)")
+  (newline))

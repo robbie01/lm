@@ -186,25 +186,25 @@
 ;; A glyph, straight into the bitmap: going through the blitter for each run
 ;; would cost more in setup than the pixels are worth. One wait for the
 ;; blitter per glyph, after the background fill has been issued, and then
-;; plain stores. Clipped to the rastport's region and to the bitmap.
+;; plain stores into the pixels. Clipped to the rastport's region and to the
+;; bitmap.
 (define (glyph-rows i ox py ink fg bmp x0 y0 x1 y1)
-  (unsafe
-  (let ((row 0))
+  (let ((row 0) (pixels (bm-pixels bmp)))
     (while (%< row font-height)
       (let ((gy (%+ py row)))
         (if (if (%>= gy y0) (%< gy y1) nil)
-            (let ((bits (font-bits i row)) (col 0) (addr (bm-at bmp ox gy)))
+            (let ((bits (font-bits i row)) (col 0) (at (bm-index bmp ox gy)))
               (while (%< col ink)
                 (let ((gx (%+ ox col)))
                   (if (if (%>= gx x0) (%< gx x1) nil)
                       (if (%= 1 (%logand (%lsh bits (%- col 15)) 1))
-                          (%st-byte! (%+ addr col) fg)
+                          (bytes-set! pixels (%+ at col) fg)
                           nil)
                       nil))
                 (set! col (%+ col 1))))
             nil))
       (set! row (%+ row 1)))
-    nil)))
+    nil))
 
 ;; `bg` is a colour to fill the cell with first, or nil to leave what is
 ;; there, which is what drawing over pinstripes needs. Answers the advance.

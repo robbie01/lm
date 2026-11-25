@@ -17,8 +17,9 @@
 ;;; in memory, 3 for the host failing.
 ;;;
 ;;; A transfer names a byte object, not an address: a disk read is a write
-;;; into memory, and an address is permission to write anywhere. The driver
-;;; checks that the blocks fit.
+;;; into memory, and the controller writes memory by number, wherever the
+;;; number says. The driver checks that the blocks fit, and only then turns
+;;; the object into its address, in an `unsafe` form.
 
 (in-package disk)
 
@@ -37,7 +38,7 @@
 ;; Start one and watch the status until it is over: the only way with
 ;; interrupts off, inside an exclusive job, or when there is no driver.
 (define (transfer cmd addr block n)
-  (disk-go cmd addr block n)
+  (unsafe (disk-go cmd addr block n))
   (while (disk-busy?) nil)
   (disk-status))
 
@@ -45,7 +46,7 @@
 ;; A loop, because the signal is an edge and one can be left over from a
 ;; transfer that was watched rather than slept through.
 (define (transfer-sleeping cmd addr block n)
-  (disk-go cmd addr block n)
+  (unsafe (disk-go cmd addr block n))
   (while (disk-busy?)
     (set! *sleeps* (%+ *sleeps* 1))
     (wait (port-signal *disk-done*)))
@@ -62,7 +63,7 @@
   (let ((op (%car body)))
     (cond ((%eq? op 'read) (serve-bytes disk-cmd-read body))
           ((%eq? op 'write) (serve-bytes disk-cmd-write body))
-          ((%eq? op 'flush) (transfer-sleeping disk-cmd-flush 0 0 0))
+          ((%eq? op 'flush) (unsafe (transfer-sleeping disk-cmd-flush 0 0 0)))
           ((%eq? op 'size) (disk-blocks))
           ;; Interrupts off for the whole job, and every transfer in it
           ;; watched rather than slept through: nothing else runs to wake it.
@@ -73,10 +74,9 @@
 ;; holding. It cannot be collected while the transfer runs, because the
 ;; caller is blocked with the request in hand; and objects never move.
 (define (serve-bytes cmd body)
-  (unsafe
   (let ((block (cadr body)) (n (caddr body)) (bytes (cadddr body)))
     (check-buffer n bytes)
-    (transfer-sleeping cmd (%addr-of bytes) block n))))
+    (unsafe (transfer-sleeping cmd (%addr-of bytes) block n))))
 
 ;; A driver is running exactly when it holds the disk. That covers a driver
 ;; that ended, whose device came back when it did, and a resumed image, whose
@@ -117,22 +117,20 @@
   (if *driver* (server-port *driver*) (error "disk: there is no driver")))
 
 (define (read-blocks block n bytes)
-  (unsafe
   (check-buffer n bytes)
   (if (device-usable? *disk*)
-      (transfer disk-cmd-read (%addr-of bytes) block n)
-      (request (driver-port) (list 'read block n bytes)))))
+      (unsafe (transfer disk-cmd-read (%addr-of bytes) block n))
+      (request (driver-port) (list 'read block n bytes))))
 
 (define (write-blocks block n bytes)
-  (unsafe
   (check-buffer n bytes)
   (if (device-usable? *disk*)
-      (transfer disk-cmd-write (%addr-of bytes) block n)
-      (request (driver-port) (list 'write block n bytes)))))
+      (unsafe (transfer disk-cmd-write (%addr-of bytes) block n))
+      (request (driver-port) (list 'write block n bytes))))
 
 (define (flush)
   (if (device-usable? *disk*)
-      (transfer disk-cmd-flush 0 0 0)
+      (unsafe (transfer disk-cmd-flush 0 0 0))
       (request (driver-port) (list 'flush))))
 
 (define (size)
@@ -153,4 +151,8 @@
       (without-interrupts (%funcall job))
       (request (driver-port) (list 'exclusive job))))
 
-(define (write-raw addr block n) (transfer disk-cmd-write addr block n))
+(define (write-raw addr block n) (unsafe (transfer disk-cmd-write addr block n)))
+
+;; Transfers by address, which is what every call above comes down to once its
+;; byte object has been checked: needs an `unsafe` around the call.
+(unsafe-names (quote (transfer transfer-sleeping write-raw)))

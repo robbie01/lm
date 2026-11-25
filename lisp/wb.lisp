@@ -401,10 +401,10 @@
   (bm-fill-rect (window-bitmap win)
                 (%+ x (win-inner-x win)) (%+ y (win-inner-y win)) w h c))
 
-;; Where a row of the interior starts, for the things that walk memory.
+;; Where a row of the interior starts in the window bitmap's pixels, for the
+;; things that walk them.
 (define (win-row win y)
-  (unsafe
-  (bm-at (window-bitmap win) (win-inner-x win) (%+ y (win-inner-y win)))))
+  (bm-index (window-bitmap win) (win-inner-x win) (%+ y (win-inner-y win))))
 
 ;; The window list is read by the compositor and written by whoever opens,
 ;; closes or raises a window. It is never changed in place: every change
