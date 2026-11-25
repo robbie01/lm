@@ -213,9 +213,9 @@
 ;; and LD too for an operation that reads it, and every byte the rectangle
 ;; touches, rows and stride, must lie inside the capability. A transfer that
 ;; fails is not made: its done word says which capability refused it and
-;; why, as `blit-refused-src` or `blit-refused-dst` with the capability
-;; fault in the low byte, and the chip's status keeps `blit-status-refused`
-;; until it is cleared. The descriptor completes either way, so nothing waits
+;; why, as `blit-refused-src` or `blit-refused-dst` with a `refuse-*` code
+;; in the low byte, and the chip's status keeps `blit-status-refused` until
+;; it is cleared. The descriptor completes either way, so nothing waits
 ;; for a blit that will never land.
 ;;
 ;; A descriptor belongs to whoever is filling it. Every task has a ring of

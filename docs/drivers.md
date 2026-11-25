@@ -133,9 +133,10 @@ and LD as well for an operation that reads it; every byte the rectangle
 touches, rows and stride included, must lie inside the capability's bounds,
 and for a line every byte of the box its ends make. A transfer that fails
 any check is not made: its done word is `blit-refused-src` or
-`blit-refused-dst` with the capability fault in the low byte, and the status
-register keeps `blit-status-refused` until it is cleared. The descriptor
-completes either way, so nothing waits for a blit that will never land. A
+`blit-refused-dst` with the check that failed in the low byte, one of the
+`refuse-*` codes, and the status register keeps `blit-status-refused` until
+it is cleared. The descriptor completes either way, so nothing waits for a
+blit that will never land. A
 link that is no capability ends the chain; one the chip may not follow ends
 it as refused. When it finishes a descriptor the chip clears its three
 capability slots, so a finished descriptor holds no authority over anything.
@@ -150,10 +151,10 @@ to the first pixel, so building a descriptor names no memory by number. A
 descriptor is read by the chip once it is linked, so `blit-descriptor` and
 `blit-go` stay unsafe names, and everywhere another task could read one,
 a ring in a binding, the chain's tail in a global, a sleeper's descriptor on
-the completion server's list, it is sealed with an otype of hw's: the
-capability to an open descriptor exists only while it is being filled. The
-rectangle calls in hw.lisp, which take bitmaps, are how everything else
-blits.
+the completion server's list, it is sealed with an otype of hw's, with a
+key hw mints and keeps in its own closures: the capability to an open
+descriptor exists only while it is being filled. The rectangle calls in
+hw.lisp, which take bitmaps, are how everything else blits.
 
 A blit is queued by filling the next free descriptor of the ring and linking
 it onto the chain. Linking follows the hardware rule: link only while the

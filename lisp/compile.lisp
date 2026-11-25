@@ -1002,11 +1002,11 @@
               (list '%cap-ld fits-offset? (cap-load-const i-ly))
               (list '%cap-ld-word fits-offset? (cap-load-const i-lw))
               (list '%cap-ld-byte fits-offset? (cap-load-const i-lbu))
-              (list '%cap-and-perms fixnum-constant? emit-and-perms-const))))
+              (list '%cap-and-perms any-mask? emit-and-perms-const))))
 
 ;; `ypermc` clears the permissions its mask names, and `%cap-and-perms` keeps
 ;; them, so a written-down mask is complemented here and costs nothing more.
-(define (fixnum-constant? k) t)
+(define (any-mask? k) t)
 (define (emit-and-perms-const a d s k)
   (i-li a $t2 (%lognot k))
   (i-ypermc a d s $t2))
