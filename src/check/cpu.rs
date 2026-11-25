@@ -636,6 +636,11 @@ pub fn run_all() -> bool {
         let o = go(&c8);
         ok("candperm of a sealed capability by every permission keeps it", o.x(A4) == 1);
         ok("...and by fewer untags it", o.x(A6) == 0);
+        // cincoffset by x0 is cmove, as RVY's YADD with x0 is YMV, so it
+        // keeps a sealed capability; by a register holding 0 it does not.
+        let o = go(&[csealentry(A0, ROOT), cincoffset(A1, A0, ZERO), cseqx(A2, A1, A0), cincoffset(A3, A0, A4), cgettag(A5, A3)]);
+        ok("cincoffset by x0 is cmove", o.x(A2) == 1);
+        ok("...and by a register untags a sealed capability", o.x(A5) == 0);
         // The escape hatch: an SE authority at otype 2 opens a closure.
         let mut c5 = vec![addi(A3, ZERO, 2), csetaddr(A3, ROOT, A3), cseal(A4, ROOT, A3), cgettype(A5, A4)];
         c5.extend([cunseal(A6, A4, A3), cgettype(A7, A6)]);

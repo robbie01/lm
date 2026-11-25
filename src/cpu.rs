@@ -1197,6 +1197,9 @@ fn op_cheri(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
             }
         }
         0 => match w >> 25 {
+            // `cincoffset` by x0 moves nothing: it is `cmove`, sealed or
+            // not.
+            0x11 if t == 0 => mv(m, d, s),
             0x11 => {
                 let off = r(m, t);
                 if let Err(st) = inc_cap(m, pc, fuel, d, s, off) {

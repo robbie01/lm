@@ -286,7 +286,7 @@ funct3 0, R-type, funct7:
   0x0c  cunseal     cd, cs1, cs2      likewise, and the otype must match
   0x0d  candperm    cd, cs1, rs2      rs2 the mask, in the permission positions 8..0
   0x10  csetaddr    cd, cs1, rs2
-  0x11  cincoffset  cd, cs1, rs2
+  0x11  cincoffset  cd, cs1, rs2      rs2 = x0 is cmove
   0x14  csub        rd, cs1, cs2      address difference
   0x16  csethigh    cd, cs1, rs2      untagged result, metadata = rs2
   0x1d  cbuildcap   cd, cs1, cs2      cs2's bits re-tagged under the authority cs1
