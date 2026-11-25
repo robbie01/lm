@@ -219,10 +219,16 @@ pub fn write_layout() {
     def!("imm-default", IMM_DEFAULT);
     // What `vkind` answers: an untagged value's metadata below 16, then nil,
     // a pair and any other capability, and an object's header type above 32.
-    def!("vkind-nil", VK_NIL);
-    def!("vkind-pair", VK_PAIR);
-    def!("vkind-cap", VK_CAP);
-    def!("vkind-object", VK_OBJECT);
+    def!("kind-fixnum", IMM_FIXNUM);
+    def!("kind-char", IMM_CHAR);
+    def!("kind-unbound", IMM_UNBOUND);
+    def!("kind-eof", IMM_EOF);
+    def!("kind-void", IMM_VOID);
+    def!("kind-default", IMM_DEFAULT);
+    def!("kind-nil", VK_NIL);
+    def!("kind-pair", VK_PAIR);
+    def!("kind-cap", VK_CAP);
+    def!("kind-object", VK_OBJECT);
 
     // Permissions in the positions `cgetperm` answers and `candperm` takes,
     // and the sets the allocators hand out.
@@ -299,15 +305,13 @@ pub fn write_layout() {
         def!(format!("reg-{name}"), i as u32);
     }
 
-    s.push_str("\n;; ---- special capability registers and custom CSRs ----\n");
+    s.push_str("\n;; ---- special capability registers ----\n");
     def!("scr-pcc", SCR_PCC);
     def!("scr-ddc", SCR_DDC);
     def!("scr-mtcc", SCR_MTCC);
     def!("scr-mtdc", SCR_MTDC);
     def!("scr-mscratchc", SCR_MSCRATCHC);
     def!("scr-mepcc", SCR_MEPCC);
-    def!("csr-stack-limit", CSR_STKLIM);
-    def!("csr-gc-mode", CSR_GCMODE);
 
     s.push_str("\n;; ---- ecall codes: what a7 carries when compiled code raises one ----\n");
     def!("ecall-arity", E_ARITY);
@@ -330,7 +334,7 @@ pub fn write_layout() {
     def!("cause-range", C_RANGE);
     def!("cause-overflow", C_OVER);
     def!("cause-divzero", C_DIVZERO);
-    def!("cause-cap", C_CAP);
+    def!("cause-capability", C_CAP);
     def!("cause-barrier", C_BARRIER);
     def!("cause-stack", C_STACK);
 
@@ -693,7 +697,6 @@ pub fn build(out: &str, verbose: bool) -> i32 {
     // Wire the pieces the assembly stubs reach through globals.
     for step in [
         "(%st-cap! lg-toplevel (%symbol-value 'sys:kickstart))",
-        "(%st-cap! lg-refill (%symbol-value 'gc:refill-cons))",
         "(%st-cap! lg-traphook (%symbol-value 'sys:handle-trap))",
         "(%st-cap! lg-bootlist (reverse compiler:*boot-thunks*))",
     ] {
@@ -705,8 +708,8 @@ pub fn build(out: &str, verbose: bool) -> i32 {
     }
     let entry = match drive(&mut l, "(boot:build-boot-code)") {
         Ok(v) => {
-            // (reset trap refill); the trap stub's address is stashed where
-            // collect_before_saving can find it.
+            // (reset trap); the trap stub's address is kept where the
+            // collection before saving and the code compactor find it.
             let trap = crate::heap::unfix(l.h.cadr(v)) as u32;
             l.h.set_g(LG_TRAPENTRY, trap);
             crate::heap::unfix(l.h.car(v)) as u32
@@ -836,17 +839,16 @@ fn call_on_machine(l: &mut Lisp, name: &str, trap: u32) -> Option<V> {
         l.h.st(halt + 4 * i as u32, w);
     }
     let region = |lo: u32, hi: u32| Cap::root().with_addr(lo).with_bounds(hi - lo);
-    let (Some(stack), Some(run), Some(frame)) = (
+    let (Some(stack), Some(frame)) = (
         region(l.h.g(LG_STACKBOT), l.h.g(LG_STACKTOP)),
-        region(l.h.g(LG_CONS_RUN), l.h.g(LG_CONSRUNEND)),
         region(l.h.g(LG_TRAPSAVE), l.h.g(LG_TRAPSAVE) + 32 * VALUE_BYTES),
     ) else {
-        eprintln!("lm: the boot stack, the cons run or the trap frame is not set up");
+        eprintln!("lm: the boot stack or the trap frame is not set up");
         return None;
     };
     let ret = cap_to(halt, 4 * halt_code.len() as u32, P_EX | P_SR).seal(OT_SENTRY);
     let sp = stack.with_addr(l.h.g(LG_STACKTOP));
-    let gp = run.with_addr(l.h.g(LG_CONS_PTR));
+    let gp = l.h.gv(LG_CONS_RUN);
     let entry = l.h.slot(closure, CLO_ENTRY);
     let m = &mut *l.h.m;
     for r in 1..32 {
@@ -900,12 +902,15 @@ fn blank_run_scratch(l: &mut Lisp) {
 fn collect_before_saving(l: &mut Lisp, verbose: bool) -> u32 {
     let trap = l.h.g(LG_TRAPENTRY);
     // Everything up to now was allocated by the forge's own bump pointer. The
-    // machine's allocator lives in a register, so hand it a run that starts
-    // exactly where the forge stopped: the collector reads gp to find out how
-    // much of the heap has been used.
+    // machine's allocator is a capability in gp, so hand it a run that starts
+    // exactly where the forge stopped and goes to the end of cons space: the
+    // collector reads gp to find out how much of the heap has been used.
     let before = l.h.g(LG_CONS_PTR);
-    l.h.set_g(LG_CONS_RUN, before);
-    l.h.set_g(LG_CONSRUNEND, CONS_END);
+    let Some(run) = crate::cap::Cap::root().with_addr(before).with_bounds(CONS_END - before) else {
+        eprintln!("lm: cons space is full");
+        return 0;
+    };
+    l.h.set_gv(LG_CONS_RUN, run);
     match call_on_machine(l, "gc:collect-for-image", trap) {
         Some(v) => {
             let n = unfix(v) as u32;

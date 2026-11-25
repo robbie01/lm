@@ -241,8 +241,7 @@ fn blank_fresh_pool(h: &mut Heap) {
 /// stacks, and this must never be used on one.
 ///
 /// Two things stay exactly where they are: the reset stub at the base, and
-/// the refill and trap stubs, which the forge assembles one after the other
-/// and which are not objects at all. Everything else that is not a live code
+/// the trap stub at `lg-trap-entry`, which are not objects at all. Everything else that is not a live code
 /// object is garbage: dead code the collector freed, and the odd few bytes an
 /// allocation did not hand back.
 pub fn compact_code(h: &mut Heap, verbose: bool) -> Result<CodeStats, String> {
@@ -277,8 +276,8 @@ pub fn compact_code(h: &mut Heap, verbose: bool) -> Result<CodeStats, String> {
         }
     }
 
-    // The stubs run from `stub-lo` to whatever comes next that is something
-    // else: a live code object, or a block on the free list.
+    // The trap stub runs from `lg-trap-entry` to whatever comes next that is
+    // something else: a live code object, or a block on the free list.
     let mut frees: Vec<u32> = Vec::new();
     let mut p = h.g(LG_CODEFREE);
     while p != 0 {
@@ -289,7 +288,7 @@ pub fn compact_code(h: &mut Heap, verbose: bool) -> Result<CodeStats, String> {
         p = h.ld(p + 4);
     }
     let mut pins: Vec<(u32, u32)> = vec![(lo, lo + RESET_RESERVE)];
-    let stub = h.g(LG_STUBLO) & !7;
+    let stub = h.g(LG_TRAPENTRY) & !7;
     if stub >= lo + RESET_RESERVE && stub < hi {
         let next = code
             .iter()

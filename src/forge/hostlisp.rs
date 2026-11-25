@@ -1720,8 +1720,10 @@ impl<'a> Lisp<'a> {
                 let n = n!(0) as u32;
                 let fillv = if a.len() > 1 { a[1] } else { NIL };
                 let p = self.h.alloc_obj(T_VECTOR, n);
-                for i in 0..n {
-                    self.h.set_slot(p, i, fillv);
+                if fillv != NIL {
+                    for i in 0..n {
+                        self.h.set_slot(p, i, fillv);
+                    }
                 }
                 p
             }

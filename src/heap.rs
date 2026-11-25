@@ -231,7 +231,6 @@ pub const VALUE_GLOBALS: &[u32] = &[
     LG_TOPLEVEL,
     LG_ERRHANDLER,
     LG_TRAPHOOK,
-    LG_REFILL,
     LG_STARTUP,
     LG_TASKEXIT,
     LG_BOOTARG,
@@ -393,7 +392,7 @@ impl<'a> Heap<'a> {
         self.st(at + 4, 0);
     }
 
-    /// A fresh object of `len` elements: values start as fixnum 0, bytes as
+    /// A fresh object of `len` elements: values start as nil, bytes as
     /// zero. Its base is aligned for its bounds, and a hole fills whatever
     /// the alignment skipped.
     pub fn alloc_obj(&mut self, ty: u32, len: u32) -> V {
@@ -413,8 +412,9 @@ impl<'a> Heap<'a> {
         self.set_g(LG_OBJ_PTR, end);
         self.st(at, h);
         self.st(at + 4, 0);
+        let fill = if is_byte_type(ty) { Cap::NULL } else { NIL };
         for a in (base..end).step_by(8) {
-            self.stc(a, Cap::NULL);
+            self.stc(a, fill);
         }
         cap_to(base, span, object_perms(ty))
     }
@@ -710,9 +710,6 @@ impl<'a> Heap<'a> {
             return o;
         }
         let v = self.alloc_obj(T_VECTOR, 1021);
-        for i in 0..1021 {
-            self.set_slot(v, i, NIL);
-        }
         self.set_gv(LG_OBARRAY, v);
         v
     }
@@ -750,9 +747,7 @@ impl<'a> Heap<'a> {
         }
         let nm = self.string(name);
         let pkg = self.alloc_obj(T_RECORD, PKG_SLOTS);
-        self.set_slot(pkg, PKG_TAG, NIL);
         self.set_slot(pkg, PKG_NAME, nm);
-        self.set_slot(pkg, PKG_USE, NIL);
         let all = self.gv(LG_PACKAGES);
         let cell = self.cons(pkg, all);
         self.set_gv(LG_PACKAGES, cell);
@@ -826,8 +821,6 @@ impl<'a> Heap<'a> {
         let s = self.alloc_obj(T_SYMBOL, SYM_SLOTS);
         self.set_slot(s, SYM_NAME, nm);
         self.set_slot(s, SYM_VALUE, UNBOUND);
-        self.set_slot(s, SYM_FUNCTION, NIL);
-        self.set_slot(s, SYM_PLIST, NIL);
         let idx = self.g(LG_SYMCOUNT);
         self.set_g(LG_SYMCOUNT, idx + 1);
         self.set_slot(s, SYM_FLAGS, fix((idx << 8) as i32));

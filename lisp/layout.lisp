@@ -79,10 +79,16 @@
 (define imm-eof #x3)
 (define imm-void #x4)
 (define imm-default #x5)
-(define vkind-nil #x10)
-(define vkind-pair #x11)
-(define vkind-cap #x1f)
-(define vkind-object #x20)
+(define kind-fixnum #x0)
+(define kind-char #x1)
+(define kind-unbound #x2)
+(define kind-eof #x3)
+(define kind-void #x4)
+(define kind-default #x5)
+(define kind-nil #x10)
+(define kind-pair #x11)
+(define kind-cap #x1f)
+(define kind-object #x20)
 
 ;; ---- permissions and otypes ----
 (define perm-ld #x100)
@@ -175,15 +181,13 @@
 (define reg-t5 #x1e)
 (define reg-t6 #x1f)
 
-;; ---- special capability registers and custom CSRs ----
+;; ---- special capability registers ----
 (define scr-pcc #x0)
 (define scr-ddc #x1)
 (define scr-mtcc #x1c)
 (define scr-mtdc #x1d)
 (define scr-mscratchc #x1e)
 (define scr-mepcc #x1f)
-(define csr-stack-limit #x7c0)
-(define csr-gc-mode #x7c1)
 
 ;; ---- ecall codes: what a7 carries when compiled code raises one ----
 (define ecall-arity #x1)
@@ -206,7 +210,7 @@
 (define cause-range #x19)
 (define cause-overflow #x1a)
 (define cause-divzero #x1b)
-(define cause-cap #x1c)
+(define cause-capability #x1c)
 (define cause-barrier #x1d)
 (define cause-stack #x1e)
 
