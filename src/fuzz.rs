@@ -15,6 +15,7 @@
 //! the host is.
 
 use crate::forge::hostlisp::Lisp;
+use crate::cap::*;
 use crate::mach::{Machine, MSTATUS_MIE, MSTATUS_MPIE};
 use crate::map::*;
 
@@ -31,10 +32,13 @@ const LISP_FUEL: u64 = 2_000_000;
 
 /// Run `data` as code with the registers it also supplies.
 ///
-/// The first 31 words are x1..x31 and set the CSRs too; the rest is code,
-/// placed at the base of code space, where the trap vector also points, so
-/// traps land back in the fuzz code. The machine is fresh: what the run
-/// does is a function of its input alone.
+/// The first 31 doublewords are x1..x31, address below and metadata above;
+/// the word after them says which are tagged, so random code gets random
+/// capabilities, bounds and permissions and all. The registers' addresses
+/// set the CSRs too, and bit 0 of the tag word takes SR away from PCC. The
+/// rest is code, placed at the base of code space, where the trap vector
+/// also points, so traps land back in the fuzz code. The machine is fresh:
+/// what the run does is a function of its input alone.
 pub fn exec(data: &[u8]) {
     let mut m = Machine::new();
     let word = |i: usize| -> u32 {
@@ -45,20 +49,23 @@ pub fn exec(data: &[u8]) {
             0
         }
     };
+    let tags = word(62);
     for i in 1..32 {
-        m.x[i] = word(i - 1);
+        let c = Cap { addr: word(2 * (i - 1)), meta: word(2 * (i - 1) + 1), tag: tags & (1 << i) != 0 };
+        m.set_reg(i as u32, c);
     }
-    let code = data.get(31 * 4..).unwrap_or(&[]);
+    let code = data.get(63 * 4..).unwrap_or(&[]);
     let code = &code[..code.len().min(CODE_MAX)];
     let at = CODE_AT as usize;
     m.ram_mut()[at..at + code.len()].copy_from_slice(code);
-    m.pc = CODE_AT;
-    m.mtvec = CODE_AT | (m.x[31] & 1);
+    let pcc = if tags & 1 != 0 { Cap::ROOT.and_perms(P_ALL & !P_SR) } else { Cap::ROOT };
+    m.set_pcc(pcc.with_addr(CODE_AT));
+    m.mtcc = Cap::ROOT.with_addr(CODE_AT | (m.x[31] & 1));
     m.mstatus = m.x[30] & (MSTATUS_MIE | MSTATUS_MPIE);
     m.mie = m.x[29] & 0x888;
     m.gcmode = m.x[28] & 1;
     m.stklim = m.x[27];
-    m.mscratch = m.x[26];
+    m.mscratchc = m.reg(26);
     m.mtimecmp = (m.x[25] as u64) << 4;
     m.uart.mute = true;
     let _ = crate::run::run(&mut m, EXEC_BUDGET);
@@ -150,20 +157,47 @@ const PLACES: &[u32] = &[
 /// stores, branches, jumps, system.
 const OPCODES: &[u32] = &[0x0b, 0x2b, 0x5b, 0x7b, 0x03, 0x23, 0x63, 0x6f, 0x67, 0x73, 0x0f, 0x33, 0x13];
 
-fn gen_register(r: &mut Rng) -> u32 {
-    match r.below(4) {
-        0 => r.below(64) as u32 * 2 + 1, // a small fixnum
-        1 => PLACES[r.below(PLACES.len())].wrapping_add(r.below(16) as u32 * 4),
-        2 => PLACES[r.below(PLACES.len())].wrapping_add(r.below(8) as u32) | 4,
+/// A word worth putting in an image: a small number, an address near the
+/// edge of a region, or random bits.
+fn gen_word(r: &mut Rng) -> u32 {
+    match r.below(3) {
+        0 => r.below(64) as u32,
+        1 => PLACES[r.below(PLACES.len())].wrapping_add(r.below(16) as u32 * 8),
         _ => r.word(),
     }
 }
 
-fn gen_exec(r: &mut Rng) -> Vec<u8> {
-    let mut v = Vec::with_capacity(31 * 4 + 512);
-    for _ in 0..31 {
-        v.extend_from_slice(&gen_register(r).to_le_bytes());
+/// A register for random code: a small fixnum, a capability to a place
+/// with sensible bounds, or random bits. Whether it is tagged is the
+/// caller's choice, so random bits may be tagged too.
+fn gen_register(r: &mut Rng) -> Cap {
+    match r.below(4) {
+        0 => Cap::int(r.below(64) as u32),
+        1 | 2 => {
+            let at = PLACES[r.below(PLACES.len())].wrapping_add(r.below(16) as u32 * 8);
+            let len = [16, 64, 4096, 1 << 20][r.below(4)];
+            let perms = if r.chance(70) { P_ALL } else { r.word() & P_ALL };
+            Cap::ROOT.with_addr(at).with_bounds(len).unwrap_or(Cap::ROOT).and_perms(perms)
+        }
+        _ => Cap { addr: r.word(), meta: r.word(), tag: false },
     }
+}
+
+fn gen_exec(r: &mut Rng) -> Vec<u8> {
+    let mut v = Vec::with_capacity(63 * 4 + 512);
+    let mut tags = 0u32;
+    for i in 1..32 {
+        let c = gen_register(r);
+        v.extend_from_slice(&c.addr.to_le_bytes());
+        v.extend_from_slice(&c.meta.to_le_bytes());
+        if r.chance(60) {
+            tags |= 1 << i;
+        }
+    }
+    if r.chance(20) {
+        tags |= 1;
+    }
+    v.extend_from_slice(&tags.to_le_bytes());
     let n = 1 + r.below(200);
     for _ in 0..n {
         if r.chance(60) {
@@ -198,16 +232,16 @@ fn gen_image(r: &mut Rng, seed: &[u8]) -> Vec<u8> {
             let mut v = Vec::new();
             v.extend_from_slice(crate::image::MAGIC);
             v.extend_from_slice(&(if r.chance(90) { 1u32 } else { r.word() }).to_le_bytes());
-            v.extend_from_slice(&gen_register(r).to_le_bytes());
+            v.extend_from_slice(&gen_word(r).to_le_bytes());
             let n = r.below(40) as u32;
             v.extend_from_slice(&(if r.chance(90) { n } else { r.word() }).to_le_bytes());
             for _ in 0..n {
-                v.extend_from_slice(&gen_register(r).to_le_bytes());
+                v.extend_from_slice(&gen_word(r).to_le_bytes());
             }
             let pages = r.below(n as usize + 2);
             for _ in 0..pages {
                 for _ in 0..1024 {
-                    v.extend_from_slice(&gen_register(r).to_le_bytes());
+                    v.extend_from_slice(&gen_word(r).to_le_bytes());
                 }
             }
             v.truncate(r.below(v.len() + 1).max(20));
@@ -216,11 +250,11 @@ fn gen_image(r: &mut Rng, seed: &[u8]) -> Vec<u8> {
         _ => {
             let mut v = vec![0u8; 512];
             v[0..4].copy_from_slice(&crate::image::SNAP_MAGIC.to_le_bytes());
-            v[4..8].copy_from_slice(&gen_register(r).to_le_bytes());
+            v[4..8].copy_from_slice(&gen_word(r).to_le_bytes());
             let n = if r.chance(90) { r.below(41) as u32 } else { r.word() };
             v[8..12].copy_from_slice(&n.to_le_bytes());
             for i in 0..40 {
-                let base = gen_register(r);
+                let base = gen_word(r);
                 let len = if r.chance(50) { r.below(8192) as u32 } else { r.word() };
                 let blk = r.below(64) as u32;
                 v[12 + i * 12..16 + i * 12].copy_from_slice(&base.to_le_bytes());
@@ -229,7 +263,7 @@ fn gen_image(r: &mut Rng, seed: &[u8]) -> Vec<u8> {
             }
             for _ in 0..r.below(16) {
                 for _ in 0..128 {
-                    v.extend_from_slice(&gen_register(r).to_le_bytes());
+                    v.extend_from_slice(&gen_word(r).to_le_bytes());
                 }
             }
             v

@@ -1,5 +1,6 @@
 //! Keyboard and mouse. Events land in a fifo as packed words:
 //!
+//! ```text
 //!     bits 31..28  kind: 1 key down, 2 key up, 3 mouse move,
 //!                        4 button down, 5 button up, 6 wheel
 //!
@@ -7,6 +8,7 @@
 //!                  bits 19..12 raw key code
 //!     the pointer  bits 27..16 y, bits 15..4 x, bits 3..0 the button
 //!     the wheel    bits 11..0  steps, one a notch, positive away from the user
+//! ```
 //!
 //! A key held down repeats as more key-down events. The host's pointer
 //! moves are gathered into one between any two other events.

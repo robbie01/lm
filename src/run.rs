@@ -241,6 +241,7 @@ pub fn cause_name(c: u32) -> &'static str {
         C_RANGE => "index out of range",
         C_OVER => "fixnum overflow",
         C_DIVZERO => "division by zero",
+        C_CAP => "capability fault",
         C_STACK => "stack overflow",
         C_BARRIER => "write barrier",
         _ => "trap",
