@@ -40,6 +40,14 @@ impl Default for Options {
     }
 }
 
+/// The reset state for an image whose entry is `entry`: PCC, DDC and MTCC
+/// the root, PCC at the entry. Every general register is NULL already.
+pub fn reset(m: &mut Machine, entry: u32) {
+    m.set_pcc(Cap::ROOT.with_addr(entry));
+    m.set_ddc(Cap::ROOT);
+    m.mtcc = Cap::ROOT;
+}
+
 /// Boot and run headless.
 pub fn boot(o: &Options) -> i32 {
     run_machine(o, None)
@@ -65,11 +73,7 @@ fn run_machine(o: &Options, host: Option<Host>) -> i32 {
             return 1;
         }
     };
-    // The reset state: PCC, DDC and MTCC are the root, PCC at the image's
-    // entry, and every general register is NULL.
-    m.set_pcc(Cap::ROOT.with_addr(loaded.entry));
-    m.ddc = Cap::ROOT;
-    m.mtcc = Cap::ROOT;
+    reset(&mut m, loaded.entry);
     m.trace_traps = o.trace_traps;
 
     if let Some(path) = &o.disk {
@@ -172,10 +176,7 @@ fn run_machine(o: &Options, host: Option<Host>) -> i32 {
         let ram = unsafe { std::slice::from_raw_parts(ramp, len) };
         let gfx = &mut m.gfx as *mut crate::dev::gfx::Gfx;
         unsafe { (*gfx).scanout(ram) };
-        let mut out = format!("P6
-{w} {h}
-255
-").into_bytes();
+        let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
         for p in m.gfx.scan.iter().take(w * h) {
             out.push((p >> 16) as u8);
             out.push((p >> 8) as u8);
