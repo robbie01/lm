@@ -71,7 +71,7 @@
 ;; of a frame that every task drawing shares, so only what moved is
 ;; composited.
 (define *damage* nil)      ; a list of rectangles, newest first
-(define damage-max 32)     ; beyond which a new one joins its nearest
+(defconstant damage-max 32)     ; beyond which a new one joins its nearest
 
 ;; Every task that draws adds to the list and the compositor empties it, so
 ;; it is guarded by a mutex: adding damage is a walk of up to thirty-two

@@ -25,13 +25,13 @@
 (in-package snap)
 (unsafe-file)
 
-(define snap-header-blocks 1)
-(define snap-regions 5)
+(defconstant snap-header-blocks 1)
+(defconstant snap-regions 5)
 
 ;; The header is put together in the collector's scratch memory, which no
 ;; allocator hands out, and each region's tag map after it.
-(define snap-header gc-scratch)
-(define snap-tag-map (%+ gc-scratch 512))
+(defconstant snap-header gc-scratch)
+(defconstant snap-tag-map (%+ gc-scratch 512))
 
 (define (region-blocks len) (%lsh (%+ len 511) -9))
 

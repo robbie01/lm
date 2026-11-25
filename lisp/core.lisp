@@ -116,8 +116,8 @@
       (set! xs (%cdr xs)))
     acc))
 
-(define most-positive-fixnum 2147483647)
-(define most-negative-fixnum -2147483648)
+(defconstant most-positive-fixnum 2147483647)
+(defconstant most-negative-fixnum -2147483648)
 
 (define (fixnum-only op r)
   (if (%fixnum? r) r (error "fixnum overflow in" op)))

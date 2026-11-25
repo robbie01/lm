@@ -10,33 +10,33 @@
 (in-package platinum)
 
 ;; ---------------------------------------------------------------- palette
-(define palette-base 232)
+(defconstant palette-base 232)
 
 ;; Grey n of the ramp, 0 black and 15 white.
 (define (grey n) (%+ palette-base n))
 
-(define black (%+ palette-base 0))
-(define g13 (%+ palette-base 2))       ; 0x22, the darkest thing that is not black
-(define g12 (%+ palette-base 3))       ; 0x33
-(define g11 (%+ palette-base 4))       ; 0x44
-(define g10 (%+ palette-base 5))       ; 0x55
-(define g9 (%+ palette-base 6))        ; 0x66
-(define g8 (%+ palette-base 7))        ; 0x77, the dark pinstripe
-(define g7 (%+ palette-base 8))        ; 0x88
-(define g6 (%+ palette-base 9))        ; 0x99, the shadow of a raised strip
-(define g5 (%+ palette-base 10))       ; 0xAA
-(define g4 (%+ palette-base 11))       ; 0xBB
-(define g3 (%+ palette-base 12))       ; 0xCC, the frame face
-(define g2 (%+ palette-base 13))       ; 0xDD, the dialog background
-(define g1 (%+ palette-base 14))       ; 0xEE
-(define white (%+ palette-base 15))
+(defconstant black (%+ palette-base 0))
+(defconstant g13 (%+ palette-base 2))  ; 0x22, the darkest thing that is not black
+(defconstant g12 (%+ palette-base 3))  ; 0x33
+(defconstant g11 (%+ palette-base 4))  ; 0x44
+(defconstant g10 (%+ palette-base 5))  ; 0x55
+(defconstant g9 (%+ palette-base 6))   ; 0x66
+(defconstant g8 (%+ palette-base 7))   ; 0x77, the dark pinstripe
+(defconstant g7 (%+ palette-base 8))   ; 0x88
+(defconstant g6 (%+ palette-base 9))   ; 0x99, the shadow of a raised strip
+(defconstant g5 (%+ palette-base 10))  ; 0xAA
+(defconstant g4 (%+ palette-base 11))  ; 0xBB
+(defconstant g3 (%+ palette-base 12))  ; 0xCC, the frame face
+(defconstant g2 (%+ palette-base 13))  ; 0xDD, the dialog background
+(defconstant g1 (%+ palette-base 14))  ; 0xEE
+(defconstant white (%+ palette-base 15))
 
-(define lav-light (%+ palette-base 16))   ; #CCCCFF
-(define lav (%+ palette-base 17))         ; #9999FF
-(define lav-dark (%+ palette-base 18))    ; #6666CC, the highlight colour
-(define lav-darkest (%+ palette-base 19)) ; #333399
-(define desktop (%+ palette-base 20))     ; #63639C
-(define desktop-dark (%+ palette-base 21))
+(defconstant lav-light (%+ palette-base 16))   ; #CCCCFF
+(defconstant lav (%+ palette-base 17))         ; #9999FF
+(defconstant lav-dark (%+ palette-base 18))    ; #6666CC, the highlight colour
+(defconstant lav-darkest (%+ palette-base 19)) ; #333399
+(defconstant desktop (%+ palette-base 20))     ; #63639C
+(defconstant desktop-dark (%+ palette-base 21))
 
 (define (palette)
   ;; Sixteen greys, then the accents, as one request to the display driver.
@@ -57,13 +57,13 @@
 ;; ---------------------------------------------------------------- metrics
 ;; Rows 0..21 of a window: the frame-rect, nineteen interior rows, the shadow row
 ;; and the content border. Everything else is measured off that.
-(define title-height 22)
-(define band 6)              ; left, right and bottom bands
-(define box-size 12)              ; a title-bar box
-(define box-x 4)
-(define box-y 4)
-(define menubar-height 20)
-(define menubar-first-x 9)
+(defconstant title-height 22)
+(defconstant band 6)              ; left, right and bottom bands
+(defconstant box-size 12)              ; a title-bar box
+(defconstant box-x 4)
+(defconstant box-y 4)
+(defconstant menubar-height 20)
+(defconstant menubar-first-x 9)
 
 ;; ---------------------------------------------------------------- bevels
 ;; A raised strip is a white line along its top and left and a #99 line

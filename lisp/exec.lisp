@@ -146,11 +146,11 @@
   run-owed                       ; bytes of cons run handed to it, unpaid; see gc.lisp
   gen)                           ; which Exec it belongs to: see `task-alive?`
 
-(define ts-added 1)
-(define ts-run 2)
-(define ts-ready 3)
-(define ts-wait 4)
-(define ts-removed 5)
+(defconstant ts-added 1)
+(defconstant ts-run 2)
+(defconstant ts-ready 3)
+(defconstant ts-wait 4)
+(defconstant ts-removed 5)
 
 ;; ---------------------------------------------------------------- the kernel
 (define *idle-task* nil)
@@ -317,15 +317,15 @@
 ;; handed over, and a deadline passed. Every other bit from 0 to 30 is for allocation. Bit 31 is
 ;; not: a mask is a fixnum, and a fixnum with bit 31 set is negative, which
 ;; the tests below would misread.
-(define sigb-vblank 5)
-(define sigf-vblank (%lsh 1 sigb-vblank))
-(define sigb-blit 7)                   ; your blits have landed; see gfx.lisp
-(define sigf-blit (%lsh 1 sigb-blit))
-(define sigb-mutex 8)                  ; you have been handed a mutex
-(define sigf-mutex (%lsh 1 sigb-mutex))
-(define sigb-timer 9)                  ; your deadline has passed; see `wait-timeout`
-(define sigf-timer (%lsh 1 sigb-timer))
-(define sig-reserved
+(defconstant sigb-vblank 5)
+(defconstant sigf-vblank (%lsh 1 sigb-vblank))
+(defconstant sigb-blit 7)              ; your blits have landed; see gfx.lisp
+(defconstant sigf-blit (%lsh 1 sigb-blit))
+(defconstant sigb-mutex 8)             ; you have been handed a mutex
+(defconstant sigf-mutex (%lsh 1 sigb-mutex))
+(defconstant sigb-timer 9)             ; your deadline has passed; see `wait-timeout`
+(defconstant sigf-timer (%lsh 1 sigb-timer))
+(defconstant sig-reserved
   (%logior sigf-vblank (%logior sigf-blit (%logior sigf-mutex sigf-timer))))
 
 ;; What comes back is the mask, because that is what `signal` and `wait`
@@ -418,7 +418,7 @@
 ;; in step with the screen. `millis` in hw is the host's clock, for pacing
 ;; to the host, and is not this.
 (define *ticks* 0)                     ; timer interrupts since Exec started
-(define ticks-per-second 100)
+(defconstant ticks-per-second 100)
 (define *ms-per-tick* (%/ 1000 ticks-per-second))
 
 (define (now-ms) (%* *ticks* *ms-per-tick*))
@@ -471,14 +471,14 @@
 (define (sleep ms) (wait-timeout 0 ms) nil)
 
 ;; ---------------------------------------------------------------- tasks
-(define default-stack 65536)
+(defconstant default-stack 65536)
 
 ;; How far above the bottom of its stack a task is stopped. The processor
 ;; faults when the stack pointer goes below the limit with interrupts on; the
 ;; reserve under it is for code that runs with them off, the collector, the
 ;; allocator, the kernel's lists, which can be entered with the stack nearly
 ;; full and has to finish. A small stack keeps a quarter of itself.
-(define stack-reserve 8192)
+(defconstant stack-reserve 8192)
 
 (define (task-stack-limit task)
   (let* ((lo (%cap-base (tc-stack task)))

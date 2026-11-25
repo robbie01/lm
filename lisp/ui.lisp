@@ -11,12 +11,12 @@
 
 (in-package ui)
 
-(define row-height 16)
-(define scrollbar-width 16)
-(define arrow-length 15)
-(define min-thumb 17)
-(define indent 16)
-(define double-click-frames 25)
+(defconstant row-height 16)
+(defconstant scrollbar-width 16)
+(defconstant arrow-length 15)
+(defconstant min-thumb 17)
+(defconstant indent 16)
+(defconstant double-click-frames 25)
 
 ;; ---------------------------------------------------------------- shapes
 ;; The 8x4 scroll arrow with a two-pixel apex; x y is the top left of its box.
@@ -453,14 +453,14 @@
              (set-ol-selected! o r)
              (if again (%cons 'open r) 'changed))))))
 
-(define key-up #x80)
-(define key-down #x81)
-(define key-left #x82)
-(define key-right #x83)
-(define key-home #x84)
-(define key-end #x85)
-(define key-page-up #x86)
-(define key-page-down #x87)
+(defconstant key-up #x80)
+(defconstant key-down #x81)
+(defconstant key-left #x82)
+(defconstant key-right #x83)
+(defconstant key-home #x84)
+(defconstant key-end #x85)
+(defconstant key-page-up #x86)
+(defconstant key-page-down #x87)
 
 (define (key! o rows ascii code)
   (let* ((sel (ol-selected o))

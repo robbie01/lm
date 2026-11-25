@@ -61,8 +61,8 @@
 ;; a sign, and the intermediate products here reach twenty-eight, which is why
 ;; the escape radius is checked against four rather than something more
 ;; generous.
-(define fp-bits 12)
-(define fp-one 4096)
+(defconstant fp-bits 12)
+(defconstant fp-one 4096)
 
 (define (mandel-point cr ci limit)
   (let ((zr 0) (zi 0) (i 0) (done nil))
@@ -448,7 +448,7 @@
 ;; instead of hanging the test. How long a task takes to get anywhere depends
 ;; on what else the machine is doing: with a collection in progress, a fresh
 ;; task's first cons pays the collector for its whole run.
-(define lk-patience 1200)   ; vblanks: twenty seconds of the machine's clock
+(defconstant lk-patience 1200)  ; vblanks: twenty seconds of the machine's clock
 
 ;; Waits until `pred` holds, or patience runs out. Answers what `pred` does.
 (define (lk-until pred)

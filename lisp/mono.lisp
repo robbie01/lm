@@ -14,11 +14,11 @@
 
 (in-package wb)
 
-(define mono-first 32)
-(define mono-cell 12)     ; the cell is twelve rows tall
-(define mono-advance 6)   ; and six pixels wide
-(define mono-height 12)
-(define mono-columns 6)
+(defconstant mono-first 32)
+(defconstant mono-cell 12)     ; the cell is twelve rows tall
+(defconstant mono-advance 6)   ; and six pixels wide
+(defconstant mono-height 12)
+(defconstant mono-columns 6)
 
 (define *mono-rows*
   '(

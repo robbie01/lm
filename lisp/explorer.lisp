@@ -15,7 +15,7 @@
 
 (in-package explorer)
 
-(define label-max 96)
+(defconstant label-max 96)
 
 ;; ---------------------------------------------------------------- capabilities
 (define perm-names
