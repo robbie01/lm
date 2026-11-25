@@ -910,7 +910,41 @@
     (remove-task (server-task s))
     (failure? r)))
 
+;; A capability narrowed out of a heap block keeps the block its base lies
+;; in alive. Each is made in a call of its own, so that no frame is left
+;; holding the whole block, and the heap is churned until a collection
+;; would have reused it.
+(define (narrowed-pair) (%cap-bounds (cons 'apple 'pear) 8))
+(define (narrowed-cdr) (%cap-bounds (%cap-inc (cons 'plum 'quince) 8) 8))
+(define (narrowed-slot) (%cap-bounds (%cap-inc (vector 'first (list 'kept 42) 'third) 8) 8))
+(define (churn n)
+  (let ((i 0) (l nil))
+    (while (< i n)
+      (set! l (cons i (if (= (logand i 1023) 0) nil l)))
+      (if (= (logand i 7) 0) (vector i l i) nil)
+      (set! i (+ i 1)))
+    nil))
+(define (narrowed-survive)
+  (let ((c (narrowed-pair)) (d (narrowed-cdr)) (s (narrowed-slot)))
+    (churn 300000)
+    (gc)
+    (churn 300000)
+    (gc)
+    (num-check 'a-narrowed-pair-keeps-its-pair
+               (list (%cap-len c) (%cap-ld c 0))
+               (list value-bytes 'apple))
+    (num-check 'and-one-narrowed-to-its-cdr (%cap-ld d 0) 'quince)
+    (num-check 'a-narrowed-slot-keeps-its-vector
+               (list (%cap-len s) (%cap-ld s 0))
+               (list value-bytes '(kept 42)))
+    (let ((u (%cap-and-perms s (lognot perm-hd))))
+      (set! s nil)
+      (churn 300000)
+      (gc)
+      (num-check 'and-so-does-one-without-hd (%cap-ld u 0) '(kept 42)))))
+
 (define (capabilities)
+  (narrowed-survive)
   (let* ((v (vector 1 2 3))
          (w (%cap-and-perms v (lognot perm-sd)))
          (p (cons 1 2))

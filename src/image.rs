@@ -147,6 +147,9 @@ pub fn load(m: &mut Machine, path: &str) -> std::io::Result<Loaded> {
 
 /// Load from anything readable: a file, or bytes in memory.
 pub fn load_from(m: &mut Machine, f: &mut (impl Read + Seek)) -> std::io::Result<Loaded> {
+    // Object space is about to change under the object-start map, which the
+    // first collection then builds again.
+    m.poke32(crate::map::OBJ_STARTS_READY, 0);
     let mut head = [0u8; 20];
     f.read_exact(&mut head)?;
     if u32::from_le_bytes(head[0..4].try_into().unwrap()) == SNAP_MAGIC {

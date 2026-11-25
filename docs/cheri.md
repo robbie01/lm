@@ -396,11 +396,15 @@ on `sp`, which the handler also reports as a stack overflow.
 **The write barrier** (`gcmode`, CSR 0x7c1, bit 0): while it is on, any
 store of any width, through a capability or through DDC, that would
 overwrite a tagged granule in cons or object space whose capability points
-at an unmarked heap object traps with cause 29, before writing. The object
-of a pair capability (no HD, sixteen bytes, based in cons space) is its
-base; the object of a headed capability is the header at base-8, in object
-space. Its mark bit is the bit of that granule in the bitmap at
-`GC_BITMAP`, one bit per 8 bytes from `CONS_BASE`. The handler marks it and
+at an unmarked heap object traps with cause 29, before writing. A tagged
+capability keeps alive the block its base lies in, whatever its length: one
+without HD based in cons space, the pair at its base rounded down to 16; one
+based in object space, headed or not, the object whose header is the
+nearest set bit of the object-start map (`OBJ_STARTS`, one bit per 8 bytes
+of object space, set at every allocated block's header) at or below the
+granule before its base. So a capability narrowed to a cdr or to a slot
+keeps its pair or its vector. Its mark bit is the bit of that granule in the
+bitmap at `GC_BITMAP`, one bit per 8 bytes from `CONS_BASE`. The handler marks it and
 the store re-executes. Nothing can overwrite the last copy of a pointer
 unseen.
 
@@ -414,7 +418,7 @@ unseen.
 0x0100_0000  code space, 16 MiB; the reset stub at its base
 0x0200_0000  cons space, 128 MiB, eight million pairs
 0x0A00_0000  object space, 64 MiB
-0x0E00_0000  the mark bitmap, the mark stack, scratch
+0x0E00_0000  the mark bitmap, the object-start map, the mark stack, scratch
 0xF000_0000  device pages, 4 KiB each, 32-bit registers and two capability registers
 ```
 

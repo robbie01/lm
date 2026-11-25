@@ -63,12 +63,22 @@ fn slid(c: Cap, delta: u32) -> Cap {
 /// finds there without its header, so such a capability names nothing it
 /// kept, and loses its tag. One that reaches past its block names a region,
 /// not a block, and stays as it is.
-fn rewrite(h: &mut Heap, moves: &[Move], lo: u32, hi: u32) -> Result<(), String> {
+///
+/// In object space every capability names the block holding the granule
+/// below its base (`below`): a headed one's header, and one narrowed into a
+/// payload, or to nothing at its end, the object it was cut from, as the
+/// collector reads it. Its bounds slide with the block, which keeps them
+/// representable because the block's payload keeps its alignment.
+fn rewrite(h: &mut Heap, moves: &[Move], lo: u32, hi: u32, below: bool) -> Result<(), String> {
     for at in h.tagged() {
         let c = h.ldc(at);
         // A headed capability's block is the one holding its header, which
         // for an object with no payload is not the block its base is in.
-        let b = if c.perms() & cap::P_HD != 0 { c.base().wrapping_sub(8) } else { c.base() };
+        let b = if c.perms() & cap::P_HD != 0 || (below && c.base() > lo) {
+            c.base().wrapping_sub(8)
+        } else {
+            c.base()
+        };
         if b < lo || b >= hi {
             continue;
         }
@@ -160,7 +170,10 @@ pub fn compact_objects(h: &mut Heap, verbose: bool) -> Result<Stats, String> {
     // Rewrite every pointer before anything moves: after this pass the heap
     // names where everything is going, and nothing may be dereferenced until
     // it is there.
-    rewrite(h, &moves, lo, hi)?;
+    rewrite(h, &moves, lo, hi, true)?;
+    // The object-start map describes the blocks where they were: the next
+    // collection builds it again.
+    h.m.poke32(OBJ_STARTS_READY, 0);
 
     // Slide, a granule at a time with its tag. Ascending, and every block
     // moves down, so a block that overlaps its own destination copies
@@ -347,7 +360,7 @@ pub fn compact_code(h: &mut Heap, verbose: bool) -> Result<CodeStats, String> {
     let mut owners = moves.clone();
     owners.extend(pins.iter().map(|&(s, e)| Move { from: s, size: e - s, to: s }));
     owners.sort_by_key(|m| m.from);
-    rewrite(h, &owners, lo, hi)?;
+    rewrite(h, &owners, lo, hi, false)?;
 
     // Take every block out, granule by granule with its tag, blank everything
     // that is not pinned, and put the blocks back where they go. Copying out
@@ -483,7 +496,10 @@ mod tests {
         h.set_slot(c, 299, a);
         h.set_slot(a, 1, c);
         let inner = d.inc(100).with_bounds(16).unwrap();
-        let l = h.list(&[a, c, d, inner]);
+        // Narrowed to nothing at the end of its payload: its base is the next
+        // block's header, and it still names `c`.
+        let end = c.inc(2400).with_bounds(0).unwrap();
+        let l = h.list(&[a, c, d, inner, end]);
         h.set_gv(LG_ROOTS, l);
         // What the collector does to the dead object.
         let at = dead.addr - HEADER_BYTES;
@@ -495,7 +511,7 @@ mod tests {
         assert_eq!(st.moved, 2);
         assert!(h.g(LG_OBJ_PTR) < before);
         let items = h.list_vec(h.gv(LG_ROOTS));
-        let (a, c, d, inner) = (items[0], items[1], items[2], items[3]);
+        let (a, c, d, inner, end) = (items[0], items[1], items[2], items[3], items[4]);
         assert_eq!(h.slot(a, 0), fix(1));
         assert_eq!(h.slot(a, 1), c);
         assert_eq!(h.slot(c, 0), d);
@@ -506,6 +522,8 @@ mod tests {
         assert_eq!(h.m.peek8(d.addr + 4999), 7);
         assert_eq!(inner.base(), d.addr + 100);
         assert_eq!(inner.len(), 16);
+        assert_eq!(end.base(), c.addr + 2400);
+        assert_eq!(end.len(), 0);
         let mut p = OBJ_BASE;
         while p < h.g(LG_OBJ_PTR) {
             p += block_size(h.ld(p));

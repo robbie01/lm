@@ -1065,6 +1065,54 @@ pub fn run_all() -> bool {
         capr(&mut v, A2, 0x8000);
         v.push(sc(ZERO, A2, 0));
         ok("the pool is not watched", go_with(&v, stack).clean());
+
+        // A capability narrowed to the cdr of the inner pair keeps that pair:
+        // overwriting it traps while the pair is unmarked, whatever its length.
+        let narrow = |mark: bool| {
+            move |m: &mut Machine| {
+                setup(mark)(m);
+                let outer = m.reg(A1);
+                let inner = m.load_cap(PAIR);
+                let cdr = inner.inc(8).with_bounds(8).unwrap();
+                m.store_cap(outer.base(), cdr);
+            }
+        };
+        ok("a narrowed pair traps", go_with(&store, narrow(false)).took(C_BARRIER, PAIR));
+        ok("...and not once its pair is marked", go_with(&store, narrow(true)).clean());
+
+        // A capability into a vector's second slot, HD gone, keeps the
+        // vector: the object-start map finds its header from the base.
+        const VEC: u32 = OBJ + 0x100;
+        let interior_as = |mark: bool, start: bool, hd: bool| {
+            move |m: &mut Machine| {
+                setup(true)(m);
+                let v = object(m, VEC, T_VECTOR, 4);
+                let slot = v.inc(8).with_bounds(8).unwrap();
+                let slot = if hd { slot } else { slot.and_perms(slot.perms() & !P_HD) };
+                let outer = m.reg(A1);
+                m.store_cap(outer.base(), slot);
+                let set = |m: &mut Machine, map: u32, a: u32, from: u32| {
+                    let bit = (a - from) >> 3;
+                    let w = map + (bit >> 5) * 4;
+                    let old = m.peek32(w);
+                    m.poke32(w, old | (1 << (bit & 31)));
+                };
+                if start {
+                    set(m, OBJ_STARTS, VEC, OBJ_BASE);
+                }
+                if mark {
+                    set(m, GC_BITMAP, VEC, CONS_BASE);
+                }
+            }
+        };
+        let interior = |mark: bool, start: bool| interior_as(mark, start, false);
+        ok("a capability into a payload traps", go_with(&store, interior(false, true)).took(C_BARRIER, PAIR));
+        // HD survives a moved base; the granule below is a slot, not a
+        // header, and the map still finds the vector.
+        ok("...headed or not", go_with(&store, interior_as(false, true, true)).took(C_BARRIER, PAIR));
+        ok("...and the vector's mark is what it reads", go_with(&store, interior_as(true, true, true)).clean());
+        ok("...and not once its object is marked", go_with(&store, interior(true, true)).clean());
+        ok("...nor where no object starts below it", go_with(&store, interior(false, false)).clean());
     }
 
     // ---- the stack limit ----

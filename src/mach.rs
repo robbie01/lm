@@ -921,7 +921,7 @@ impl Machine {
                 continue;
             }
             let old = unsafe { self.rd_cap(g) };
-            if let Some(obj) = heap_object(old) {
+            if let Some(obj) = self.referent(old) {
                 let bit = (obj - CONS_BASE) >> 3;
                 let word = unsafe { self.rd32(GC_BITMAP + ((bit >> 5) << 2)) };
                 if word & (1 << (bit & 31)) == 0 {
@@ -932,15 +932,59 @@ impl Machine {
         None
     }
 
+    /// The heap block a tagged capability keeps alive, as the address its
+    /// mark bit belongs to: the block its base lies in. One without HD based
+    /// in cons space keeps the pair at its base rounded down to sixteen,
+    /// whatever its length. One based in object space, headed or not, keeps
+    /// the block whose header is the nearest object start at or below the
+    /// granule before its base: for an object's own capability that is its
+    /// header, and a capability narrowed into a payload, or to nothing at its
+    /// end, keeps the object it was cut from.
+    pub fn referent(&self, c: Cap) -> Option<u32> {
+        if !c.tag {
+            return None;
+        }
+        let b = c.base();
+        if (CONS_BASE..CONS_END).contains(&b) {
+            (!c.has(P_HD)).then_some(b & !15)
+        } else if b > OBJ_BASE && b <= OBJ_END {
+            self.object_start(b - 8)
+        } else {
+            None
+        }
+    }
+
+    /// The nearest object start at or below `a`, in object space.
+    pub fn object_start(&self, a: u32) -> Option<u32> {
+        let i = (a - OBJ_BASE) >> 3;
+        let mut w = i >> 5;
+        let mut bits = unsafe { self.rd32(OBJ_STARTS + (w << 2)) };
+        let k = i & 31;
+        if k < 31 {
+            bits &= (2u32 << k) - 1;
+        }
+        loop {
+            if bits != 0 {
+                return Some(OBJ_BASE + (((w << 5) + 31 - bits.leading_zeros()) << 3));
+            }
+            if w == 0 {
+                return None;
+            }
+            w -= 1;
+            bits = unsafe { self.rd32(OBJ_STARTS + (w << 2)) };
+        }
+    }
+
     /// Number of instructions until the timer fires, saturating.
     pub fn fuel_to_timer(&self) -> u64 {
         self.mtimecmp.saturating_sub(self.cycles)
     }
 }
 
-/// The heap object a tagged capability refers to, as the address its mark
-/// bit belongs to: a pair's base, or an object's header. None for anything
-/// else, a run, a code entry, a stack, a device.
+/// The heap object a pair or headed capability refers to, as the address its
+/// mark bit belongs to: a pair's base, or an object's header. None for
+/// anything else, a run, a code entry, a stack, a device. What the barrier
+/// asks is wider: see `Machine::referent`.
 pub fn heap_object(c: Cap) -> Option<u32> {
     if !c.tag {
         return None;

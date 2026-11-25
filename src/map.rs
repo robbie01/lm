@@ -11,7 +11,8 @@
 //!   0100_0000  ..  01FF_FFFF   code space; the reset stub at its base
 //!   0200_0000  ..  09FF_FFFF   cons space, eight million pairs
 //!   0A00_0000  ..  0DFF_FFFF   object space
-//!   0E00_0000  ..  0FFF_FFFF   the mark bitmap, the mark stack, scratch
+//!   0E00_0000  ..  0FFF_FFFF   the mark bitmap, the object-start map, the
+//!                              mark stack, scratch
 //!   F000_0000  ..              device pages, 4 KiB each, 32-bit registers
 //! ```
 //!
@@ -68,6 +69,20 @@ pub const FAST_BASE: u32 = 0x0E00_0000;
 /// (see `mach::CSR_GCMODE`), so the address is the machine's, not the
 /// collector's to choose: gc.lisp's `gc-bitmap` is this.
 pub const GC_BITMAP: u32 = FAST_BASE;
+pub const GC_BITMAP_BYTES: u32 = (OBJ_END - CONS_BASE) >> 6;
+
+/// The object-start map: one bit per eight bytes of object space from
+/// `OBJ_BASE`, set at the header of every block the allocator has handed out
+/// and not yet seen swept. A capability whose base lies inside an object's
+/// payload finds the object by the nearest set bit at or below the granule
+/// before its base. The write barrier reads it too.
+pub const OBJ_STARTS: u32 = GC_BITMAP + GC_BITMAP_BYTES;
+pub const OBJ_STARTS_BYTES: u32 = (OBJ_END - OBJ_BASE) >> 6;
+/// A word that holds `OBJ_STARTS_MAGIC` once the map describes object space:
+/// scratch memory starts zero, so a machine fresh from an image builds the
+/// map before its first collection marks anything.
+pub const OBJ_STARTS_READY: u32 = OBJ_STARTS + OBJ_STARTS_BYTES;
+pub const OBJ_STARTS_MAGIC: u32 = 0x0b57_a275;
 
 pub const MMIO_BASE: u32 = 0xF000_0000;
 pub const MMIO_END: u32 = 0xF010_0000;

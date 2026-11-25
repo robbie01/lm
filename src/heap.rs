@@ -421,6 +421,11 @@ impl<'a> Heap<'a> {
         self.set_g(LG_OBJ_PTR, end);
         self.st(at, h);
         self.st(at + 4, 0);
+        // The object-start map, as the machine's allocator keeps it.
+        let bit = (at - OBJ_BASE) >> 3;
+        let w = OBJ_STARTS + (bit >> 5) * 4;
+        let old = self.m.peek32(w);
+        self.m.poke32(w, old | (1 << (bit & 31)));
         let fill = if is_byte_type(ty) { Cap::NULL } else { NIL };
         for a in (base..end).step_by(8) {
             self.stc(a, fill);
