@@ -216,9 +216,13 @@
            `(%set-symbol-value! ,(car args) ,val))
           ((memq head '(peek)) `(poke ,(car args) ,val))
           ((memq head '(peek8)) `(poke8 ,(car args) ,val))
-          ((memq head '(%ld-fixnum)) `(%st-fixnum! ,(car args) ,val))
-          ((memq head '(%ld-byte)) `(%st-byte! ,(car args) ,val))
+          ((memq head '(%ld-word)) `(%st-word! ,(car args) ,val))
           ((memq head '(%ld-half)) `(%st-half! ,(car args) ,val))
+          ((memq head '(%ld-byte)) `(%st-byte! ,(car args) ,val))
+          ((memq head '(%ld-cap)) `(%st-cap! ,(car args) ,val))
+          ((memq head '(%cap-ld)) `(%cap-st! ,(car args) ,(cadr args) ,val))
+          ((memq head '(%cap-ld-word)) `(%cap-st-word! ,(car args) ,(cadr args) ,val))
+          ((memq head '(%cap-ld-byte)) `(%cap-st-byte! ,(car args) ,(cadr args) ,val))
           (else (error "setf does not know how to write to" head)))))
 
 ;; ---------------------------------------------------------------- misc sugar
@@ -352,8 +356,8 @@
     (let ((n (%+ 1 (length fields)))
           (k 1)
           (body nil))
-      ;; A fresh record is zeroed, and zero reads as nil, so only the fields
-      ;; that start as something else are written.
+      ;; A fresh record's fields hold nil, so only the fields that start as
+      ;; something else are written.
       (dolist (v inits)
         (if v (set! body (append body (list (list '%record-set! 'r k v)))) nil)
         (set! k (%+ k 1)))

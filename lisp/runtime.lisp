@@ -10,27 +10,43 @@
 (unsafe-file)                 ; the object system and the allocator: raw throughout
 
 ;; ---------------------------------------------------------------- allocation
-(define (object-payload type len)
-  (cond ((%= type t-string) len)
-        ((%= type t-bytes) len)
-        ((%= type t-symbol) (%* 4 sym-slots))
-        ((%= type t-float) 4)
-        (else (%* 4 len))))
+;; An object is a header granule and its payload. The header's first word is
+;; (len << 8) | type and its second is zero, which is exactly a fixnum stored
+;; in the granule. The payload is a byte per element for a string or a byte
+;; vector, which hold no capabilities, and a slot per element for the rest.
+(define (byte-payload? type)
+  (if (%= type t-string) t (%= type t-bytes)))
 
-;; The entry address is copied out of the code object. Both that word and the
-;; closure slot it lands in are raw addresses, so they go through the raw
-;; word accessors and not the slot accessors.
+(define (object-payload type len)
+  (cond ((byte-payload? type) len)
+        ((%= type t-symbol) (%* value-bytes sym-slots))
+        ((%= type t-float) value-bytes)
+        (else (%* value-bytes len))))
+
+;; What a holder of an object may do with it: load and store, and for the
+;; slotted types load and store capabilities too. HD says the header sits in
+;; the granule below the base; only an allocator mints it.
+(define value-object-perms
+  (%logior (%logior perm-ld perm-sd)
+           (%logior (%logior perm-lc perm-sc) (%logior perm-lm perm-hd))))
+(define byte-object-perms (%logior perm-ld (%logior perm-sd perm-hd)))
+
+;; The closure is answered unsealed, so that its maker can fill in the free
+;; variables; sealing it is the maker's last act. Its entry is the code's.
 (define (make-closure code nfree)
-  (let ((c (alloc-object t-closure (%+ 2 nfree))))
-    (%st-word! (%addr-of c) (%ld-word (%addr-of code)))
+  (let ((c (alloc-object t-closure (%+ clo-free nfree))))
+    (%set-slot! c clo-entry (%slot code code-entry))
     (%set-slot! c clo-code code)
     c))
 
+;; A fresh vector already holds nil in every slot.
 (define (make-vector-n n fill)
   (let ((v (alloc-object t-vector n)) (i 0))
-    (while (%< i n)
-      (%set-slot! v i fill)
-      (set! i (%+ i 1)))
+    (if (%null? fill)
+        nil
+        (while (%< i n)
+          (%set-slot! v i fill)
+          (set! i (%+ i 1))))
     v))
 
 (define (make-string-n n)
@@ -53,43 +69,54 @@
 (define *pacer*)
 
 ;; A block between being taken and being a well formed object is in no state
-;; to be collected: its header still says free, and the raw address held here
-;; is not a tagged pointer, so nothing would keep it. So the whole of taking
-;; the block, writing its header and zeroing any slots the collector would
-;; trace is one critical section. The payload of a string, byte vector,
-;; bignum or float holds no pointers, so it is zeroed afterwards with
-;; interrupts on: a screen bitmap is most of a megabyte.
-(define (raw-payload? type)
-  (if (%= type t-string) t
-      (if (%= type t-bytes) t
-          (if (%= type t-bignum) t (%= type t-float)))))
-
+;; to be collected: its header still says free, and the address held here is
+;; a number, not a capability, so nothing would keep it. Whatever the block
+;; held before may still carry tags. So the whole of taking the block,
+;; writing its header and filling the slots the collector would trace is one
+;; critical section. The payload of a string or byte vector is never traced,
+;; so it is zeroed afterwards with interrupts on: a screen bitmap is most of
+;; a megabyte.
+;;
+;; The capability's bounds are the payload, rounded as the processor needs
+;; to represent them: `%rrl` gives the length and `%ram` the alignment the
+;; base must have. The collector's allocator is handed the size of the whole
+;; block, header and rounded payload, and that alignment mask, and answers
+;; the address of a block whose payload starts suitably aligned, or 0.
 (define (alloc-object type len)
-  (let* ((raw (raw-payload? type))
+  (let* ((bytes (byte-payload? type))
          ;; A record, which is most of what gets made, is sized here rather
-         ;; than by a call: a slot is a word, and the header is one more.
-         (size (%logand (%+ (if (%= type t-record) (%lsh len 2) (object-payload type len))
-                            11)
-                        -8))
+         ;; than by a call.
+         (payload (if (%= type t-record) (%* value-bytes len) (object-payload type len)))
+         (span (%rrl payload))
+         (align (%ram payload))
+         (size (%+ value-bytes (%logand (%+ span (%- value-bytes 1)) (%- 0 value-bytes))))
          (paced (%funcall *pacer* size))
          (p (without-interrupts
-              (let ((p (%funcall *object-allocator* size)))
+              (let ((p (%funcall *object-allocator* size align)))
                 (if (%= p 0)
                     (begin
                       (%funcall *collector*)
-                      (set! p (%funcall *object-allocator* size))
+                      (set! p (%funcall *object-allocator* size align))
                       (if (%= p 0) (out-of-memory "object space") nil))
                     nil)
-                (%st-fixnum! p (%logior (%lsh len 8) type))
-                (if raw nil (zero-words (%+ p 4) (%+ p size)))
+                (%st-cap! p (%logior (%lsh len 8) type))
+                (if bytes nil (fill-granules (%+ p value-bytes) (%+ p size) (fresh-slot type)))
                 p))))
-    (if raw (zero-words (%+ p 4) (%+ p size)) nil)
-    (%from-addr (%+ p 4))))
+    (if bytes (fill-granules (%+ p value-bytes) (%+ p size) 0) nil)
+    (%cap-and-perms (%cap-bounds-exact (%from-addr (%+ p value-bytes)) span)
+                    (if bytes byte-object-perms value-object-perms))))
 
-(define (zero-words from to)
+;; What a fresh slot holds until it is given something: nil, so that a
+;; record's fields start empty, or zero in the limbs of a number.
+(define (fresh-slot type)
+  (if (%= type t-bignum) 0 (if (%= type t-float) 0 nil)))
+
+;; Every granule from `from` to `to` set to `v`. A store of an untagged value
+;; clears the granule's tag.
+(define (fill-granules from to v)
   (while (%< from to)
-    (%st-fixnum! from 0)
-    (set! from (%+ from 4))))
+    (%st-cap! from v)
+    (set! from (%+ from value-bytes))))
 
 (define (make-record n tag)
   (let ((r (alloc-object t-record n)))
@@ -142,7 +169,7 @@
 (define (package-use p) (%slot p pkg-use))
 (define (set-package-use! p v) (%set-slot! p pkg-use v))
 (define (symbol-package s) (%slot s sym-package))
-(define (all-packages) (%ld-word lg-packages))
+(define (all-packages) (%ld-cap lg-packages))
 
 (define (package? x)
   (if (%record? x) (%eq? (%slot x pkg-tag) 'package) nil))
@@ -163,7 +190,7 @@
         (let ((p (make-record pkg-slots 'package)))
           (%set-slot! p pkg-name name)
           (%set-slot! p pkg-use nil)
-          (%st-word! lg-packages (%cons p (%ld-word lg-packages)))
+          (%st-cap! lg-packages (%cons p (%ld-cap lg-packages)))
           p)))))
 
 (define (symbol-exported? s)
@@ -194,7 +221,7 @@
   (find-symbol-hashed pkg s (name-hash s) (name-power s)))
 
 (define (find-symbol-hashed pkg s nh np)
-  (let* ((ob (%ld-word lg-obarray))
+  (let* ((ob (%ld-cap lg-obarray))
          (n (%vector-length ob))
          (h (%logand (%+ (%* (prefix-hash (package-name pkg)) np) nh) 1073741823))
          (chain (%vector-ref ob (%mod h n)))
@@ -218,8 +245,8 @@
     (%set-slot! sym sym-value (%unbound))
     (%set-slot! sym sym-function nil)
     (%set-slot! sym sym-plist nil)
-    (%set-slot! sym sym-flags (%lsh (%ld-fixnum lg-symcount) 8))
-    (%st-fixnum! lg-symcount (%+ (%ld-fixnum lg-symcount) 1))
+    (%set-slot! sym sym-flags (%lsh (%ld-word lg-symcount) 8))
+    (%st-word! lg-symcount (%+ (%ld-word lg-symcount) 1))
     sym))
 
 ;; A symbol in no package and on no list, for a macro's temporaries: nothing
@@ -237,13 +264,13 @@
   (let ((found (find-symbol-in pkg s)))
     (if found
         found
-        (let* ((ob (%ld-word lg-obarray))
+        (let* ((ob (%ld-cap lg-obarray))
                (n (%vector-length ob))
                (b (%mod (qualified-hash (package-name pkg) s) n))
                (sym (alloc-symbol s)))
           (%set-slot! sym sym-package pkg)
           (%vector-set! ob b (%cons sym (%vector-ref ob b)))
-          (%st-word! lg-symlist (%cons sym (%ld-word lg-symlist)))
+          (%st-cap! lg-symlist (%cons sym (%ld-cap lg-symlist)))
           (if *names-seen* (table-set! *names-seen* sym t) nil)
           sym)))))
 
@@ -272,10 +299,10 @@
 ;; work from. The scheduler swaps it like the streams, so two shells can be in
 ;; two packages at once.
 (define (current-package)
-  (let ((p (%ld-word lg-package)))
-    (if p p (let ((base (make-package "lm"))) (%st-word! lg-package base) base))))
+  (let ((p (%ld-cap lg-package)))
+    (if p p (let ((base (make-package "lm"))) (%st-cap! lg-package base) base))))
 
-(define (set-current-package! p) (%st-word! lg-package p) p)
+(define (set-current-package! p) (%st-cap! lg-package p) p)
 
 (define (intern-string s) (intern-in (current-package) s))
 
@@ -349,27 +376,27 @@
 (define uart-data (%+ mmio-base (%+ (%lsh dev-uart 12) uart-data-reg)))
 (define uart-ctrl (%+ mmio-base (%+ (%lsh dev-uart 12) uart-ctrl-reg)))
 
-(define (uart-nl) (%st-fixnum! uart-data 10))
+(define (uart-nl) (%st-word! uart-data 10))
 
 (define (uart-string s)
   (let ((i 0) (n (%string-length s)))
     (while (%< i n)
-      (%st-fixnum! uart-data (%char->int (%string-ref s i)))
+      (%st-word! uart-data (%char->int (%string-ref s i)))
       (set! i (%+ i 1)))
     s))
 
 (define (uart-num n)
   (if (%< n 0)
-      (begin (%st-fixnum! uart-data 45) (set! n (%- 0 n)))
+      (begin (%st-word! uart-data 45) (set! n (%- 0 n)))
       nil)
   (if (%>= n 10) (uart-num (%/ n 10)) nil)
-  (%st-fixnum! uart-data (%+ 48 (%mod n 10))))
+  (%st-word! uart-data (%+ 48 (%mod n 10))))
 
 (define (uart-hex n)
-  (%st-fixnum! uart-data 48)
-  (%st-fixnum! uart-data 120)
+  (%st-word! uart-data 48)
+  (%st-word! uart-data 120)
   (let ((i 28))
     (while (%>= i 0)
       (let ((d (%logand (%lsh n (%- 0 i)) 15)))
-        (%st-fixnum! uart-data (if (%< d 10) (%+ 48 d) (%+ 87 d))))
+        (%st-word! uart-data (if (%< d 10) (%+ 48 d) (%+ 87 d))))
       (set! i (%- i 4)))))

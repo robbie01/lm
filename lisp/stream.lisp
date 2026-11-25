@@ -19,11 +19,11 @@
 
 ;; The raw serial line takes and gives characters, not their codes.
 (define (out-char c)
-  (unsafe (%st-fixnum! uart-data (%char->int c))))
+  (unsafe (%st-word! uart-data (%char->int c))))
 
 (define (uart-char)
   (unsafe
-  (let ((v (%ld-fixnum uart-data)))
+  (let ((v (%ld-word uart-data)))
     (if (%= v -1) nil (%int->char v)))))
 
 (define (emit-ch c)

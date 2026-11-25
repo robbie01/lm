@@ -54,7 +54,7 @@
             (%display path) (%display ": ")
             (%display (if (%cons? f) (if (%cons? (cadr f)) (caadr f) (cadr f)) f))
             (%display "  pairs=")
-            (%display (%lsh (%- (%ld-fixnum lg-cons-ptr) cons-base) -3))
+            (%display (%/ (%- (%ld-word lg-cons-ptr) cons-base) (%* 2 value-bytes)))
             (%newline)
             (%flush))
           nil)

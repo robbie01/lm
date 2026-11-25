@@ -11,12 +11,7 @@
 ;; function and a backtrace line say the same thing. These emit rather than
 ;; build a string: reporting an error must not allocate.
 (define (code-object? v)
-  (unsafe
-  (if (%object? v)
-      (if (%>= (%addr-of v) obj-base)
-          (if (%< (%addr-of v) obj-limit) (%= (%obj-type v) t-code) nil)
-          nil)
-      nil)))
+  (if (%object? v) (%= (%obj-type v) t-code) nil))
 
 ;; A symbol for a named function; (lambda . home) for one that never had a
 ;; name, so an anonymous frame still says where it came from.
@@ -67,13 +62,13 @@
   (emit-ch #\"))
 
 (define (print-obj x quoted depth)
-  (unsafe
   (cond
    ((%> depth 32) (emit-str "..."))
    ((%null? x) (emit-str "nil"))
    ((%fixnum? x) (emit-str (number->string x)))
    ((%char? x) (if quoted (write-char-name x) (emit-ch x)))
    ((%cons? x) (print-list x quoted depth))
+   ((%closure? x) (print-function x))
    ((%object? x)
     (let ((ty (%obj-type x)))
       (cond
@@ -81,10 +76,6 @@
        ((%= ty t-symbol) (print-symbol x))
        ((%= ty t-string) (if quoted (write-string-quoted x) (emit-str x)))
        ((%= ty t-vector) (print-vector x quoted depth))
-       ((%= ty t-closure)
-        (emit-str "#<function ")
-        (emit-code-label (%slot x clo-code))
-        (emit-ch #\>))
        ((%= ty t-bytes)
         (emit-str "#<bytes ")
         (emit-str (number->string (%obj-len x)))
@@ -96,17 +87,70 @@
           (emit-str "#<package ") (emit-str (package-name x)) (emit-ch #\>))
          (else (print-record x quoted depth))))
        (else (emit-str "#<object>")))))
-   (else (print-immediate x)))))
+   ((%cap-tag? x) (print-capability x))
+   (else (print-immediate x))))
 
-;; The immediates that are not characters: the marker of a variable with no
-;; value, the end of a file, and no value at all.
-(define (print-immediate x)
+;; A closure is sealed, and only its own code may look inside it, by being
+;; called. The printer opens it through the escape hatch, the root's
+;; authority over the closure otype, to reach its code object and so its
+;; name.
+(define (print-function x)
   (unsafe
-  (let ((w (%addr-of x)))
-    (cond ((%= w (%logior (%lsh imm-unbound 3) 2)) (emit-str "#<unbound>"))
-          ((%= w (%logior (%lsh imm-eof 3) 2)) (emit-str "#<eof>"))
-          ((%= w (%logior (%lsh imm-void 3) 2)) (emit-str "#<void>"))
-          (else (emit-str "#<immediate ") (emit-str (number->hex w)) (emit-ch #\>))))))
+  (let ((c (if (%cap-sealed? x) (%cap-unseal x (%from-addr otype-closure)) x)))
+    (emit-str "#<function ")
+    (emit-code-label (%slot c clo-code))
+    (emit-ch #\>))))
+
+;; A capability that is not a Lisp value: code, a stack, a device, a block of
+;; the pool. Its address, its bounds, what it permits and how it is sealed:
+;;
+;;   #<capability 0x2040 [0x2000,0x3000) rwRWm>
+;;   #<capability 0x10002a4 [0x1000200,0x1000400) xs sentry>
+(define (print-capability x)
+  (emit-str "#<capability 0x")
+  (emit-str (number->hex (%addr-of x)))
+  (emit-str " [0x")
+  (emit-str (number->hex (%cap-base x)))
+  (emit-str ",0x")
+  (emit-str (number->hex (%cap-top x)))
+  (emit-str ") ")
+  (emit-perms (%cap-perms x))
+  (if (%cap-sealed? x)
+      (if (%= (%cap-otype x) otype-sentry)
+          (emit-str " sentry")
+          (begin (emit-str " sealed ") (emit-str (number->string (%cap-otype x)))))
+      nil)
+  (emit-ch #\>))
+
+;; Each permission as a letter, in the order of the bits: r and w to load and
+;; store data, R and W capabilities, m load mutable, x execute, s the system
+;; registers, e seal and unseal, h headed.
+(define perm-letters
+  (list (%cons perm-ld "r") (%cons perm-sd "w") (%cons perm-lc "R") (%cons perm-sc "W")
+        (%cons perm-lm "m") (%cons perm-ex "x") (%cons perm-sr "s") (%cons perm-se "e")
+        (%cons perm-hd "h")))
+
+(define (emit-perms p)
+  (if (%= p 0)
+      (emit-ch #\-)
+      (dolist (e perm-letters)
+        (if (%= 0 (%logand p (%car e))) nil (emit-str (%cdr e))))))
+
+;; The immediates that are not characters, told apart by their metadata: the
+;; marker of a variable with no value, the end of a file, no value at all,
+;; and the marker of an argument not given. Anything else untagged is data
+;; that is not a Lisp value, shown as its metadata and its address.
+(define (print-immediate x)
+  (let ((m (%cap-high x)))
+    (cond ((%= m imm-unbound) (emit-str "#<unbound>"))
+          ((%= m imm-eof) (emit-str "#<eof>"))
+          ((%= m imm-void) (emit-str "#<void>"))
+          ((%= m imm-default) (emit-str "#<default>"))
+          (else (emit-str "#<immediate 0x")
+                (emit-str (number->hex m))
+                (emit-str " 0x")
+                (emit-str (number->hex (%addr-of x)))
+                (emit-ch #\>)))))
 
 ;; (quote x) prints as 'x.
 (define (print-list x quoted depth)
@@ -177,7 +221,7 @@
       (if first (set! first nil) (space))
       (if (%string? a) (emit-str a) (write a))))
   (newline)
-  (let ((h (%ld-word lg-errhandler)))
+  (let ((h (%ld-cap lg-errhandler)))
     (if h (%funcall h args) (%halt exit-error)))))
 
 (define (warn . args)
