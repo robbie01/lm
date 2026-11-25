@@ -597,6 +597,10 @@ pub fn run_all() -> bool {
         li32(&mut c6, A2, P_ALL & !P_SE);
         c6.extend([candperm(A1, ROOT, A2), addi(A3, ZERO, 5), csetaddr(A3, A1, A3), cseal(A4, ROOT, A3)]);
         ok("cseal needs SE", go(&c6).took(C_CAP, (A3 << 5) | CAPEX_SEAL_PERM));
+        let mut c7 = code[..6].to_vec();
+        li32(&mut c7, A2, P_ALL & !P_SE);
+        c7.extend([candperm(A1, A3, A2), cunseal(A6, A4, A1)]);
+        ok("cunseal needs SE", go(&c7).took(C_CAP, (A1 << 5) | CAPEX_UNSEAL));
     }
 
     // ---- capability loads and stores, and tags in memory ----

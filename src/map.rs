@@ -1,27 +1,29 @@
 //! Physical memory map of the LM machine.
 //!
+//! ```text
 //!   0000_0000  ..  0000_000F   the nil cell: a pair whose car and cdr are nil.
 //!                              nil is a capability to these 16 bytes that may
 //!                              read them and nothing else.
 //!   0000_0100  ..              the low-memory globals, one 8-byte slot each
 //!   0000_0400  ..  0000_05FF   the free bins of object space
-//!   0000_1000  ..              trap vectors and the exception stub
-//!   0000_2000  ..  00FF_FFFF   the pool: stacks, contexts, descriptors
-//!   0100_0000  ..  01FF_FFFF   code space (also the reset vector)
+//!   0000_2000  ..  00FF_FFFF   the pool: stacks, contexts, descriptors, the
+//!                              code registry
+//!   0100_0000  ..  01FF_FFFF   code space; the reset stub at its base
 //!   0200_0000  ..  09FF_FFFF   cons space, eight million pairs
 //!   0A00_0000  ..  0DFF_FFFF   object space
-//!   0E00_0000  ..  0FFF_FFFF   the mark bitmap, scratch
+//!   0E00_0000  ..  0FFF_FFFF   the mark bitmap, the mark stack, scratch
 //!   F000_0000  ..              device pages, 4 KiB each, 32-bit registers
+//! ```
 //!
 //! One flat address space. Tags exist for RAM only: a device page holds no
 //! capabilities. Every slot below 0x800 is reachable with one load or store
 //! off x0, which addresses memory through DDC.
 
-pub const RAM_BASE: u32 = 0x0000_0000;
+/// RAM: chip RAM, the first 128 MiB, which a display bitmap must lie in,
+/// and fast RAM above it.
 pub const CHIP_SIZE: u32 = 128 << 20;
 pub const FAST_SIZE: u32 = 128 << 20;
 pub const RAM_SIZE: u32 = CHIP_SIZE + FAST_SIZE;
-pub const CHIP_END: u32 = RAM_BASE + CHIP_SIZE;
 
 /// The 16-byte cell nil names. Its car and cdr hold nil.
 pub const NIL_CELL: u32 = 0x0000_0000;
@@ -36,13 +38,16 @@ pub const LG_BASE: u32 = 0x0000_0100;
 pub const OBJ_BINS: u32 = 0x0000_0400;
 pub const OBJ_BIN_COUNT: u32 = 64;
 
-pub const TRAP_BASE: u32 = 0x0000_1000;
+/// The end of the low block, the nil cell, the globals and the bins, which
+/// an image saves whole.
+pub const LOW_END: u32 = 0x0000_1000;
+
 pub const POOL_BASE: u32 = 0x0000_2000;
 pub const POOL_END: u32 = 0x0100_0000;
 
-/// Reset vector, and the base of code space.
-pub const KICK_BASE: u32 = 0x0100_0000;
+/// The base of code space, which is also the reset vector.
 pub const CODE_BASE: u32 = 0x0100_0000;
+pub const KICK_BASE: u32 = CODE_BASE;
 /// The reset stub's room at the base of code space. It is the one piece of
 /// code with no block header; code blocks start after it.
 pub const RESET_RESERVE: u32 = 256;
@@ -118,7 +123,7 @@ globals! {
     LG_POOLEND    = 13, "poolend";
     LG_ROOTS      = 14, "roots";        // vector of extra gc roots
     LG_ERRHANDLER = 15, "errhandler";   // closure called on a lisp error
-    LG_TRAPSAVE   = 16, "trapsave";     // scratch for the exception stub
+    LG_TRAPSAVE   = 16, "trapsave";     // the boot context the trap stub saves into
     LG_SYMLIST    = 17, "symlist";      // every interned symbol, for the gc
     LG_IMGENTRY   = 18, "imgentry";     // entry point recorded in the image
     LG_CONSFREEN  = 19, "cons-free-n";  // cells on the cons free list
@@ -128,7 +133,7 @@ globals! {
     LG_CONS_RUN   = 23, "cons-run";     // the running task's cons run
     LG_STARTUP    = 24, "startup";      // closure run before the repl
     LG_TASKEXIT   = 25, "task-exit";    // the closure a task returns into
-    LG_TRAPENTRY  = 26, "trap-entry";   // the forge's trap stub, for its collection
+    LG_TRAPENTRY  = 26, "trap-entry";   // the trap stub's block in code space
     LG_BOOTARG    = 27, "boot-arg";     // the forge's trampoline argument
     LG_CODEFREE   = 28, "code-free";    // free blocks in code space
     LG_CODEREG    = 29, "code-reg";     // registry of every code object
@@ -144,5 +149,6 @@ globals! {
     LG_TRAPTMP2   = 38, "traptmp2";     // entry, so two go here for a moment
 }
 
-// The globals must stay below the free bins.
+// The globals must stay below the free bins, and the bins in the low block.
 const _: () = assert!(LG_BASE + 8 * 39 <= OBJ_BINS);
+const _: () = assert!(OBJ_BINS + 8 * OBJ_BIN_COUNT <= LOW_END);
