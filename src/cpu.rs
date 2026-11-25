@@ -489,8 +489,8 @@ fn jump_out(m: &mut Machine, t: u32, pc: u32, fuel: u32) -> Stop {
 /// executable, unsealed or a sentry, which is unsealed by the jump and may
 /// only be entered at its own address: with no offset, and at an even
 /// address, since a jump clears bit 0 of its target. PCC becomes `cs1` at
-/// the target; the link is a sentry for the next instruction. A macro, so that its `next!`
-/// tail-calls from the handler it is expanded in.
+/// the target; the link is a sentry for the next instruction. A macro, so
+/// that its `next!` tail-calls from the handler it is expanded in.
 macro_rules! jump {
     ($m:expr, $w:expr, $pc:expr, $fuel:expr, $s:expr, $off:expr, $d:expr) => {{
         let (m, w, pc, fuel): (&mut Machine, u32, u32, u32) = ($m, $w, $pc, $fuel);
@@ -1288,8 +1288,8 @@ fn op_cheri_two(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         0x16 => wcap(m, d, Cap { addr: a.addr, meta: b.addr, tag: false }),
         0x1d => {
             // cbuildcap: cs2's bits, tagged again if cs1 could have made
-            // them. Bits that are not the encoding of their own bounds no
-            // instruction makes.
+            // them. No instruction makes bits that are not the encoding of
+            // their own bounds.
             if !a.tag {
                 return capfault(m, s, CAPEX_TAG, pc, fuel);
             }
@@ -1630,8 +1630,8 @@ pub fn kind(m: &Machine, c: Cap) -> u32 {
 /// and LC, since the entry is loaded through it; it is left unsealed for the
 /// callee, rd gets a sentry for the next instruction, and PCC becomes the
 /// entry capability in the closure's slot 0, which must be tagged and
-/// executable. The entry's window comes from the window cache
-/// when the same entry was called before.
+/// executable. The entry's window comes from the window cache when the same
+/// entry was called before.
 #[inline(never)]
 fn op_jcl(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let s = rs1(w);
@@ -1646,7 +1646,11 @@ fn op_jcl(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     }
     let a = r(m, s);
     if a & 7 != 0 || !in_win(a, m.wb[k], m.wl[k], 8) {
-        return if m.reg(s).covers(a, 8) { m.fault(C_LFAULT, a, pc, fuel) } else { capfault(m, s, CAPEX_LENGTH, pc, fuel) };
+        return if m.reg(s).covers(a, 8) {
+            m.fault(C_LFAULT, a, pc, fuel)
+        } else {
+            capfault(m, s, CAPEX_LENGTH, pc, fuel)
+        };
     }
     let e = unsafe { m.rd_cap(a) };
     if !e.tag || !e.enterable(0) || !e.has(P_EX) {
