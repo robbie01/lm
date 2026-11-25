@@ -64,8 +64,10 @@ hands out read-only tails.
 modification clears its tag. otype 1, the sentry, is unsealed by jumping to
 it. otype 2, the closure, is unsealed by calling it (`jcl`, below). Neither
 needs an authority to make: anyone may seal their own code or closure
-object, and nobody may open one except by entering it. The other otypes need
-a capability with SE whose address is the otype.
+object, and nobody may open one except by entering it, or with an authority.
+Sealing or unsealing with an explicit authority, for any otype, needs a
+capability with SE whose address is the otype; the root is one, which is how
+the escape hatch opens a closure.
 
 **Untagged capabilities are data.** Every integer instruction reads the
 address field of its operands and writes an untagged result whose metadata
