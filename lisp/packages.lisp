@@ -180,7 +180,7 @@
   invalidate-runs note-run! take-owed-run
   scan-context drop-context-run empty-cons-run install-allocator
   refill-cons-run register-code code-registry-bytes code-object-at gc-scratch room
-  barrier busy? step
+  barrier busy? step ensure-starts
 ))
 
 (in-package hw)

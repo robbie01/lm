@@ -961,6 +961,10 @@
 (define (kickstart)
   ;; The allocator first: the first thing the boot list does is allocate.
   (install-allocator)
+  ;; The object-start map is scratch memory, which no image carries: built
+  ;; here, while nothing waits on interrupts, rather than in the first
+  ;; collection's start, which would hold them off for the whole walk.
+  (ensure-starts)
   (%st-cap! lg-traphook (%symbol-value 'handle-trap))
   (%st-cap! lg-errhandler (%symbol-value 'error-trap))
   (run-boot-list)

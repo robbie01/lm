@@ -334,7 +334,9 @@
 
 ;; The map, built from a walk of object space when it is not already right:
 ;; scratch memory is zero when a machine starts, whatever image it starts
-;; from. Every block that is not free is a start.
+;; from. Every block that is not free is a start. The kickstart builds it;
+;; a cycle's start builds it if nothing has, as on a machine the forge is
+;; still building.
 (define (ensure-starts)
   (if (%= (%ld-word obj-starts-ready) obj-starts-magic)
       nil
