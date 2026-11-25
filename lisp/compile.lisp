@@ -1503,10 +1503,11 @@
     (dolist (x args)
       (if (simple-arg? x) nil (set! last i))
       (set! i (%+ i 1)))
-    ;; The last value computed can stay in a0 when the first argument is
-    ;; read where it is and wants no register of its own.
+    ;; When the operator takes its operands in any register, the last value
+    ;; computed can stay in a0, and a simple first argument goes where it
+    ;; would have gone instead.
     (if (if in-place (%> last 0) nil)
-        (set! a0-free (operand-home c (%car args) (zero-ok? zero-at 0)))
+        (set! a0-free (simple-arg? (%car args)))
         nil)
     ;; pass one: evaluate and park the complicated ones but the last
     (set! i 0)
@@ -1538,7 +1539,7 @@
     ;; pass three: the simple ones, which cannot disturb anything
     (set! i 0)
     (dolist (p plan)
-      (let ((r (%+ $a0 i)) (kind (%car p)))
+      (let ((r (%+ $a0 (if (if a0-free (%= i 0) nil) last i))) (kind (%car p)))
         (cond
          ((%eq? kind 'simple)
           (let ((home (if in-place (operand-home c (%cdr p) (zero-ok? zero-at i)) nil)))
