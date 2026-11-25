@@ -135,7 +135,7 @@
 ;; record is anybody's to read, and a task's stack and saved registers hold
 ;; whatever it was working with, a driver's device page among them; sealed,
 ;; their bounds can be read and nothing through them. Only the kernel opens
-;; them, with the root.
+;; them, with its key to that otype.
 (defrecord (task tc) (include node)
   state sigalloc sigwait sigrecvd
   stack                          ; the whole stack, standing at its top
@@ -153,10 +153,15 @@
   run-owed                       ; bytes of cons run handed to it, unpaid; see gc.lisp
   gen)                           ; which Exec it belongs to: see `task-alive?`
 
-;; The otype they are sealed with.
+;; The otype they are sealed with, and the key to it: minted when Exec
+;; starts, and held by these two closures and nothing else.
 (defconstant otype-task 3)
-(define (task-seal c) (%cap-seal c (%cap-set-addr (%root) otype-task)))
-(define (task-unseal c) (%cap-unseal c (%cap-set-addr (%root) otype-task)))
+(define task-seal)
+(define task-unseal)
+(define (mint-task-key)
+  (let ((key (sealing-key otype-task)))
+    (set! task-seal (lambda (c) (%cap-seal c key)))
+    (set! task-unseal (lambda (c) (%cap-unseal c key)))))
 (define (task-stack task) (task-unseal (tc-stack task)))
 (define (task-context task) (task-unseal (tc-context task)))
 
@@ -1425,6 +1430,7 @@
 ;; A resumed image arrives with the counts and flags of an Exec that no longer
 ;; exists, so every one of them is set here.
 (define (exec-init)
+  (mint-task-key)
   (set! *vblank-int* nil)
   (%set-this-task! nil)
   (set! *idle-task* nil)
@@ -1577,4 +1583,4 @@
 (define (task-count) *task-count*)
 
 ;; What opens a task's stack or its saved registers.
-(unsafe-names (quote (task-unseal task-stack task-context)))
+(unsafe-names (quote (task-seal task-unseal task-stack task-context)))

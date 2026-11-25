@@ -233,10 +233,16 @@
 ;; Each of those holds its ring or its descriptor sealed, with an otype of
 ;; the chips', as a sleeper's place on a waiting list does: a binding, a
 ;; global and a list are anybody's to read, and a capability to a descriptor
-;; is authority over what the chip does next. Only the code here opens one.
+;; is authority over what the chip does next. Only the code here opens one,
+;; with its key to that otype, which the first ring made mints and these two
+;; closures hold, and nothing else.
 (defconstant otype-blit 4)
-(define (blit-seal c) (%cap-seal c (%cap-set-addr (%root) otype-blit)))
-(define (blit-unseal c) (%cap-unseal c (%cap-set-addr (%root) otype-blit)))
+(define blit-seal)
+(define blit-unseal)
+(define (mint-blit-key)
+  (let ((key (sealing-key otype-blit)))
+    (set! blit-seal (lambda (c) (%cap-seal c key)))
+    (set! blit-unseal (lambda (c) (%cap-unseal c key)))))
 
 ;; A ring is a vector: a slot saying which descriptor is next, then the
 ;; descriptors, each a run of value slots, a field to a slot, laid out as the
@@ -250,8 +256,10 @@
 
 ;; A fresh ring holds zero in every slot: the next descriptor is the first,
 ;; and every done word reads as done, so no descriptor that was never used
-;; waits for a write-back that never comes.
-(define (new-blit-ring) (make-vector blit-ring-slots 0))
+;; waits for a write-back that never comes. It is handed out sealed.
+(define (new-blit-ring)
+  (if blit-seal nil (mint-blit-key))
+  (blit-seal (make-vector blit-ring-slots 0)))
 
 ;; Descriptor i of ring r, as the capability it is filled through and handed
 ;; to the chip as: bounded to the descriptor, with a pair's permissions, so
@@ -278,7 +286,7 @@
   (if *in-interrupt*
       (error "the blitter is task context only: signal a task instead")
       nil)
-  (if (%cap-tag? *blit-ring*) nil (set! *blit-ring* (blit-seal (new-blit-ring))))
+  (if (%cap-tag? *blit-ring*) nil (set! *blit-ring* (new-blit-ring)))
   (ring-take (blit-unseal *blit-ring*)))
 
 ;; The collector's own ring. Not a fluid binding: a collection runs with
@@ -286,7 +294,7 @@
 ;; made before a collection that uses it begins, because nothing may be
 ;; allocated inside one.
 (define (ensure-gc-blit-ring)
-  (if (%cap-tag? *gc-blit-ring*) nil (set! *gc-blit-ring* (blit-seal (new-blit-ring)))))
+  (if (%cap-tag? *gc-blit-ring*) nil (set! *gc-blit-ring* (new-blit-ring))))
 
 (define (gc-blit-descriptor) (ring-take (blit-unseal *gc-blit-ring*)))
 
@@ -739,4 +747,5 @@
 ;; What reaches memory by number or makes a device's page: needs an
 ;; `unsafe` around the call. A descriptor is what the chip is handed, so
 ;; handing one out and linking one are among them.
-(unsafe-names (quote (peek poke peek8 poke8 device-page blit-descriptor blit-go)))
+(unsafe-names (quote (peek poke peek8 poke8 device-page blit-descriptor blit-go
+                      blit-seal blit-unseal)))

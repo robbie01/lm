@@ -1116,6 +1116,15 @@
     (num-check 'the-escape-hatch-opens-it
                (list (%cap-sealed? opened) (code-object? (unsafe (%slot opened clo-code))))
                (list nil t))
+    ;; A sealing key seals and unseals its own otype and no other.
+    (let* ((k5 (unsafe (sealing-key 5)))
+           (k6 (unsafe (sealing-key 6)))
+           (sealed (%cap-seal p k5)))
+      (num-check 'a-key-seals-its-otype (list (%cap-tag? sealed) (%cap-otype sealed)) (list t 5))
+      (num-check 'and-opens-it (eq? (%cap-unseal sealed k5) p) t)
+      (num-check 'and-no-other
+                 (list (%cap-tag? (%cap-unseal sealed k6)) (%cap-tag? (%cap-seal p (%cap-inc k5 1))))
+                 (list nil nil)))
     ;; A pointer cannot be made from its bits.
     (let ((forged (%cap-set-high (%addr-of v) (%cap-high v))))
       (num-check 'bits-are-not-a-pointer (list (%cap-tag? forged) (eq? forged v)) (list nil nil)))

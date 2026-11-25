@@ -46,6 +46,13 @@
 (define (open-closure f)
   (%cap-unseal-within f (%root)))
 
+;; A sealing key: authority to seal and to unseal with the otype `ot` and
+;; with no other, the root narrowed to that one type and to SE. A manager
+;; mints the key to its own type once and keeps it in its own closures, so
+;; that what it seals into a record anybody can read is still its own.
+(define (sealing-key ot)
+  (%cap-and-perms (%cap-bounds-exact (%from-addr ot) 1) perm-se))
+
 ;; A fresh vector already holds nil in every slot.
 (define (make-vector-n n fill)
   (let ((v (alloc-object t-vector n)) (i 0))

@@ -127,7 +127,7 @@
   integer->char intern intern-in intern-string intern-visible iota lambda
   last last-pair length let let* letrec list list* list->string
   list->vector list-copy list-index list-ref list? logand logior lognot
-  logxor loop lsh make-bytes make-bytes-n make-closure open-closure make-list
+  logxor loop lsh make-bytes make-bytes-n make-closure open-closure sealing-key make-list
   make-package make-record make-stream make-string make-string-n make-symbol make-table
   make-vector make-vector-n map map2 mapcar max max2 member memq merge2 min
   min2 mod modulo mul2 neg negative? newline not nth nthcdr null? num-eq

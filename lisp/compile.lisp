@@ -2507,8 +2507,8 @@
 
 ;; The raw vocabulary: what names memory by number through DDC, hands out
 ;; the root, or reads or sets the machine's own state, all of which the
-;; processor refuses to code without SR, and `open-closure`, the escape hatch
-;; built from them. The operations on a capability the caller already holds
+;; processor refuses to code without SR, and `open-closure` and
+;; `sealing-key`, the escape hatch and the keys built from them. The operations on a capability the caller already holds
 ;; are not here, and neither is `%addr-of`, whose answer cannot be followed
 ;; without one of these.
 (unsafe-names
@@ -2519,7 +2519,7 @@
    %set-this-task!
    %ecall %halt %disable %enable %restore-interrupts %enable-after-trap
    %enable-interrupt-lines %wait-for-interrupt
-   %cons-run %set-cons-run! open-closure))
+   %cons-run %set-cons-run! open-closure sealing-key))
 
 ;; From here on a record's accessors are open-coded as the record is
 ;; declared. The shapes declared before this line get done now.
