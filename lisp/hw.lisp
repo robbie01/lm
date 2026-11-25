@@ -1,15 +1,13 @@
 ;;; hw.lisp - the custom chips.
 ;;;
 ;;; Every device is a 4 KiB page of naturally aligned 32-bit registers, but for
-;;; the blitter's list register and the disk's buffer register, which take a
-;;; capability: the chips that move memory are handed capabilities and refuse
-;;; what those do not cover. Naming memory by number is a privilege: a load
-;;; or store through an integer address goes through DDC and needs SR, which
-;;; only code compiled unsafe has, and this file is that code for the chips.
-;;; A register is an offset into its device's page (generated into
-;;; layout.lisp from the Rust side), and the only way to the registers is a
-;;; capability bounded exactly to the page, so a register offset that leaves
-;;; the page is a bounds fault and never a store into the next device.
+;;; the blitter's list register, the disk's buffer register and the display's
+;;; scan-out register, which take a capability: the chips that reach memory
+;;; are handed capabilities and refuse what those do not cover. A register is
+;;; an offset into its device's page (generated into layout.lisp from the
+;;; Rust side), and the only way to the registers is a capability bounded
+;;; exactly to the page, so a register offset that leaves the page is a
+;;; bounds fault and never a store into the next device.
 
 (in-package hw)
 (unsafe-file)
@@ -17,29 +15,27 @@
 (defconstant device-page-bytes 4096)
 
 ;; ---------------------------------------------------------------- devices
-;; A device's page: the root narrowed to it, to loading and storing data,
-;; and, for the two chips with a capability register, to capabilities as
-;; well, since storing them goes with loading them. Holding it is owning the device. Nothing records who holds
-;; one, and nothing needs to: the name is unsafe, so taking a page is a
-;; privilege, and a driver takes its page once, when it starts, and keeps it
-;; in its own closures, which are sealed. No global, record field or message
-;; holds it, so no other task can name it, and it lives exactly as long as
-;; the driver. Exec's own devices, `sys`, the timer and the blitter, are
-;; reached through a page the functions below make for each use: a few
-;; instructions and no allocation, so the trap handler and interrupt servers
-;; use them too.
-(define (device-page dev)
-  (%cap-and-perms (%cap-bounds-exact (%from-addr (%+ mmio-base (%* dev device-page-bytes)))
-                                     device-page-bytes)
-                  (if (if (%= dev dev-blit) t (%= dev dev-disk))
-                      (%logior (%logior perm-ld perm-sd) (%logior perm-lc perm-sc))
-                      (%logior perm-ld perm-sd))))
+;; A device's page: its 4 KiB, to load and store data, and, for the three
+;; chips with a capability register, capabilities as well, since storing
+;; them goes with loading them. The reset stub mints every page from the
+;; memory map and the kernel block holds them. Holding one is owning the
+;; device. Nothing records who holds one, and nothing needs to: the name is
+;; unsafe, so taking a page is a privilege, and a driver takes its page
+;; once, when it starts, and keeps it in its own closures, which are sealed.
+;; No global, record field or message holds it, so no other task can name
+;; it, and it lives exactly as long as the driver. Exec's own devices, `sys`,
+;; the timer and the blitter, are reached through the page each use takes
+;; afresh: two loads and no allocation, so the trap handler and interrupt
+;; servers use them too.
+(define (device-page dev) (%slot (kernel-ref kb-devices) dev))
 
 ;; ---------------------------------------------------------------- words
 ;; A machine word is a fixnum. `peek` reads the word at an address as a
 ;; number from -2^31 to 2^31-1 and `poke` stores one back unchanged, both by
-;; number through DDC. `poke` takes nothing but a fixnum: anything else would
-;; store its address, which is never what was meant.
+;; number through the root. They are the gun in the safe: nothing gets in
+;; their way, and nothing but code that says `unsafe` can reach for them.
+;; `poke` takes nothing but a fixnum: anything else would store its address,
+;; which is never what was meant.
 (define (peek a) (%ld-word a))
 
 (define (poke a v)
@@ -70,6 +66,11 @@
 ;; The lowest pending and enabled line, or -1, which the chip spells as a
 ;; word of all ones. Runs inside the trap handler and must not allocate.
 (define (int-pending) (%cap-ld-word (device-page dev-sys) sys-intnum))
+
+;; The processor started again at the reset vector, as from power-on, with
+;; memory as it is: the reset stub mints the memory map and enters the
+;; kernel block's top level. Never returns.
+(define (reset-processor) (%cap-st-word! (device-page dev-sys) sys-reset 1))
 
 ;; ---------------------------------------------------------------- timer
 ;; The timebase is the retired instruction count, so the same program
@@ -119,9 +120,10 @@
 ;; the collector frees the pixels when the last reference goes, and the
 ;; extent is checked once at construction so that everything downstream can
 ;; trust `w` and `h`. The blitter is handed the pixels' capability itself
-;; and refuses a rectangle it does not cover. The display chip, which only
-;; reads, is handed their address: objects never move, so it is good for
-;; ever.
+;; and refuses a rectangle it does not cover, and so is the display chip,
+;; which shows nothing it may not read. What either chip holds stays alive:
+;; a blit in flight through its descriptor, and the bitmap on show through
+;; the scan-out register, which hands its capability back to the collector.
 (defrecord (bitmap bm) pixels w h)
 
 (define (make-bitmap pixels w h)
@@ -144,9 +146,10 @@
 
 ;; Point the chip at a bitmap, 8-bit indexed, with the picture and the frame
 ;; clock on: writing the control register without the interrupt bit would
-;; stop the vertical blank.
+;; stop the vertical blank. The pixels go to the scan-out register with a
+;; capability store.
 (define (gfx-show p b)
-  (%cap-st-word! p gfx-base (%addr-of (bm-pixels b)))
+  (%cap-st! p gfx-base (bm-pixels b))
   (%cap-st-word! p gfx-width (bm-w b))
   (%cap-st-word! p gfx-height (bm-h b))
   (%cap-st-word! p gfx-pitch (bm-w b))
@@ -712,7 +715,7 @@
 ;; Whether the chip raises its line when a byte arrives. Raw, like the rest of
 ;; the line's registers: it is turned on by whoever starts console.driver and
 ;; off when the driver ends.
-(define (serial-interrupts! on) (%st-word! uart-ctrl (if on 1 0)))
+(define (serial-interrupts! on) (%cap-st-word! (uart-page) uart-ctrl-reg (if on 1 0)))
 
 ;; ---------------------------------------------------------------- storage
 ;; The disk controller. A command runs on its own time: `disk-go` programs it
@@ -744,8 +747,8 @@
 (define (disk-blocks p) (%cap-ld-word p dsk-blocks))
 (define (disk-interrupts! p on) (%cap-st-word! p dsk-ctrl (if on 1 0)))
 
-;; What reaches memory by number or makes a device's page: needs an
+;; What reaches memory by number or hands out a device's page: needs an
 ;; `unsafe` around the call. A descriptor is what the chip is handed, so
 ;; handing one out and linking one are among them.
-(unsafe-names (quote (peek poke peek8 poke8 device-page blit-descriptor blit-go
+(unsafe-names (quote (peek poke peek8 poke8 device-page reset-processor blit-descriptor blit-go
                       blit-seal blit-unseal)))

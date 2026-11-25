@@ -886,9 +886,11 @@
   (let* ((h (%car form)) (args (%cdr form)) (n (length args)))
     (if (if (%symbol? h) (cx-lookup c h) t)
         nil
-        (let ((ca (const-arg-entry c h args)))
+        (let ((ca (const-arg-entry c h args))
+              (cs (const-store-entry c h args)))
           (cond
            (ca (emit-const-arg c ca args dst) t)
+           (cs (emit-const-store c cs args dst) t)
            ((indexed-imm-entry c h args) nil)
            (else
             (let ((op (assq (intrinsic-name h n) *in-place-ops*)))
@@ -923,18 +925,43 @@
 ;; A load or a store through the capability in a0 moved by the byte offset
 ;; in a1. The access is checked against the capability's own bounds and
 ;; permissions, so it cannot reach past what the caller was given.
+;; A load or a store by number: the root, which a CSR holds, at the address.
+(define (by-number op)
+  (lambda (a d rs)
+    (i-csrrs a $t2 csr-root $zero)
+    (i-yaddrw a $t2 $t2 (%car rs))
+    (%funcall op a (value-reg d) $t2 0)))
+
+(define (store-by-number op)
+  (lambda (a d rs)
+    (i-csrrs a $t2 csr-root $zero)
+    (i-yaddrw a $t2 $t2 (%car rs))
+    (%funcall op a (cadr rs) $t2 0)
+    (emit-move a d (cadr rs))))
+
 (define (cap-load op)
-  (lambda (c)
-    (let ((a (cx-asm c)))
-      (i-yadd a $t2 $a0 $a1)
-      (%funcall op a $a0 $t2 0))))
+  (lambda (a d rs)
+    (i-yadd a $t2 (%car rs) (cadr rs))
+    (%funcall op a (value-reg d) $t2 0)))
 
 (define (cap-store op)
-  (lambda (c)
-    (let ((a (cx-asm c)))
-      (i-yadd a $t2 $a0 $a1)
-      (%funcall op a $a2 $t2 0)
-      (i-mv a $a0 $a2))))
+  (lambda (a d rs)
+    (i-yadd a $t2 (%car rs) (cadr rs))
+    (%funcall op a (caddr rs) $t2 0)
+    (emit-move a d (caddr rs))))
+
+;; The same at an address rather than an offset: the capability's address
+;; set to it, as `yaddrw` sets it, then the access, checked as any is.
+(define (cap-load-at op)
+  (lambda (a d rs)
+    (i-yaddrw a $t2 (%car rs) (cadr rs))
+    (%funcall op a (value-reg d) $t2 0)))
+
+(define (cap-store-at op)
+  (lambda (a d rs)
+    (i-yaddrw a $t2 (%car rs) (cadr rs))
+    (%funcall op a (caddr rs) $t2 0)
+    (emit-move a d (caddr rs))))
 
 ;; ---------------------------------------------------------------- constant argument
 ;; A second operand that is written down, as a number or as the name of a
@@ -1002,7 +1029,32 @@
               (list '%cap-ld fits-offset? (cap-load-const i-ly))
               (list '%cap-ld-word fits-offset? (cap-load-const i-lw))
               (list '%cap-ld-byte fits-offset? (cap-load-const i-lbu))
-              (list '%cap-and-perms any-mask? emit-and-perms-const))))
+              (list '%cap-inc fits-offset? emit-cap-inc-const)
+              (list '%cap-and-perms any-mask? emit-and-perms-const)))
+  (set! *const-store*
+        (list (list '%cap-st! i-sy)
+              (list '%cap-st-word! i-sw)
+              (list '%cap-st-byte! i-sb))))
+
+(define (emit-cap-inc-const a d s k) (i-yaddi a d s k))
+
+;; A store through a capability at a written-down offset is the store's own
+;; offset field, as a load's is. Entries are (name emitter).
+(define *const-store* nil)
+
+(define (const-store-entry c h args)
+  (let ((e (assq (intrinsic-name h 3) *const-store*)))
+    (if e
+        (if (%= (length args) 3)
+            (let ((k (written-down c (cadr args))))
+              (if (%fixnum? k) (if (fits-offset? k) e nil) nil))
+            nil)
+        nil)))
+
+(define (emit-const-store c e args dst)
+  (let ((rs (compile-operands c (list (%car args) (caddr args)) t 1)))
+    (%funcall (cadr e) (cx-asm c) (cadr rs) (%car rs) (written-down c (cadr args)))
+    (emit-move (cx-asm c) dst (cadr rs))))
 
 ;; `ypermc` clears the permissions its mask names, and `%cap-and-perms` keeps
 ;; them, so a written-down mask is complemented here and costs nothing more.
@@ -1187,37 +1239,53 @@
     (lambda (a d rs) (i-retag a (value-reg d) (%car rs) kind-fixnum kind-char)))
 
   ;; ---- raw memory ----
-  ;; Memory named by an integer address, through DDC: the root. A word
-  ;; loaded is a fixnum, a half or a byte comes back zero-extended, and a
-  ;; capability comes back with its tag. These are the escape hatch, and the
-  ;; processor refuses them to code without SR.
+  ;; Memory named by an integer address, through the root, a CSR that takes
+  ;; SR to read. A word loaded is a fixnum, a half or a byte comes back
+  ;; zero-extended, and a capability comes back with its tag. These are the
+  ;; escape hatch: `peek` and `poke` and the debugging views are made of
+  ;; them, and the processor refuses them to code without SR.
   (definline '%root 0
-    (lambda (c) (i-csrrs (cx-asm c) $a0 csr-ddc $zero)))
+    (lambda (c) (i-csrrs (cx-asm c) $a0 csr-root $zero)))
   (definline '%from-addr 1
     (lambda (c)
       (let ((a (cx-asm c)))
-        (i-csrrs a $t2 csr-ddc $zero)
+        (i-csrrs a $t2 csr-root $zero)
         (i-yaddrw a $a0 $t2 $a0))))
-  (defop '%ld-word 1 (op1 i-lw-ddc))
-  (defop '%ld-half 1 (op1 i-lhu-ddc))
-  (defop '%ld-byte 1 (op1 i-lbu-ddc))
-  (defop '%ld-cap 1 (op1 i-ly-ddc))
-  (defstore '%st-word! 2 (store-through i-sw-ddc))
-  (defstore '%st-half! 2 (store-through i-sh-ddc))
-  (defstore '%st-byte! 2 (store-through i-sb-ddc))
-  (defstore '%st-cap! 2 (store-through i-sy-ddc))
+  (defop '%ld-word 1 (by-number i-lw))
+  (defop '%ld-half 1 (by-number i-lhu))
+  (defop '%ld-byte 1 (by-number i-lbu))
+  (defop '%ld-cap 1 (by-number i-ly))
+  (defstore '%st-word! 2 (store-by-number i-sw))
+  (defstore '%st-half! 2 (store-by-number i-sh))
+  (defstore '%st-byte! 2 (store-by-number i-sb))
+  (defstore '%st-cap! 2 (store-by-number i-sy))
+
+  ;; ---- the kernel block ----
+  ;; `mscratch` names it, and reading `mscratch` takes SR. Its slots are the
+  ;; trap stub's state and the capabilities the reset stub mints.
+  (definline '%kernel 0
+    (lambda (c) (i-csrrs (cx-asm c) $a0 csr-mscratch $zero)))
 
   ;; ---- capabilities ----
   ;; The operations on a capability the caller already holds. A load or a
   ;; store is bounded by it, and everything that makes a new one from it can
   ;; only narrow it, seal it, or clear its tag, so none of these is unsafe.
   ;; Offsets are in bytes.
-  (definline '%cap-ld 2 (cap-load i-ly))
-  (definline '%cap-st! 3 (cap-store i-sy))
-  (definline '%cap-ld-word 2 (cap-load i-lw))
-  (definline '%cap-st-word! 3 (cap-store i-sw))
-  (definline '%cap-ld-byte 2 (cap-load i-lbu))
-  (definline '%cap-st-byte! 3 (cap-store i-sb))
+  (defop '%cap-ld 2 (cap-load i-ly))
+  (defstore '%cap-st! 3 (cap-store i-sy))
+  (defop '%cap-ld-word 2 (cap-load i-lw))
+  (defstore '%cap-st-word! 3 (cap-store i-sw))
+  (defop '%cap-ld-byte 2 (cap-load i-lbu))
+  (defstore '%cap-st-byte! 3 (cap-store i-sb))
+  ;; The same at an address within c: what the collector, the allocator and
+  ;; the image writer work with, holding a region and knowing addresses in
+  ;; it.
+  (defop '%cap-ld-at 2 (cap-load-at i-ly))
+  (defstore '%cap-st-at! 3 (cap-store-at i-sy))
+  (defop '%cap-ld-word-at 2 (cap-load-at i-lw))
+  (defstore '%cap-st-word-at! 3 (cap-store-at i-sw))
+  (defop '%cap-ld-byte-at 2 (cap-load-at i-lbu))
+  (defstore '%cap-st-byte-at! 3 (cap-store-at i-sb))
   ;; The address of anything, as a fixnum: a pointer's, or an immediate's
   ;; payload. Any integer instruction leaves it. Following it again takes
   ;; the root.
@@ -1305,27 +1373,29 @@
   ;; ---- bits ----
   (defop '%popcount 1 (op1 i-cpop))
 
-  ;; A bit array at an integer address, indexed by bit number: the
-  ;; collector's mark map. The map is addressed a word at a time, which puts
-  ;; the low five bits of the index where `bext` and `bset` look for them. On
-  ;; a little-endian machine bit i of the word at (i >> 5) is bit i & 7 of
-  ;; the byte at (i >> 3), so the blitter can still clear a map by the byte.
+  ;; A bit array, given as a capability standing at its first word, indexed
+  ;; by bit number: the collector's maps. The map is addressed a word at a
+  ;; time, which puts the low five bits of the index where `bext` and `bset`
+  ;; look for them. On a little-endian machine bit i of the word at (i >> 5)
+  ;; is bit i & 7 of the byte at (i >> 3), so the blitter can still clear a
+  ;; map by the byte. The word is reached through the capability, so these
+  ;; are bounded by it like any other access.
   (definline '%bit-ref 2
     (lambda (c)
       (let ((a (cx-asm c)))
         (i-srli a $t4 $a1 5)
-        (i-sh2add a $t4 $t4 $a0)
-        (i-lw-ddc a $t4 $t4)
+        (i-ysh2add a $t4 $t4 $a0)
+        (i-lw a $t4 $t4 0)
         (i-bext a $t2 $t4 $a1)
         (emit-bool-from-flag c $t2 $a0))))
   (definline '%bit-set! 2
     (lambda (c)
       (let ((a (cx-asm c)))
         (i-srli a $t4 $a1 5)
-        (i-sh2add a $t4 $t4 $a0)
-        (i-lw-ddc a $t5 $t4)
+        (i-ysh2add a $t4 $t4 $a0)
+        (i-lw a $t5 $t4 0)
         (i-bset a $t5 $t5 $a1)
-        (i-sw-ddc a $t5 $t4)
+        (i-sw a $t5 $t4 0)
         (i-mv a $a0 $tp))))
 
   ;; ---- symbols ----
@@ -1377,16 +1447,20 @@
         (i-ecall a)
         (i-mv a $a0 $tp))))
 
-  ;; The register context `mscratch` names, as a capability: inside a trap,
-  ;; the block the interrupted code was saved into. The trap stub restores
-  ;; from whatever `mscratch` names on its way out, so setting it is the
-  ;; context switch.
+  ;; The register context the kernel block's frame names, as a capability:
+  ;; inside a trap, the block the interrupted code was saved into. The trap
+  ;; stub restores from whatever the frame names on its way out, so setting
+  ;; it is the context switch.
   (definline '%context 0
-    (lambda (c) (i-csrrs (cx-asm c) $a0 csr-mscratch $zero)))
+    (lambda (c)
+      (let ((a (cx-asm c)))
+        (i-csrrs a $t2 csr-mscratch $zero)
+        (i-ly a $a0 $t2 (%* value-bytes kb-frame)))))
   (definline '%set-context! 1
     (lambda (c)
       (let ((a (cx-asm c)))
-        (i-csrrw a $zero csr-mscratch $a0)
+        (i-csrrs a $t2 csr-mscratch $zero)
+        (i-sy a $a0 $t2 (%* value-bytes kb-frame))
         (i-mv a $a0 $tp))))
 
   ;; Let the timer, the chips and software interrupts through.
@@ -1428,13 +1502,15 @@
       (let ((a (cx-asm c)))
         (i-csrrw a $zero csr-gcmode $a0)
         (i-mv a $a0 $tp))))
-  ;; The system device's first register stops the machine with the exit code
-  ;; written to it. A device page is named by its address, through DDC.
+  ;; The system device's halt register stops the machine with the exit code
+  ;; written to it, through the device's page in the kernel block.
   (definline '%halt 1
     (lambda (c)
       (let ((a (cx-asm c)))
-        (i-li a $t3 mmio-base)
-        (i-sw-ddc a $a0 $t3))))
+        (i-csrrs a $t3 csr-mscratch $zero)
+        (i-ly a $t3 $t3 (%* value-bytes kb-devices))
+        (i-ly a $t3 $t3 (%* value-bytes dev-sys))
+        (i-sw a $a0 $t3 hw::sys-halt))))
   ;; Turning interrupts off answers whether they were on, as 1 or 0, which is
   ;; what makes a critical section nestable without a counter: every caller
   ;; puts back what it found.
@@ -2505,16 +2581,17 @@
 
 (setup-intrinsics)
 
-;; The raw vocabulary: what names memory by number through DDC, hands out
-;; the root, or reads or sets the machine's own state, all of which the
-;; processor refuses to code without SR, and `open-closure` and
-;; `sealing-key`, the escape hatch and the keys built from them. The operations on a capability the caller already holds
-;; are not here, and neither is `%addr-of`, whose answer cannot be followed
-;; without one of these.
+;; The raw vocabulary: what names memory by number through the root, hands
+;; out the root or the kernel block and what it holds, or reads or sets the
+;; machine's own state, all of which the processor refuses to code without SR, and
+;; `open-closure` and `sealing-key`, the escape hatch and the keys made
+;; from the root's otypes. The operations on a capability the caller
+;; already holds are not here, and neither is `%addr-of`, whose answer
+;; cannot be followed without one of these.
 (unsafe-names
- '(%root %from-addr
+ '(%root %from-addr %kernel kernel-ref kernel-set! all-symbols
    %ld-word %st-word! %ld-half %st-half! %ld-byte %st-byte! %ld-cap %st-cap!
-   %bit-ref %bit-set! %slot %set-slot!
+   %slot %set-slot!
    %context %set-context! %stack-limit %set-stack-limit! %set-gc-mode!
    %set-this-task!
    %ecall %halt %disable %enable %restore-interrupts %enable-after-trap

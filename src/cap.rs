@@ -235,8 +235,8 @@ pub fn rrl(len: u32) -> u32 {
 impl Cap {
     pub const NULL: Cap = Cap { addr: 0, meta: 0, tag: false };
 
-    /// Every permission over the whole address space: what PCC, DDC and
-    /// `mtvec` hold at reset.
+    /// Every permission over the whole address space: what PCC and `mtvec`
+    /// hold at reset, and what the root CSR reads as.
     pub const ROOT: Cap = Cap { addr: 0, meta: (P_ALL << PERM_SHIFT) | IE_BIT | (3 << 10), tag: true };
 
     /// nil: the 16-byte cell at 0, readable as a pair of nils and nothing
@@ -365,13 +365,16 @@ impl Cap {
     /// Whether a capability derived from this one with its base at `base`
     /// may keep HD. HD says the base is an object's payload with its header
     /// below it, so it survives at this capability's own base, and from one
-    /// that spans the whole address space, which is how the root mints it;
-    /// a new base anywhere else has left the object. `YBNDS*` drop HD where
-    /// this says no, and `YBLD` leaves such bits untagged.
+    /// that spans the whole of object space to a base in it, which is how
+    /// an allocator mints it: the root, and object space's own capability,
+    /// which the reset stub makes from the root for the allocator. A new
+    /// base anywhere else has left the object. `YBNDS*` drop HD where this
+    /// says no, and `YBLD` leaves such bits untagged.
     #[inline]
     pub fn heads_at(&self, base: u32) -> bool {
+        use crate::map::{OBJ_BASE, OBJ_END};
         let (b, t) = self.bounds();
-        b == base || (b == 0 && t == 1 << 32)
+        b == base || (b <= OBJ_BASE && t >= OBJ_END as u64 && (OBJ_BASE..=OBJ_END).contains(&base))
     }
 
     /// Keep only the permissions in `mask`, in the format's positions. A
@@ -620,7 +623,11 @@ mod tests {
             if let Some(d) = Cap::ROOT.with_addr(base).with_bounds(len) {
                 let e = Cap::from_bits(d.to_bits(), true);
                 assert_eq!(e.bounds(), d.bounds());
-                assert_eq!(e.perms(), P_ALL);
+                assert_eq!(e.perms(), d.perms());
+                // HD only in object space, where objects and object space's own
+                // capability are.
+                let heads = (crate::map::OBJ_BASE..=crate::map::OBJ_END).contains(&base);
+                assert_eq!(e.perms(), if heads { P_ALL } else { P_ALL & !P_HD });
             }
         }
     }

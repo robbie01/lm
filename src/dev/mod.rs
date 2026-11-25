@@ -1,9 +1,10 @@
 //! Custom chips. Every device is a 4 KiB page in the MMIO window and every
-//! register is a naturally-aligned 32-bit word, but for the two capability
-//! registers: the blitter's list register and the disk's buffer register,
-//! each 8 bytes, written with a capability store. A chip that moves memory
-//! is handed capabilities, never numbers, and refuses a transfer its
-//! capability does not cover.
+//! register is a naturally-aligned 32-bit word, but for the three capability
+//! registers: the blitter's list register, the disk's buffer register and
+//! the display's scan-out register, each 8 bytes at the start of its page,
+//! written with a capability store. A chip that reaches memory is handed
+//! capabilities, never numbers, and refuses what its capability does not
+//! cover.
 
 pub mod blit;
 pub mod boxfilter;
@@ -29,6 +30,9 @@ pub const SYS_RANDOM: u32 = 0x1c;
 pub const SYS_RAMSIZE: u32 = 0x20;
 pub const SYS_CHIPSIZE: u32 = 0x24;
 pub const SYS_INTSET: u32 = 0x28; // w: raise a line from software (Cause)
+/// w: the processor starts again at the reset vector with the root in PCC,
+/// as from power-on, with memory and the chips as they are.
+pub const SYS_RESET: u32 = 0x2c;
 
 // ----------------------------------------------------------- TIMER registers
 pub const TMR_LO: u32 = 0x00; // r: mtime low  (== retired instructions)
@@ -134,6 +138,7 @@ pub fn write(m: &mut Machine, a: u32, f: u32, v: u32) {
             SYS_INTREQ => m.intreq &= !v,
             SYS_INTENA => m.intena = v,
             SYS_INTSET => m.intreq |= v,
+            SYS_RESET => m.reset_asked = true,
             _ => {}
         },
         DEV_UART => m.uart.write(reg, v),
@@ -157,8 +162,28 @@ pub fn takes_cap(a: u32) -> bool {
     match dev_of(a) {
         DEV_BLIT => reg == blit::B_LIST,
         DEV_DISK => reg == disk::D_BUF,
+        DEV_GFX => reg == gfx::G_BASE,
         _ => false,
     }
+}
+
+/// Whether the register at `a` hands back the capability it holds to a
+/// capability load: the display's scan-out register, which holds its bitmap
+/// for as long as it shows it, so that the collector can keep what is on
+/// show alive. The blitter and the disk hold theirs only for a transfer,
+/// which their owners hold too, and hand nothing back.
+pub fn gives_cap(a: u32) -> bool {
+    dev_of(a) == DEV_GFX && a & 0xfff == gfx::G_BASE
+}
+
+/// A capability load from a register `gives_cap` allows, through `auth`,
+/// the page's capability, as `LY` loads one.
+pub fn read_cap(m: &Machine, a: u32, auth: Cap) -> Cap {
+    let held = match dev_of(a) {
+        DEV_GFX => m.gfx.base,
+        _ => Cap::NULL,
+    };
+    loaded_through(held, auth)
 }
 
 /// A capability store to a capability register.
@@ -166,6 +191,7 @@ pub fn write_cap(m: &mut Machine, a: u32, c: Cap) {
     match dev_of(a) {
         DEV_BLIT => blit::start_chain(m, c),
         DEV_DISK => m.disk.buf = c,
+        DEV_GFX => m.gfx.write_cap(c),
         _ => {}
     }
 }
@@ -174,7 +200,11 @@ pub fn write_cap(m: &mut Machine, a: u32, c: Cap) {
 /// the way `LY` does: without LC in `auth` the tag is dropped, and without
 /// LM a tagged, unsealed capability loses SD, SC and LM.
 pub fn load_through(m: &Machine, auth: Cap, a: u32) -> Cap {
-    let c = m.load_cap(a);
+    loaded_through(m.load_cap(a), auth)
+}
+
+/// `c` as a load through `auth` leaves it, by `LY`'s rule.
+pub fn loaded_through(c: Cap, auth: Cap) -> Cap {
     if !c.tag {
         c
     } else if !auth.has(P_LC) {

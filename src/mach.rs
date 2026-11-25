@@ -40,8 +40,12 @@ pub const C_RUN: u32 = 28;
 /// The write barrier. With bit 0 of `gcmode` set, a store of any width that
 /// would overwrite a tagged granule in cons or object space whose capability
 /// points at an unmarked heap object traps before writing, unless the
-/// granule lies in a stack or a register context. `mtval` is the address of
-/// that granule; the handler marks the object and the store re-executes.
+/// granule lies in a stack, a register context or the kernel block. `mtval`
+/// names the granule as the other Xlm faults name a value, by register: bits
+/// 4..0 are the register the store went through, and bits 31..5 the
+/// granule's offset from that capability's base rounded down to a granule,
+/// in granules (`barrier_mtval`). The handler reads the capability there,
+/// marks its object, and the store re-executes.
 /// This is what lets the collector mark while everything else runs: nothing
 /// reachable when marking began can be lost, because the last pointer to it
 /// cannot be overwritten without the collector seeing it first. A stack or a
@@ -61,13 +65,10 @@ pub const C_CAP_STORE: u32 = 34;
 
 /// What a range fault names for an immediate index.
 pub const RANGE_IMM: u32 = 32;
-/// What the write barrier names as the authority of a store through DDC.
-pub const WHO_DDC: u32 = 32;
 
 /// The CSRs by number. `mtvec`, `mscratch` and `mepc` are capabilities, as
-/// RVY widens them, and so are the thread identifiers RVY adds and DDC,
-/// which Xlm keeps in a custom CSR: the one capability integer addressing
-/// goes through.
+/// RVY widens them, and so are the thread identifiers RVY adds, Xlm's two
+/// capabilities to the collector's maps, and the root.
 pub const CSR_UTIDC: u32 = 0x07f;
 pub const CSR_MSTATUS: u32 = 0x300;
 pub const CSR_MIE: u32 = 0x304;
@@ -81,11 +82,20 @@ pub const CSR_MTIDC: u32 = 0x37f;
 /// A custom CSR: the lowest address sp may be moved down to with interrupts
 /// on. Zero means no limit.
 pub const CSR_STKLIM: u32 = 0x7c0;
-/// A custom CSR: bit 0 turns the write barrier on. The mark bits it consults
-/// are one per eight bytes of heap, from `CONS_BASE`, at `GC_BITMAP`.
+/// A custom CSR: bit 0 turns the write barrier on.
 pub const CSR_GCMODE: u32 = 0x7c1;
-/// A custom CSR: DDC, the default data capability.
-pub const CSR_DDC: u32 = 0x7c2;
+/// Custom capability CSRs: the collector's mark bitmap, one bit per eight
+/// bytes of heap from `CONS_BASE`, and its object-start map, one bit per
+/// eight bytes of object space from `OBJ_BASE`, each from the capability's
+/// base. The write barrier reads both through these, as a load would: a word
+/// the capability does not let it read reads as zero.
+pub const CSR_GCMARKS: u32 = 0x7c2;
+pub const CSR_GCSTARTS: u32 = 0x7c3;
+/// A custom read-only CSR: the root, every permission over the whole address
+/// space. It takes SR to read, as every machine-level CSR does, and nothing
+/// can write it. The reset stub mints the memory map from it, and `peek`,
+/// `poke` and the debugging views reach memory by number through it.
+pub const CSR_ROOT: u32 = 0xfc0;
 
 /// A task's register save area, which is also a trap frame: 32 capability
 /// slots, slot 0 the pc (`mepc`) and slot i the register x_i.
@@ -182,19 +192,20 @@ pub struct Machine {
     pub pcc_tag: bool,
     pub pcc_wb: u32,
     pub pcc_wl: u32,
-    /// DDC, with its window and the permissions it grants (none unless it is
-    /// tagged and unsealed). `set_ddc` keeps them in step, and the core
-    /// refreshes them on entry, so DDC may also be assigned between runs.
-    pub ddc: Cap,
-    pub ddc_wb: u32,
-    pub ddc_wl: u32,
-    pub ddc_perms: u32,
-    /// The other capability-wide CSRs.
+    /// The capability-wide CSRs.
     pub mtvec: Cap,
     pub mscratch: Cap,
     pub mepc: Cap,
     pub mtidc: Cap,
     pub utidc: Cap,
+    /// The collector's maps, and the windows the barrier reads them through:
+    /// the part of each capability's bounds in RAM, if it is tagged,
+    /// unsealed and may load, and nothing otherwise. `csr_cap_write` keeps
+    /// them in step.
+    gcmarks: Cap,
+    gcstarts: Cap,
+    marks_win: (u32, u32),
+    starts_win: (u32, u32),
     /// The windows of capabilities decoded in full, keyed by the
     /// capability's bits: the entries `jcl` jumps through, and the return
     /// addresses, frames and code objects a return loads back. A window is a
@@ -279,6 +290,9 @@ pub struct Machine {
     pub disk: Disk,
     pub mtimecmp: u64,
     pub halted: bool,
+    /// A write to the system device's reset register, which the core acts
+    /// on once the store that made it is done.
+    pub reset_asked: bool,
     pub exit_code: u32,
     /// Name indices for the build: `sym_name_id` maps a symbol's identity to a
     /// dense index for its name, and `name_ids` allocates those indices. Only
@@ -314,8 +328,9 @@ pub fn ram_window(c: Cap, ramlen: u32) -> (u32, u32) {
 }
 
 impl Machine {
-    /// A machine at reset: PCC, DDC and `mtvec` the root, every general
-    /// register NULL, PCC at the reset vector.
+    /// A machine at reset: PCC and `mtvec` the root, every general
+    /// register and every other capability CSR NULL, PCC at the reset
+    /// vector.
     pub fn new() -> Box<Machine> {
         let mut ram = vec![0u8; RAM_SIZE as usize].into_boxed_slice();
         let ramp = ram.as_mut_ptr();
@@ -331,15 +346,15 @@ impl Machine {
             pcc_tag: false,
             pcc_wb: 0,
             pcc_wl: 0,
-            ddc: Cap::NULL,
-            ddc_wb: 0,
-            ddc_wl: 0,
-            ddc_perms: 0,
             mtvec: Cap::ROOT,
             mscratch: Cap::NULL,
             mepc: Cap::NULL,
             mtidc: Cap::NULL,
             utidc: Cap::NULL,
+            gcmarks: Cap::NULL,
+            gcstarts: Cap::NULL,
+            marks_win: (0, 0),
+            starts_win: (0, 0),
             wcache: Box::new([(0, 0, 0); WCACHE]),
             ram,
             ramp,
@@ -383,6 +398,7 @@ impl Machine {
             disk: Disk::new(),
             mtimecmp: u64::MAX,
             halted: false,
+            reset_asked: false,
             exit_code: 0,
             fuel_left: 0,
             fuel_start: 0,
@@ -391,7 +407,6 @@ impl Machine {
             trace_traps: false,
         });
         m.set_pcc(Cap::ROOT.with_addr(RESET_VECTOR));
-        m.set_ddc(Cap::ROOT);
         m
     }
 
@@ -495,18 +510,38 @@ impl Machine {
         self.pcc_wl = l;
     }
 
+    /// The processor as power-on leaves it: PCC the root at the reset
+    /// vector, `mtvec` the root, every general register and every other
+    /// capability CSR NULL, interrupts off and the barrier and the stack
+    /// limit with them. Memory and the chips are as they were.
+    pub fn cpu_reset(&mut self) {
+        for i in 1..32 {
+            self.set_reg(i, Cap::NULL);
+        }
+        self.set_pcc(Cap::ROOT.with_addr(RESET_VECTOR));
+        self.mtvec = Cap::ROOT;
+        for n in [CSR_MSCRATCH, CSR_MEPC, CSR_MTIDC, CSR_UTIDC, CSR_GCMARKS, CSR_GCSTARTS] {
+            self.csr_cap_write(n, Cap::NULL, true);
+        }
+        self.mstatus = 0;
+        self.mie = 0;
+        self.gcmode = 0;
+        self.stklim = 0;
+        self.reset_asked = false;
+    }
+
     #[inline(always)]
     pub fn pcc_has(&self, p: u32) -> bool {
         self.pcc_meta & (p << PERM_SHIFT) != 0
     }
 
-    pub fn set_ddc(&mut self, c: Cap) {
-        self.ddc = c;
-        let live = c.tag && !c.is_sealed();
-        let (b, l) = if live { ram_window(c, self.ramlen) } else { (0, 0) };
-        self.ddc_wb = b;
-        self.ddc_wl = l;
-        self.ddc_perms = if live { c.perms() } else { 0 };
+    /// The window the barrier reads a map through.
+    fn map_window(&self, c: Cap) -> (u32, u32) {
+        if c.tag && !c.is_sealed() && c.has(P_LD) {
+            ram_window(c, self.ramlen)
+        } else {
+            (0, 0)
+        }
     }
 
     /// A capability-wide CSR, if `n` is one.
@@ -517,7 +552,9 @@ impl Machine {
             CSR_MEPC => self.mepc,
             CSR_MTIDC => self.mtidc,
             CSR_UTIDC => self.utidc,
-            CSR_DDC => self.ddc,
+            CSR_GCMARKS => self.gcmarks,
+            CSR_GCSTARTS => self.gcstarts,
+            CSR_ROOT => Cap::ROOT,
             _ => return None,
         })
     }
@@ -543,7 +580,14 @@ impl Machine {
             CSR_MEPC => self.mepc = c,
             CSR_MTIDC => self.mtidc = c,
             CSR_UTIDC => self.utidc = c,
-            CSR_DDC => self.set_ddc(c),
+            CSR_GCMARKS => {
+                self.gcmarks = c;
+                self.marks_win = self.map_window(c);
+            }
+            CSR_GCSTARTS => {
+                self.gcstarts = c;
+                self.starts_win = self.map_window(c);
+            }
             _ => {}
         }
     }
@@ -794,9 +838,14 @@ impl Machine {
     /// the handler's first fetch faults.
     pub fn enter_trap(&mut self, cause: u32, tval: u32, epc: u32) {
         if self.trace_traps {
+            let at = crate::cpu::code_containing(self, epc).map(|c| crate::cpu::name_of(self, c));
             eprintln!(
-                "[trap cause={cause:#x} epc={epc:#x} mtval={tval:#x} mtvec={:#x} mscratch={:#x} sp={:#x} cycles={}]",
-                self.mtvec.addr, self.mscratch.addr, self.x[2], self.cycles
+                "[trap cause={cause:#x} epc={epc:#x} in {} mtval={tval:#x} mtvec={:#x} mscratch={:#x} sp={:#x} cycles={}]",
+                at.unwrap_or_default(),
+                self.mtvec.addr,
+                self.mscratch.addr,
+                self.x[2],
+                self.cycles
             );
         }
         self.mepc = self.pcc().with_addr(epc);
@@ -907,11 +956,11 @@ impl Machine {
     }
 
     /// The write barrier's question for a store of `sz` bytes at `a` through
-    /// register `who`, or DDC as `WHO_DDC`, asked only while it is on: the address of a
-    /// granule the store touches that holds a capability to an unmarked heap
-    /// object, if there is one and the store is not into a stack or a
-    /// context. That is asked first, being two loads, where finding the
-    /// object a capability keeps can be a walk of the object-start map.
+    /// register `who`, asked only while it is on: `mtval` for the trap, if a
+    /// granule the store touches holds a capability to an unmarked heap
+    /// object and the store is not into a stack, a context or the kernel
+    /// block. That is asked first, being two loads, where finding the object
+    /// a capability keeps can be a walk of the object-start map.
     #[inline(never)]
     pub fn barrier_hit(&self, a: u32, sz: u32, who: u32) -> Option<u32> {
         let first = a & !7;
@@ -920,43 +969,57 @@ impl Machine {
             if g < CONS_BASE || g >= OBJ_END || !unsafe { self.rd_tag(g) } {
                 continue;
             }
-            if self.in_state(g, who) {
+            let base = self.base_of(who);
+            if self.in_state(g, base) {
                 continue;
             }
             let old = unsafe { self.rd_cap(g) };
             if let Some(obj) = self.referent(old) {
                 let bit = (obj - CONS_BASE) >> 3;
-                let word = unsafe { self.rd32(GC_BITMAP + ((bit >> 5) << 2)) };
-                if word & (1 << (bit & 31)) == 0 {
-                    return Some(g);
+                if self.map_word(self.marks_win, bit) & (1 << (bit & 31)) == 0 {
+                    return Some(barrier_mtval(who, base, g));
                 }
             }
         }
         None
     }
 
-    /// Whether a store through register `who` into the granule at `g` is a
-    /// store into a stack or a register context: whether the authority is
-    /// based at the payload of one, as every stack pointer, frame pointer
-    /// and context capability is, and the granule lies in that payload. The
-    /// granule below the base must be an object start, a header the
-    /// allocator wrote, and not a slot that happens to hold its number.
-    fn in_state(&self, g: u32, who: u32) -> bool {
-        let base = if who == WHO_DDC {
-            self.ddc.base()
-        } else if self.xm[who as usize] & XM_READY != 0 {
+    /// The base of register `who`, from its window when it has one.
+    fn base_of(&self, who: u32) -> u32 {
+        if self.xm[who as usize] & XM_READY != 0 {
             self.wb[who as usize]
         } else {
             self.reg(who).base()
-        };
+        }
+    }
+
+    /// The word of a collector's map that holds bit `bit`, read through the
+    /// map's window: a word outside it reads as zero.
+    #[inline]
+    fn map_word(&self, (b, l): (u32, u32), bit: u32) -> u32 {
+        let off = (bit >> 5) << 2;
+        if off < l && l - off >= 4 {
+            unsafe { self.rd32(b + off) }
+        } else {
+            0
+        }
+    }
+
+    /// Whether a store through an authority based at `base` into the
+    /// granule at `g` is a store into a stack, a register context or the
+    /// kernel block: whether the base is the payload of one, as every stack
+    /// pointer, frame pointer and context capability's is, and the granule
+    /// lies in that payload. The granule below the base must be an object
+    /// start, a header the allocator wrote, and not a slot that happens to
+    /// hold its number.
+    fn in_state(&self, g: u32, base: u32) -> bool {
         if base <= OBJ_BASE || base > OBJ_END {
             return false;
         }
         let h = base - 8;
         let i = (h - OBJ_BASE) >> 3;
-        let starts = unsafe { self.rd32(OBJ_STARTS + ((i >> 5) << 2)) };
         let hdr = unsafe { self.rd32(h) };
-        starts & (1 << (i & 31)) != 0
+        self.map_word(self.starts_win, i) & (1 << (i & 31)) != 0
             && crate::heap::is_state_type(crate::heap::hdr_type(hdr))
             && g < base + crate::heap::bounds_bytes(hdr)
     }
@@ -976,18 +1039,19 @@ impl Machine {
         let b = c.base();
         if (CONS_BASE..CONS_END).contains(&b) {
             (!c.has(P_HD)).then_some(b & !15)
-        } else if b > OBJ_BASE && b <= OBJ_END {
+        } else if b > OBJ_BASE && b < OBJ_END {
             self.object_start(b - 8)
         } else {
             None
         }
     }
 
-    /// The nearest object start at or below `a`, in object space.
+    /// The nearest object start at or below `a`, in object space, by the
+    /// start map the barrier reads.
     pub fn object_start(&self, a: u32) -> Option<u32> {
         let i = (a - OBJ_BASE) >> 3;
         let mut w = i >> 5;
-        let mut bits = unsafe { self.rd32(OBJ_STARTS + (w << 2)) };
+        let mut bits = self.map_word(self.starts_win, w << 5);
         let k = i & 31;
         if k < 31 {
             bits &= (2u32 << k) - 1;
@@ -1000,7 +1064,7 @@ impl Machine {
                 return None;
             }
             w -= 1;
-            bits = unsafe { self.rd32(OBJ_STARTS + (w << 2)) };
+            bits = self.map_word(self.starts_win, w << 5);
         }
     }
 
@@ -1008,6 +1072,15 @@ impl Machine {
     pub fn fuel_to_timer(&self) -> u64 {
         self.mtimecmp.saturating_sub(self.cycles)
     }
+}
+
+/// What the write barrier puts in `mtval` for the granule at `g`, written
+/// through register `who` whose base is `base`: the register in bits 4..0,
+/// and in bits 31..5 the granule's offset from the base rounded down to a
+/// granule, counted in granules. The granule lies at or above the base and
+/// in RAM, so the offset always fits.
+pub fn barrier_mtval(who: u32, base: u32, g: u32) -> u32 {
+    (((g - (base & !7)) >> 3) << 5) | who
 }
 
 /// The heap object a pair or headed capability refers to, as the address its

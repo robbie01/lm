@@ -40,13 +40,16 @@
 (defconstant csr-utidc    #x07f)
 (defconstant csr-stklim   #x7c0)   ; custom: the lowest address sp may reach
 (defconstant csr-gcmode   #x7c1)   ; custom: bit 0 turns the write barrier on
-(defconstant csr-ddc      #x7c2)   ; custom: DDC, the default data capability
+(defconstant csr-gcmarks  #x7c2)   ; custom: the mark bitmap, a capability
+(defconstant csr-gcstarts #x7c3)   ; custom: the object-start map, likewise
+(defconstant csr-root     #xfc0)   ; custom, read only: the root
 (defconstant csr-cycle    #xc00)
 (defconstant csr-cycleh   #xc80)
 
-;; `mtvec`, `mscratch`, `mepc`, the thread identifiers and DDC hold
-;; capabilities: a CSR instruction reads one whole, `csrrw` writes one
-;; whole, and the others write its address.
+;; `mtvec`, `mscratch`, `mepc`, the thread identifiers, the collector's maps
+;; and the root hold capabilities: a CSR instruction reads one whole, `csrrw`
+;; writes one whole, and the others write its address. The root is read
+;; only.
 
 ;; ---------------------------------------------------------------- the buffer
 ;; buf is the output buffer and len the bytes of it used. labels is an alist
@@ -358,9 +361,7 @@
 
 ;; ---------------------------------------------------------------- memory
 ;; The base register of a load or store is the capability that authorises
-;; it. Base x0, which RVY reserves, is Xlm's integer addressing: the offset
-;; is then an integer address, reached through DDC, which only privileged
-;; code may do.
+;; it. Base x0, which RVY reserves, is illegal: x0 is NULL, no authority.
 (define (i-lb a rd rs1 off)  (i-i a rd rs1 off 0 op-load))
 (define (i-lh a rd rs1 off)  (i-i a rd rs1 off 1 op-load))
 (define (i-lw a rd rs1 off)
@@ -527,21 +528,6 @@
 (define (i-retag a rd rs1 from-kind to-kind)
   (x-r a (%logior #x40 (%logand from-kind 31)) rd rs1 to-kind))
 
-;; Memory by integer address, through DDC: rs1 is the address. A store's
-;; rd field and a load's rs2 field say the width, 3 a capability.
-(define (ddc-load a sel rd rs1)    (x-r a #x7d rd rs1 sel))
-(define (ddc-store a sel rs2 rs1)  (x-r a #x7c sel rs1 rs2))
-(define (i-lb-ddc a rd rs1)  (ddc-load a 0 rd rs1))
-(define (i-lh-ddc a rd rs1)  (ddc-load a 1 rd rs1))
-(define (i-lw-ddc a rd rs1)  (ddc-load a 2 rd rs1))
-(define (i-ly-ddc a rd rs1)  (ddc-load a 3 rd rs1))
-(define (i-lbu-ddc a rd rs1) (ddc-load a 4 rd rs1))
-(define (i-lhu-ddc a rd rs1) (ddc-load a 5 rd rs1))
-(define (i-sb-ddc a rs2 rs1) (ddc-store a 0 rs2 rs1))
-(define (i-sh-ddc a rs2 rs1) (ddc-store a 1 rs2 rs1))
-(define (i-sw-ddc a rs2 rs1) (ddc-store a 2 rs2 rs1))
-(define (i-sy-ddc a rs2 rs1) (ddc-store a 3 rs2 rs1))
-
 ;; Indexed access: rd, object, index; for the stores rd is the value
 ;; written. funct7 is the form, store, byte and immediate index, above the
 ;; type the object has to be, so one instruction checks the tag, the type,
@@ -630,28 +616,6 @@
              (hi (%logand (%lsh (%- v lo-signed) -12) #xfffff)))
         (i-lui a rd hi)
         (if (%= lo-signed 0) nil (i-addi a rd rd lo-signed)))))
-
-;; Memory at an absolute address. Base x0 reaches the low 2 KiB through DDC
-;; in one instruction; anywhere else the address is formed in a register and
-;; reached with the DDC form. A load forms it in its own destination; a store
-;; needs a scratch register. The ly and sy forms move an 8-byte value, as the
-;; low globals that hold one are.
-(define (i-lw-abs a rd addr)
-  (if (fits12? addr)
-      (i-lw a rd $zero addr)
-      (begin (i-li a rd addr) (i-lw-ddc a rd rd))))
-(define (i-ly-abs a rd addr)
-  (if (fits12? addr)
-      (i-ly a rd $zero addr)
-      (begin (i-li a rd addr) (i-ly-ddc a rd rd))))
-(define (i-sw-abs a rs addr scratch)
-  (if (fits12? addr)
-      (i-sw a rs $zero addr)
-      (begin (i-li a scratch addr) (i-sw-ddc a rs scratch))))
-(define (i-sy-abs a rs addr scratch)
-  (if (fits12? addr)
-      (i-sy a rs $zero addr)
-      (begin (i-li a scratch addr) (i-sy-ddc a rs scratch))))
 
 ;; ---------------------------------------------------------------- branches
 ;; Label-relative forms record a fixup and are patched once every label is
@@ -747,11 +711,12 @@
 (define (code-size a) (%rrl (asm-len a)))
 
 ;; The capability that enters placed code: bounds exactly its bytes, EX, and
-;; SR as well when the code is privileged.
+;; SR as well when the code is privileged, made from object space's own
+;; capability in the kernel block, which holds both.
 (define (entry-capability a)
   (unsafe
   (%cap-and-perms
-   (%cap-bounds-exact (%from-addr (asm-origin a)) (code-size a))
+   (%cap-bounds-exact (%cap-set-addr (kernel-ref kb-objects) (asm-origin a)) (code-size a))
    (if (asm-privileged a) (%logior perm-ex perm-sr) perm-ex))))
 
 ;; The code into a fresh text, through the text's own capability: a word at
@@ -773,20 +738,6 @@
     (copy-into a text)
     (set-asm-origin! a (%addr-of text))
     (entry-capability a)))
-
-;; Place at a fixed address, by number through DDC, and answer the address.
-;; The reset stub is assembled last, because it refers to everything else,
-;; and has to sit at the reset vector, where the processor starts with the
-;; root in PCC.
-(define (place-at a addr)
-  (unsafe
-  (set-asm-origin! a addr)
-  (resolve a)
-  (let ((len (asm-len a)) (buf (asm-buf a)) (i 0))
-    (while (%< i len)
-      (%st-byte! (%+ addr i) (%bytes-ref buf i))
-      (set! i (%+ i 1))))
-  addr))
 
 ;; The placed code as a heap object, which is how the collector sees every
 ;; literal it refers to: slot 0 the entry capability, then the name, then

@@ -26,9 +26,9 @@ pub const XLM0: usize = 64;
 pub const FIXI0: usize = 72;
 /// The Xlm R-type group by funct7, in `XLM_RS` order.
 pub const XLMR0: usize = 76;
-const XLM_RS: [u32; 28] = [
+const XLM_RS: [u32; 26] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x18, 0x19, 0x1a, 0x20, 0x21, 0x22,
-    0x23, 0x24, 0x7c, 0x7d, 0x40,
+    0x23, 0x24, 0x40,
 ];
 /// Indexed access by form: ldx stx ldxb stxb and the immediate four.
 pub const INDEX0: usize = 104;
@@ -249,10 +249,9 @@ const TOKENS: [&str; 64] = [
 ];
 const XLMS: [&str; 8] = ["lref", "sref", "lvar", "beqx", "bnex", "xlm fixnum imm", "xlm r-type", "xlm index"];
 const FIXIS: [&str; 4] = ["faddi", "faddio", "fandi", "fori"];
-const XLMR_NAMES: [&str; 28] = [
+const XLMR_NAMES: [&str; 26] = [
     "fadd", "fsub", "fmul", "fdiv", "frem", "fand", "for", "fxor", "faddo", "fsubo", "fmulo", "fsll", "fsrl", "fsra",
-    "flt", "fltu", "feq", "fshi sll", "fshi srl", "fshi sra", "jcl", "vkind", "lhdr", "sealcl", "npair", "store.ddc",
-    "load.ddc", "retag",
+    "flt", "fltu", "feq", "fshi sll", "fshi srl", "fshi sra", "jcl", "vkind", "lhdr", "sealcl", "npair", "retag",
 ];
 const INDEXES: [&str; 8] = ["ldx", "stx", "ldxb", "stxb", "ldxi", "stxi", "ldxbi", "stxbi"];
 const RVYS: [&str; 8] = ["rvy r-type", "ly", "sy", "?3", "yaddi", "ybndswi", "?6", "?7"];
@@ -268,7 +267,7 @@ pub fn name(slot: usize) -> &'static str {
         0..=63 => TOKENS[slot],
         XLM0..=71 => XLMS[slot - XLM0],
         FIXI0..=75 => FIXIS[slot - FIXI0],
-        XLMR0..=103 => XLMR_NAMES[slot - XLMR0],
+        XLMR0..=101 => XLMR_NAMES[slot - XLMR0],
         INDEX0..=111 => INDEXES[slot - INDEX0],
         RVY0..=119 => RVYS[slot - RVY0],
         RVYR0..=134 => RVYR_NAMES[slot - RVYR0],
@@ -355,7 +354,7 @@ pub fn report(prof: &[u64; SLOTS]) -> String {
         line(&mut out, "", i);
         // A token's breakdown immediately under it.
         let subs: &[std::ops::Range<usize>] = match i {
-            34 => &[XLM0..XLM0 + 8, FIXI0..FIXI0 + 4, XLMR0..XLMR0 + 28, INDEX0..INDEX0 + 8],
+            34 => &[XLM0..XLM0 + 8, FIXI0..FIXI0 + 4, XLMR0..XLMR0 + 26, INDEX0..INDEX0 + 8],
             62 => &[RVY0..RVY0 + 8, RVYR0..RVYR0 + 15, RVY1..RVY1 + 8, YAMASK..YAMASK + 1],
             _ => &[],
         };

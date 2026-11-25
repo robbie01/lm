@@ -41,9 +41,9 @@ pub const PAGE_TAG_BYTES: usize = (PAGE / 8 / 8) as usize;
 fn regions(m: &Machine) -> Vec<(u32, u32)> {
     let g = |off: u32| m.load_cap(off).addr;
     vec![
-        (0, LOW_END), // nil cell, globals, object bins, the reset stub
-        (CONS_BASE, g(LG_CONS_PTR)),
-        (OBJ_BASE, g(LG_OBJ_PTR)),
+        (0, LOW_END), // the nil cell and the reset stub
+        (CONS_BASE, g(KB_CONS_PTR)),
+        (OBJ_BASE, g(KB_OBJ_PTR)),
     ]
 }
 
@@ -246,7 +246,7 @@ mod tests {
         let s = h.intern("round-trip");
         let v = h.vector(&[fix(-7), chr('x' as u32), s, NIL]);
         let l = h.list(&[v, fix(1 << 30), s]);
-        h.set_gv(LG_ROOTS, l);
+        h.set_gv(KB_ROOTS, l);
         let path = std::env::temp_dir().join(format!("lm-image-test-{}.img", std::process::id()));
         let path = path.to_str().unwrap();
         save(&m, path, RESET_VECTOR).unwrap();
@@ -261,7 +261,7 @@ mod tests {
             }
         }
         let h = Heap::new(&mut back);
-        let l = h.gv(LG_ROOTS);
+        let l = h.gv(KB_ROOTS);
         assert!(is_cons(l));
         let v = h.car(l);
         assert!(h.is_type(v, T_VECTOR));

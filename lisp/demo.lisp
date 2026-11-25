@@ -358,7 +358,7 @@
     (exec::remove-int-server int-vblank *nest-int*)
     (num-check 'nested-result *nest-last*
                (* 1000000 (+ 1000000 *nest-hits*)))
-    (num-check 'depth-unwound (peek lg-trapdepth) 0)
+    (num-check 'depth-unwound (trap-depth) 0)
     (princ "nesting: ") (princ *nest-hits*)
     (princ " traps taken inside the trap handler, all of them survived")
     (newline))))
@@ -737,10 +737,10 @@
                  (list (blit-busy?) gc::*phase*) (list t gc::phase-idle))
       (unsafe (without-interrupts
                 (gc::start-cycle)
-                (gc::gc-push *blit-ring*)
+                (gc::gc-push-1 *blit-ring*)
                 (gc::trace-some)))
       (num-check 'is-kept-by-its-descriptor
-                 (list (blit-busy?) (unsafe (gc::marked? (- a 8))))
+                 (list (blit-busy?) (unsafe (gc::marked? (gc::mark-map) (- a 8))))
                  (list t t))
       (while (= gc::*phase* gc::phase-marking) (gc::step))
       (gc)
@@ -809,6 +809,12 @@
        (set! i (+ i 1)))
      found)))
 
+;; A bitmap put on show and dropped: only the display holds it.
+(define (show-and-drop gfx)
+  (let ((b (alloc-bitmap 64 64)))
+    (%cap-st! gfx hw::gfx-base (bm-pixels b))
+    (%addr-of (bm-pixels b))))
+
 (define (devices)
   (let ((sys (unsafe (device-page dev-sys)))
         (disk (unsafe (device-page dev-disk)))
@@ -840,8 +846,21 @@
     (num-check 'the-walk-finds-a-page-left-lying-about
                (device-cap? (loads-reach (list (list 1 (vector 2 sys))))) t)
     (num-check 'nothing-a-program-can-name-leads-to-one
-               (loads-reach (list (unsafe (%ld-cap lg-symlist)) (this-task)))
+               (loads-reach (list (unsafe (all-symbols)) (this-task)))
                nil))
+  ;; The display is handed its bitmap as a capability and keeps it: a bitmap
+  ;; on show that nothing else holds survives collections, because the
+  ;; scan-out register hands its capability back to the collector's roots.
+  (let* ((gfx (unsafe (device-page dev-gfx)))
+         (was (%cap-ld gfx hw::gfx-base))
+         (a (show-and-drop gfx)))
+    (gc)
+    (gc)
+    (num-check 'the-display-hands-its-bitmap-back
+               (%addr-of (%cap-ld gfx hw::gfx-base)) a)
+    (num-check 'and-keeps-it
+               (unsafe (gc::object-start-at (gc::start-map) (- a 8))) (- a 8))
+    (%cap-st! gfx hw::gfx-base was))
   (princ "devices: done (nothing above = all correct)")
   (newline))
 

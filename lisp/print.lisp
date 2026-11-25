@@ -231,9 +231,13 @@
 (define (display-to-string x) (with-output-to-string (lambda () (display x))))
 
 ;; ---------------------------------------------------------------- errors
-;; There is no condition system. An error prints what it knows and traps, and
-;; the trap handler prints a backtrace and restarts the prompt, or ends the
-;; task.
+;; There is no condition system. An error prints what it knows and calls the
+;; error handler, which the kickstart sets to trap, and the trap handler
+;; prints a backtrace and restarts the prompt, or ends the task. Declared,
+;; not initialised, so the boot list does not empty it; until there is one,
+;; an error stops the machine.
+(define *error-handler*)
+
 (define (error . args)
   (unsafe
   (emit-str "error: ")
@@ -242,7 +246,7 @@
       (if first (set! first nil) (space))
       (if (%string? a) (emit-str a) (write a))))
   (newline)
-  (let ((h (%ld-cap lg-errhandler)))
+  (let ((h (if (%eq? (%symbol-value '*error-handler*) (%unbound)) nil *error-handler*)))
     (if h (%funcall h args) (%halt exit-error)))))
 
 (define (warn . args)

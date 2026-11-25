@@ -95,7 +95,7 @@ pub fn run(path: &str, json: bool) -> i32 {
 
     let mut pkgs: Vec<Pkg> = Vec::new();
     let mut index: HashMap<V, usize> = HashMap::new();
-    let mut p = h.gv(LG_PACKAGES);
+    let mut p = h.gv(KB_PACKAGES);
     while is_cons(p) {
         let rec = h.car(p);
         index.insert(rec, pkgs.len());
@@ -111,7 +111,7 @@ pub fn run(path: &str, json: bool) -> i32 {
     }
 
     let mut homeless = 0;
-    let mut p = h.gv(LG_SYMLIST);
+    let mut p = h.gv(KB_SYMBOLS);
     while is_cons(p) {
         let s = h.car(p);
         match index.get(&h.slot(s, SYM_PACKAGE)) {
@@ -136,10 +136,10 @@ pub fn run(path: &str, json: bool) -> i32 {
     // `collect-for-image` blanks every free block, so only a page with
     // something live on it is written; what is dead on such a page stays
     // until the forge compacts the image.
-    let roots: Vec<V> = VALUE_GLOBALS.iter().map(|a| h.gv(*a)).collect();
-    let obj_high = (h.g(LG_OBJ_PTR) - OBJ_BASE) as u64;
+    let roots: Vec<V> = KERNEL_VALUES.iter().map(|a| h.gv(*a)).collect();
+    let obj_high = (h.g(KB_OBJ_PTR) - OBJ_BASE) as u64;
     let code_high = h.text_bytes() as u64;
-    let pair_high = (h.g(LG_CONS_PTR) - CONS_BASE) as u64;
+    let pair_high = (h.g(KB_CONS_PTR) - CONS_BASE) as u64;
     let obj_pages = (obj_high as usize).div_ceil(4096);
     let mut page_used = vec![false; obj_pages.max(1)];
     let mut used = |at: u32, size: u32| {

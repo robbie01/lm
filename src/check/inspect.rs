@@ -32,7 +32,7 @@ struct Census {
 /// function's text holds no capability at all.
 fn census(h: &Heap) -> Census {
     let mut c = Census::default();
-    let (cons_hi, obj_hi) = (h.g(LG_CONS_PTR), h.g(LG_OBJ_PTR));
+    let (cons_hi, obj_hi) = (h.g(KB_CONS_PTR), h.g(KB_OBJ_PTR));
     let spans = spans_of(h, is_byte_type);
     let states = spans_of(h, is_state_type);
     let stale = |at: u32| {
@@ -99,7 +99,7 @@ fn spans_of(h: &Heap, which: fn(u32) -> bool) -> Vec<(u32, u32, u32)> {
 
 /// The function whose code holds `at`, by its code object's entry.
 fn owner(h: &Heap, at: u32) -> String {
-    let mut p = h.gv(LG_SYMLIST);
+    let mut p = h.gv(KB_SYMBOLS);
     while is_cons(p) {
         let sym = h.car(p);
         let f = h.sym_value(sym);
@@ -123,25 +123,28 @@ pub fn run(path: &str, names: &[String]) -> i32 {
             return 1;
         }
     };
-    let h = Heap::new(&mut m);
+    let mut h = Heap::new(&mut m);
+    let sys = h.package("sys");
+    let boot = h.find_in(sys, "*boot-list*");
+    let boot = if boot == NIL { NIL } else { h.sym_value(boot) };
     println!("{path}: entry {:#x}", loaded.entry);
     println!(
         "  objects {} KiB ({} KiB of it code), pairs {}",
-        (h.g(LG_OBJ_PTR) - OBJ_BASE) / 1024,
+        (h.g(KB_OBJ_PTR) - OBJ_BASE) / 1024,
         h.text_bytes() / 1024,
-        (h.g(LG_CONS_PTR) - CONS_BASE) / PAIR_BYTES
+        (h.g(KB_CONS_PTR) - CONS_BASE) / PAIR_BYTES
     );
     println!(
         "  boot list {} thunks, obarray {:#x}",
-        h.list_len(h.gv(LG_BOOTLIST)),
-        h.gv(LG_OBARRAY).addr
+        h.list_len(boot),
+        h.gv(KB_OBARRAY).addr
     );
 
     // Walk every symbol and count how many carry a value.
     let mut total = 0;
     let mut bound = 0;
     let mut dups: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-    let mut p = h.gv(LG_SYMLIST);
+    let mut p = h.gv(KB_SYMBOLS);
     while is_cons(p) {
         let s = h.car(p);
         *dups.entry(h.sym_name(s)).or_insert(0) += 1;
@@ -195,7 +198,7 @@ pub fn run(path: &str, names: &[String]) -> i32 {
 
     // Anything named on the command line gets reported in full.
     for want in names {
-        let mut p = h.gv(LG_SYMLIST);
+        let mut p = h.gv(KB_SYMBOLS);
         let mut found = false;
         while is_cons(p) {
             let s = h.car(p);

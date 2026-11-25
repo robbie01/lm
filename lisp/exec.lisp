@@ -13,10 +13,10 @@
 ;;; or owned by one task and reached through its port, and the kernel's own
 ;;; few-instruction sections turn interrupts off.
 ;;;
-;;; The context switch is one CSR write. The trap stub saves all 32
-;;; registers into the block `mscratch` names and restores from there on the
-;;; way out, so switching tasks is pointing `mscratch` at a different task's
-;;; context.
+;;; The context switch is one store. The trap stub saves all 32 registers
+;;; into the block the kernel block's frame names and restores from there on
+;;; the way out, so switching tasks is pointing the frame at a different
+;;; task's context.
 
 (in-package exec)
 (unsafe-file)
@@ -139,7 +139,7 @@
 (defrecord (task tc) (include node)
   state sigalloc sigwait sigrecvd
   stack                          ; the whole stack, standing at its top
-  context                        ; the register block `mscratch` names
+  context                        ; the register block the trap stub saves into
   fn                             ; the closure the task runs
   result switches
   binds                          ; this task's fluid bindings, innermost first
@@ -288,7 +288,7 @@
   (set-tc-state! task ts-ready)
   (enqueue (ready-list) task))
 
-;; Choose the next task and point `mscratch` at its context. Called only from
+;; Choose the next task and point the frame at its context. Called only from
 ;; inside the trap handler, with the outgoing task's registers already saved.
 (define (switch-tasks)
   (let* ((cur (this-task))
@@ -740,16 +740,17 @@
     ;; `remove-task` on the current task never returns.
     (while t (reschedule))))
 
-;; The stub reads `task-finished` out of a low global, which takes integer
-;; addressing, so it is placed with SR. Exec builds it each time it starts,
+;; The stub reads `task-finished` out of the kernel block, which takes
+;; `mscratch`, so it is placed with SR. Exec builds it each time it starts,
 ;; and the sentry in `*task-exit-stub*` keeps its text.
 (define (build-task-exit-stub)
   (let ((a (make-assembler)))
     (set-asm-privileged! a t)
     (i-li a $t1 0)
-    (i-ly a $t0 $zero lg-task-exit)
+    (i-csrrs a $t0 csr-mscratch $zero)
+    (i-ly a $t0 $t0 (%* value-bytes kb-task-exit))
     (i-jcl a $ra $t0)
-    (%st-cap! lg-task-exit (%symbol-value 'task-finished))
+    (kernel-set! kb-task-exit (%symbol-value 'task-finished))
     (set! *task-exit-stub* (%cap-seal-entry (place a)))
     *task-exit-stub*))
 
@@ -1456,7 +1457,8 @@
   (set! *ticks* 0)
   ;; The code that is already running becomes task zero. Its context is the
   ;; boot context the trap stub has been saving into all along, and its stack
-  ;; the boot stack, both objects the forge made and left in low globals.
+  ;; the boot stack, both objects the forge made and left in the kernel
+  ;; block.
   (let ((boot (tc-alloc)))
     (set-node-name! boot "boot")
     (set-node-pri! boot 0)
@@ -1465,8 +1467,8 @@
     (zero-task-counters! boot)
     (set-tc-quantum! boot *quantum*)
     (set-tc-state! boot ts-run)
-    (set-tc-context! boot (task-seal (%ld-cap lg-trapsave)))
-    (set-tc-stack! boot (task-seal (%ld-cap lg-boot-stack)))
+    (set-tc-context! boot (task-seal (kernel-ref kb-boot-frame)))
+    (set-tc-stack! boot (task-seal (kernel-ref kb-boot-stack)))
     (set-tc-sigalloc! boot sig-reserved)
     ;; Task zero takes whatever was bound before there were tasks.
     (set-tc-binds! boot *boot-binds*)

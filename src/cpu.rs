@@ -170,21 +170,14 @@ fn auth(m: &mut Machine, s: u32, need: u64, a: u32, sz: u32) -> bool {
         && in_win(a, unsafe { *m.wb.get_unchecked(k) }, unsafe { *m.wl.get_unchecked(k) }, sz)
 }
 
-/// The same through DDC, for integer addressing: PCC must have SR.
-#[inline(always)]
-fn ddc_auth(m: &Machine, need: u64, a: u32, sz: u32) -> bool {
-    m.pcc_has(P_SR) && pm(m.ddc_perms) & need == need && in_win(a, m.ddc_wb, m.ddc_wl, sz)
-}
-
-/// The fast test for a load or store with base register `s`: through `s`,
-/// or through DDC when `s` is x0. Answers the authority's metadata, in
-/// `xm` positions, which a capability load reads LC and LM from.
+/// The fast test for a load or store with base register `s`. Answers the
+/// authority's metadata, in `xm` positions, which a capability load reads
+/// LC and LM from. x0 reads as NULL, so a load or store with x0 as its base,
+/// an encoding RVY reserves, never passes; the slow path calls it illegal.
 #[inline(always)]
 fn authority(m: &mut Machine, s: u32, need: u64, a: u32, sz: u32) -> Option<u64> {
     if auth(m, s, need, a, sz) {
         Some(h(m, s))
-    } else if s == 0 && ddc_auth(m, need, a, sz) {
-        Some(m.ddc.meta as u64)
     } else {
         None
     }
@@ -363,8 +356,6 @@ fn enter(m: &mut Machine, _w: u32, pc: u32, fuel: u32) -> Stop {
 }
 
 pub fn run_block(m: &mut Machine, pc: u32, fuel: u32) -> Stop {
-    let ddc = m.ddc;
-    m.set_ddc(ddc);
     enter(m, 0, pc, fuel)
 }
 
@@ -575,7 +566,7 @@ unsafe fn st_data(m: &mut Machine, a: u32, f: u32, v: u32) {
 }
 
 /// The write barrier, asked before every store into RAM, with the register
-/// the store goes through, or `WHO_DDC`.
+/// the store goes through.
 #[inline(always)]
 fn barrier(m: &Machine, a: u32, sz: u32, who: u32) -> Option<u32> {
     if m.gcmode & 1 == 0 {
@@ -636,9 +627,8 @@ fn store(m: &mut Machine, a: u32, f: u32, v: u32, au: u64) {
     }
 }
 
-/// LOAD: `lb lh lw lbu lhu`, through `cs1`, or through DDC when the base
-/// register is x0. funct3 3 is RV64's `ld` and Zilsd's, neither of which
-/// the machine has.
+/// LOAD: `lb lh lw lbu lhu`, through `cs1`. funct3 3 is RV64's `ld` and
+/// Zilsd's, neither of which the machine has.
 #[inline(never)]
 fn op_load(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let s = rs1(w);
@@ -671,81 +661,40 @@ fn op_store(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     mem_slow(m, w, pc, fuel)
 }
 
-/// Xlm's loads and stores through DDC, `lb.ddc` to `ly.ddc` and `sb.ddc`
-/// to `sy.ddc`: `rs1` the integer address, the width in `rd` for a store
-/// and in `rs2` for a load.
-#[inline(never)]
-fn op_ddc(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
-    let a = r(m, rs1(w));
-    if w >> 25 == 0x7c {
-        let (f, v) = (rd(w), rs2(w));
-        if f < 4 && (f != 3 || a & 7 == 0) {
-            let sz = SIZE[f as usize];
-            if ddc_auth(m, M_SD, a, sz) && barrier(m, a, sz, WHO_DDC).is_none() {
-                let au = m.ddc.meta as u64;
-                store(m, a, f, v, au);
-                next!(m, pc.wrapping_add(4), fuel - 1)
-            }
-        }
-    } else {
-        let f = rs2(w);
-        if f < 6 && (f != 3 || a & 7 == 0) && ddc_auth(m, M_LD, a, SIZE[f as usize]) {
-            let au = m.ddc.meta as u64;
-            load(m, rd(w), a, f, au);
-            next!(m, pc.wrapping_add(4), fuel - 1)
-        }
-    }
-    mem_slow(m, w, pc, fuel)
-}
-
-/// Whose authority a load or store goes through.
-#[derive(Clone, Copy)]
-enum Via {
-    Reg(u32),
-    Ddc,
-}
-
 /// A load or store decoded, whatever its encoding: the width as LOAD's
-/// funct3 numbers it (3 a capability), the authority, the address, the
-/// register loaded or stored, and the instruction's length.
+/// funct3 numbers it (3 a capability), the register the authority is in, the
+/// address, the register loaded or stored, and the instruction's length.
 struct Mem {
     store: bool,
     f: u32,
-    via: Via,
+    via: u32,
     a: u32,
     data: u32,
     len: u32,
 }
 
 fn decode_mem(m: &Machine, w: u32) -> Option<Mem> {
-    let base = |s: u32| if s == 0 { Via::Ddc } else { Via::Reg(s) };
     let at = |s: u32, off: u32| r(m, s).wrapping_add(off);
     Some(if w & 3 == 3 {
         let (f, s) = (f3(w), rs1(w));
         match w & 0x7f {
-            0x03 if f < 6 && f != 3 => Mem { store: false, f, via: base(s), a: at(s, imm_i(w)), data: rd(w), len: 4 },
-            0x23 if f < 3 => Mem { store: true, f, via: base(s), a: at(s, imm_s(w)), data: rs2(w), len: 4 },
-            0x7b if f == 1 => Mem { store: false, f: 3, via: base(s), a: at(s, imm_i(w)), data: rd(w), len: 4 },
-            0x7b if f == 2 => Mem { store: true, f: 3, via: base(s), a: at(s, imm_s(w)), data: rs2(w), len: 4 },
-            0x0b if f == 6 && w >> 25 == 0x7d && rs2(w) < 6 => {
-                Mem { store: false, f: rs2(w), via: Via::Ddc, a: r(m, s), data: rd(w), len: 4 }
-            }
-            0x0b if f == 6 && w >> 25 == 0x7c && rd(w) < 4 => {
-                Mem { store: true, f: rd(w), via: Via::Ddc, a: r(m, s), data: rs2(w), len: 4 }
-            }
+            0x03 if f < 6 && f != 3 => Mem { store: false, f, via: s, a: at(s, imm_i(w)), data: rd(w), len: 4 },
+            0x23 if f < 3 => Mem { store: true, f, via: s, a: at(s, imm_s(w)), data: rs2(w), len: 4 },
+            0x7b if f == 1 => Mem { store: false, f: 3, via: s, a: at(s, imm_i(w)), data: rd(w), len: 4 },
+            0x7b if f == 2 => Mem { store: true, f: 3, via: s, a: at(s, imm_s(w)), data: rs2(w), len: 4 },
             _ => return None,
         }
     } else {
         let (q, f) = (w & 3, (w >> 13) & 7);
         match (q, f) {
-            (0, 2) => Mem { store: false, f: 2, via: Via::Reg(rcs(w, 7)), a: at(rcs(w, 7), clw_imm(w)), data: rcs(w, 2), len: 2 },
-            (0, 3) => Mem { store: false, f: 3, via: Via::Reg(rcs(w, 7)), a: at(rcs(w, 7), clc_imm(w)), data: rcs(w, 2), len: 2 },
-            (0, 6) => Mem { store: true, f: 2, via: Via::Reg(rcs(w, 7)), a: at(rcs(w, 7), clw_imm(w)), data: rcs(w, 2), len: 2 },
-            (0, 7) => Mem { store: true, f: 3, via: Via::Reg(rcs(w, 7)), a: at(rcs(w, 7), clc_imm(w)), data: rcs(w, 2), len: 2 },
-            (2, 2) if rd(w) != 0 => Mem { store: false, f: 2, via: Via::Reg(2), a: at(2, lwsp_imm(w)), data: rd(w), len: 2 },
-            (2, 3) if rd(w) != 0 => Mem { store: false, f: 3, via: Via::Reg(2), a: at(2, lcsp_imm(w)), data: rd(w), len: 2 },
-            (2, 6) => Mem { store: true, f: 2, via: Via::Reg(2), a: at(2, swsp_imm(w)), data: (w >> 2) & 31, len: 2 },
-            (2, 7) => Mem { store: true, f: 3, via: Via::Reg(2), a: at(2, scsp_imm(w)), data: (w >> 2) & 31, len: 2 },
+            (0, 2) => Mem { store: false, f: 2, via: rcs(w, 7), a: at(rcs(w, 7), clw_imm(w)), data: rcs(w, 2), len: 2 },
+            (0, 3) => Mem { store: false, f: 3, via: rcs(w, 7), a: at(rcs(w, 7), clc_imm(w)), data: rcs(w, 2), len: 2 },
+            (0, 6) => Mem { store: true, f: 2, via: rcs(w, 7), a: at(rcs(w, 7), clw_imm(w)), data: rcs(w, 2), len: 2 },
+            (0, 7) => Mem { store: true, f: 3, via: rcs(w, 7), a: at(rcs(w, 7), clc_imm(w)), data: rcs(w, 2), len: 2 },
+            (2, 2) if rd(w) != 0 => Mem { store: false, f: 2, via: 2, a: at(2, lwsp_imm(w)), data: rd(w), len: 2 },
+            (2, 3) if rd(w) != 0 => Mem { store: false, f: 3, via: 2, a: at(2, lcsp_imm(w)), data: rd(w), len: 2 },
+            (2, 6) => Mem { store: true, f: 2, via: 2, a: at(2, swsp_imm(w)), data: (w >> 2) & 31, len: 2 },
+            (2, 7) => Mem { store: true, f: 3, via: 2, a: at(2, scsp_imm(w)), data: (w >> 2) & 31, len: 2 },
             _ => return None,
         }
     })
@@ -774,16 +723,13 @@ fn check(m: &Machine, c: Cap, perm: u32, a: u32, sz: u32, store: bool) -> Result
 #[cold]
 #[inline(never)]
 fn mem_slow(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
-    let Some(d) = decode_mem(m, w) else {
+    // x0 as the base is an encoding RVY reserves, and there is no integer
+    // addressing to give it a meaning: memory is reached through
+    // capabilities only.
+    let Some(d) = decode_mem(m, w).filter(|d| d.via != 0) else {
         return illegal(m, w, pc, fuel);
     };
-    // Integer addressing is Xlm's, in the encodings RVY reserves, and
-    // without SR they are the reserved encodings they would otherwise be.
-    let (c, who) = match d.via {
-        Via::Reg(s) => (m.reg(s), s),
-        Via::Ddc if !m.pcc_has(P_SR) => return illegal(m, w, pc, fuel),
-        Via::Ddc => (m.ddc, WHO_DDC),
-    };
+    let (c, who) = (m.reg(d.via), d.via);
     let sz = SIZE[d.f as usize];
     let ram = match check(m, c, if d.store { P_SD } else { P_LD }, d.a, sz, d.store) {
         Ok(ram) => ram,
@@ -794,25 +740,35 @@ fn mem_slow(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     if d.f == 3 && d.a & 7 != 0 {
         return m.fault(if d.store { C_SFAULT } else { C_LFAULT }, d.a, pc, fuel);
     }
-    // A device hands out no capabilities, and only a capability register
-    // takes one.
-    if !ram && d.f == 3 && !(d.store && dev::takes_cap(d.a)) {
+    // Only a capability register takes a capability, and only the one
+    // whose chip keeps what it was given hands it back.
+    let cap_reg = if d.store { dev::takes_cap(d.a) } else { dev::gives_cap(d.a) };
+    if !ram && d.f == 3 && !cap_reg {
         return m.fault(if d.store { C_SFAULT } else { C_LFAULT }, d.a, pc, fuel);
     }
     if !ram {
         m.tick(fuel);
-        if d.f == 3 {
+        if d.f == 3 && d.store {
             let v = m.reg(d.data);
             let v = if c.has(P_SC) { v } else { v.without_tag() };
             dev::write_cap(m, d.a, v);
+        } else if d.f == 3 {
+            let v = dev::read_cap(m, d.a, c);
+            m.set_reg(d.data, v);
         } else if d.store {
             let v = r(m, d.data);
             dev::write(m, d.a, d.f, v);
-            // A store that powers the machine down is the last instruction.
+            // A store that powers the machine down is the last instruction,
+            // and one that resets the processor the last before the reset.
             if m.halted {
                 m.pc = pc.wrapping_add(d.len);
                 m.fuel_left = fuel - 1;
                 return Stop::Halt;
+            }
+            if m.reset_asked {
+                m.cpu_reset();
+                m.fuel_left = fuel - 1;
+                return Stop::Fuel;
             }
         } else {
             let v = dev::read(m, d.a, d.f);
@@ -1246,11 +1202,11 @@ fn op_rvy_r(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     next!(m, pc.wrapping_add(4), fuel - 1)
 }
 
-/// The header word of the object `c` names, if `c` is headed and the header
-/// is in RAM.
+/// The header word of the object `c` names, if `c` is headed and based
+/// past the start of object space, so that its header is in RAM.
 fn header(m: &Machine, c: Cap) -> Option<u32> {
     let b = c.base();
-    if !c.tag || !c.has(P_HD) || b < 8 || !m.in_ram(b - 8, 8) {
+    if !c.tag || !c.has(P_HD) || b <= OBJ_BASE || !m.in_ram(b - 8, 8) {
         return None;
     }
     Some(unsafe { m.rd32(b - 8) })
@@ -1272,7 +1228,7 @@ const PAIR_MASK: u64 = TAG | M_OT | M_HD;
 ///     f3 3  beqx  rs1, rs2, off  branch if identical
 ///     f3 4  bnex  rs1, rs2, off  branch if not
 ///     f3 5  fixnum immediates    imm[11:10] the operation, imm[9:0] signed
-///     f3 6  R-type, funct7 the operation: fixnums, calls, kinds, DDC
+///     f3 6  R-type, funct7 the operation: fixnums, calls, kinds, runs
 ///     f3 7  indexed access       funct7 = the form << 4 | the type
 /// ```
 ///
@@ -1333,7 +1289,7 @@ fn op_lvar(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     if hh & (READY | TAG | M_OT | M_HD | M_LD | M_LC) == READY | TAG | M_HD | M_LD | M_LC
         && a & 7 == 0
         && in_win(a, b, l, 8)
-        && b >= 8
+        && b > OBJ_BASE
         && unsafe { m.rd32(b - 8) } & 0xff == T_SYMBOL
     {
         let v = unsafe { m.rd_cap(a) };
@@ -1371,8 +1327,6 @@ fn op_beqx(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 ///     0x24  npair  cd, cs1             the next pair of a cons run
 ///     0x40 | from  retag rd, rs1, to   rs1 untagged of kind `from` (31 any);
 ///                                      rd its address with metadata `to`
-///     0x7c  sb.ddc .. sy.ddc           stores through DDC, rd the width
-///     0x7d  lb.ddc .. lhu.ddc          loads through DDC, rs2 the width
 /// ```
 #[inline(never)]
 fn op_xlm_r(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
@@ -1423,7 +1377,6 @@ fn op_xlm_r(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
                 next!(m, pc.wrapping_add(4), fuel - 1)
             }
         }
-        0x7c | 0x7d => return op_ddc(m, w, pc, fuel),
         0x40..=0x5f => {
             let from = (w >> 25) & 31;
             let hh = h(m, s);
@@ -1454,13 +1407,13 @@ fn op_xlm_r(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 }
 
 /// The header word of the object register `k` holds, read through its
-/// window: a headed capability, unsealed or a closure, whose bounds start
-/// in RAM, so that the header is the word below its window.
+/// window: a headed capability, unsealed or a closure, based past the start
+/// of object space, so that the header is the word below its window.
 #[inline(always)]
 fn headed(m: &Machine, k: usize, hh: u64) -> Option<u32> {
     let (b, l) = (m.wb[k], m.wl[k]);
     let ot = hh & M_OT;
-    let ok = hh & (READY | TAG | M_HD) == READY | TAG | M_HD && (ot == 0 || ot == M_CLOSURE) && b >= 8 && l != 0;
+    let ok = hh & (READY | TAG | M_HD) == READY | TAG | M_HD && (ot == 0 || ot == M_CLOSURE) && b > OBJ_BASE && l != 0;
     ok.then(|| unsafe { m.rd32(b - 8) })
 }
 
@@ -1652,9 +1605,10 @@ fn op_index(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     }
     let (base, wl) = (m.wb[k], m.wl[k]);
     // A headed capability whose bounds start in RAM has its base in the
-    // window and its header just below; one with no header there, the root,
-    // is not an object.
-    if base < 8 || wl == 0 {
+    // window and its header just below. One that is not based above the
+    // start of object space has no header there: the root, and object
+    // space's own capability, are not objects.
+    if base <= OBJ_BASE || wl == 0 {
         return m.fault(C_TYPE, s, pc, fuel);
     }
     let hdr = unsafe { m.rd32(base - 8) };
@@ -2082,7 +2036,7 @@ pub fn watch_backtrace(m: &Machine) -> String {
 /// answer is the object's own capability, headed and bounded to its payload.
 pub fn code_containing(m: &Machine, pc: u32) -> Option<Cap> {
     use crate::heap::{block_size, bounds_bytes, cap_to, CODE_ENTRY, PERMS_OBJECT, T_CODE};
-    let end = m.peek32(crate::map::LG_OBJ_PTR);
+    let end = m.peek32(crate::map::KB_OBJ_PTR);
     let mut p = crate::map::OBJ_BASE;
     while p < end {
         let hdr = m.peek32(p);

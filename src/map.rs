@@ -4,22 +4,23 @@
 //!   0000_0000  ..  0000_000F   the nil cell: a pair whose car and cdr are nil.
 //!                              nil is a capability to these 16 bytes that may
 //!                              read them and nothing else.
-//!   0000_0100  ..              the low-memory globals, one 8-byte slot each
-//!   0000_0400  ..  0000_05FF   the free bins of object space
-//!   0000_0800  ..  0000_08FF   the reset stub, where the processor starts
+//!   0000_0800  ..  0000_0FFF   the reset stub, where the processor starts
 //!   0100_0000  ..  08FF_FFFF   cons space, eight million pairs
-//!   0900_0000  ..  0CFF_FFFF   object space: every object, machine code,
-//!                              stacks and register contexts among them
-//!   0D00_0000  ..  0FFF_FFFF   the mark bitmap, the object-start map, the
-//!                              mark stack, scratch
+//!   0900_0000  ..  0CFF_FFFF   object space: every object, the kernel block,
+//!                              machine code, stacks and register contexts
+//!                              among them
+//!   0D00_0000  ..  0FFF_FFFF   the mark bitmap, the object-start map, and
+//!                              the collector's scratch
 //!   F000_0000  ..              device pages, 4 KiB each, 32-bit registers
 //! ```
 //!
-//! One flat address space. Tags exist for RAM only: a device page holds no
-//! capabilities. Every slot below 0x800 is reachable with one load or store
-//! off x0, which addresses memory through DDC. Nothing lies between the low
-//! page and cons space, which starts at 16 MiB so that its runs fall on
-//! round boundaries.
+//! One flat address space, and the machine reaches none of it by number.
+//! The reset stub turns this map into capabilities, once, each time the
+//! machine starts: nil, the kernel block, each region and each device page,
+//! from the root. Everything after that holds capabilities and works by
+//! offsets into them. Tags exist for RAM only: a device page holds no
+//! capabilities. Cons space starts at 16 MiB so that its runs fall on round
+//! boundaries.
 
 /// RAM: chip RAM, the first 128 MiB, which a display bitmap must lie in,
 /// and fast RAM above it.
@@ -30,14 +31,9 @@ pub const RAM_SIZE: u32 = CHIP_SIZE + FAST_SIZE;
 /// The 16-byte cell nil names. Its car and cdr hold nil.
 pub const NIL_CELL: u32 = 0x0000_0000;
 
-/// The low-memory globals. A global that holds an address holds it as a
-/// fixnum, and authority to what it names comes from DDC; one that holds a
-/// value holds the value.
-pub const LG_BASE: u32 = 0x0000_0100;
-
-/// Exact-fit free lists for object space, one 8-byte slot per granule count.
-/// Entry 0 holds everything too big to have a list of its own.
-pub const OBJ_BINS: u32 = 0x0000_0400;
+/// Exact-fit free lists for object space, one per granule count, in a
+/// vector the kernel block holds. Entry 0 holds everything too big to have a
+/// list of its own.
 pub const OBJ_BIN_COUNT: u32 = 64;
 
 /// The reset vector, where PCC starts, and the room the reset stub has
@@ -45,10 +41,10 @@ pub const OBJ_BIN_COUNT: u32 = 64;
 /// that is not an object: every function's machine code is an object in
 /// object space (`T_TEXT`), reached through its entry capability.
 pub const RESET_VECTOR: u32 = 0x0000_0800;
-pub const RESET_RESERVE: u32 = 256;
+pub const RESET_RESERVE: u32 = 1024;
 
-/// The end of the low block, the nil cell, the globals, the bins and the
-/// reset stub, which an image saves whole.
+/// The end of the low block, the nil cell and the reset stub, which an
+/// image saves whole.
 pub const LOW_END: u32 = 0x0000_1000;
 
 pub const CONS_BASE: u32 = 0x0100_0000;
@@ -58,13 +54,14 @@ pub const OBJ_BASE: u32 = 0x0900_0000;
 pub const OBJ_END: u32 = 0x0D00_0000; // 64 MiB
 
 /// Everything above this is the collector's: the mark bitmap, the
-/// object-start map, the mark stack, and scratch.
+/// object-start map, and scratch.
 pub const FAST_BASE: u32 = 0x0D00_0000;
 
 /// The collector's mark bitmap: one bit per eight bytes of heap from
 /// `CONS_BASE`, bit i of the word at index i/32. The write barrier reads it
-/// (see `mach::CSR_GCMODE`), so the address is the machine's, not the
-/// collector's to choose: gc.lisp's `gc-bitmap` is this.
+/// through the capability in `mach::CSR_GCMARKS`, so how a map is laid out
+/// is the machine's; where it lies is whatever that capability says, and
+/// the reset stub says this.
 pub const GC_BITMAP: u32 = FAST_BASE;
 pub const GC_BITMAP_BYTES: u32 = (OBJ_END - CONS_BASE) >> 6;
 
@@ -72,13 +69,19 @@ pub const GC_BITMAP_BYTES: u32 = (OBJ_END - CONS_BASE) >> 6;
 /// `OBJ_BASE`, set at the header of every block the allocator has handed out
 /// and not yet seen swept. A capability whose base lies inside an object's
 /// payload finds the object by the nearest set bit at or below the granule
-/// before its base. The write barrier reads it too.
+/// before its base. The write barrier reads it too, through the capability
+/// in `mach::CSR_GCSTARTS`.
 pub const OBJ_STARTS: u32 = GC_BITMAP + GC_BITMAP_BYTES;
 pub const OBJ_STARTS_BYTES: u32 = (OBJ_END - OBJ_BASE) >> 6;
-/// A word that holds `OBJ_STARTS_MAGIC` once the map describes object space:
-/// scratch memory starts zero, so a machine fresh from an image builds the
-/// map before its first collection marks anything.
-pub const OBJ_STARTS_READY: u32 = OBJ_STARTS + OBJ_STARTS_BYTES;
+
+/// The collector's scratch, the rest of RAM: the mark stack, the
+/// compactor's table and the image writer's tag maps, laid out by gc.lisp.
+/// Its first word holds `OBJ_STARTS_MAGIC` once the start map describes
+/// object space: scratch memory starts zero, so a machine fresh from an
+/// image builds the map before its first collection marks anything.
+pub const SCRATCH: u32 = OBJ_STARTS + OBJ_STARTS_BYTES;
+pub const SCRATCH_BYTES: u32 = RAM_SIZE - SCRATCH;
+pub const OBJ_STARTS_READY: u32 = SCRATCH;
 pub const OBJ_STARTS_MAGIC: u32 = 0x0b57_a275;
 
 pub const MMIO_BASE: u32 = 0xF000_0000;
@@ -106,54 +109,75 @@ pub const INT_BLIT: u32 = 3;
 pub const INT_DISK: u32 = 4;
 pub const INT_SOFT: u32 = 5; // software interrupt, for Exec's Cause()
 
-// ============================================================ Lisp globals
-// Slot numbers within LG_BASE, eight bytes apart. Kept in one place and
-// emitted into a generated Lisp file at build time so the two sides cannot
-// drift apart.
+/// How many device pages there are, the reserved one included.
+pub const DEV_COUNT: u32 = 8;
 
-macro_rules! globals {
+// ======================================================== the kernel block
+// The kernel's own state, one object: the first in object space, where the
+// forge makes it and nothing moves it, so that the reset stub can mint it
+// from the root and put it in `mscratch`. Everything after reaches it
+// through `mscratch`, which takes SR to read. Its slots are kept in one place
+// and emitted into the generated layout, so the two sides cannot drift
+// apart. The Rust names are the slots' addresses, which only the forge and
+// the tools outside the machine use.
+
+/// Where the kernel block's payload starts: its header is the first granule
+/// of object space.
+pub const KB_BASE: u32 = OBJ_BASE + 8;
+
+macro_rules! kernel {
     ($($name:ident = $slot:expr, $lisp:expr;)*) => {
-        $(pub const $name: u32 = LG_BASE + 8 * $slot;)*
-        pub const GLOBAL_NAMES: &[(&str, u32)] = &[$(($lisp, LG_BASE + 8 * $slot)),*];
+        $(pub const $name: u32 = KB_BASE + 8 * $slot;)*
+        pub const KERNEL_SLOTS: &[(&str, u32)] = &[$(($lisp, $slot)),*];
     };
 }
 
-globals! {
-    LG_CONS_PTR   = 0,  "cons-ptr";     // bump pointer, cons space
-    LG_CONS_END   = 1,  "cons-end";
-    LG_OBJ_PTR    = 2,  "obj-ptr";      // bump pointer, object space
-    LG_OBJ_END    = 3,  "obj-end";
-    LG_CONS_FREE  = 4,  "cons-free";    // free list head, cons space
-    LG_OBARRAY    = 5,  "obarray";      // vector of symbol buckets
-    LG_GCCOUNT    = 6,  "gccount";
-    LG_BOOTSTACK  = 7,  "boot-stack";   // the boot stack, standing at its top
-    LG_TRAPSTACK  = 8,  "trap-stack";   // the trap handler's, likewise
-    LG_TOPLEVEL   = 9,  "toplevel";     // closure the kickstart enters
-    LG_TRAPNEST   = 10, "trap-nest";    // a vector of frames for nested traps
-    LG_TRAPSAVE   = 11, "trapsave";     // the boot context, which `mscratch`
-                                        // names at reset
-    LG_ROOTS      = 12, "roots";        // vector of extra gc roots
-    LG_ERRHANDLER = 13, "errhandler";   // closure called on a lisp error
-    LG_SYMLIST    = 14, "symlist";      // every interned symbol, for the gc
-    LG_CONSFREEN  = 15, "cons-free-n";  // cells on the cons free list
-    LG_OBJFREEN   = 16, "obj-free-n";
-    LG_TRAPHOOK   = 17, "traphook";     // closure called from the trap stub
-    LG_BOOTLIST   = 18, "bootlist";     // thunks the kickstart runs in order
-    LG_CONS_RUN   = 19, "cons-run";     // the running task's cons run
-    LG_STARTUP    = 20, "startup";      // closure run before the repl
-    LG_TASKEXIT   = 21, "task-exit";    // the closure a task returns into
-    LG_TRAPENTRY  = 22, "trap-entry";   // the trap stub's entry, for `mtvec`
-    LG_SYMCOUNT   = 23, "symcount";     // symbols interned so far: the next
-                                        // symbol's identity, and its hash
-    LG_PACKAGES   = 24, "packages";     // every package, as a list
-    LG_PACKAGE    = 25, "package";      // the one a bare name is read in
-    LG_TRAPDEPTH  = 26, "trapdepth";    // traps in progress; 0 outside one
-    LG_TRAPTMP    = 27, "traptmp";      // the stub has no free register at
-    LG_TRAPTMP2   = 28, "traptmp2";     // entry, so two go here for a moment
+kernel! {
+    // What the collector's roots scan, values every one.
+    KB_FRAME      = 0,  "frame";      // the frame the next trap saves into
+    KB_DEPTH      = 1,  "depth";      // traps in progress; 0 outside one
+    KB_TRAPSTACK  = 2,  "trap-stack"; // the trap handler's stack, at its top
+    KB_TRAPHOOK   = 3,  "trap-hook";  // the closure the trap stub calls
+    KB_TRAPNEST   = 4,  "trap-nest";  // a vector of frames for nested traps
+    KB_TRAPENTRY  = 5,  "trap-entry"; // the trap stub's entry, for `mtvec`
+    KB_BOOTSTACK  = 6,  "boot-stack"; // the boot stack, at its top
+    KB_BOOTFRAME  = 7,  "boot-frame"; // the boot context
+    KB_TOPLEVEL   = 8,  "toplevel";   // the closure the reset stub enters
+    KB_TASKEXIT   = 9,  "task-exit";  // the closure a finished task calls
+    KB_OBARRAY    = 10, "obarray";    // a vector of symbol buckets
+    KB_SYMBOLS    = 11, "symbols";    // every interned symbol, as a list
+    KB_PACKAGES   = 12, "packages";   // every package, as a list
+    KB_PACKAGE    = 13, "package";    // the one a bare name is read in
+    KB_SYMCOUNT   = 14, "symcount";   // symbols interned so far: the next
+                                      // symbol's identity, and its hash
+    KB_ROOTS      = 15, "roots";      // whatever else is to be kept
+    KB_CONS_PTR   = 16, "cons-ptr";   // cons space's frontier
+    KB_OBJ_PTR    = 17, "obj-ptr";    // object space's frontier
+    KB_OBJ_FREE   = 18, "obj-free";   // the bytes in its free blocks
+    KB_BINS       = 19, "bins";       // object space's free lists, a vector
+    KB_DEVICES    = 20, "devices";    // a vector of the device pages
+    // What they do not: the trap stub's two parked registers, which the
+    // frame it saves holds too, and the capabilities the reset stub mints
+    // from the memory map, which name regions rather than objects.
+    KB_PARK       = 21, "park";
+    KB_PARK2      = 22, "park2";
+    KB_LOW        = 23, "low";        // the low block, to be read
+    KB_CONS       = 24, "cons";       // cons space
+    KB_OBJECTS    = 25, "objects";    // object space, the allocator's
+    KB_MARKS      = 26, "marks";      // the mark bitmap
+    KB_STARTS     = 27, "starts";     // the object-start map
+    KB_SCRATCH    = 28, "scratch";    // the collector's scratch
+    KB_SEALS      = 29, "seals";      // every otype, to mint keys from
 }
 
-// The globals must stay below the free bins, the bins below the reset stub,
-// and the stub in the low block.
-const _: () = assert!(LG_BASE + 8 * 29 <= OBJ_BINS);
-const _: () = assert!(OBJ_BINS + 8 * OBJ_BIN_COUNT <= RESET_VECTOR);
+/// How many slots the kernel block has, and the first one the roots do not
+/// scan.
+pub const KB_SLOTS: u32 = 30;
+pub const KB_UNSCANNED: u32 = 21;
+
+// The kernel block's bounds are exact wherever it is, the reset stub fits
+// the low block, and the maps and the scratch fill fast RAM.
+const _: () = assert!(KB_SLOTS * 8 < 256);
 const _: () = assert!(RESET_VECTOR + RESET_RESERVE <= LOW_END);
+const _: () = assert!(SCRATCH + SCRATCH_BYTES == RAM_SIZE);
+

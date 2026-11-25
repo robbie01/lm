@@ -53,7 +53,7 @@
             (%display path) (%display ": ")
             (%display (if (%cons? f) (if (%cons? (cadr f)) (caadr f) (cadr f)) f))
             (%display "  pairs=")
-            (%display (%/ (%- (%ld-word lg-cons-ptr) cons-base) (%* 2 value-bytes)))
+            (%display (%/ (%- (kernel-ref kb-cons-ptr) cons-base) (%* 2 value-bytes)))
             (%newline)
             (%flush))
           nil)

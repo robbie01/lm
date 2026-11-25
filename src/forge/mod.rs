@@ -171,28 +171,34 @@ pub fn write_layout() {
     def!("ram-size", RAM_SIZE);
     def!("chip-size", CHIP_SIZE);
     def!("nil-cell", NIL_CELL);
-    def!("lg-base", LG_BASE);
     def!("low-end", LOW_END);
     def!("cons-base", CONS_BASE);
     def!("cons-limit", CONS_END);
     def!("obj-base", OBJ_BASE);
     def!("obj-limit", OBJ_END);
-    def!("fast-base", FAST_BASE);
     def!("gc-bitmap", GC_BITMAP);
+    def!("gc-bitmap-bytes", GC_BITMAP_BYTES);
     def!("obj-starts", OBJ_STARTS);
-    def!("obj-starts-ready", OBJ_STARTS_READY);
+    def!("obj-starts-bytes", OBJ_STARTS_BYTES);
+    def!("scratch-base", SCRATCH);
+    def!("scratch-bytes", SCRATCH_BYTES);
     def!("obj-starts-magic", OBJ_STARTS_MAGIC);
     def!("reset-vector", RESET_VECTOR);
     def!("reset-reserve", RESET_RESERVE);
+    def!("dev-count", DEV_COUNT);
+    def!("dev-page-bytes", 1 << DEV_SHIFT);
     // The first word of an image the machine writes itself, which is how the
     // loader tells one from an image the forge built.
     def!("snap-magic", crate::image::SNAP_MAGIC);
 
-    // Each global is one value slot. One that holds an address or a count
-    // holds it as a fixnum; one that holds a value holds the value.
-    s.push_str("\n;; ---- low-memory globals, one value slot each ----\n");
-    for (name, addr) in GLOBAL_NAMES {
-        def!(format!("lg-{name}"), *addr);
+    // The kernel block's slots, by number. One that holds a count holds it
+    // as a fixnum; one that holds a value holds the value.
+    s.push_str("\n;; ---- the kernel block, which mscratch names: its slots ----\n");
+    def!("kb-base", KB_BASE);
+    def!("kb-slots", KB_SLOTS);
+    def!("kb-unscanned", KB_UNSCANNED);
+    for (name, slot) in KERNEL_SLOTS {
+        def!(format!("kb-{name}"), *slot);
     }
 
     s.push_str("\n;; ---- values ----\n");
@@ -236,12 +242,12 @@ pub fn write_layout() {
     def!("perms-bytes", cap::ap_of(PERMS_BYTES));
     def!("perms-nil", cap::ap_of(PERMS_NIL));
     def!("perms-code", cap::ap_of(PERMS_CODE));
+    def!("perms-space", cap::ap_of(PERMS_SPACE));
     def!("otype-unsealed", cap::OT_UNSEALED);
     def!("otype-sentry", cap::OT_SENTRY);
     def!("otype-closure", cap::OT_CLOSURE);
 
     s.push_str("\n;; ---- object representation ----\n");
-    def!("obj-bins", OBJ_BINS);
     def!("obj-bin-count", OBJ_BIN_COUNT);
     def!("t-free", T_FREE);
     def!("t-symbol", T_SYMBOL);
@@ -257,6 +263,7 @@ pub fn write_layout() {
     def!("t-text", T_TEXT);
     def!("t-stack", T_STACK);
     def!("t-context", T_CONTEXT);
+    def!("t-kernel", T_KERNEL);
     def!("code-entry", CODE_ENTRY);
     def!("code-name", CODE_NAME);
     def!("code-lits", CODE_LITS);
@@ -436,6 +443,7 @@ pub fn write_layout() {
         def!("sys-ramsize", SYS_RAMSIZE);
         def!("sys-chipsize", SYS_CHIPSIZE);
         def!("sys-intset", SYS_INTSET);
+        def!("sys-reset", SYS_RESET);
         def!("tmr-lo", TMR_LO);
         def!("tmr-hi", TMR_HI);
         def!("tmr-cmplo", TMR_CMPLO);
@@ -458,6 +466,7 @@ pub fn write_layout() {
         def!("gfx-winw", G_WINW);
         def!("gfx-winh", G_WINH);
         def!("gfx-hz", G_HZ);
+        def!("gfx-status", G_STATUS);
         def!("gfx-on", CTRL_ON);
         def!("gfx-vbirq", CTRL_VBIRQ);
     }
@@ -647,8 +656,8 @@ pub fn build(out: &str, verbose: bool) -> i32 {
         if verbose {
             eprintln!(
                 "{what}: {} pairs, {} obj bytes",
-                (l.h.g(LG_CONS_PTR) - CONS_BASE) / PAIR_BYTES,
-                l.h.g(LG_OBJ_PTR) - OBJ_BASE
+                (l.h.g(KB_CONS_PTR) - CONS_BASE) / PAIR_BYTES,
+                l.h.g(KB_OBJ_PTR) - OBJ_BASE
             );
         }
     };
@@ -678,11 +687,12 @@ pub fn build(out: &str, verbose: bool) -> i32 {
     // addresses, and the collection below slides them.
     l.prof_report();
 
-    // Wire the pieces the assembly stubs reach through globals.
+    // Wire the pieces the assembly stubs reach through the kernel block, and
+    // the boot list the kickstart runs.
     for step in [
-        "(%st-cap! lg-toplevel (%symbol-value 'sys:kickstart))",
-        "(%st-cap! lg-traphook (%symbol-value 'sys:handle-trap))",
-        "(%st-cap! lg-bootlist (reverse compiler:*boot-thunks*))",
+        "(%set-slot! (%kernel) kb-toplevel (%symbol-value 'sys:kickstart))",
+        "(%set-slot! (%kernel) kb-trap-hook (%symbol-value 'sys:handle-trap))",
+        "(%set-symbol-value! 'sys:*boot-list* (reverse compiler:*boot-thunks*))",
     ] {
         if let Err(e) = drive(&mut l, step) {
             eprint!("wiring {step}: {e}");
@@ -690,17 +700,12 @@ pub fn build(out: &str, verbose: bool) -> i32 {
         }
         note(&l, step);
     }
-    // The trap stub goes into object space and its entry into
-    // `lg-trap-entry`, and the reset stub to the reset vector. The answer is
-    // where the reset stub stops the machine, which is where a function run
-    // from here returns to.
-    let back = match drive(&mut l, "(boot:build-boot-code)") {
-        Ok(v) => unfix(v) as u32,
-        Err(e) => {
-            eprint!("wiring the kickstart: {e}");
-            return 1;
-        }
-    };
+    // The trap stub goes into object space and its entry into the kernel
+    // block, and the reset stub to the reset vector.
+    if let Err(e) = drive(&mut l, "(boot:build-boot-code)") {
+        eprint!("wiring the kickstart: {e}");
+        return 1;
+    }
 
     note(&l, "boot code built");
     match drive(&mut l, "(undefined-globals)") {
@@ -751,7 +756,7 @@ pub fn build(out: &str, verbose: bool) -> i32 {
     // trees, assembler buffers, analysis lists) is garbage once the code is
     // placed, and nothing can see it except the interpreter, which is about
     // to be thrown away.
-    if !collect_before_saving(&mut l, back, verbose) {
+    if !collect_before_saving(&mut l, verbose) {
         return 1;
     }
 
@@ -773,9 +778,9 @@ pub fn build(out: &str, verbose: bool) -> i32 {
 
     let stats = format!(
         "objects {} KiB ({} KiB of it code), live pairs {}",
-        (l.h.g(LG_OBJ_PTR) - OBJ_BASE) / 1024,
+        (l.h.g(KB_OBJ_PTR) - OBJ_BASE) / 1024,
         l.h.text_bytes() / 1024,
-        (l.h.g(LG_CONS_PTR) - CONS_BASE) / PAIR_BYTES
+        (l.h.g(KB_CONS_PTR) - CONS_BASE) / PAIR_BYTES
     );
     let entry = RESET_VECTOR;
     match crate::image::save(l.h.m, out, entry) {
@@ -797,14 +802,12 @@ pub fn build(out: &str, verbose: bool) -> i32 {
 /// Run one compiled Lisp function on the machine, from Rust, and answer what
 /// it returned.
 ///
-/// The registers are set as a call through `jcl` leaves them: the closure
-/// unsealed in `t0`, no arguments, a return sentry in `ra`, and PCC the
-/// closure's entry. `sp` is the boot stack, `gp` the empty cons run, so the
-/// first pair faults into a refill, `tp` and `s2` nil, there being no task,
-/// and the trap vector and the trap frame are the image's own. The function
-/// returns to `back`, the end of the reset stub, which stops the machine.
-fn call_on_machine(l: &mut Lisp, name: &str, back: u32) -> Option<V> {
-    use crate::cap::{OT_SENTRY, P_EX, P_SR};
+/// The machine starts as it does from an image: at the reset vector with
+/// the root in PCC, and the reset stub mints the memory map, stands on the
+/// boot stack and enters the kernel block's top level, which for the length
+/// of the call is the function. When it returns, the stub stops the machine
+/// with what it answered still in a0.
+fn call_on_machine(l: &mut Lisp, name: &str) -> Option<V> {
     use crate::mach::Stop;
     use crate::rvenc::*;
     let sym = l.h.intern_path(name);
@@ -813,50 +816,41 @@ fn call_on_machine(l: &mut Lisp, name: &str, back: u32) -> Option<V> {
         eprintln!("lm: {name} is not a compiled function; skipping");
         return None;
     }
-    let (sp, frame) = (l.h.gv(LG_BOOTSTACK), l.h.gv(LG_TRAPSAVE));
-    if sp == NIL || frame == NIL {
-        eprintln!("lm: the boot stack or the trap frame is not set up");
+    if l.h.gv(KB_BOOTSTACK) == NIL || l.h.gv(KB_TRAPENTRY) == NIL {
+        eprintln!("lm: the boot stack or the trap stub is not set up");
         return None;
     }
-    let ret = cap_to(RESET_VECTOR, RESET_RESERVE, P_EX | P_SR).with_addr(back).seal(OT_SENTRY);
-    let entry = l.h.slot(closure, CLO_ENTRY);
-    let trap = l.h.gv(LG_TRAPENTRY);
+    let top = l.h.gv(KB_TOPLEVEL);
+    l.h.set_gv(KB_TOPLEVEL, closure);
     let m = &mut *l.h.m;
     for r in 1..32 {
         m.set_reg(r, Cap::NULL);
     }
-    m.set_reg(SP, sp);
-    m.set_reg(GP, empty_cons_run());
-    m.set_reg(TP, NIL);
-    m.set_reg(S2, NIL);
-    m.set_reg(T0, closure.unseal());
-    m.set_reg(T1, fix(0));
-    m.set_reg(RA, ret);
-    m.mtvec = trap;
-    m.mscratch = frame;
-    m.set_pcc(entry);
+    crate::boot::reset(m, RESET_VECTOR);
     m.halted = false;
     m.mstatus = 0;
     m.mtimecmp = u64::MAX;
     m.gfx.next_vbl = u64::MAX;
     let st = crate::run::run(m, 20_000_000_000);
+    let a0 = m.reg(A0);
+    l.h.set_gv(KB_TOPLEVEL, top);
     if st != Stop::Halt {
         eprintln!("lm: {name} did not finish on the machine ({st:?})");
         return None;
     }
-    Some(m.reg(A0))
+    Some(a0)
 }
 
 /// Run the machine's own collector over everything the build made. An
 /// image written without it would carry everything the compiler consed.
 /// The machine's allocator goes in first, as the kickstart would put it:
 /// the collection makes the descriptor ring it clears the mark map through.
-fn collect_before_saving(l: &mut Lisp, back: u32, verbose: bool) -> bool {
-    if call_on_machine(l, "gc:install-allocator", back).is_none() {
+fn collect_before_saving(l: &mut Lisp, verbose: bool) -> bool {
+    if call_on_machine(l, "gc:install-allocator").is_none() {
         eprintln!("lm: the machine's allocator did not go in; no image written");
         return false;
     }
-    match call_on_machine(l, "gc:collect-for-image", back) {
+    match call_on_machine(l, "gc:collect-for-image") {
         Some(v) => {
             if verbose {
                 eprintln!("collected: {} bytes of dead object space blanked", unfix(v));

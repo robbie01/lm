@@ -7,7 +7,7 @@
 
 use crate::forge::boot_host;
 use crate::forge::hostlisp::Lisp;
-use crate::mach::{Machine, CSR_DDC, CSR_MEPC, CSR_MSCRATCH, CSR_MTVEC};
+use crate::mach::{Machine, CSR_GCMARKS, CSR_MEPC, CSR_MSCRATCH, CSR_MTVEC, CSR_ROOT};
 use crate::rvenc::*;
 
 /// The Lisp half. Leaves the buffer in the global `*asm-buf*` and the length
@@ -120,7 +120,8 @@ const LISP_SIDE: &str = r#"
 (i-ysh1add a $a0 $a1 $a2)
 (i-ysh2add a $a0 $a1 $a2)
 (i-ysh3add a $a0 $a1 $a2)
-(i-csrrs a $t0 csr-ddc $zero)
+(i-csrrs a $t0 csr-root $zero)
+(i-csrrw a $zero csr-gcmarks $t1)
 (i-csrrw a $zero csr-mtvec $t1)
 (i-csrrw a $t0 csr-mscratch $t0)
 (i-csrrs a $a0 csr-mepc $zero)
@@ -135,24 +136,6 @@ const LISP_SIDE: &str = r#"
 (i-yseale a $a0 $a1)
 (i-sealcl a $a0 $a1)
 (i-npair a $a0 $gp)
-(i-lb-ddc a $a0 $a1)
-(i-lh-ddc a $a0 $a1)
-(i-lw-ddc a $a0 $a1)
-(i-ly-ddc a $a0 $a1)
-(i-lbu-ddc a $a0 $a1)
-(i-lhu-ddc a $a0 $a1)
-(i-sb-ddc a $a2 $a1)
-(i-sh-ddc a $a2 $a1)
-(i-sw-ddc a $a2 $a1)
-(i-sy-ddc a $a2 $a1)
-(i-lw-abs a $a0 #x108)
-(i-lw-abs a $a0 #x12345678)
-(i-ly-abs a $a1 #x110)
-(i-ly-abs a $a1 mmio-base)
-(i-sw-abs a $a2 #x100 $t0)
-(i-sw-abs a $a2 #x20000 $t0)
-(i-sy-abs a $a2 #x1f8 $t0)
-(i-sy-abs a $a2 #x4000 $t0)
 (i-car a $a0 $a1)
 (i-cdr a $t0 $s1)
 (i-set-car a $a2 $a3)
@@ -367,7 +350,8 @@ fn rust_side() -> Vec<u8> {
     w.push(ysh1add(A0, A1, A2));
     w.push(ysh2add(A0, A1, A2));
     w.push(ysh3add(A0, A1, A2));
-    w.push(csrrs(T0, CSR_DDC, ZERO));
+    w.push(csrrs(T0, CSR_ROOT, ZERO));
+    w.push(csrrw(ZERO, CSR_GCMARKS, T1));
     w.push(csrrw(ZERO, CSR_MTVEC, T1));
     w.push(csrrw(T0, CSR_MSCRATCH, T0));
     w.push(csrrs(A0, CSR_MEPC, ZERO));
@@ -382,30 +366,6 @@ fn rust_side() -> Vec<u8> {
     w.push(yseale(A0, A1));
     w.push(sealcl(A0, A1));
     w.push(npair(A0, GP));
-    w.push(lb_ddc(A0, A1));
-    w.push(lh_ddc(A0, A1));
-    w.push(lw_ddc(A0, A1));
-    w.push(ly_ddc(A0, A1));
-    w.push(lbu_ddc(A0, A1));
-    w.push(lhu_ddc(A0, A1));
-    w.push(sb_ddc(A2, A1));
-    w.push(sh_ddc(A2, A1));
-    w.push(sw_ddc(A2, A1));
-    w.push(sy_ddc(A2, A1));
-    // Absolute addresses: base x0 is DDC with the offset as the address, and
-    // anything out of its reach is formed in a register for the DDC form.
-    w.push(lw(A0, ZERO, 0x108));
-    li32(&mut w, A0, 0x1234_5678);
-    w.push(lw_ddc(A0, A0));
-    w.push(ly(A1, ZERO, 0x110));
-    li32(&mut w, A1, 0xF000_0000);
-    w.push(ly_ddc(A1, A1));
-    w.push(sw(A2, ZERO, 0x100));
-    li32(&mut w, T0, 0x20000);
-    w.push(sw_ddc(A2, T0));
-    w.push(sy(A2, ZERO, 0x1f8));
-    li32(&mut w, T0, 0x4000);
-    w.push(sy_ddc(A2, T0));
     w.push(car(A0, A1));
     w.push(cdr(T0, S1));
     w.push(setcar(A2, A3));

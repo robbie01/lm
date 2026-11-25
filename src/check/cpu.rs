@@ -4,7 +4,7 @@
 //! the core.
 
 use crate::cap::*;
-use crate::heap::{T_BYTES, T_CLOSURE, T_CONTEXT, T_STACK, T_STRING, T_SYMBOL, T_VECTOR};
+use crate::heap::{T_BYTES, T_CLOSURE, T_CONTEXT, T_KERNEL, T_STACK, T_STRING, T_SYMBOL, T_VECTOR};
 use crate::mach::*;
 use crate::map::*;
 use crate::run;
@@ -80,24 +80,28 @@ fn go_with(code: &[u32], setup: impl FnOnce(&mut Machine)) -> Out {
     m.set_reg(ROOT, Cap::ROOT);
     let end = emit(&mut m, BASE, code);
     let mut tail = vec![];
-    li32(&mut tail, T0, MMIO_BASE);
-    tail.push(sw_ddc(ZERO, T0));
+    halt_through_root(&mut tail, ZERO);
     emit(&mut m, end, &tail);
-    // The handler halts with exit code 1, through a DDC it takes back from
-    // `mtidc`, since a test may have narrowed DDC.
-    let mut stub = vec![csrrs(T1, CSR_MTIDC, ZERO), csrrw(ZERO, CSR_DDC, T1)];
-    li32(&mut stub, T0, MMIO_BASE);
-    stub.push(addi(T1, ZERO, 1));
-    stub.push(sw_ddc(T1, T0));
+    // The handler halts with exit code 1, through the root.
+    let mut stub = vec![addi(T2, ZERO, 1)];
+    halt_through_root(&mut stub, T2);
     emit(&mut m, HANDLER, &stub);
     m.mtvec = Cap::ROOT.with_addr(HANDLER);
-    m.mtidc = Cap::ROOT;
     m.set_pcc(Cap::ROOT.with_addr(BASE));
     m.mtimecmp = u64::MAX;
     m.gfx.next_vbl = u64::MAX;
     setup(&mut m);
     run::run(&mut m, 200_000);
     Out { m, end }
+}
+
+/// Stop the machine with the exit code in `code`, through the system
+/// device's page made from the root, which takes SR to read.
+fn halt_through_root(out: &mut Vec<u32>, code: u32) {
+    out.push(csrrs(T0, CSR_ROOT, ZERO));
+    li32(out, T1, MMIO_BASE);
+    out.push(yaddrw(T0, T0, T1));
+    out.push(sw(code, T0, 0));
 }
 
 fn go(code: &[u32]) -> Out {
@@ -804,60 +808,57 @@ pub fn run_all() -> bool {
         ok("an integer is no authority", o.took(C_CAP_LOAD, 0x400));
     }
 
-    // ---- integer addressing through DDC, and SR ----
+    // ---- no integer addressing; the root, and SR ----
     {
-        let o = go(&[addi(A0, ZERO, 77), sw(A0, ZERO, 0x100), lw(A1, ZERO, 0x100)]);
-        ok("x0-based addressing reaches DDC", o.x(A1) == 77 && o.m.peek32(0x100) == 77);
-        let o = go(&[sy(ROOT, ZERO, 0x108), ly(A1, ZERO, 0x108)]);
-        ok("...for capabilities too", o.c(A1) == Cap::ROOT && o.m.load_cap(0x108) == Cap::ROOT);
-        let mut v = vec![];
-        li32(&mut v, A2, 0x5000);
-        v.extend([addi(A0, ZERO, -2), sw_ddc(A0, A2), lw_ddc(A1, A2), lbu_ddc(A3, A2), lh_ddc(A4, A2)]);
-        v.extend([sb_ddc(ZERO, A2), lb_ddc(A5, A2), lw_ddc(S2, A2), sh_ddc(ZERO, A2), lhu_ddc(A6, A2), lw_ddc(S3, A2)]);
-        v.extend([sy_ddc(ROOT, A2), ly_ddc(A7, A2)]);
-        let o = go(&v);
-        ok("lw.ddc/sw.ddc", o.x(A1) == 0xffff_fffe && o.x(A3) == 0xfe && o.x(A4) == 0xffff_fffe);
-        ok("sb.ddc/lb.ddc", o.x(A5) == 0 && o.x(S2) == 0xffff_ff00);
-        ok("sh.ddc/lhu.ddc", o.x(A6) == 0 && o.x(S3) == 0xffff_0000);
-        ok("sy.ddc/ly.ddc", o.c(A7) == Cap::ROOT);
+        // x0 as a base is an encoding RVY reserves, and nothing gives it a
+        // meaning: a load or store by number is refused with SR or without.
+        for w in [lw(A1, ZERO, 0x100), sw(A0, ZERO, 0x100), ly(A1, ZERO, 0x108), sy(ROOT, ZERO, 0x108)] {
+            ok("x0 is no authority, even with SR", go(&[w]).took(C_ILLEGAL, w));
+        }
+        // Xlm's old DDC loads and stores are gone, so their encodings are
+        // illegal.
+        let ddc = |f7: u32, rs2: u32, rd: u32| (f7 << 25) | (rs2 << 20) | (A2 << 15) | (6 << 12) | (rd << 7) | 0x0b;
+        for w in [ddc(0x7d, 2, A1), ddc(0x7c, A0, 2)] {
+            ok("custom-0 0x7c and 0x7d are illegal", go(&[w]).took(C_ILLEGAL, w));
+        }
+        // The root is a CSR that takes SR to read and that nothing writes.
+        let o = go(&[csrrs(A0, CSR_ROOT, ZERO)]);
+        ok("the root CSR reads the root", o.c(A0) == Cap::ROOT);
+        ok("writing the root CSR is illegal", go(&[csrrw(ZERO, CSR_ROOT, A0)]).took(C_ILLEGAL, csrrw(ZERO, CSR_ROOT, A0)));
         // Without SR every privileged act is an illegal instruction, as RVY
         // has it without ASR.
         let nosr = |m: &mut Machine| m.set_pcc(Cap::ROOT.and_perms(P_ALL & !P_SR).with_addr(BASE));
         let refused = |w: u32| go_with(&[w], nosr).took(C_ILLEGAL, w);
-        ok("x0-based addressing needs SR", refused(lw(A1, ZERO, 0x100)));
-        ok("lw.ddc needs SR", refused(lw_ddc(A1, A2)));
+        ok("reading the root needs SR", refused(csrrs(A0, CSR_ROOT, ZERO)));
         ok("writing a CSR needs SR", refused(csrrw(ZERO, 0x340, A0)));
         ok("reading mstatus needs SR", refused(csrrs(A0, 0x300, ZERO)));
         ok("reading gcmode needs SR", refused(csrrs(A0, CSR_GCMODE, ZERO)));
-        ok("reading DDC needs SR", refused(csrrs(A0, CSR_DDC, ZERO)));
+        ok("reading the mark map's capability needs SR", refused(csrrs(A0, CSR_GCMARKS, ZERO)));
+        ok("reading mscratch needs SR", refused(csrrs(A0, CSR_MSCRATCH, ZERO)));
         ok("writing utidc needs SR", refused(csrrw(ZERO, CSR_UTIDC, A0)));
         ok("mret needs SR", refused(mret()));
         ok("writing the cycle counter is illegal", go(&[csrrw(ZERO, 0xc00, A0)]).took(C_ILLEGAL, csrrw(ZERO, 0xc00, A0)));
         // The counters, utidc and mtidc are anyone's to read; this run ends
         // at the halt, which needs SR.
         let o = go_with(&[addi(A1, ZERO, 1), csrrs(A0, 0xc00, ZERO), csrrs(A3, CSR_UTIDC, ZERO), csrrs(A4, CSR_MTIDC, ZERO)], nosr);
-        ok("the cycle counter and the thread IDs need nothing", matches!(o.trap(), Some((C_ILLEGAL, _, e)) if e == o.end + 4));
+        ok("the cycle counter and the thread IDs need nothing", matches!(o.trap(), Some((C_ILLEGAL, _, e)) if e == o.end));
         ok("ecall needs nothing", go_with(&[ecall()], nosr).took(C_ECALL, 0));
-        // A DDC narrowed to a page bounds integer addressing.
-        let small = |m: &mut Machine| m.set_ddc(region(0x5000, 0x1000, DATA));
-        let mut v = vec![];
-        li32(&mut v, A2, 0x6000);
-        v.push(lw_ddc(A1, A2));
-        ok("DDC's bounds hold", go_with(&v, small).took(C_CAP_LOAD, 0x6000));
     }
     {
         // The capability-wide CSRs, and PCC read with auipc.
-        let mut code = vec![csrrs(A0, CSR_DDC, ZERO), auipc(A1, 0)];
+        let mut code = vec![csrrs(A0, CSR_ROOT, ZERO), auipc(A1, 0)];
         capr(&mut code, A2, 0x7000);
         code.extend([csrrw(ZERO, CSR_UTIDC, A2), csrrs(A3, CSR_UTIDC, ZERO)]);
         code.extend([csrrw(ZERO, CSR_MSCRATCH, A2), csrrs(A4, CSR_MSCRATCH, ZERO)]);
         code.extend([addi(A5, ZERO, 0x40), csrrs(ZERO, CSR_MSCRATCH, A5), csrrs(A6, CSR_MSCRATCH, ZERO)]);
+        code.extend([csrrw(ZERO, CSR_GCMARKS, A2), csrrs(A7, CSR_GCMARKS, ZERO)]);
         let o = go(&code);
-        ok("csrrs reads DDC whole", o.c(A0) == Cap::ROOT);
+        ok("csrrs reads the root whole", o.c(A0) == Cap::ROOT);
         ok("auipc reads PCC", o.c(A1).tag && o.c(A1).has(P_EX) && o.x(A1) == BASE + 4);
         ok("csrrw writes a capability whole", o.c(A3) == o.c(A2));
         ok("mscratch holds a capability", o.c(A4) == o.c(A2));
         ok("csrrs writes its address", o.c(A6) == o.c(A2).with_addr(0x7040));
+        ok("the mark map's CSR holds a capability", o.c(A7) == o.c(A2));
         let mut code = vec![yseale(A1, ROOT), csrrw(ZERO, CSR_MTVEC, A1), csrrs(A2, CSR_MTVEC, ZERO)];
         code.extend([auipc(A3, 0), yaddi(A3, A3, 1), csrrw(ZERO, CSR_MEPC, A3), csrrs(A4, CSR_MEPC, ZERO)]);
         let o = go(&code);
@@ -1168,6 +1169,14 @@ pub fn run_all() -> bool {
 
     // ---- the write barrier ----
     {
+        // The collector's maps, where the barrier is told they are.
+        let maps = |m: &mut Machine| {
+            m.csr_cap_write(CSR_GCMARKS, region(GC_BITMAP, GC_BITMAP_BYTES, P_LD | P_SD), true);
+            m.csr_cap_write(CSR_GCSTARTS, region(OBJ_STARTS, OBJ_STARTS_BYTES, P_LD | P_SD), true);
+        };
+        // What the barrier names: the register the store went through, and
+        // the granule's offset from its base, in granules.
+        let named = |reg: u32, granules: u32| (granules << 5) | reg;
         // A pair in cons space whose car points at another pair. With the
         // barrier on, overwriting the car traps while the target is unmarked.
         let setup = |mark: bool| {
@@ -1176,6 +1185,7 @@ pub fn run_all() -> bool {
                 let outer = pair(m, PAIR, inner, Cap::int(5));
                 m.set_reg(A1, outer);
                 m.gcmode = 1;
+                maps(m);
                 if mark {
                     let bit = (PAIR + 0x100 - CONS_BASE) >> 3;
                     let w = GC_BITMAP + (bit >> 5) * 4;
@@ -1185,11 +1195,22 @@ pub fn run_all() -> bool {
             }
         };
         let store = [addi(A3, ZERO, 9), setcar(A3, A1)];
-        ok("the barrier traps on an unmarked pointer", go_with(&store, setup(false)).took(C_BARRIER, PAIR));
+        ok("the barrier traps on an unmarked pointer", go_with(&store, setup(false)).took(C_BARRIER, named(A1, 0)));
         ok("...and not on a marked one", go_with(&store, setup(true)).clean());
         ok("...nor over a fixnum", go_with(&[addi(A3, ZERO, 9), setcdr(A3, A1)], setup(false)).clean());
-        ok("a byte store traps too", go_with(&[sb(ZERO, A1, 3)], setup(false)).took(C_BARRIER, PAIR));
-        ok("a capability store too", go_with(&[sy(ZERO, A1, 0)], setup(false)).took(C_BARRIER, PAIR));
+        ok("a byte store traps too", go_with(&[sb(ZERO, A1, 3)], setup(false)).took(C_BARRIER, named(A1, 0)));
+        ok("a capability store too", go_with(&[sy(ZERO, A1, 0)], setup(false)).took(C_BARRIER, named(A1, 0)));
+        // The mark is read through the capability in the CSR: a map it does
+        // not cover reads as unmarked.
+        let unmapped = |m: &mut Machine| {
+            setup(true)(m);
+            m.csr_cap_write(CSR_GCMARKS, Cap::NULL, true);
+        };
+        ok("a map the CSR does not reach reads as unmarked", go_with(&store, unmapped).took(C_BARRIER, named(A1, 0)));
+        // The register and the offset name the granule from the store's own
+        // capability, wherever its address stands.
+        let moved = [addi(A3, ZERO, 9), yaddi(A4, A1, 8), sy(A3, A4, -8)];
+        ok("...from the base, not the address", go_with(&moved, setup(false)).took(C_BARRIER, named(A4, 0)));
         let objs = |m: &mut Machine| {
             setup(false)(m);
             let v = object(m, OBJ, T_VECTOR, 2);
@@ -1199,7 +1220,7 @@ pub fn run_all() -> bool {
         };
         // The pair at PAIR is unmarked too, so overwriting a pointer to it
         // from object space traps naming the slot.
-        ok("an indexed store traps", go_with(&[stxi(ZERO, A2, 1, 0)], objs).took(C_BARRIER, OBJ + 8));
+        ok("an indexed store traps", go_with(&[stxi(ZERO, A2, 1, 0)], objs).took(C_BARRIER, named(A2, 1)));
         // A stack and a register context are scanned whole when marking
         // begins, so the barrier lets a store into one through: the type in
         // the header of the object holding the granule says which it is.
@@ -1220,7 +1241,8 @@ pub fn run_all() -> bool {
         let over = [sy(ZERO, A2, 16)];
         ok("a stack is not watched", go_with(&over, state(T_STACK)).clean());
         ok("...nor a context", go_with(&over, state(T_CONTEXT)).clean());
-        ok("...but a vector is", go_with(&over, state(T_VECTOR)).took(C_BARRIER, STATE + 16));
+        ok("...nor the kernel block", go_with(&over, state(T_KERNEL)).clean());
+        ok("...but a vector is", go_with(&over, state(T_VECTOR)).took(C_BARRIER, named(A2, 2)));
 
         // A capability narrowed to the cdr of the inner pair keeps that pair:
         // overwriting it traps while the pair is unmarked, whatever its length.
@@ -1233,7 +1255,7 @@ pub fn run_all() -> bool {
                 m.store_cap(outer.base(), cdr);
             }
         };
-        ok("a narrowed pair traps", go_with(&store, narrow(false)).took(C_BARRIER, PAIR));
+        ok("a narrowed pair traps", go_with(&store, narrow(false)).took(C_BARRIER, named(A1, 0)));
         ok("...and not once its pair is marked", go_with(&store, narrow(true)).clean());
 
         // A capability into a vector's second slot, HD gone, keeps the
@@ -1262,10 +1284,11 @@ pub fn run_all() -> bool {
             }
         };
         let interior = |mark: bool, start: bool| interior_as(mark, start, false);
-        ok("a capability into a payload traps", go_with(&store, interior(false, true)).took(C_BARRIER, PAIR));
-        // HD survives a moved base; the granule below is a slot, not a
-        // header, and the map still finds the vector.
-        ok("...headed or not", go_with(&store, interior_as(false, true, true)).took(C_BARRIER, PAIR));
+        ok("a capability into a payload traps", go_with(&store, interior(false, true)).took(C_BARRIER, named(A1, 0)));
+        // A headed capability narrowed by the root keeps HD only within
+        // object space; the granule below is a slot, not a header, and the
+        // map still finds the vector.
+        ok("...headed or not", go_with(&store, interior_as(false, true, true)).took(C_BARRIER, named(A1, 0)));
         ok("...and the vector's mark is what it reads", go_with(&store, interior_as(true, true, true)).clean());
         ok("...and not once its object is marked", go_with(&store, interior(true, true)).clean());
         ok("...nor where no object starts below it", go_with(&store, interior(false, false)).clean());
@@ -1295,10 +1318,11 @@ pub fn run_all() -> bool {
     {
         let mut code = vec![];
         li32(&mut code, A0, MMIO_BASE + (DEV_UART << 12));
-        code.push(lw_ddc(A1, A0));
+        code.extend([yaddrw(A0, ROOT, A0), lw(A1, A0, 0)]);
         li32(&mut code, A2, MMIO_BASE);
-        code.push(sw_ddc(A1, A2));
+        code.extend([yaddrw(A2, ROOT, A2), sw(A1, A2, 0)]);
         let mut m = Machine::new();
+        m.set_reg(ROOT, Cap::ROOT);
         emit(&mut m, RESET_VECTOR, &code);
         m.uart.feed(b"K");
         m.mtimecmp = u64::MAX;
@@ -1328,8 +1352,9 @@ pub fn run_all() -> bool {
         m.set_reg(A1, region(d, LIST_BYTES, DATA));
         let mut code = vec![];
         li32(&mut code, A0, blit + B_LIST);
-        code.push(sy_ddc(A1, A0));
+        code.extend([yaddrw(A0, ROOT, A0), sy(A1, A0, 0)]);
         code.push(jal(ZERO, 0));
+        m.set_reg(ROOT, Cap::ROOT);
         emit(&mut m, RESET_VECTOR, &code);
         m.mtimecmp = u64::MAX;
         m.gfx.next_vbl = u64::MAX;
@@ -1356,12 +1381,13 @@ pub fn run_all() -> bool {
         let mut code = vec![];
         li32(&mut code, A0, blit + B_CTRL);
         code.push(addi(A2, ZERO, CTRL_DRAINED as i32));
-        code.push(sw_ddc(A2, A0));
+        code.extend([yaddrw(A0, ROOT, A0), sw(A2, A0, 0)]);
         li32(&mut code, A0, blit + B_LIST);
-        code.push(sy_ddc(A1, A0));
+        code.extend([yaddrw(A0, ROOT, A0), sy(A1, A0, 0)]);
         li32(&mut code, A0, blit + B_STATUS);
-        code.push(lw_ddc(A2, A0));
+        code.extend([yaddrw(A0, ROOT, A0), lw(A2, A0, 0)]);
         code.push(jal(ZERO, 0));
+        m.set_reg(ROOT, Cap::ROOT);
         emit(&mut m, RESET_VECTOR, &code);
         m.mtimecmp = u64::MAX;
         m.gfx.next_vbl = u64::MAX;
@@ -1392,22 +1418,23 @@ pub fn run_all() -> bool {
         let blit = MMIO_BASE + (DEV_BLIT << 12);
         let mut code = vec![];
         li32(&mut code, A0, blit + B_LIST);
-        code.push(sy_ddc(A1, A0));
+        code.extend([yaddrw(A0, ROOT, A0), sy(A1, A0, 0)]);
         // Wait for the chain, then read the status, clear its refused bit,
         // and read it again.
         li32(&mut code, A0, blit + B_STATUS);
-        code.push(lw_ddc(A2, A0));
+        code.extend([yaddrw(A0, ROOT, A0), lw(A2, A0, 0)]);
         code.push(andi(A3, A2, STATUS_BUSY as i32));
         code.push(bne(A3, ZERO, -8));
         code.push(addi(A3, ZERO, STATUS_REFUSED as i32));
-        code.push(sw_ddc(A3, A0));
-        code.push(lw_ddc(A4, A0));
+        code.extend([yaddrw(A0, ROOT, A0), sw(A3, A0, 0)]);
+        code.extend([yaddrw(A0, ROOT, A0), lw(A4, A0, 0)]);
         // A number written to the list register is no capability.
         li32(&mut code, A5, blit + B_LIST);
         li32(&mut code, A6, a);
-        code.push(sw_ddc(A6, A5));
-        code.push(lw_ddc(A7, A0));
+        code.extend([yaddrw(A5, ROOT, A5), sw(A6, A5, 0)]);
+        code.extend([yaddrw(A0, ROOT, A0), lw(A7, A0, 0)]);
         code.push(jal(ZERO, 0));
+        m.set_reg(ROOT, Cap::ROOT);
         emit(&mut m, RESET_VECTOR, &code);
         m.mtimecmp = u64::MAX;
         m.gfx.next_vbl = u64::MAX;
@@ -1422,8 +1449,37 @@ pub fn run_all() -> bool {
         ok("a number is no descriptor", r(A7) == STATUS_REFUSED);
     }
     {
-        // Only a capability register takes a capability, and no register
-        // hands one out.
+        // The display is handed its bitmap as a capability, shows only what
+        // that lets it read, says why in its status, and hands the
+        // capability back to a capability load, as `LY` would load it.
+        use crate::dev::gfx::*;
+        use crate::dev::{REFUSE_LENGTH, REFUSE_LOAD, REFUSE_TAG};
+        let page = MMIO_BASE + (DEV_GFX << 12);
+        let pixels = region(0x4000, 256, P_LD | P_SD);
+        let show = |bitmap: Cap| {
+            let mut code = vec![];
+            capr(&mut code, A0, page);
+            code.extend([addi(A2, ZERO, 16), sw(A2, A0, G_WIDTH as i32), sw(A2, A0, G_HEIGHT as i32)]);
+            code.extend([sw(A2, A0, G_PITCH as i32), addi(A2, ZERO, 8), sw(A2, A0, G_MODE as i32)]);
+            code.extend([addi(A2, ZERO, CTRL_ON as i32), sw(A2, A0, G_CTRL as i32)]);
+            code.extend([sy(A1, A0, G_BASE as i32), lw(A3, A0, G_STATUS as i32), ly(A4, A0, G_BASE as i32)]);
+            code.push(ly(A6, A5, G_BASE as i32));
+            go_with(&code, move |m| {
+                m.set_reg(A1, bitmap);
+                m.set_reg(A5, region(page, 4096, P_LD | P_SD));
+            })
+        };
+        let o = show(pixels);
+        ok("the display takes a bitmap it may read", o.clean() && o.x(A3) == 0);
+        ok("the scan-out register hands its capability back", o.c(A4) == pixels);
+        ok("...without its tag through a page without LC", !o.c(A6).tag && o.c(A6).addr == pixels.addr);
+        ok("a number is no bitmap", show(Cap::int(0x4000)).x(A3) == REFUSE_TAG);
+        ok("a bitmap too small is refused", show(pixels.with_bounds_exact(255).unwrap()).x(A3) == REFUSE_LENGTH);
+        ok("a bitmap it may not read is refused", show(pixels.and_perms(P_SD)).x(A3) == REFUSE_LOAD);
+    }
+    {
+        // Only a capability register takes a capability, and the blitter's
+        // hands none back.
         use crate::dev::blit::*;
         let blit = MMIO_BASE + (DEV_BLIT << 12);
         let mut code = vec![];
@@ -1433,7 +1489,7 @@ pub fn run_all() -> bool {
         let mut code = vec![];
         capr(&mut code, A0, blit);
         code.push(ly(A1, A0, B_LIST as i32));
-        ok("a capability register reads back no capability", go(&code).took(C_LFAULT, blit + B_LIST));
+        ok("the list register reads back no capability", go(&code).took(C_LFAULT, blit + B_LIST));
     }
     {
         // The disk is handed its buffer as a capability, completes
@@ -1455,16 +1511,16 @@ pub fn run_all() -> bool {
         let reg = |code: &mut Vec<u32>, r: u32, v: u32| {
             li32(code, A0, d + r);
             li32(code, A1, v);
-            code.push(sw_ddc(A1, A0));
+            code.extend([yaddrw(A0, ROOT, A0), sw(A1, A0, 0)]);
         };
         let buf = |code: &mut Vec<u32>, c: u32| {
             li32(code, A0, d + D_BUF);
-            code.push(sy_ddc(c, A0));
+            code.extend([yaddrw(A0, ROOT, A0), sy(c, A0, 0)]);
         };
         let wait = |code: &mut Vec<u32>, first: u32, last: u32| {
             li32(code, A0, d + D_STATUS);
-            code.push(lw_ddc(first, A0));
-            code.push(lw_ddc(last, A0));
+            code.extend([yaddrw(A0, ROOT, A0), lw(first, A0, 0)]);
+            code.extend([yaddrw(A0, ROOT, A0), lw(last, A0, 0)]);
             code.push(beq(last, T0, -4));
         };
         let mut code = vec![];
@@ -1479,9 +1535,9 @@ pub fn run_all() -> bool {
         reg(&mut code, D_CMD, CMD_READ);
         wait(&mut code, A4, A7);
         li32(&mut code, A6, 0x5000);
-        code.push(lbu_ddc(T1, A6));
+        code.extend([yaddrw(A6, ROOT, A6), lbu(T1, A6, 0)]);
         code.push(addi(A6, A6, 1));
-        code.push(lbu_ddc(T2, A6));
+        code.extend([yaddrw(A6, ROOT, A6), lbu(T2, A6, 0)]);
         // A block into 248 bytes, and a block into a number.
         buf(&mut code, S4);
         reg(&mut code, D_CMD, CMD_READ);
@@ -1490,6 +1546,7 @@ pub fn run_all() -> bool {
         reg(&mut code, D_CMD, CMD_READ);
         wait(&mut code, S7, S8);
         code.push(jal(ZERO, 0));
+        m.set_reg(ROOT, Cap::ROOT);
         emit(&mut m, RESET_VECTOR, &code);
         m.mtimecmp = u64::MAX;
         m.gfx.next_vbl = u64::MAX;

@@ -42,18 +42,20 @@
 (export '(
   alloc-object *object-allocator* *collector* *pacer*
   ;; the generated layout: the names another package reads
-  low-end reset-vector reset-reserve cons-base cons-limit obj-base obj-limit gc-bitmap obj-starts obj-starts-ready obj-starts-magic mmio-base
-  snap-magic
-  lg-bootlist lg-cons-free lg-cons-free-n lg-cons-ptr lg-errhandler lg-gccount lg-obarray
-  lg-obj-end lg-obj-free-n lg-obj-ptr lg-package lg-packages
-  lg-roots lg-boot-stack lg-trap-stack lg-trap-nest lg-startup lg-symlist lg-task-exit
-  lg-toplevel lg-trapdepth lg-trap-entry lg-traphook lg-trapsave lg-traptmp lg-traptmp2
+  low-end reset-vector reset-reserve cons-base cons-limit obj-base obj-limit
+  gc-bitmap gc-bitmap-bytes obj-starts obj-starts-bytes scratch-base scratch-bytes obj-starts-magic
+  mmio-base dev-count dev-page-bytes snap-magic
+  kb-base kb-slots kb-unscanned kb-frame kb-depth kb-trap-stack kb-trap-hook kb-trap-nest
+  kb-trap-entry kb-boot-stack kb-boot-frame kb-toplevel kb-task-exit kb-obarray kb-symbols
+  kb-packages kb-package kb-symcount kb-roots kb-cons-ptr kb-obj-ptr kb-obj-free kb-bins
+  kb-devices kb-park kb-park2 kb-low kb-cons kb-objects kb-marks kb-starts kb-scratch kb-seals
+  kernel-ref kernel-set! all-symbols trap-depth *error-handler*
   value-bytes kind-fixnum kind-char kind-unbound kind-pair kind-object
   perm-ld perm-sd perm-lc perm-sc perm-lm perm-ex perm-sr perm-se perm-hd perms-all perms-pair perms-object
-  perms-nil
+  perms-nil perms-space
   otype-sentry otype-closure
-  obj-bins obj-bin-count t-free t-symbol t-string t-vector t-bytes t-closure t-record t-float
-  t-port t-bignum t-code t-text t-stack t-context code-entry code-name code-lits clo-entry clo-code clo-free
+  obj-bin-count t-free t-symbol t-string t-vector t-bytes t-closure t-record t-float
+  t-port t-bignum t-code t-text t-stack t-context t-kernel code-entry code-name code-lits clo-entry clo-code clo-free
   sym-name sym-value sym-function sym-plist sym-flags sym-package sym-macro sym-constant sym-detached pkg-tag
   ctx-slots ctx-bytes reg-pc reg-ra reg-sp reg-gp reg-tp reg-t0 reg-t1 reg-t3 reg-s0 reg-s1 reg-s2
   reg-a0 reg-a7
@@ -79,7 +81,7 @@
   %closure? %cons %cons? %cycles %disable %display %ecall
   %bignum? %enable %enable-interrupt-lines %eq? %error %eval %fixnum? %float? %flush
   %fluid-value %set-fluid-value!
-  %from-addr %funcall %gensym %halt %this-task %set-this-task! %int->char
+  %from-addr %kernel %funcall %gensym %halt %this-task %set-this-task! %int->char
   %set-stack-limit! %stack-limit %set-gc-mode! %context
   %intern %ld-half %ld-byte %logand %logior %lognot %logxor %lsh %macro?
   %*o %+o %-o
@@ -96,6 +98,7 @@
   %vector? %wait-for-interrupt %write
   ;; capabilities
   %root %cap-ld %cap-st! %cap-ld-word %cap-st-word! %cap-ld-byte %cap-st-byte!
+  %cap-ld-at %cap-st-at! %cap-ld-word-at %cap-st-word-at! %cap-ld-byte-at %cap-st-byte-at!
   %cap-base %cap-len %cap-top %cap-perms %cap-otype %cap-offset %cap-tag? %cap-sealed? %cap-high
   %cap-set-addr %cap-inc %cap-bounds %cap-bounds-exact %cap-and-perms %cap-clear-tag %cap-seal-entry
   %cap-seal-closure %cap-seal %cap-unseal %cap-unseal-within %cap-set-high %cap=? %cap-subset?
@@ -153,7 +156,7 @@
   symbol-package symbol-plist symbol-value symbol? t table->alist
   table-capacity table-count table-del! table-for-each table-has?
   table-keys table-ref table-set! table? third time uart-char
-  uart-ctrl uart-data uart-hex uart-nl uart-num uart-string
+  uart-page uart-put uart-get uart-ctrl-reg uart-hex uart-nl uart-num uart-string
   undefined-globals unless unquote unquote-splicing use-stream! vector
   vector->list vector-equal? vector-fill! vector-grow vector-length
   vector-map vector-ref vector-set! vector? warn when when-let while
@@ -177,7 +180,8 @@
   gc collect extra-roots collect-for-image
   invalidate-runs note-run! take-owed-run
   scan-context drop-context-run empty-cons-run install-allocator
-  refill-cons-run code-object-at code-bytes object-bytes-used gc-scratch room
+  refill-cons-run code-object-at code-bytes object-bytes-used room
+  scratch-ready scratch-stack scratch-prefix scratch-image
   barrier busy? step ensure-starts
 ))
 
@@ -185,7 +189,7 @@
 (export '(
   bm-pixels bitmap? make-bitmap alloc-bitmap
   blit-busy? blit-drain blit-sync blit-wait-descriptor blit-wait-ring
-  device-page device-page-bytes
+  device-page device-page-bytes reset-processor
   disk-go disk-status disk-busy? disk-blocks disk-interrupts!
   *blit-ring* *gc-blit-ring* *in-interrupt*
   blit-descriptor gc-blit-descriptor ensure-gc-blit-ring blit-go
@@ -223,9 +227,9 @@
   ;; the assembler and placing its code
   make-assembler asm-buf asm-len asm-labels asm-fixups asm-origin asm-nlits
   asm-privileged set-asm-len! set-asm-origin! set-asm-privileged!
-  label label-offset gensym-label literal literal-offset place place-at code-object
+  label label-offset gensym-label literal literal-offset place code-object resolve
   ;; CSRs, and the opcodes a trap handler decodes
-  csr-cycle csr-cycleh csr-ddc csr-gcmode csr-mcause csr-mepc csr-mie csr-mip
+  csr-cycle csr-cycleh csr-gcmarks csr-gcstarts csr-root csr-gcmode csr-mcause csr-mepc csr-mie csr-mip
   csr-mscratch csr-mstatus csr-mtidc csr-mtval csr-mtvec csr-stklim csr-utidc
   op-load op-store op-jal op-jalr op-sys op-rvy op-xlm
   ;; RV32IMC
@@ -236,7 +240,6 @@
   i-mulh i-mulhsu i-mulhu i-mv i-neg i-nop i-not i-or i-ori i-rem i-remu
   i-ret i-sb i-seqz i-sh i-sll i-slli i-slt i-slti i-sltiu i-sltu i-snez
   i-sra i-srai i-srl i-srli i-sub i-sw i-wfi i-xor i-xori
-  i-lw-abs i-ly-abs i-sw-abs i-sy-abs
   ;; the B extension and Zicond
   i-andn i-bclr i-bclri i-bext i-bexti i-binv i-binvi i-bset i-bseti
   i-clz i-cpop i-ctz i-czero-eqz i-czero-nez i-max i-maxu i-min i-minu
@@ -254,8 +257,6 @@
   i-fadd i-faddi i-faddio i-faddo i-fand i-fandi i-fdiv i-feq i-flt i-fltu
   i-fmul i-fmulo i-for i-fori i-frem i-fshi i-fsll i-fsra i-fsrl i-fsub
   i-fsubo i-fxor i-retag
-  i-lb-ddc i-lbu-ddc i-lh-ddc i-lhu-ddc i-lw-ddc i-ly-ddc
-  i-sb-ddc i-sh-ddc i-sw-ddc i-sy-ddc
 ))
 
 (in-package compiler)
@@ -272,7 +273,7 @@
   kickstart macro-form?
   rebuild rebuild-end genesis *fresh-image* record-initialiser register-macro repl
   resume-kickstart print-report
-  ctx-set! enter-closure
+  ctx-set! enter-closure *enter-stub* *boot-list* *startup*
   system-name top-level-form
 ))
 

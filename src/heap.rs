@@ -28,7 +28,7 @@
 //! writer and the bench all build and read objects through it, so what the
 //! compiler builds is what the machine runs.
 
-use crate::cap::{self, Cap, P_EX, P_HD, P_LC, P_LD, P_LM, P_SC, P_SD};
+use crate::cap::{self, Cap, P_EX, P_HD, P_LC, P_LD, P_LM, P_SC, P_SD, P_SE, P_SR};
 use crate::mach::{Machine, KIND_CAP, KIND_NIL, KIND_OBJECT, KIND_PAIR};
 use crate::map::*;
 use num_bigint::{BigInt, Sign};
@@ -53,6 +53,9 @@ pub const PERMS_BYTES: u32 = P_LD | P_SD | P_HD;
 pub const PERMS_NIL: u32 = P_LD | P_LC;
 /// A code object's entry: execute, and nothing else. `unsafe` code adds SR.
 pub const PERMS_CODE: u32 = P_EX;
+/// Object space's own capability, which the allocator mints objects and the
+/// assembler entries from: every permission but SE.
+pub const PERMS_SPACE: u32 = PERMS_OBJECT | P_EX | P_SR;
 
 /// A pair's bounds.
 pub const PAIR_BYTES: u32 = 16;
@@ -199,6 +202,12 @@ pub const T_STACK: u32 = 12;
 /// link to the frame it interrupted after them. The roots scan the ones in
 /// use, and marking does not trace one.
 pub const T_CONTEXT: u32 = 13;
+/// The kernel block: the trap stub's state and the capabilities the reset
+/// stub mints from the memory map (see `map::KB_BASE`). There is one, the
+/// first object in object space, and `mscratch` names it. Like a stack and
+/// a context it is machine state: the roots scan it, marking does not trace
+/// it, and the write barrier lets a store through its own capability.
+pub const T_KERNEL: u32 = 14;
 
 pub const SYM_SLOTS: u32 = 6;
 pub const SYM_NAME: u32 = 0;
@@ -249,26 +258,49 @@ pub const CLO_BODY: u32 = 2;
 pub const CLO_ENV: u32 = 3;
 pub const CLO_NAME: u32 = 4;
 
-/// The low-memory globals that hold values rather than addresses or counts.
-/// They start as nil.
-pub const VALUE_GLOBALS: &[u32] = &[
-    LG_SYMLIST,
-    LG_OBARRAY,
-    LG_PACKAGES,
-    LG_PACKAGE,
-    LG_BOOTLIST,
-    LG_ROOTS,
-    LG_TOPLEVEL,
-    LG_ERRHANDLER,
-    LG_TRAPHOOK,
-    LG_STARTUP,
-    LG_TASKEXIT,
-    LG_TRAPENTRY,
-    LG_BOOTSTACK,
-    LG_TRAPSTACK,
-    LG_TRAPNEST,
-    LG_TRAPSAVE,
+/// The kernel block's slots that hold values rather than counts. They
+/// start as nil.
+pub const KERNEL_VALUES: &[u32] = &[
+    KB_FRAME,
+    KB_TRAPSTACK,
+    KB_TRAPHOOK,
+    KB_TRAPNEST,
+    KB_TRAPENTRY,
+    KB_BOOTSTACK,
+    KB_BOOTFRAME,
+    KB_TOPLEVEL,
+    KB_TASKEXIT,
+    KB_OBARRAY,
+    KB_SYMBOLS,
+    KB_PACKAGES,
+    KB_PACKAGE,
+    KB_ROOTS,
+    KB_BINS,
+    KB_DEVICES,
 ];
+
+/// The capabilities the reset stub mints from the memory map, by kernel
+/// block slot: each region's base, length and permissions. The forge,
+/// which builds a heap before any machine has started, mints the same.
+pub fn memory_map() -> [(u32, u32, u32, u32); 7] {
+    [
+        (KB_LOW, 0, LOW_END, P_LD),
+        (KB_CONS, CONS_BASE, CONS_END - CONS_BASE, PERMS_PAIR),
+        (KB_OBJECTS, OBJ_BASE, OBJ_END - OBJ_BASE, PERMS_SPACE),
+        (KB_MARKS, GC_BITMAP, GC_BITMAP_BYTES, P_LD | P_SD),
+        (KB_STARTS, OBJ_STARTS, OBJ_STARTS_BYTES, P_LD | P_SD),
+        (KB_SCRATCH, SCRATCH, SCRATCH_BYTES, P_LD | P_SD),
+        (KB_SEALS, 0, 16, P_SE),
+    ]
+}
+
+/// A device's page, as the reset stub mints it: its registers, and for the
+/// chips with a capability register, capabilities as well.
+pub fn device_page(dev: u32) -> V {
+    let caps = dev == DEV_BLIT || dev == DEV_DISK || dev == DEV_GFX;
+    let perms = if caps { P_LD | P_SD | P_LC | P_SC } else { P_LD | P_SD };
+    cap_to(MMIO_BASE + (dev << DEV_SHIFT), 1 << DEV_SHIFT, perms)
+}
 
 #[inline]
 pub fn header(len: u32, ty: u32) -> u32 {
@@ -289,12 +321,12 @@ pub fn is_byte_type(ty: u32) -> bool {
     ty == T_STRING || ty == T_BYTES || ty == T_TEXT
 }
 
-/// A stack or a register context: a task's state, which the roots scan
-/// where it is in use, which marking does not trace, and which the write
-/// barrier does not watch.
+/// A stack, a register context or the kernel block: the machine's state,
+/// which the roots scan where it is in use, which marking does not trace,
+/// and which the write barrier does not watch.
 #[inline]
 pub fn is_state_type(ty: u32) -> bool {
-    ty == T_STACK || ty == T_CONTEXT
+    ty == T_STACK || ty == T_CONTEXT || ty == T_KERNEL
 }
 
 /// The payload's length in bytes, which is the length its bounds round up
@@ -380,45 +412,80 @@ impl<'a> Heap<'a> {
         out
     }
 
-    /// A low global that holds an address or a count, as that number.
-    pub fn g(&self, off: u32) -> u32 {
-        self.ldc(off).addr
+    /// A slot of the kernel block that holds a count or an address, as that
+    /// number. `slot` is the slot's address, a `KB_*` name.
+    pub fn g(&self, slot: u32) -> u32 {
+        self.ldc(slot).addr
     }
-    pub fn set_g(&mut self, off: u32, v: u32) {
-        self.stc(off, fix(v as i32))
+    pub fn set_g(&mut self, slot: u32, v: u32) {
+        self.stc(slot, fix(v as i32))
     }
-    /// A low global that holds a value.
-    pub fn gv(&self, off: u32) -> V {
-        self.ldc(off)
+    /// A slot of the kernel block that holds a value.
+    pub fn gv(&self, slot: u32) -> V {
+        self.ldc(slot)
     }
-    pub fn set_gv(&mut self, off: u32, v: V) {
-        self.stc(off, v)
+    pub fn set_gv(&mut self, slot: u32, v: V) {
+        self.stc(slot, v)
+    }
+
+    /// The kernel block, as the capability the reset stub puts in
+    /// `mscratch`.
+    pub fn kernel(&self) -> V {
+        cap_to(KB_BASE, KB_SLOTS * VALUE_BYTES, PERMS_OBJECT)
     }
 
     /// Lay out the empty heap. Everything after this is allocation.
     pub fn format(&mut self) {
-        // The nil cell, the global block and the object bins.
+        // The low block: the nil cell, and the reset stub's room.
         for a in (0..LOW_END).step_by(8) {
             self.stc(a, Cap::NULL);
         }
         self.stc(NIL_CELL, NIL);
         self.stc(NIL_CELL + 8, NIL);
-        self.set_g(LG_CONS_PTR, CONS_BASE);
-        self.set_g(LG_CONS_END, CONS_END);
-        self.set_g(LG_OBJ_PTR, OBJ_BASE);
-        self.set_g(LG_OBJ_END, OBJ_END);
-        for g in VALUE_GLOBALS {
+        // The kernel block, the first object in object space.
+        let at = KB_BASE - HEADER_BYTES;
+        self.st(at, header(KB_SLOTS, T_KERNEL));
+        self.st(at + 4, 0);
+        self.note_start(at);
+        for a in (KB_BASE..KB_BASE + KB_SLOTS * VALUE_BYTES).step_by(8) {
+            self.stc(a, Cap::NULL);
+        }
+        self.set_g(KB_CONS_PTR, CONS_BASE);
+        self.set_g(KB_OBJ_PTR, KB_BASE + KB_SLOTS * VALUE_BYTES);
+        for g in KERNEL_VALUES {
             self.set_gv(*g, NIL);
         }
+        for (slot, base, len, perms) in memory_map() {
+            self.set_gv(slot, cap_to(base, len, perms));
+        }
+        let bins = self.alloc_obj(T_VECTOR, OBJ_BIN_COUNT);
+        for i in 0..OBJ_BIN_COUNT {
+            self.set_slot(bins, i, fix(0));
+        }
+        self.set_gv(KB_BINS, bins);
+        let devices = self.alloc_obj(T_VECTOR, DEV_COUNT);
+        for d in 0..DEV_COUNT {
+            self.set_slot(devices, d, device_page(d));
+        }
+        self.set_gv(KB_DEVICES, devices);
+    }
+
+    /// The block whose header is at `at` set in the object-start map, as
+    /// the machine's allocator keeps it.
+    fn note_start(&mut self, at: u32) {
+        let bit = (at - OBJ_BASE) >> 3;
+        let w = OBJ_STARTS + (bit >> 5) * 4;
+        let old = self.m.peek32(w);
+        self.m.poke32(w, old | (1 << (bit & 31)));
     }
 
     // ---- allocation (bump only; the collector lives in Lisp) ----
     pub fn cons(&mut self, a: V, d: V) -> V {
-        let p = self.g(LG_CONS_PTR);
-        if p + PAIR_BYTES > self.g(LG_CONS_END) {
+        let p = self.g(KB_CONS_PTR);
+        if p + PAIR_BYTES > CONS_END {
             panic!("cons space exhausted at build time");
         }
-        self.set_g(LG_CONS_PTR, p + PAIR_BYTES);
+        self.set_g(KB_CONS_PTR, p + PAIR_BYTES);
         self.stc(p, a);
         self.stc(p + 8, d);
         cap_to(p, PAIR_BYTES, PERMS_PAIR)
@@ -438,24 +505,20 @@ impl<'a> Heap<'a> {
         let h = header(len, ty);
         let bytes = payload_bytes(h);
         let span = bounds_bytes(h);
-        let p = self.g(LG_OBJ_PTR);
+        let p = self.g(KB_OBJ_PTR);
         let base = align_up(p + HEADER_BYTES, cap::ram(bytes));
         let at = base - HEADER_BYTES;
         let end = base + round8(span);
-        if end > self.g(LG_OBJ_END) {
+        if end > OBJ_END {
             panic!("object space exhausted at build time");
         }
         if at > p {
             self.hole(p, at - p);
         }
-        self.set_g(LG_OBJ_PTR, end);
+        self.set_g(KB_OBJ_PTR, end);
         self.st(at, h);
         self.st(at + 4, 0);
-        // The object-start map, as the machine's allocator keeps it.
-        let bit = (at - OBJ_BASE) >> 3;
-        let w = OBJ_STARTS + (bit >> 5) * 4;
-        let old = self.m.peek32(w);
-        self.m.poke32(w, old | (1 << (bit & 31)));
+        self.note_start(at);
         let fill = if is_byte_type(ty) || is_state_type(ty) { Cap::NULL } else { NIL };
         for a in (base..end).step_by(8) {
             self.stc(a, fill);
@@ -464,14 +527,19 @@ impl<'a> Heap<'a> {
     }
 
     /// What the stubs stand on: the boot stack, the trap stack, the boot
-    /// context and the frames for nested traps, every one an object a low
-    /// global holds. A machine writes all of it before it reads any, so what
-    /// an image carries there is whatever the machine that wrote it last had
-    /// in hand, and a stale capability would keep what it names alive and in
-    /// the file. This zeroes them.
+    /// context and the frames for nested traps, every one an object the
+    /// kernel block holds, and the registers the trap stub parks there. A
+    /// machine writes all of it before it reads any, so what an image
+    /// carries there is whatever the machine that wrote it last had in hand,
+    /// and a stale capability would keep what it names alive and in the
+    /// file. This zeroes them, and leaves the boot context the frame.
     pub fn blank_stub_state(&mut self) {
-        let mut state: Vec<V> = [LG_BOOTSTACK, LG_TRAPSTACK, LG_TRAPSAVE].iter().map(|&g| self.gv(g)).collect();
-        let nest = self.gv(LG_TRAPNEST);
+        self.stc(KB_PARK, Cap::NULL);
+        self.stc(KB_PARK2, Cap::NULL);
+        let frame = self.gv(KB_BOOTFRAME);
+        self.set_gv(KB_FRAME, frame);
+        let mut state: Vec<V> = [KB_BOOTSTACK, KB_TRAPSTACK, KB_BOOTFRAME].iter().map(|&g| self.gv(g)).collect();
+        let nest = self.gv(KB_TRAPNEST);
         if self.is_type(nest, T_VECTOR) {
             state.extend((0..self.olen(nest)).map(|i| self.slot(nest, i)));
         }
@@ -543,7 +611,7 @@ impl<'a> Heap<'a> {
     /// that claims no bytes, or more than are left, is corrupt: the error is
     /// its address.
     pub fn blocks(&self) -> Result<Vec<(u32, u32)>, u32> {
-        let hi = self.g(LG_OBJ_PTR);
+        let hi = self.g(KB_OBJ_PTR);
         let mut out = Vec::new();
         let mut p = OBJ_BASE;
         while p < hi {
@@ -763,12 +831,12 @@ impl<'a> Heap<'a> {
     /// Symbols are chained through the obarray, a vector of buckets, and also
     /// threaded onto a flat list so the collector can walk every one of them.
     pub fn obarray(&mut self) -> V {
-        let o = self.gv(LG_OBARRAY);
+        let o = self.gv(KB_OBARRAY);
         if o != NIL {
             return o;
         }
         let v = self.alloc_obj(T_VECTOR, 1021);
-        self.set_gv(LG_OBARRAY, v);
+        self.set_gv(KB_OBARRAY, v);
         v
     }
 
@@ -795,7 +863,7 @@ impl<'a> Heap<'a> {
     /// Find a package by name, or make one. The first one made is `lm`, which
     /// has to exist before any symbol can, so its tag is filled in afterwards.
     pub fn package(&mut self, name: &str) -> V {
-        let mut p = self.gv(LG_PACKAGES);
+        let mut p = self.gv(KB_PACKAGES);
         while p != NIL {
             let pkg = self.car(p);
             if self.package_name(pkg) == name {
@@ -806,9 +874,9 @@ impl<'a> Heap<'a> {
         let nm = self.string(name);
         let pkg = self.alloc_obj(T_RECORD, PKG_SLOTS);
         self.set_slot(pkg, PKG_NAME, nm);
-        let all = self.gv(LG_PACKAGES);
+        let all = self.gv(KB_PACKAGES);
         let cell = self.cons(pkg, all);
-        self.set_gv(LG_PACKAGES, cell);
+        self.set_gv(KB_PACKAGES, cell);
         let tag = self.intern("package");
         self.set_slot(pkg, PKG_TAG, tag);
         pkg
@@ -864,9 +932,9 @@ impl<'a> Heap<'a> {
         let head = self.slot(ob, b);
         let cell = self.cons(s, head);
         self.set_slot(ob, b, cell);
-        let all = self.gv(LG_SYMLIST);
+        let all = self.gv(KB_SYMBOLS);
         let cell2 = self.cons(s, all);
-        self.set_gv(LG_SYMLIST, cell2);
+        self.set_gv(KB_SYMBOLS, cell2);
         s
     }
 
@@ -879,8 +947,8 @@ impl<'a> Heap<'a> {
         let s = self.alloc_obj(T_SYMBOL, SYM_SLOTS);
         self.set_slot(s, SYM_NAME, nm);
         self.set_slot(s, SYM_VALUE, UNBOUND);
-        let idx = self.g(LG_SYMCOUNT);
-        self.set_g(LG_SYMCOUNT, idx + 1);
+        let idx = self.g(KB_SYMCOUNT);
+        self.set_g(KB_SYMCOUNT, idx + 1);
         self.set_slot(s, SYM_FLAGS, fix((idx << 8) as i32));
         self.set_slot(s, SYM_PACKAGE, pkg);
         s

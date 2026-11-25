@@ -16,7 +16,7 @@
 
 use crate::forge::hostlisp::Lisp;
 use crate::cap::*;
-use crate::mach::{Machine, MSTATUS_MIE, MSTATUS_MPIE};
+use crate::mach::{Machine, CSR_GCMARKS, CSR_GCSTARTS, MSTATUS_MIE, MSTATUS_MPIE};
 use crate::map::*;
 
 /// Where the fuzz code goes: the reset vector, so the trap vector can point
@@ -67,6 +67,9 @@ pub fn exec(data: &[u8]) {
     m.gcmode = m.x[28] & 1;
     m.stklim = m.x[27];
     m.mscratch = m.reg(26);
+    let (marks, starts) = (m.reg(24), m.reg(23));
+    m.csr_cap_write(CSR_GCMARKS, marks, true);
+    m.csr_cap_write(CSR_GCSTARTS, starts, true);
     m.mtimecmp = (m.x[25] as u64) << 4;
     m.uart.mute = true;
     let _ = crate::run::run(&mut m, EXEC_BUDGET);
@@ -147,8 +150,8 @@ impl Rng {
 
 /// Addresses worth handing random code: each region, its edges, the chips.
 const PLACES: &[u32] = &[
-    0, 4, 8, LG_BASE, OBJ_BINS, LOW_END, RESET_VECTOR,
-    CONS_BASE, CONS_END - 4, OBJ_BASE, OBJ_END - 4, FAST_BASE, RAM_SIZE - 4, RAM_SIZE,
+    0, 4, 8, 16, LOW_END, RESET_VECTOR, KB_BASE,
+    CONS_BASE, CONS_END - 4, OBJ_BASE, OBJ_END - 4, FAST_BASE, OBJ_STARTS, SCRATCH, RAM_SIZE - 4, RAM_SIZE,
     MMIO_BASE, MMIO_BASE + 0x1000, MMIO_BASE + 0x2000, MMIO_BASE + 0x3000,
     MMIO_BASE + 0x4000, MMIO_BASE + 0x5000, MMIO_BASE + 0x6000, MMIO_END - 4,
     0xFFFF_FFFF, 0xFFFF_FFFC, 0x8000_0000,

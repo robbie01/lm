@@ -98,7 +98,7 @@
 ;; The stub passes mcause, the pc and mtval as integers, and the capability
 ;; to the frame it saved the registers into.
 (define (handle-trap cause epc tval ctx)
-  (if (%>= (%ld-word lg-trapdepth) trap-nest-limit) (trap-spiral cause epc tval) nil)
+  (if (%>= (trap-depth) trap-nest-limit) (trap-spiral cause epc tval) nil)
   (if (cons-refill? cause tval)
       (refill-run ctx)
       (begin
@@ -107,7 +107,7 @@
             ;; The barrier first: while a collection is marking it is the
             ;; commonest trap by far, and the store that took it is waiting to
             ;; re-execute.
-            (cond ((%= cause cause-barrier) (barrier tval))
+            (cond ((%= cause cause-barrier) (barrier tval ctx))
                   ((%= cause cause-ecall) (handle-ecall epc ctx))
                   ((%= cause cause-wrong-type)
                    (if (try-widen epc ctx) nil (check-trap cause epc tval ctx)))
@@ -153,14 +153,22 @@
 ;; ------------------------- the instruction that trapped
 ;; The report says which operation failed and what it was handed: the
 ;; instruction is at the saved pc, and every register it named is in the
-;; saved context. The pc is an integer, read through DDC a halfword at a time
-;; because an instruction is only aligned to two bytes; a compressed one is
-;; the low half alone.
+;; saved context. The pc is a number, and the instruction is read at it
+;; through object space's capability, where every function's code is, or
+;; the low block's, where the reset stub is; a pc anywhere else has no
+;; instruction to read, and reads as 0. An instruction is only aligned to
+;; two bytes, and a compressed one is the low half alone.
 (define (insn-at pc)
-  (let ((lo (%logand (%ld-half pc) #xffff)))
-    (if (%= (%logand lo 3) 3)
-        (%logior lo (%lsh (%ld-half (%+ pc 2)) 16))
-        lo)))
+  (let ((space (cond ((if (%>= pc obj-base) (%<= pc (%- obj-limit 4)) nil) (kernel-ref kb-objects))
+                     ((if (%>= pc 0) (%<= pc (%- low-end 4)) nil) (kernel-ref kb-low))
+                     (else nil))))
+    (if space
+        (let* ((at (%cap-set-addr space pc))
+               (lo (%logior (%cap-ld-byte at 0) (%lsh (%cap-ld-byte at 1) 8))))
+          (if (%= (%logand lo 3) 3)
+              (%logior lo (%lsh (%logior (%cap-ld-byte at 2) (%lsh (%cap-ld-byte at 3) 8)) 16))
+              lo))
+        0)))
 
 (define (compressed? w) (if (%= (%logand w 3) 3) nil t))
 (define (insn-op w)  (%logand w 127))
@@ -238,8 +246,8 @@
         ((if (%= (retag-from w) 0) (%= (retag-to w) 1) nil) "integer->char")
         (else "retag")))
 
-;; The R-type group by funct7: fop, fshi, jcl, vkind, lhdr, sealcl, npair,
-;; retag and the loads and stores through DDC.
+;; The R-type group by funct7: fop, fshi, jcl, vkind, lhdr, sealcl, npair
+;; and retag.
 (define (xlm-r-op-name w)
   (let ((f7 (insn-f7 w)))
     (cond ((%< f7 #x18) (fop-name f7))
@@ -249,8 +257,6 @@
           ((%= f7 #x23) "make-closure")
           ((%= f7 #x24) "cons")
           ((retag? w) (retag-name w))
-          ((%= f7 #x7c) "store")
-          ((%= f7 #x7d) "load")
           (else "instruction"))))
 
 ;; Xlm by funct3: lref, sref, lvar, beqx, bnex, the fixnum immediates, the
@@ -426,13 +432,11 @@
 ;; the permission, or not wide enough.
 
 ;; The register a load or a store takes as its authority: the base, or the
-;; object of an Xlm access, or nil for DDC, which integer addressing goes
-;; through.
+;; object of an Xlm access.
 (define (access-authority w)
-  (cond ((compressed? w) (if (%= (%logand w 3) 2) reg-sp (%+ 8 (%logand (%lsh w -7) 7))))
-        ((xlm-r? w) (if (%>= (insn-f7 w) #x7c) nil (insn-rs1 w)))
-        ((%= (insn-rs1 w) 0) nil)
-        (else (insn-rs1 w))))
+  (if (compressed? w)
+      (if (%= (%logand w 3) 2) reg-sp (%+ 8 (%logand (%lsh w -7) 7)))
+      (insn-rs1 w)))
 
 ;; The register a jump takes its target from, or nil for one relative to the
 ;; pc: `jalr`, and `c.jr` and `c.jalr`, which name it where rd would be.
@@ -468,14 +472,13 @@
 ;; `sp` is bounded to its task's stack, so writing below the bottom is a
 ;; capability fault even where the stack limit has not caught it.
 (define (emit-access-fault w reg store a ctx)
-  (let ((v (if reg (fault-value ctx reg) (%root))))
-    (if (if (if reg (%= reg reg-sp) nil) (if (%cap-tag? v) (%< a (%cap-base v)) nil) nil)
+  (let ((v (fault-value ctx reg)))
+    (if (if (%= reg reg-sp) (if (%cap-tag? v) (%< a (%cap-base v)) nil) nil)
         (emit-str "stack overflow: below the bottom of the stack")
         (begin
           (emit-str (op-name w))
           (emit-str ": ")
           (cond
-           ((%null? reg) (emit-str "integer addressing refused by the default data capability"))
            ((not (%cap-tag? v)) (emit-value v) (emit-str " is not a pointer"))
            ((%cap-sealed? v) (emit-value v) (emit-sealed v))
            ((if store (not (stores-data? v)) nil)
@@ -508,16 +511,11 @@
      (else (emit-str (op-name w)) (emit-str ": the target is outside the code")))))
 
 ;; An illegal instruction. Without SR in the pc the privileged instructions
-;; are illegal: a CSR or `mret`, and integer addressing, a load or store
-;; whose base is x0 or one of Xlm's through DDC.
+;; are illegal: a CSR and `mret`. A load or a store through x0, which RVY
+;; reserves, is illegal with SR or without: memory is reached through a
+;; capability, and x0 is none.
 (define (privileged-insn? w)
-  (cond ((compressed? w) nil)
-        ((%= (insn-op w) op-sys) t)
-        ((xlm-r? w) (%>= (insn-f7 w) #x7c))
-        ((if (%= (insn-op w) op-load) t (%= (insn-op w) op-store)) (%= (insn-rs1 w) 0))
-        ((%= (insn-op w) op-rvy)
-         (if (if (%= (insn-f3 w) 1) t (%= (insn-f3 w) 2)) (%= (insn-rs1 w) 0) nil))
-        (else nil)))
+  (if (compressed? w) nil (%= (insn-op w) op-sys)))
 
 (define (illegal-trap epc tval ctx)
   (if (if (privileged-insn? tval) (not (%= perm-sr (%logand (%cap-perms (ctx-ref ctx reg-pc)) perm-sr))) nil)
@@ -798,12 +796,12 @@
 (define (error-trap args) (%ecall ecall-error))
 
 ;; A task restarts on its own stack, which is a capability standing at its
-;; top. Before there are tasks, on the boot stack, which a low global holds
-;; the same way.
+;; top. Before there are tasks, on the boot stack, which the kernel block
+;; holds the same way.
 (define (restart-stack)
   (if *stack-top-fn*
       (%funcall *stack-top-fn*)
-      (%ld-cap lg-boot-stack)))
+      (kernel-ref kb-boot-stack)))
 
 ;; Where a restarted closure returns to when it finally does: on the machine
 ;; the sentry for the task exit stub, so a prompt in a window that is
@@ -811,19 +809,32 @@
 (define (restart-ra)
   (if *return-addr-fn* (%funcall *return-addr-fn*) 0))
 
-;; What `jcl` does to a closure, done by hand for a context that is to start
-;; in one: the closure opened through the escape hatch goes in t0, and its
-;; entry in the pc. The closure takes one argument if one is given, the
-;; report of the fault that brought it here. Nothing the abandoned code left
-;; in a register survives except the task in s2 and its cons run in gp, and
-;; the NULL left in s0 is the bottom of the new stack.
+;; A context that is to start in a closure starts here: one `jcl` that keeps
+;; no link, which calls the closure in t0 as a tail call does, leaving it
+;; the return address the context holds. So nothing has to open the closure
+;; to start it; `jcl` does, as it does for every call. Made at the
+;; kickstart, before anything can need it, and kept here, which keeps its
+;; text; declared, not initialised, so that the boot list leaves it be.
+(define *enter-stub*)
+
+(define (build-enter-stub)
+  (let ((a (make-assembler)))
+    (i-jcl a $zero $t0)
+    (set! *enter-stub* (place a))))
+
+;; A call to a closure set up by hand in a context: the closure goes in t0,
+;; still sealed, and the pc is the enter stub. The closure takes one
+;; argument if one is given, the report of the fault that brought it here.
+;; Nothing the abandoned code left in a register survives except the task in
+;; s2 and its cons run in gp, and the NULL left in s0 is the bottom of the
+;; new stack.
 (define (enter-closure ctx f sp . arg)
-  (let ((open (open-closure f)) (r 1))
+  (let ((r 1))
     (while (%< r 32)
       (if (if (%= r reg-gp) t (%= r reg-s2)) nil (ctx-set! ctx r 0))
       (set! r (%+ r 1)))
-    (ctx-set! ctx reg-pc (%cap-ld open (%* value-bytes clo-entry))) ; pc = its entry
-    (ctx-set! ctx reg-t0 open)                                 ; t0 = the closure
+    (ctx-set! ctx reg-pc *enter-stub*)                         ; pc = the stub
+    (ctx-set! ctx reg-t0 f)                                    ; t0 = the closure
     (if (%cons? arg)
         (begin (ctx-set! ctx reg-a0 (%car arg))                ; a0 = the argument
                (ctx-set! ctx reg-t1 1))                        ; t1 = one of them
@@ -843,7 +854,7 @@
 ;; The machine stops and says so.
 (define (abort-to-repl ctx . report)
   (let ((r (if (%cons? report) (%car report) nil)))
-    (if (%> (%ld-word lg-trapdepth) 1)
+    (if (%> (trap-depth) 1)
         (begin
           (uart-string "\n*** error inside the trap handler\n")
           (if r (uart-string r) nil)
@@ -1031,9 +1042,15 @@
 
 ;; ---------------------------------------------------------------- kickstart
 ;; The forge left a thunk for every top level form that was not a function
-;; definition, in source order.
+;; definition, in source order. Declared, not initialised: a `(define ...
+;; nil)` would put on the boot list a `(set! ... nil)` that emptied it.
+(define *boot-list*)
+
+;; Run before the first prompt, if it is set.
+(define *startup* nil)
+
 (define (run-boot-list)
-  (let ((l (%ld-cap lg-bootlist)))
+  (let ((l *boot-list*))
     (while (%cons? l)
       (%funcall (%car l))
       (set! l (%cdr l)))))
@@ -1045,8 +1062,9 @@
   ;; here, while nothing waits on interrupts, rather than in the first
   ;; collection's start, which would hold them off for the whole walk.
   (ensure-starts)
-  (%st-cap! lg-traphook (%symbol-value 'handle-trap))
-  (%st-cap! lg-errhandler (%symbol-value 'error-trap))
+  (build-enter-stub)
+  (kernel-set! kb-trap-hook (%symbol-value 'handle-trap))
+  (set! *error-handler* (%symbol-value 'error-trap))
   (run-boot-list)
   ;; Exec comes up before anything can want a task: the code already running
   ;; becomes task zero, and its context is the trap frame the stub has been
@@ -1056,9 +1074,7 @@
   (banner)
   (banner-exec)
   (emit-str "type (help) for what to try\n")
-  (if (%ld-cap lg-startup)
-      (%funcall (%ld-cap lg-startup))
-      nil)
+  (if *startup* (%funcall *startup*) nil)
   ;; A prompt starts in user, whatever package the boot list left the reader
   ;; in.
   (set-current-package! (make-package "user"))
@@ -1068,5 +1084,5 @@
   (%halt exit-ok)
   0)
 
-;; These hand out capabilities made from the root, or open a closure.
+;; This sets a context's registers.
 (unsafe-names (quote (enter-closure)))

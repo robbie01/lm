@@ -113,12 +113,11 @@
 (define (symbol<? a b) (string<? (symbol-name a) (symbol-name b)))
 
 (define (package-symbols p)
-  (unsafe
-  (let ((acc nil) (l (%ld-cap lg-symlist)))
+  (let ((acc nil) (l (unsafe (all-symbols))))
     (while (%cons? l)
       (if (%eq? (symbol-package (%car l)) p) (set! acc (%cons (%car l) acc)) nil)
       (set! l (%cdr l)))
-    (sort acc symbol<?))))
+    (sort acc symbol<?)))
 
 (define (package-parts p)
   (map (lambda (s) (list (symbol-name s) s t)) (package-symbols p)))

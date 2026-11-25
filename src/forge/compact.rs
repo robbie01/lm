@@ -16,8 +16,9 @@
 //! within a function is relative to itself, and anything else reaches code
 //! through a capability, a code object's entry or a return address, which is
 //! rewritten like any other. The one capability to code that is not in
-//! memory is `mtvec`, and the reset stub loads that from `lg-trap-entry` every
-//! time the machine starts.
+//! memory is `mtvec`, and the reset stub loads that from the kernel block
+//! every time the machine starts. The kernel block is the first object, and
+//! the first object never moves.
 //!
 //! Liveness is not recomputed. `collect-for-image` has already run a full
 //! collection with the machine's own root set, and it leaves object space as
@@ -141,10 +142,11 @@ fn free_hole(h: &mut Heap, at: u32, len: u32) -> u32 {
     let gran = len / 8;
     h.hole(at, len);
     if gran >= 2 {
-        let bin = OBJ_BINS + (if gran < OBJ_BIN_COUNT { gran } else { 0 }) * VALUE_BYTES;
-        let head = h.ldc(bin);
+        let bins = h.gv(KB_BINS);
+        let bin = if gran < OBJ_BIN_COUNT { gran } else { 0 };
+        let head = h.slot(bins, bin);
         h.stc(at + HEADER_BYTES, head);
-        h.set_g(bin, at);
+        h.set_slot(bins, bin, fix(at as i32));
     }
     for a in (at + 2 * VALUE_BYTES..at + len).step_by(8) {
         h.stc(a, Cap::NULL);
@@ -154,7 +156,7 @@ fn free_hole(h: &mut Heap, at: u32, len: u32) -> u32 {
 
 pub fn compact_objects(h: &mut Heap, verbose: bool) -> Result<Stats, String> {
     let lo = OBJ_BASE;
-    let hi = h.g(LG_OBJ_PTR);
+    let hi = h.g(KB_OBJ_PTR);
     let blocks = live_blocks(h)?;
 
     // Where everything lands: as low as it will go with its payload aligned
@@ -197,8 +199,9 @@ pub fn compact_objects(h: &mut Heap, verbose: bool) -> Result<Stats, String> {
     // writer skip a page. The tail above the last block is not a hole on a
     // bin but unclaimed ground the allocator bumps into, so it is only
     // blanked.
+    let bins = h.gv(KB_BINS);
     for b in 0..OBJ_BIN_COUNT {
-        h.set_g(OBJ_BINS + b * VALUE_BYTES, 0);
+        h.set_slot(bins, b, fix(0));
     }
     let mut freed = 0;
     let mut cursor = lo;
@@ -211,8 +214,8 @@ pub fn compact_objects(h: &mut Heap, verbose: bool) -> Result<Stats, String> {
     for a in (free..hi).step_by(8) {
         h.stc(a, Cap::NULL);
     }
-    h.set_g(LG_OBJ_PTR, free);
-    h.set_g(LG_OBJFREEN, freed);
+    h.set_g(KB_OBJ_PTR, free);
+    h.set_g(KB_OBJ_FREE, freed);
 
     let stats = Stats { before: hi - lo, after: free - lo, used, moved };
     if verbose {
@@ -301,17 +304,17 @@ mod tests {
         // block's header, and it still names `c`.
         let end = c.inc(2400).with_bounds(0).unwrap();
         let l = h.list(&[a, c, d, inner, end]);
-        h.set_gv(LG_ROOTS, l);
+        h.set_gv(KB_ROOTS, l);
         // What the collector does to the dead object.
         let at = dead.addr - HEADER_BYTES;
         let size = block_size(h.ld(at));
         h.hole(at, size);
-        let before = h.g(LG_OBJ_PTR);
+        let before = h.g(KB_OBJ_PTR);
 
         let st = compact_objects(&mut h, false).unwrap();
         assert_eq!(st.moved, 2);
-        assert!(h.g(LG_OBJ_PTR) < before);
-        let items = h.list_vec(h.gv(LG_ROOTS));
+        assert!(h.g(KB_OBJ_PTR) < before);
+        let items = h.list_vec(h.gv(KB_ROOTS));
         let (a, c, d, inner, end) = (items[0], items[1], items[2], items[3], items[4]);
         assert_eq!(h.slot(a, 0), fix(1));
         assert_eq!(h.slot(a, 1), c);

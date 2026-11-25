@@ -10,7 +10,7 @@ use crate::cap::Cap;
 use crate::forge::hostlisp::Lisp;
 use crate::forge::{boot_host, write_layout};
 use crate::heap::{NIL, PERMS_PAIR, T_STACK, T_TEXT};
-use crate::mach::{Machine, Stop, C_CAP_FETCH, C_CAP_LOAD, C_CAP_STORE, C_ECALL, C_RANGE, C_TYPE};
+use crate::mach::{Machine, Stop, CSR_ROOT, C_CAP_FETCH, C_CAP_LOAD, C_CAP_STORE, C_ECALL, C_RANGE, C_TYPE};
 use crate::map::*;
 use crate::run;
 use crate::rvenc::*;
@@ -29,11 +29,13 @@ fn put(m: &mut Machine, at: u32, code: &[u32]) {
 }
 
 /// Stop the machine with an exit code: the system device's first register,
-/// written by integer address through DDC.
+/// written through the root, which the stubs here have SR to read.
 fn halt(c: &mut Vec<u32>, code: i32) {
-    li32(c, T3, MMIO_BASE);
+    c.push(csrrs(T3, CSR_ROOT, ZERO));
+    li32(c, T4, MMIO_BASE);
+    c.push(yaddrw(T3, T3, T4));
     c.push(addi(T4, ZERO, code));
-    c.push(sw_ddc(T4, T3));
+    c.push(sw(T4, T3, 0));
     c.push(jal(ZERO, 0));
 }
 
@@ -514,14 +516,15 @@ pub fn run_one(l: &mut Lisp, src: &str) -> String {
     // run is one. The cons run is the rest of cons space.
     let trap = l.h.alloc_obj(T_TEXT, 64).base();
     let tramp = l.h.alloc_obj(T_TEXT, 64).base();
-    let run_start = l.h.g(LG_CONS_PTR);
-    let run_end = l.h.g(LG_CONS_END);
+    let run_start = l.h.g(KB_CONS_PTR);
+    let run_end = CONS_END;
     let root = Cap::ROOT;
-    if l.h.gv(LG_BOOTSTACK) == NIL {
+    if l.h.gv(KB_BOOTSTACK) == NIL {
         let s = l.h.alloc_obj(T_STACK, STACK_BYTES / 8).and_perms(PERMS_PAIR);
-        l.h.set_gv(LG_BOOTSTACK, s.with_addr(s.top() as u32));
+        l.h.set_gv(KB_BOOTSTACK, s.with_addr(s.top() as u32));
     }
-    let stack = l.h.gv(LG_BOOTSTACK);
+    let stack = l.h.gv(KB_BOOTSTACK);
+    let kernel = l.h.kernel();
     let cons_run = root
         .with_addr(run_start)
         .with_bounds(run_end - run_start)
@@ -540,6 +543,7 @@ pub fn run_one(l: &mut Lisp, src: &str) -> String {
     m.set_reg(T0, closure);
     m.set_reg(T1, Cap::int(0));
     m.mtvec = root.with_addr(trap);
+    m.mscratch = kernel;
     m.set_pcc(root.with_addr(tramp));
     m.halted = false;
     m.exit_code = 0;
@@ -662,8 +666,8 @@ pub fn run_all(verbose: bool) -> bool {
     let mut fail = 0;
     for Case(src, want) in cases() {
         if verbose {
-            let cons = (l.h.g(LG_CONS_PTR) - CONS_BASE) / 8;
-            let obj = l.h.g(LG_OBJ_PTR) - OBJ_BASE;
+            let cons = (l.h.g(KB_CONS_PTR) - CONS_BASE) / 8;
+            let obj = l.h.g(KB_OBJ_PTR) - OBJ_BASE;
             let code = l.h.text_bytes();
             eprintln!("[{cons} conses, {obj} obj bytes, {code} code bytes] {src}");
         }

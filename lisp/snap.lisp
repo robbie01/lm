@@ -28,47 +28,56 @@
 (defconstant snap-header-blocks 1)
 (defconstant snap-regions 3)
 
-;; The header is put together in the collector's scratch memory, which no
-;; allocator hands out, and each region's tag map after it.
-(defconstant snap-header gc-scratch)
-(defconstant snap-tag-map (%+ gc-scratch 512))
+;; The header is put together in the image writer's part of the collector's
+;; scratch, which no allocator hands out, and each region's tag map after
+;; it: a capability to it, from the kernel block's.
+(define (snap-area) (%cap-inc (kernel-ref kb-scratch) scratch-image))
 
 (define (region-blocks len) (%lsh (%+ len 511) -9))
 
-;; Word k of region i's entry in the header.
-(defsubst (region-field hdr i k) (%+ hdr (%+ 12 (%+ (%lsh i 4) (%lsh k 2)))))
+;; The offset of word k of region i's entry in the header.
+(defsubst (region-field i k) (%+ 12 (%+ (%lsh i 4) (%lsh k 2))))
 
 (define (save-image) (save-image-with (%symbol-value 'resume-kickstart)))
 
 (define (put-region hdr i base len)
-  (poke (region-field hdr i 0) base)
-  (poke (region-field hdr i 1) len)
+  (%cap-st-word! hdr (region-field i 0) base)
+  (%cap-st-word! hdr (region-field i 1) len)
   nil)
 
-;; What the controller is handed to write n blocks from `base`: the root
-;; narrowed to those blocks and to loading data.
-(define (blocks-at base n)
-  (%cap-and-perms (%cap-bounds (%from-addr base) (%lsh n 9)) perm-ld))
+;; Region i of the image, as the capability the kernel block holds for it:
+;; the low block, cons space and object space.
+(define (snap-region i)
+  (cond ((%= i 0) (kernel-ref kb-low))
+        ((%= i 1) (kernel-ref kb-cons))
+        (else (kernel-ref kb-objects))))
+
+;; What the controller is handed to write n blocks from where `c` stands:
+;; `c` narrowed to those blocks and to loading data.
+(define (blocks c n)
+  (%cap-and-perms (%cap-bounds c (%lsh n 9)) perm-ld))
 
 ;; The first thing that went wrong, or 0 if nothing has.
 (define (first-bad bad status) (if (%= bad 0) status bad))
 
-;; The tags of the granules from `lo` up to `hi`, as a map at `at`, padded
-;; with zeroes to a whole block. Answers the map's length in blocks.
-(define (tag-map lo hi at)
-  (let ((q at))
+;; The tags of the granules of region `r` from `lo` up to `hi`, as a map
+;; written through `at`, padded with zeroes to a whole block. Answers the
+;; map's length in blocks.
+(define (tag-map r lo hi at)
+  (let ((q 0) (g (%cap-set-addr r lo)))
     (while (%< lo hi)
       (let ((byte 0) (bit 1) (e (%+ lo 64)))
         (while (%< lo e)
-          (if (%< lo hi) (if (%cap-tag? (%ld-cap lo)) (set! byte (%logior byte bit)) nil) nil)
+          (if (%< lo hi) (if (%cap-tag? (%cap-ld g 0)) (set! byte (%logior byte bit)) nil) nil)
           (set! bit (%lsh bit 1))
-          (set! lo (%+ lo 8)))
-        (%st-byte! q byte)
+          (set! lo (%+ lo 8))
+          (set! g (%cap-inc g 8)))
+        (%cap-st-byte! at q byte)
         (set! q (%+ q 1))))
-    (while (%> (%logand (%- q at) 511) 0)
-      (%st-byte! q 0)
+    (while (%> (%logand q 511) 0)
+      (%cap-st-byte! at q 0)
       (set! q (%+ q 1)))
-    (%lsh (%- q at) -9)))
+    (%lsh q -9)))
 
 ;; Everything from the collection to the last block written is one critical
 ;; section, and nothing inside it allocates: another task could otherwise
@@ -80,10 +89,10 @@
 ;; driver's is in flight under it, and a transfer inside a section with
 ;; interrupts off can only be watched. `disk:exclusive` runs the job there,
 ;; and this task sleeps until it answers with the blocks written, or minus
-;; the first status that was not ok. The job writes through a page of the
-;; controller's of its own, made from the root.
+;; the first status that was not ok. The job writes through the
+;; controller's page, which the kernel block holds.
 (define (save-image-with top)
-  (let* ((saved-top (%ld-cap lg-toplevel))
+  (let* ((saved-top (kernel-ref kb-toplevel))
          (result
           (disk:exclusive
             (lambda ()
@@ -98,39 +107,42 @@
               (blit-drain)
               ;; A resumed image re-enters through `top` rather than through
               ;; the boot list: every global it would have set is already set.
-              (%st-cap! lg-toplevel top)
+              (kernel-set! kb-toplevel top)
               (let ((r (write-regions (device-page dev-disk))))
-                (%st-cap! lg-toplevel saved-top)
+                (kernel-set! kb-toplevel saved-top)
                 r)))))
     (report-save result)))
 
-;; Three regions: the low page, pairs, objects, each from its base to
-;; as far as its allocator has reached, each followed by its tag map,
-;; which is built in the collector's scratch memory. The header goes out
-;; last, so that a run that is interrupted leaves a file with no valid header
-;; rather than a wrong one. Answers the blocks written, or minus the first
-;; status that was not ok. Allocates nothing, and writes through `page`, the
-;; controller's.
+;; Three regions: the low block, pairs, objects, each from its base to as
+;; far as its allocator has reached, each read through the kernel block's
+;; capability to it and followed by its tag map, which is built in the
+;; collector's scratch. The header goes out last, so that a run that is
+;; interrupted leaves a file with no valid header rather than a wrong one.
+;; Answers the blocks written, or minus the first status that was not ok.
+;; Allocates nothing, and writes through `page`, the controller's.
 (define (write-regions page)
-  (put-region snap-header 0 0 low-end)
-  (put-region snap-header 1 cons-base (%- (%ld-word lg-cons-ptr) cons-base))
-  (put-region snap-header 2 obj-base (%- (%ld-word lg-obj-ptr) obj-base))
-  (let ((i 0) (k snap-header-blocks) (bad 0))
+  (let* ((hdr (snap-area))
+         (maps (%cap-inc hdr 512))
+         (i 0) (k snap-header-blocks) (bad 0))
+    (put-region hdr 0 0 low-end)
+    (put-region hdr 1 cons-base (%- (kernel-ref kb-cons-ptr) cons-base))
+    (put-region hdr 2 obj-base (%- (kernel-ref kb-obj-ptr) obj-base))
     (while (%< i snap-regions)
-      (let* ((base (peek (region-field snap-header i 0)))
-             (len (peek (region-field snap-header i 1)))
+      (let* ((base (%cap-ld-word hdr (region-field i 0)))
+             (len (%cap-ld-word hdr (region-field i 1)))
+             (r (snap-region i))
              (n (region-blocks len))
-             (m (tag-map base (%+ base len) snap-tag-map)))
-        (poke (region-field snap-header i 2) k)
-        (poke (region-field snap-header i 3) (%+ k n))
-        (set! bad (first-bad bad (disk:write-raw page (blocks-at base n) k n)))
-        (set! bad (first-bad bad (disk:write-raw page (blocks-at snap-tag-map m) (%+ k n) m)))
+             (m (tag-map r base (%+ base len) maps)))
+        (%cap-st-word! hdr (region-field i 2) k)
+        (%cap-st-word! hdr (region-field i 3) (%+ k n))
+        (set! bad (first-bad bad (disk:write-raw page (blocks (%cap-set-addr r base) n) k n)))
+        (set! bad (first-bad bad (disk:write-raw page (blocks maps m) (%+ k n) m)))
         (set! k (%+ k (%+ n m))))
       (set! i (%+ i 1)))
-    (poke snap-header snap-magic)
-    (poke (%+ snap-header 4) reset-vector)
-    (poke (%+ snap-header 8) snap-regions)
-    (set! bad (first-bad bad (disk:write-raw page (blocks-at snap-header 1) 0 1)))
+    (%cap-st-word! hdr 0 snap-magic)
+    (%cap-st-word! hdr 4 reset-vector)
+    (%cap-st-word! hdr 8 snap-regions)
+    (set! bad (first-bad bad (disk:write-raw page (blocks hdr 1) 0 1)))
     (if (%= bad 0) k (%- 0 bad))))
 
 (define (report-save result)
@@ -149,8 +161,8 @@
 ;; tasks that were saved never run again: the new Exec's lists do not hold
 ;; them, and the collector takes them back with their stacks.
 (define (resume-kickstart)
-  (%st-cap! lg-traphook (%symbol-value 'handle-trap))
-  (%st-cap! lg-errhandler (%symbol-value 'error-trap))
+  (kernel-set! kb-trap-hook (%symbol-value 'handle-trap))
+  (set! *error-handler* (%symbol-value 'error-trap))
   (exec-init)
   (exec-start)
   (if *resume-fn* (%funcall *resume-fn*) nil)
@@ -175,23 +187,20 @@
 ;; it runs in, is the machine doing the building.
 ;;
 ;; So this hands over. The image's own `finish-fresh` becomes the top level,
-;; what genesis left goes in the one root it looks in, and the machine
-;; restarts through its reset stub with memory as it is: a clean stack, no
-;; task, an empty cons run, and nothing running but the image's own code.
+;; what genesis left goes in the one root it looks in, and the processor is
+;; reset with memory as it is: it starts again at the reset vector with the
+;; root in PCC, and the reset stub mints the memory map again and enters the
+;; top level on a clean stack, with no task, an empty cons run, and nothing
+;; running but the image's own code.
 (define (save-fresh)
   (let* ((fresh *fresh-image*)
          (e (if fresh (table-ref (%car fresh) 'finish-fresh nil) nil)))
     (if e nil (error "save-fresh: run sys:genesis first"))
-    (%st-cap! lg-roots fresh)
-    (%st-cap! lg-toplevel (%vector-ref e 0))
+    (kernel-set! kb-roots fresh)
+    (kernel-set! kb-toplevel (%vector-ref e 0))
     (%disable)
     (%set-this-task! nil)
-    ;; A closure whose entry is the reset stub, with the root's authority,
-    ;; which the stub needs: the one way into it from compiled code, which
-    ;; only ever jumps through a closure.
-    (let ((c (alloc-object t-closure clo-free)))
-      (%set-slot! c clo-entry (%cap-set-addr (%root) reset-vector))
-      (%funcall (%cap-seal-closure c)))))
+    (reset-processor)))
 
 ;; Where the reset lands. The symbols still hold the builder's definitions,
 ;; so the handover itself happens in `fresh-become`, which is the builder's,
@@ -202,7 +211,7 @@
 (define (finish-fresh)
   (fresh-become)
   (forget-unused-packages)
-  (%st-cap! lg-package (find-package "user"))
+  (kernel-set! kb-package (find-package "user"))
   (collect-for-image)
   (let ((r (write-regions (device-page dev-disk))))
     (if (%< r 0)
@@ -219,18 +228,18 @@
           (%halt exit-ok)))))
 
 (define (fresh-become)
-  (let* ((fresh (%ld-cap lg-roots))
+  (let* ((fresh (kernel-ref kb-roots))
          (image (%car fresh))
          (seen (cadr fresh))
          (thunks (caddr fresh))
-         (all (%ld-cap lg-symlist))
+         (all (all-symbols))
          ;; What the image gives each symbol, as a plain list: once the cells
          ;; start changing, nothing that reads a global can be trusted. A
          ;; table's empty slots are marked by a value held in a global, and
          ;; the image's marker is not this machine's.
          (entries (table->alist image))
          (unbound (%unbound)))
-    (%st-cap! lg-roots nil)
+    (kernel-set! kb-roots nil)
     (keep-image-symbols image seen)
     ;; No trap may come while the cells change, and a collection still
     ;; marking would bring one with the first store over an unmarked pointer:
@@ -239,13 +248,12 @@
     ;; again before the allocator is the image's.
     (if (busy?) (collect) nil)
     (become-image all entries unbound)
-    ;; The image's own globals, as the forge sets them for an image it builds.
-    (%st-cap! lg-toplevel (%symbol-value 'kickstart))
-    (%st-cap! lg-traphook (%symbol-value 'handle-trap))
-    (%st-cap! lg-bootlist thunks)
-    (%st-cap! lg-errhandler nil)
-    (%st-cap! lg-startup nil)
-    (%st-cap! lg-task-exit nil)
+    ;; The image's own top level, trap hook and boot list, as the forge sets
+    ;; them for an image it builds.
+    (kernel-set! kb-toplevel (%symbol-value 'kickstart))
+    (kernel-set! kb-trap-hook (%symbol-value 'handle-trap))
+    (kernel-set! kb-task-exit nil)
+    (%set-symbol-value! '*boot-list* thunks)
     ;; And its allocator, which the kickstart would install first thing:
     ;; nothing since the symbols changed has allocated, and from here on
     ;; anything may.
@@ -258,10 +266,10 @@
 ;; the collector runs.
 (define (keep-image-symbols image seen)
   (dolist (p (all-packages)) (table-set! seen (%slot p pkg-tag) t))
-  (let* ((n (%vector-length (%ld-cap lg-obarray)))
+  (let* ((n (%vector-length (kernel-ref kb-obarray)))
          (ob (make-vector n nil))
          (kept nil)
-         (l (%ld-cap lg-symlist)))
+         (l (all-symbols)))
     (while (%cons? l)
       (let ((s (%car l)))
         (if (if (%slot s sym-package) (if (table-has? seen s) t (table-has? image s)) nil)
@@ -272,8 +280,8 @@
               (set! kept (%cons s kept)))
             nil))
       (set! l (%cdr l)))
-    (%st-cap! lg-obarray ob)
-    (%st-cap! lg-symlist (reverse kept))))
+    (kernel-set! kb-obarray ob)
+    (kernel-set! kb-symbols (reverse kept))))
 
 ;; Every symbol is emptied, and then takes what the image gives it: its
 ;; value, a function only if that is a macro's expander, and the flags that

@@ -9,6 +9,21 @@
 (in-package lm)
 (unsafe-file)                 ; the object system and the allocator: raw throughout
 
+;; ---------------------------------------------------------------- the kernel block
+;; The kernel's own state, one object, which `mscratch` names: the trap
+;; stub's state, the roots of the world, the frontiers of the heap, and the
+;; capabilities the reset stub mints from the memory map. Reading
+;; `mscratch` takes SR, so only code that says `unsafe` can reach it; these
+;; are the slots by number, `kb-*` in the layout.
+(defsubst (kernel-ref i) (%slot (%kernel) i))
+(defsubst (kernel-set! i v) (%set-slot! (%kernel) i v))
+
+;; Every interned symbol, as a list: the root of everything a name reaches.
+(define (all-symbols) (kernel-ref kb-symbols))
+
+;; How many traps are in progress: 0 outside the trap handler.
+(define (trap-depth) (kernel-ref kb-depth))
+
 ;; ---------------------------------------------------------------- allocation
 ;; An object is a header granule and its payload. The header's first word is
 ;; (len << 8) | type and its second is zero, which is exactly a fixnum stored
@@ -47,11 +62,12 @@
   (%cap-unseal-within f (%root)))
 
 ;; A sealing key: authority to seal and to unseal with the otype `ot` and
-;; with no other, the root narrowed to that one type and to SE. A manager
-;; mints the key to its own type once and keeps it in its own closures, so
-;; that what it seals into a record anybody can read is still its own.
+;; with no other, the otypes the reset stub minted narrowed to that one. A
+;; manager mints the key to its own type once and keeps it in its own
+;; closures, so that what it seals into a record anybody can read is still
+;; its own.
 (define (sealing-key ot)
-  (%cap-and-perms (%cap-bounds-exact (%from-addr ot) 1) perm-se))
+  (%cap-and-perms (%cap-bounds-exact (%cap-set-addr (kernel-ref kb-seals) ot) 1) perm-se))
 
 ;; A fresh vector already holds nil in every slot.
 (define (make-vector-n n fill)
@@ -96,10 +112,12 @@
 ;; to represent them: `%rrl` gives the length and `%ram` the alignment the
 ;; base must have. The collector's allocator is handed the size of the whole
 ;; block, header and rounded payload, and that alignment mask, and answers
-;; the address of a block whose payload starts suitably aligned, or 0. The
-;; capability's permissions are `perms-object`, values and capabilities
-;; alike, or for a byte payload `perms-bytes`, data only. Both carry HD,
-;; which only an allocator mints.
+;; where in object space the block is, a payload suitably aligned, or 0.
+;; The header is written and the capability minted through object space's
+;; own capability, which the kernel block holds. The capability's
+;; permissions are `perms-object`, values and capabilities alike, or for a
+;; byte payload `perms-bytes`, data only. Both carry HD, which only an
+;; authority over the whole of object space mints.
 (define (alloc-object type len)
   (let* ((bytes (byte-payload? type))
          (later (if bytes t (state-payload? type)))
@@ -110,6 +128,7 @@
          (align (%ram payload))
          (size (%+ value-bytes (%logand (%+ span (%- value-bytes 1)) (%- 0 value-bytes))))
          (paced (%funcall *pacer* size))
+         (space (kernel-ref kb-objects))
          (obj (without-interrupts
                 (let ((p (%funcall *object-allocator* size align)))
                   (if (%= p 0)
@@ -118,14 +137,14 @@
                         (set! p (%funcall *object-allocator* size align))
                         (if (%= p 0) (out-of-memory "object space") nil))
                       nil)
-                  (%st-cap! p (%logior (%lsh len 8) type))
-                  (if later nil (fill-granules (%+ p value-bytes) (%+ p size) (fresh-slot type)))
-                  (%cap-and-perms (%cap-bounds-exact (%from-addr (%+ p value-bytes)) span)
+                  (let ((h (%cap-set-addr space p)))
+                    (%cap-st! h 0 (%logior (%lsh len 8) type))
+                    (if later nil (fill-granules h value-bytes size (fresh-slot type))))
+                  (%cap-and-perms (%cap-bounds-exact (%cap-set-addr space (%+ p value-bytes)) span)
                                   (if bytes perms-bytes perms-object))))))
-    (if later
-        (let ((b (%cap-base obj)))
-          (fill-granules b (%+ b (%- size value-bytes)) 0))
-        nil)
+    ;; Through object space's capability, which covers the whole block: a
+    ;; byte payload's own bounds can stop short of its last granule.
+    (if later (fill-granules (%cap-set-addr space (%cap-base obj)) 0 (%- size value-bytes) 0) nil)
     obj))
 
 ;; What a fresh slot holds until it is given something: nil, so that a
@@ -133,11 +152,11 @@
 (define (fresh-slot type)
   (if (%= type t-bignum) 0 (if (%= type t-float) 0 nil)))
 
-;; Every granule from `from` to `to` set to `v`. A store of an untagged value
-;; clears the granule's tag.
-(define (fill-granules from to v)
+;; Every granule `from` bytes into `c` up to `to` set to `v`. A store of an
+;; untagged value clears the granule's tag.
+(define (fill-granules c from to v)
   (while (%< from to)
-    (%st-cap! from v)
+    (%cap-st! c from v)
     (set! from (%+ from value-bytes))))
 
 (define (make-record n tag)
@@ -190,7 +209,7 @@
 (define (package-use p) (%slot p pkg-use))
 (define (set-package-use! p v) (%set-slot! p pkg-use v))
 (define (symbol-package s) (%slot s sym-package))
-(define (all-packages) (%ld-cap lg-packages))
+(define (all-packages) (kernel-ref kb-packages))
 
 (define (package? x)
   (if (%record? x) (%eq? (%slot x pkg-tag) 'package) nil))
@@ -211,7 +230,7 @@
         (let ((p (make-record pkg-slots 'package)))
           (%set-slot! p pkg-name name)
           (%set-slot! p pkg-use nil)
-          (%st-cap! lg-packages (%cons p (%ld-cap lg-packages)))
+          (kernel-set! kb-packages (%cons p (kernel-ref kb-packages)))
           p)))))
 
 (define (symbol-exported? s)
@@ -242,7 +261,7 @@
   (find-symbol-hashed pkg s (name-hash s) (name-power s)))
 
 (define (find-symbol-hashed pkg s nh np)
-  (let* ((ob (%ld-cap lg-obarray))
+  (let* ((ob (kernel-ref kb-obarray))
          (n (%vector-length ob))
          (h (%logand (%+ (%* (prefix-hash (package-name pkg)) np) nh) 1073741823))
          (chain (%vector-ref ob (%mod h n)))
@@ -266,8 +285,8 @@
     (%set-slot! sym sym-value (%unbound))
     (%set-slot! sym sym-function nil)
     (%set-slot! sym sym-plist nil)
-    (%set-slot! sym sym-flags (%lsh (%ld-word lg-symcount) 8))
-    (%st-word! lg-symcount (%+ (%ld-word lg-symcount) 1))
+    (%set-slot! sym sym-flags (%lsh (kernel-ref kb-symcount) 8))
+    (kernel-set! kb-symcount (%+ (kernel-ref kb-symcount) 1))
     sym))
 
 ;; A symbol in no package and on no list, for a macro's temporaries: nothing
@@ -285,13 +304,13 @@
   (let ((found (find-symbol-in pkg s)))
     (if found
         found
-        (let* ((ob (%ld-cap lg-obarray))
+        (let* ((ob (kernel-ref kb-obarray))
                (n (%vector-length ob))
                (b (%mod (qualified-hash (package-name pkg) s) n))
                (sym (alloc-symbol s)))
           (%set-slot! sym sym-package pkg)
           (%vector-set! ob b (%cons sym (%vector-ref ob b)))
-          (%st-cap! lg-symlist (%cons sym (%ld-cap lg-symlist)))
+          (kernel-set! kb-symbols (%cons sym (kernel-ref kb-symbols)))
           (if *names-seen* (table-set! *names-seen* sym t) nil)
           sym)))))
 
@@ -316,14 +335,14 @@
   (let ((v (find-visible pkg s)))
     (if v v (intern-in pkg s))))
 
-;; The package a bare name is read in: one machine cell, which both readers
-;; work from. The scheduler swaps it like the streams, so two shells can be in
-;; two packages at once.
+;; The package a bare name is read in: one slot of the kernel block, which
+;; both readers work from. The scheduler swaps it like the streams, so two
+;; shells can be in two packages at once.
 (define (current-package)
-  (let ((p (%ld-cap lg-package)))
-    (if p p (let ((base (make-package "lm"))) (%st-cap! lg-package base) base))))
+  (let ((p (kernel-ref kb-package)))
+    (if p p (let ((base (make-package "lm"))) (kernel-set! kb-package base) base))))
 
-(define (set-current-package! p) (%st-cap! lg-package p) p)
+(define (set-current-package! p) (kernel-set! kb-package p) p)
 
 (define (intern-string s) (intern-in (current-package) s))
 
@@ -391,17 +410,21 @@
 ;; ---------------------------------------------------------------- console
 ;; The serial port, reached raw: it works before anything else is up, inside
 ;; a trap handler, and after the scheduler has stopped being trustworthy,
-;; which is why the collector and the panic path report through it. Nothing
-;; here allocates. Ordinary console output goes through console.driver.
-(defconstant uart-data (%+ mmio-base (%+ (%lsh dev-uart 12) uart-data-reg)))
-(defconstant uart-ctrl (%+ mmio-base (%+ (%lsh dev-uart 12) uart-ctrl-reg)))
+;; which is why the collector and the panic path report through it. It is
+;; written through the device's page in the kernel block. Nothing here
+;; allocates. Ordinary console output goes through console.driver.
+(defsubst (uart-page) (%slot (kernel-ref kb-devices) dev-uart))
 
-(define (uart-nl) (%st-word! uart-data 10))
+;; A character's code to the line, and the next code from it, or -1.
+(define (uart-put n) (%cap-st-word! (uart-page) uart-data-reg n))
+(define (uart-get) (%cap-ld-word (uart-page) uart-data-reg))
+
+(define (uart-nl) (uart-put 10))
 
 (define (uart-string s)
-  (let ((i 0) (n (%string-length s)))
+  (let ((i 0) (n (%string-length s)) (p (uart-page)))
     (while (%< i n)
-      (%st-word! uart-data (%char->int (%string-ref s i)))
+      (%cap-st-word! p uart-data-reg (%char->int (%string-ref s i)))
       (set! i (%+ i 1)))
     s))
 
@@ -410,18 +433,18 @@
 (define (uart-num n)
   (if (%< n 0)
       (begin
-        (%st-word! uart-data 45)
+        (uart-put 45)
         (if (%< n -9) (uart-num (%- 0 (%/ n 10))) nil)
-        (%st-word! uart-data (%- 48 (%rem n 10))))
+        (uart-put (%- 48 (%rem n 10))))
       (begin
         (if (%>= n 10) (uart-num (%/ n 10)) nil)
-        (%st-word! uart-data (%+ 48 (%rem n 10))))))
+        (uart-put (%+ 48 (%rem n 10))))))
 
 (define (uart-hex n)
-  (%st-word! uart-data 48)
-  (%st-word! uart-data 120)
+  (uart-put 48)
+  (uart-put 120)
   (let ((i 28))
     (while (%>= i 0)
       (let ((d (%logand (%lsh n (%- 0 i)) 15)))
-        (%st-word! uart-data (if (%< d 10) (%+ 48 d) (%+ 87 d))))
+        (uart-put (if (%< d 10) (%+ 48 d) (%+ 87 d))))
       (set! i (%- i 4)))))

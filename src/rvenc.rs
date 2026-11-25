@@ -226,7 +226,6 @@ pub fn czeronez(rd: u32, rs1: u32, rs2: u32) -> u32 {
     r_type(0x07, rs2, rs1, 7, rd, 0x33)
 }
 
-
 // ---- RVY-A, opcode 0x7b: the capability instructions ----
 fn ry(f7: u32, rs2: u32, rs1: u32, rd: u32) -> u32 {
     r_type(f7, rs2, rs1, 0, rd, 0x7b)
@@ -466,39 +465,6 @@ pub fn fltu(rd: u32, rs1: u32, rs2: u32) -> u32 {
 }
 pub fn feq(rd: u32, rs1: u32, rs2: u32) -> u32 {
     fop(0x15, rd, rs1, rs2)
-}
-/// Loads and stores through DDC: `rs1` is an integer address. The loads
-/// select their width in the rs2 field, the stores in the rd field, as
-/// LOAD's funct3 numbers widths, with 3 for a capability.
-pub fn lb_ddc(rd: u32, rs1: u32) -> u32 {
-    xr(0x7d, 0, rs1, rd)
-}
-pub fn lh_ddc(rd: u32, rs1: u32) -> u32 {
-    xr(0x7d, 1, rs1, rd)
-}
-pub fn lw_ddc(rd: u32, rs1: u32) -> u32 {
-    xr(0x7d, 2, rs1, rd)
-}
-pub fn ly_ddc(rd: u32, rs1: u32) -> u32 {
-    xr(0x7d, 3, rs1, rd)
-}
-pub fn lbu_ddc(rd: u32, rs1: u32) -> u32 {
-    xr(0x7d, 4, rs1, rd)
-}
-pub fn lhu_ddc(rd: u32, rs1: u32) -> u32 {
-    xr(0x7d, 5, rs1, rd)
-}
-pub fn sb_ddc(rs2: u32, rs1: u32) -> u32 {
-    xr(0x7c, rs2, rs1, 0)
-}
-pub fn sh_ddc(rs2: u32, rs1: u32) -> u32 {
-    xr(0x7c, rs2, rs1, 1)
-}
-pub fn sw_ddc(rs2: u32, rs1: u32) -> u32 {
-    xr(0x7c, rs2, rs1, 2)
-}
-pub fn sy_ddc(rs2: u32, rs1: u32) -> u32 {
-    xr(0x7c, rs2, rs1, 3)
 }
 /// Indexed access: funct7 the form << 4 | `ty`, the object type the access
 /// requires, or 0 for any object.
@@ -870,7 +836,6 @@ pub fn li32(out: &mut Vec<u32>, rd: u32, v: u32) {
         }
     }
 }
-
 
 /// `c.ly` and `c.sy`: rd' and rs1' are x8..x15; the offset is a multiple of
 /// 8 below 256.
