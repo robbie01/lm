@@ -128,13 +128,17 @@ completes either way, so nothing waits for a blit that will never land. A
 link that is no capability ends the chain; one the chip may not follow ends
 it as refused. When it finishes a descriptor the chip clears its three
 capability slots, so a finished descriptor holds no authority over anything.
+So the tagged granules of the tasks' rings, which hw lists in `*blit-rings*`,
+are exactly what blits in flight hold, and the collector takes them as
+roots: a bitmap dropped while a blit into it is still running stays alive
+until the blit has landed.
 
 A bitmap's pixels are handed over as their byte object's capability, moved
 to the first pixel, so building a descriptor names no memory by number. A
-descriptor is pool memory that can hold capabilities, and the pool is not
-traced, so `blit-descriptor` and `blit-go` stay unsafe names: rings, the
-chain's tail and the waiting functions name descriptors by number, and the
-capability to one exists only while it is being filled. The rectangle calls
+descriptor is pool memory that can hold capabilities, written under the
+chip once it is linked, so `blit-descriptor` and `blit-go` stay unsafe
+names: rings, the chain's tail and the waiting functions name descriptors
+by number, and the capability to one exists only while it is being filled. The rectangle calls
 in hw.lisp, which take bitmaps, are how everything else blits.
 
 A blit is queued by filling the next free descriptor of the ring and linking
@@ -196,7 +200,10 @@ address, and the controller is handed the object's capability: its buffer
 register is a capability register, a read into the buffer needs SD and a
 write from it LD, and every byte of the blocks must lie inside its bounds,
 or the command moves nothing and answers `disk-refused`. A read clears the
-tags of what it fills. Nothing in disk.lisp is unsafe. `exclusive` runs a job
+tags of what it fills. A command takes the capability out of the register
+and drops it when it ends, and its caller is blocked holding the buffer
+until then, so the buffer cannot be collected under it. Nothing in
+disk.lisp is unsafe. `exclusive` runs a job
 in the driver's task with interrupts off, with every transfer watched rather
 than slept through; saving an image is one such job, since the collection
 and every region's write must happen with nothing else running.

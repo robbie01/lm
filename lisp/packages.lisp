@@ -190,7 +190,8 @@
   make-device device? device-owner device-name device-usable? dev-page dev-ld dev-st!
   claim-device claim-device-for release-device release-devices-of release-all-devices
   *disk* disk-go disk-status disk-busy? disk-blocks disk-interrupts!
-  *blit-ring* *gc-blit-ring* *in-interrupt* blit-descriptor gc-blit-descriptor blit-go
+  *blit-ring* *gc-blit-ring* *blit-rings* blit-ring-bytes *in-interrupt*
+  blit-descriptor gc-blit-descriptor blit-go
   *screen* alloc-pool bm-blit-rect bm-fill-rect
   bm-plot bm-point bm-index bm-w bm-h
   make-bitmap-rastport make-rastport-on rp-bitmap

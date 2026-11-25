@@ -331,8 +331,16 @@
 ;; The pool hands a block out zeroed: the next descriptor is the first, and
 ;; every done word reads as done, so no descriptor that was never used waits
 ;; for a write-back that never comes.
-(define (new-blit-ring)
-  (alloc-pool (%+ 8 (%* blit-ring-size blit-list-size))))
+(define blit-ring-bytes (%+ 8 (%* blit-ring-size blit-list-size)))
+(define (new-blit-ring) (alloc-pool blit-ring-bytes))
+
+;; Every task's ring there has been, by number. A blit the chip has not
+;; finished holds the capabilities of its source and destination in its
+;; descriptor, in the pool, which is not traced; the chip clears them as it
+;; finishes, so the tagged granules of these rings are exactly what blits in
+;; flight hold, and the collector takes them as roots. The collector's own
+;; ring only ever names its mark map, which is not the heap.
+(define *blit-rings* nil)
 
 ;; The ring's next descriptor, once the chip has finished with it.
 (define (ring-take r)
@@ -350,7 +358,11 @@
   (if *in-interrupt*
       (error "the blitter is task context only: signal a task instead")
       nil)
-  (if (%= *blit-ring* 0) (set! *blit-ring* (new-blit-ring)) nil)
+  (if (%= *blit-ring* 0)
+      (let ((r (new-blit-ring)))
+        (without-interrupts (set! *blit-rings* (%cons r *blit-rings*)))
+        (set! *blit-ring* r))
+      nil)
   (ring-take *blit-ring*))
 
 ;; The collector's own ring. Not a fluid binding: a collection runs with

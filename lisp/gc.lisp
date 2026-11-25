@@ -362,10 +362,19 @@
 ;; context with `scan-context`.
 (define (extra-roots) nil)
 
+;; What the blitter holds for blits it has not finished: every tagged granule
+;; of every task's descriptor ring (see `*blit-rings*`).
+(define (scan-blit-rings)
+  (let ((p *blit-rings*))
+    (while (%cons? p)
+      (scan-granules (%car p) (%+ (%car p) blit-ring-bytes))
+      (set! p (%cdr p)))))
+
 ;; Low memory holds the globals, each an 8-byte slot holding a value or a
 ;; number, so every tagged granule below the pool is a root.
 (define (roots)
   (scan-granules 0 pool-base)
+  (scan-blit-rings)
   (gc-push (%this-task))
   ;; This task's own stack, from where it stands.
   (scan-stack (%stack-pointer))

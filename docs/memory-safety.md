@@ -47,6 +47,16 @@ refused it and why, and the blitter's status keeps a bit until it is
 cleared; a disk command answers `disk-refused`. What either chip writes is
 data, its tags cleared.
 
+**And in time.** A capability a chip holds for a transfer it has not
+finished keeps its object alive. The blitter clears a descriptor's
+capability slots as it finishes it, so the tagged granules of the tasks'
+descriptor rings are exactly what blits in flight hold, and the collector
+takes them as roots: a bitmap dropped while a blit into it is still running
+is freed by a later collection, after the blit has landed. The disk takes
+its buffer out of the register when a command starts and drops it when the
+command ends, and the command's caller is blocked holding the buffer
+throughout.
+
 **Unforgeability, by tags.** A granule's tag is out of band, and only a
 capability store from a tagged register sets it. Integer instructions write
 untagged results, data stores clear the tags they touch, and a capability
@@ -103,7 +113,7 @@ compiler and the processor.
 | `%set-context!` `%set-stack-limit!` `%set-gc-mode!` `%ecall` `%disable` `%enable` `%cons-run` `%set-cons-run!` `%set-this-task!` `%halt` | the machine's own state | arbitrary machine state |
 | `alloc-pool` `free-pool` | pool memory, by number | a freed block reused under a holder; never traced |
 | `dev-page` `dev-ld` `dev-st!` | any register of a device the task may use | a register it should not have written |
-| `blit-descriptor` `blit-go` | a descriptor: pool memory that holds capabilities | a pointer kept where the collector does not look |
+| `blit-descriptor` `blit-go` | a descriptor: pool memory that holds capabilities | a descriptor written after it was linked, under the chip |
 | `alloc-code`, `register-code`, `refill-cons-run` in gc | code space, the collector's tables | the collector's invariants |
 
 What left the list with the port: `%addr-of` is safe, because a number is
@@ -137,15 +147,7 @@ used through DDC, reaches whatever the block holds next. There is no
 revocation. `alloc-pool` zeroes the block it hands out, so the new owner
 never sees the old one's data, but the old owner can see the new one's.
 
-**DMA in flight.** The chips check space, not time. A blit holds its
-capabilities until it lands, in a descriptor in the pool, which the
-collector does not trace, so nothing keeps a bitmap alive for a blit that
-is still running into it: code that drops the last reference to one right
-after drawing into it leaves the chip writing a block a collection may
-have freed. The chip clears a descriptor's capabilities when it finishes,
-so a landed blit leaves nothing behind. The disk's caller is blocked
-holding its buffer until the transfer is over. The display chip reads a
-bitmap by number, and only reads.
+**The display.** The display chip reads a bitmap by number, and only reads.
 
 **Inside `unsafe`.** Code with SR has the root, and the root reaches
 everything: an object's header, the nil cell, a sealed closure's slots, code

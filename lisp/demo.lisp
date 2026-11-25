@@ -612,6 +612,14 @@
       (set! from (%+ from 1)))
     same))
 
+;; Start a long fill into a fresh bitmap and drop it: the only thing left
+;; holding the pixels is the descriptor the chip is working through. Answers
+;; their address, which is a number and keeps nothing alive.
+(define (blit-and-drop)
+  (let ((b (alloc-bitmap 1024 768)))
+    (bm-fill-rect b 0 0 1024 768 4)
+    (%addr-of (bm-pixels b))))
+
 (define (blitting)
   (let ((a (alloc-bitmap 256 256))
         (b (alloc-bitmap 256 256)))
@@ -690,7 +698,20 @@
       (num-check 'the-status-clears (blit-refused?) nil)
       (num-check 'what-they-cover-lands (blit-probe op-fill v src 8 4) blit-done)
       (num-check 'all-of-it (all-bytes? v 0 32 3) t)
-      (num-check 'and-nothing-was-refused (blit-refused?) nil)))
+      (num-check 'and-nothing-was-refused (blit-refused?) nil))
+    ;; A blit in flight keeps its bitmap alive: a collection that starts
+    ;; while the chip is still filling pixels nothing else holds marks them
+    ;; through the descriptor, and the fill lands in a live object.
+    (gc)
+    (let ((a (blit-and-drop)))
+      (num-check 'a-dropped-bitmap-still-being-filled
+                 (list (blit-busy?) gc::*phase*) (list t gc::phase-idle))
+      (unsafe (without-interrupts (gc::start-cycle)))
+      (while (= gc::*phase* gc::phase-marking) (gc::step))
+      (num-check 'is-kept-by-its-descriptor (unsafe (gc::marked? (- a 8))) t)
+      (gc)
+      (blit-sync)
+      (num-check 'and-the-fill-landed-in-it (unsafe (%ld-byte (+ a (* 1024 767)))) 4)))
   (princ "blitting: done (nothing above = all correct)")
   (newline))
 

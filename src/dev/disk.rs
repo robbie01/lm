@@ -73,6 +73,7 @@ pub struct Disk {
     pub busy_until: u64,
     /// The running command, latched when it was issued: the buffer and
     /// block registers are free to be written for the next one meanwhile.
+    /// Its buffer is dropped when it finishes.
     cmd: Cmd,
     file: Option<File>,
 }
@@ -162,9 +163,12 @@ pub fn command(m: &mut Machine, reg: u32, v: u32) {
         finish(m);
     }
 
+    // The command takes the buffer's capability with it and leaves the
+    // register empty, so the controller holds a capability only for a
+    // command it has not finished, and for no longer.
     let c = Cmd {
         op: v,
-        buf: m.disk.buf,
+        buf: std::mem::replace(&mut m.disk.buf, Cap::NULL),
         block: m.disk.block,
         count: m.disk.count,
     };
@@ -245,7 +249,7 @@ fn perform(m: &mut Machine, c: Cmd) -> u32 {
 /// Complete the running command: move the bytes, post the result, and raise
 /// the interrupt if it was asked for.
 fn finish(m: &mut Machine) {
-    let c = m.disk.cmd;
+    let c = std::mem::take(&mut m.disk.cmd);
     m.disk.busy = false;
     m.disk.status = perform(m, c);
     if m.disk.ctrl & 1 != 0 {

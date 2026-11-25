@@ -908,9 +908,6 @@ drawn it.
   stacks, contexts and descriptors by number; `free-pool` gives a block back
   while capabilities and addresses to it may still be held, nothing revokes
   them, and a stale one reaches whatever the block holds next.
-- The chips check space, not time: nothing keeps a bitmap alive for a blit
-  still running into it, since the descriptor is in the pool, which is not
-  traced.
 - The root is everything. Code compiled `unsafe` can make any capability,
   including one that writes an object's header or opens any closure.
 - `eq?` is exact: two capabilities to the same object with different
