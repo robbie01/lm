@@ -278,7 +278,7 @@ funct3 2  csetboundsimm cd, cs1, uimm12
 inside its bounds, else code 0x02, 0x03 or 0x01 on `cs1`. `csealentry` needs
 EX (0x11). `csealclo` needs a headed capability whose header type is
 closure (0x04). `cseal` without SE in the authority is 0x17 and `cunseal`
-0x19; an otype outside 1..15, or one that does not match, is 0x04 on the
+0x1b; an otype outside 1..15, or one that does not match, is 0x04 on the
 authority. `cbuildcap` refuses bounds outside its authority (0x01),
 permissions its authority lacks (0x08), and an otype past the sentry (0x04
 on `cs2`); it keeps a sentry sealed. `crrl` and `cram` read their length
@@ -380,7 +380,7 @@ widens an overflow into a bignum and resumes after the instruction.
                          0x0a representability, 0x11 execute, 0x12 load,
                          0x13 store, 0x14 load capability, 0x15 store
                          capability, 0x17 seal permission, 0x18 system
-                         registers, 0x19 unseal
+                         registers, 0x1b unseal
 29  write barrier        mtval: the address of the granule being overwritten
 30  stack overflow       mtval: where sp would have gone; sp is left as it was
 ```
