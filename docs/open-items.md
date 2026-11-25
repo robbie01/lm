@@ -241,6 +241,84 @@ namespaces, the Rust one knowing no packages, so the same text interns to
 different symbols and a cache of forms is unsound. The lever, if a build
 ever needs to be faster than three seconds, is the interpreted reader.
 
+### The workbench in a window
+
+Measured with `examples/latency.rs`, which stands a probe where the window
+would be and runs the machine through the real run loop and pacing, and
+with `--fnprof` on headless runs that inject input through `input:inject`.
+Times are wall time on the machine's side, before the host draws the
+frame; instruction counts are exact, the machine being deterministic.
+
+**A change waited a frame after it was drawn. RESOLVED.** A frame was
+scanned out at the vertical blank, before the compositor had run for it,
+and input waited in the window's queue for the next blank. A frame is now
+handed over when the machine first waits after a blank with the blitter
+idle, and a key, a button or the wheel wakes an idle machine at once;
+pointer moves still wait for the blank, gathered into one. A key typed into
+a shell shows in 13.6 ms instead of 33.4, an arrow key in the explorer in
+37.7 instead of 66.7.
+
+**An idle desktop kept the host busy. RESOLVED.** Sixty identical frames a
+second were converted, uploaded and drawn: 8.3% of a host core. A frame
+made from the same registers, palette and bytes as the last is not handed
+over: 0.4%. The window thread's redraw averages 0.7 ms when there is one.
+
+**The screen froze while a window was dragged across another. RESOLVED.**
+The interrupt dispatcher acknowledged a line after its servers ran, which
+wiped a raise that landed while they ran. Compositing a window over
+another is a chain of small blits, so the blit server missed a completion,
+the compositor slept on a finished descriptor, and nothing changed on the
+screen until another task's blit happened to finish. The line is now
+acknowledged first. A drag across the explorer composites at 83 thousand
+instructions a frame.
+
+**The explorer drew once per event. RESOLVED.** A redraw was 517 thousand
+instructions, more than a frame, so a held key or a fast wheel queued
+events faster than they were drawn: thirty keys a second went on moving
+the selection for 389 ms after the last. It now takes every waiting event
+and draws once, 37 ms; the wheel at fifty steps a second, 240 ms to 77.
+Charcoal glyphs cut their clip to a range of rows and columns once and
+paint in a leaf, and text with no background waits for the blitter once:
+the redraw is 285 thousand.
+
+**A new window spun on the blitter for its title boxes. RESOLVED.** Each
+box's 64-pixel gradient was a `plot` and a blitter wait a pixel, with a
+fresh window's fills still landing: 360 thousand of the 2.01 million
+instructions a new shell cost. Now 1.74 million.
+
+**A printed line moved the shell's whole grid. RESOLVED.** 61 thousand
+instructions a line, 23 of them the grid moved up a byte at a time. The
+grid is a ring of rows: 39 thousand.
+
+**The window stayed at the size of the display it booted with. RESOLVED.**
+The workbench's 1024 by 768 was drawn at 0.52 into a 640 by 400 window,
+too small to read. The window follows the display's size.
+
+**A shell's last column lay on its frame. RESOLVED.** 62 columns in an
+interior 61 wide.
+
+**A windowed machine is held to its nominal 20 MHz. WONTFIX**, as a
+decision about what the machine is. `pace` sleeps off the machine's lead
+over the wall clock at each idle while the lead is under 50 ms, which holds
+every frame to 333 thousand instructions of the machine's clock: an
+explorer redraw is 14 ms, a new shell 87 ms, a printed line 2 ms, whatever
+the host could do. Bursts longer than 50 ms run at host speed. Letting
+every busy stretch run free would make interaction about twenty times
+faster on a current host, but a task drawing each frame would then run at
+a rate set by its load, and raising `TIMER_HZ` would speed the blitter with
+the processor. *Trigger:* deciding the windowed machine is not a preview
+of the 20 MHz part.
+
+**Loops compile to about twelve instructions a turn. WONTFIX** here.
+`zero-words` is twelve a word, six of them register moves, and zeroing a
+new window's two bitmaps and its task's stack is 760 thousand of a new
+shell's 1.74 million; `glyph-paint` is the same shape. The lever is the
+compiler's register allocation, below.
+
+**An idle workbench costs 10.6 thousand instructions a frame. WONTFIX.**
+3% of the machine, nearly all of it the task switches and fluid binding
+swaps of the compositor waking for the blank.
+
 ## Compiler
 
 **Register allocation across calls. WONTFIX**, measured. Frame loads and

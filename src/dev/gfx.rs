@@ -2,8 +2,10 @@
 //!
 //! Vertical blank is derived from the retired-instruction count rather than
 //! from host wall time, so a program that draws on every vblank produces the
-//! exact same frames on every run. The host window is refreshed on those same
-//! boundaries, throttled to the rate the host can sustain.
+//! exact same frames on every run. The host window is shown a frame once per
+//! vblank, when the machine next stops to wait, so that what was drawn in
+//! answer to the blank is in it; a frame no different from the last is not
+//! shown again.
 
 use crate::dev::TIMER_HZ;
 use crate::map::{CHIP_SIZE, INT_VBLANK};
@@ -45,6 +47,14 @@ pub struct Gfx {
     boot: Instant,
     last_present: Instant,
     pub force: bool,
+    /// A vertical blank has passed since the window was last shown a frame.
+    pub owed: bool,
+    /// What the frame last shown was made from: the registers, the palette
+    /// and the bytes of the bitmap. A frame made from the same is not shown
+    /// again.
+    shown: (u32, u32, u32, u32, u32, u32),
+    shown_pal: [u32; 256],
+    shown_bytes: Vec<u8>,
 }
 
 /// A frame sink. Keeps the window toolkit out of the device model, so
@@ -56,8 +66,15 @@ pub trait Present {
     fn show(&mut self, frame: &mut Vec<u32>, w: usize, h: usize) -> bool;
     /// The window's size in host pixels.
     fn size(&self) -> (u32, u32);
-    /// Move the input that has arrived into the input chip.
-    fn pump(&mut self, ev: &mut crate::dev::input::Input);
+    /// Move the input that has arrived into the input chip. False once the
+    /// window has been closed.
+    fn pump(&mut self, ev: &mut crate::dev::input::Input) -> bool;
+    /// Sleep for `d`, or less if a key, a button or the wheel is waiting to
+    /// be pumped; true if one is.
+    fn wait(&mut self, d: std::time::Duration) -> bool {
+        std::thread::sleep(d);
+        false
+    }
 }
 
 impl Gfx {
@@ -87,6 +104,10 @@ impl Gfx {
             boot: Instant::now(),
             last_present: Instant::now(),
             force: false,
+            owed: false,
+            shown: (0, 0, 0, 0, 0, 0),
+            shown_pal: [0; 256],
+            shown_bytes: Vec::new(),
         }
     }
 
@@ -182,30 +203,66 @@ impl Gfx {
         }
     }
 
-    /// True while the window is still open (always true when headless).
-    pub fn present(&mut self, ram: &[u8], input: &mut crate::dev::input::Input) -> bool {
-        if self.win.is_none() {
+    /// A vertical blank: move the host's input into the input chip, and owe
+    /// the window the frame. True while the window is still open (always
+    /// true when headless).
+    pub fn frame(&mut self, input: &mut crate::dev::input::Input) -> bool {
+        let Some(win) = self.win.as_mut() else { return true };
+        self.owed = true;
+        win.pump(input)
+    }
+
+    /// Show the window the frame it is owed. The machine calls this once it
+    /// has stopped to wait after a vertical blank, so that what was drawn
+    /// in answer to the blank is shown at once, and at the next blank if it
+    /// never stopped. A picture made from exactly what the last was made
+    /// from is not converted or handed over again. True while the window is
+    /// still open.
+    pub fn present(&mut self, ram: &[u8]) -> bool {
+        if self.win.is_none() || !self.owed {
             return true;
         }
         // Converting a frame takes the machine's own thread; do not convert
-        // many more than a display can show.
-        let due = self.force || self.last_present.elapsed().as_micros() >= 12_000;
-        if !due {
-            if let Some(w) = self.win.as_mut() {
-                w.pump(input);
-            }
+        // many more than a display can show, which only a machine running
+        // ahead of the wall clock would. Half a frame apart and not a whole
+        // one, so that a frame shown late in its blank does not hold back the
+        // next, shown early in its own. A frame held back stays owed.
+        if !self.force && self.last_present.elapsed().as_micros() < 8_000 {
             return true;
         }
-        self.force = false;
+        self.owed = false;
+        if !std::mem::take(&mut self.force) && self.unchanged(ram) {
+            return true;
+        }
         self.last_present = Instant::now();
         self.scanout(ram);
         let (w, h) = (self.width as usize, self.height as usize);
-        let win = self.win.as_mut().unwrap();
-        win.pump(input);
         if self.scan.len() < w * h {
             return true;
         }
-        win.show(&mut self.scan, w, h)
+        self.win.as_mut().unwrap().show(&mut self.scan, w, h)
+    }
+
+    /// Whether the picture would be made from what the last one shown was,
+    /// remembering what this one is made from if not.
+    fn unchanged(&mut self, ram: &[u8]) -> bool {
+        let regs = (self.base, self.width, self.height, self.pitch, self.mode, self.ctrl);
+        let row = self.width as usize * if self.mode == 32 { 4 } else { 1 };
+        let (base, pitch, h) = (self.base as usize, self.pitch as usize, self.height as usize);
+        let rows = (0..h).map(|y| base + y * pitch).take_while(|&o| o + row <= ram.len());
+        let same = regs == self.shown
+            && self.pal == self.shown_pal
+            && self.shown_bytes.len() == row * h
+            && rows.clone().zip(self.shown_bytes.chunks_exact(row)).all(|(o, r)| ram[o..o + row] == *r);
+        if !same {
+            self.shown = regs;
+            self.shown_pal = self.pal;
+            self.shown_bytes.clear();
+            for o in rows {
+                self.shown_bytes.extend_from_slice(&ram[o..o + row]);
+            }
+        }
+        same
     }
 
     /// Chip RAM the bitmap must fit inside, for the allocator's benefit.

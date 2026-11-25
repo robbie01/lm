@@ -17,7 +17,7 @@ use crate::dev::gfx::Present;
 use crate::dev::input::*;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex, MutexGuard};
+use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -61,6 +61,7 @@ where
         }
         // A machine still running stops at its next frame.
         shared.lock().closed = true;
+        shared.arrived.notify_all();
         drop(app);
         match worker.join() {
             Ok(code) => code,
@@ -120,14 +121,26 @@ impl Present for HostWindow {
         self.shared.lock().size
     }
 
-    fn pump(&mut self, ev: &mut Input) {
+    fn pump(&mut self, ev: &mut Input) -> bool {
         let mut s = self.shared.lock();
         for w in s.events.drain(..) {
             ev.push(w);
         }
+        s.urgent = false;
         (ev.mx, ev.my) = s.pointer;
         ev.buttons = s.buttons;
         ev.mods = s.mods;
+        !s.closed
+    }
+
+    fn wait(&mut self, d: std::time::Duration) -> bool {
+        let s = self.shared.lock();
+        let (s, _) = self
+            .shared
+            .arrived
+            .wait_timeout_while(s, d, |s| !s.urgent && !s.closed)
+            .unwrap_or_else(|e| e.into_inner());
+        s.urgent || s.closed
     }
 }
 
@@ -150,15 +163,19 @@ impl Drop for Stopped {
     }
 }
 
-/// What the two threads share, under one lock.
+/// What the two threads share, under one lock, and the machine's thread
+/// asleep until a key, a button or the wheel arrives.
 #[derive(Default)]
-struct Shared(Mutex<State>);
+struct Shared {
+    state: Mutex<State>,
+    arrived: Condvar,
+}
 
 impl Shared {
     fn lock(&self) -> MutexGuard<'_, State> {
         // Nothing done under the lock leaves the state half changed, so a
         // thread that panicked holding it has not spoilt it.
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -172,6 +189,9 @@ struct State {
     /// Events the machine has yet to take, packed as the input chip queues
     /// them.
     events: VecDeque<u32>,
+    /// Something other than a pointer move is waiting, which wakes an idle
+    /// machine to take it. Moves wait for the next frame, gathered into one.
+    urgent: bool,
     /// Where the pointer is in the frame, and the buttons and modifiers held.
     pointer: (u32, u32),
     buttons: u32,
@@ -198,6 +218,7 @@ impl State {
                 self.events.push_back(w);
             }
         }
+        self.urgent |= !moved(w);
     }
 }
 
@@ -214,6 +235,10 @@ struct App {
     /// display, which is what the pointer is placed in.
     pixels: Vec<u32>,
     frame: (u32, u32),
+    /// The display size the window was last made to fit, and how many
+    /// window pixels it was asked to give each display pixel.
+    fitted: (u32, u32),
+    scale: u32,
     /// The keys held, each with the code and ascii it went down with.
     keys: Vec<(PhysicalKey, u32, u32)>,
     buttons: u32,
@@ -253,6 +278,8 @@ impl App {
             win: None,
             pixels: Vec::new(),
             frame: (0, 0),
+            fitted: (0, 0),
+            scale: 1,
             keys: Vec::new(),
             buttons: 0,
             mods: ModifiersState::empty(),
@@ -335,6 +362,8 @@ impl App {
         }));
         self.shared.lock().size = (size.width, size.height);
         self.frame = frame;
+        self.fitted = frame;
+        self.scale = scale;
         window.request_redraw();
         self.win = Some(Win { window, surface, config, renderer });
         Ok(())
@@ -399,6 +428,29 @@ impl App {
         win.reconfigure(size);
         win.window.request_redraw();
         self.repoint();
+    }
+
+    /// The display has changed size: make the window `scale` times its new
+    /// size, as it was opened, or as near that as the screen holds. Without
+    /// this a window opened onto the 640 by 400 display a machine boots with
+    /// showed the workbench's 1024 by 768 at half size, too small to read.
+    fn fit(&mut self, size: (u32, u32)) {
+        self.fitted = size;
+        let Some(win) = self.win.as_ref() else { return };
+        if size.0 == 0 || size.1 == 0 {
+            return;
+        }
+        let (w, h) = ((size.0 * self.scale) as f64, (size.1 * self.scale) as f64);
+        // Nine tenths of the screen at most, leaving room for the title bar
+        // and the taskbar.
+        let k = match win.window.current_monitor() {
+            Some(m) => {
+                let s = m.size().to_logical::<f64>(m.scale_factor());
+                (s.width * 0.9 / w).min(s.height * 0.9 / h).min(1.0)
+            }
+            None => 1.0,
+        };
+        let _ = win.window.request_inner_size(LogicalSize::new(w * k, h * k));
     }
 
     /// Tell the machine where the pointer is in the frame, if that has
@@ -531,6 +583,9 @@ impl ApplicationHandler<Wake> for App {
                     self.frame = size;
                     self.repoint();
                 }
+                if size != self.fitted {
+                    self.fit(size);
+                }
                 if let Some(win) = &self.win {
                     win.window.request_redraw();
                 }
@@ -557,6 +612,9 @@ impl ApplicationHandler<Wake> for App {
             WindowEvent::MouseWheel { delta, .. } => self.wheel(delta),
             _ => {}
         }
+        // An idle machine waiting for a key, a button or the wheel looks
+        // again.
+        self.shared.arrived.notify_all();
     }
 }
 

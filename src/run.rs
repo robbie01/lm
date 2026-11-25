@@ -38,14 +38,11 @@ fn vblank(m: &mut Machine) {
     if m.gfx.next_vbl <= m.cycles {
         m.gfx.next_vbl = m.cycles + vbl_period();
     }
-    let open = {
-        // Split the borrow of gfx from the borrow of ram.
-        let ramp = m.ramp;
-        let len = m.ramlen as usize;
-        let ram = unsafe { std::slice::from_raw_parts(ramp, len) };
-        let gfx = &mut m.gfx as *mut crate::dev::gfx::Gfx;
-        let input = &mut m.input as *mut crate::dev::input::Input;
-        unsafe { (*gfx).present(ram, &mut *input) }
+    // A frame still owed is shown now: the machine has not stopped to wait
+    // since the last blank.
+    let open = present(m) && {
+        let input = &mut m.input;
+        m.gfx.frame(input)
     };
     if !open {
         m.halted = true;
@@ -53,6 +50,13 @@ fn vblank(m: &mut Machine) {
     if m.gfx.ctrl & CTRL_VBIRQ != 0 {
         m.raise(INT_VBLANK);
     }
+}
+
+/// Show the window the frame it is owed; false once it has been closed.
+fn present(m: &mut Machine) -> bool {
+    // Split the borrow of gfx from the borrow of ram.
+    let ram = unsafe { std::slice::from_raw_parts(m.ramp, m.ramlen as usize) };
+    m.gfx.present(ram)
 }
 
 /// Nothing to run: advance the clock to the next event.
@@ -63,6 +67,13 @@ fn idle(m: &mut Machine) {
     if m.intreq & m.intena != 0 {
         return; // an interrupt is already waiting
     }
+    // Whatever was drawn in answer to the last blank is finished once the
+    // machine waits with the blitter idle, and is shown now rather than at
+    // the next blank, a frame later.
+    if m.gfx.owed && !m.blit.busy && !present(m) {
+        m.halted = true;
+        return;
+    }
     if wake == u64::MAX {
         // No scheduled event. Only host input can wake the machine, so sleep
         // briefly instead of spinning.
@@ -72,7 +83,20 @@ fn idle(m: &mut Machine) {
     }
     if wake > m.cycles {
         if m.gfx.win.is_some() {
-            pace(m, wake);
+            if let Some(at) = pace(m, wake) {
+                // Woken by a key, a button or the wheel: the machine takes it
+                // where its clock stands now, not at the next blank.
+                m.cycles = at.clamp(m.cycles, wake);
+                let open = match m.gfx.win.as_mut() {
+                    Some(w) => w.pump(&mut m.input),
+                    None => true,
+                };
+                if !open {
+                    m.halted = true;
+                }
+                service(m);
+                return;
+            }
         }
         m.cycles = wake;
     }
@@ -81,13 +105,17 @@ fn idle(m: &mut Machine) {
 /// Keep a machine with a window in step with the wall clock while it idles.
 ///
 /// A machine waiting for its next frame sleeps until that frame is due in
-/// wall time, so animations run at their intended rate.
+/// wall time, so animations run at their intended rate. A key, a button or
+/// the wheel ends the sleep early, and the answer is the machine's clock at
+/// that moment: input from the host arrives when it arrives, which no run
+/// repeats; everything else lands on the cycle it would have.
 ///
-/// Only idle time is paced. A busy machine runs as fast as the host allows,
-/// and when it next idles it is realigned with the wall clock rather than
-/// made to wait out the time it got ahead. The machine's own clock is not
-/// touched, so determinism is unaffected; only the wall clock waits.
-fn pace(m: &mut Machine, wake: u64) {
+/// Only idle time is slept. A machine up to 50 ms of its clock ahead of the
+/// wall clock sleeps the lead off at its next idle, which holds a machine
+/// that is busy for part of every frame to sixty frames a second; one
+/// further ahead (a long computation, a stalled host) is realigned with the
+/// wall clock rather than made to wait out the time it got ahead.
+fn pace(m: &mut Machine, wake: u64) -> Option<u64> {
     use std::time::{Duration, Instant};
     let now = Instant::now();
     let hz = TIMER_HZ as f64;
@@ -102,11 +130,12 @@ fn pace(m: &mut Machine, wake: u64) {
     }
     m.pace = Some((at, base));
     let due = at + Duration::from_secs_f64((wake - base) as f64 / hz);
-    if due > now {
-        let t = Instant::now();
-        std::thread::sleep((due - now).min(Duration::from_millis(50)));
-        m.slept += t.elapsed().as_secs_f64();
+    if due <= now {
+        return None;
     }
+    let woken = m.gfx.win.as_mut()?.wait((due - now).min(Duration::from_millis(50)));
+    m.slept += now.elapsed().as_secs_f64();
+    woken.then(|| base + (at.elapsed().as_secs_f64() * hz) as u64)
 }
 
 pub fn run(m: &mut Machine, budget: u64) -> Stop {

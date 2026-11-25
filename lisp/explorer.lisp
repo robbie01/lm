@@ -234,19 +234,27 @@
                       (win-inner-w win) (win-inner-h win)))
 
 ;; The task makes its own port first, so that nothing can be sent to the
-;; window before there is somewhere for it to go.
+;; window before there is somewhere for it to go. Every event waiting is
+;; taken before the outline is drawn again, and it is drawn once for all of
+;; them: a drawing costs more than a frame, and a wheel or a held key sends
+;; events faster than that, which drawn one by one would go on scrolling
+;; long after the hand had stopped.
 (define (explorer-task win ol)
   (set-win-port! win (make-port nil 0))
   (while t
-    (let* ((ev (window-wait-event win))
-           (r (ui:outline-event ol ev)))
-      (cond ((%null? r) nil)
-            ((%eq? r 'changed) (redraw win ol))
-            ((%cons? r)
-             (redraw win ol)
-             (let ((x (ui:rw-object (%cdr r))))
-               (if (has-parts? x) (explore x) nil)))
-            (else nil)))))
+    (let ((ev (window-wait-event win)) (changed nil))
+      (while ev
+        (let ((r (ui:outline-event ol ev)))
+          (cond ((%null? r) nil)
+                ((%eq? r 'changed) (set! changed t))
+                ((%cons? r)
+                 (redraw win ol)
+                 (set! changed nil)
+                 (let ((x (ui:rw-object (%cdr r))))
+                   (if (has-parts? x) (explore x) nil)))
+                (else nil)))
+        (set! ev (window-event win)))
+      (if changed (redraw win ol) nil))))
 
 ;; Every package, and under each one its symbols.
 (define (explorer)
