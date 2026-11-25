@@ -41,10 +41,12 @@
          (win (make-demo-window 420 300 "Balls"))
          (i 0))
     (win-fill win 0 0 (win-inner-w win) (win-inner-h win) white)
+    ;; The named colours from 2, after black and white: a white ball on the
+    ;; white field would not be seen.
     (while (%< i n)
       (add-task (string-append "ball" (number->string i))
                 0
-                (ball-task win (%+ 1 (%mod i 11)) (%+ 3 (%* i 37))))
+                (ball-task win (%+ 2 (%mod i 11)) (%+ 3 (%* i 37))))
       (set! i (%+ i 1)))
     win))
 

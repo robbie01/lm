@@ -23,12 +23,14 @@
         (%cons perm-sc "SC") (%cons perm-lm "LM") (%cons perm-ex "EX")
         (%cons perm-sr "SR") (%cons perm-se "SE") (%cons perm-hd "HD")))
 
-;; Tagged, and neither nil, a pair nor an object.
+;; Tagged, and neither nil, a pair nor an object, as the processor tells them
+;; apart. HD alone does not make an object: the root has every permission,
+;; and its base has no header below it.
 (define (raw-capability? x)
   (if (%cap-tag? x)
       (if (%null? x)
           nil
-          (if (%cons? x) nil (%= 0 (%logand (%cap-perms x) perm-hd))))
+          (if (%cons? x) nil (if (%object? x) nil t)))
       nil))
 
 (define (hex n) (string-append "#x" (number->hex n)))
@@ -169,8 +171,8 @@
 (define (closure-parts c)
   (unsafe
   (let* ((o (open-closure c))
-         (acc (list (part "entry" (%slot o clo-entry))
-                    (part "code" (%slot o clo-code))))
+         (acc (reverse (list (part "entry" (%slot o clo-entry))
+                             (part "code" (%slot o clo-code)))))
          (i clo-free)
          (n (%obj-len o)))
     (while (%< i n)
@@ -185,9 +187,9 @@
 (define (code-parts c)
   (unsafe
   (let* ((entry (%slot c code-entry))
-         (acc (list (fact "bytes" (number->string (%cap-len entry)))
-                    (part "entry" entry)
-                    (part "name" (%slot c code-name))))
+         (acc (reverse (list (fact "bytes" (number->string (%cap-len entry)))
+                             (part "entry" entry)
+                             (part "name" (%slot c code-name)))))
          (i code-lits)
          (n (%obj-len c)))
     (while (%< i n)
@@ -197,7 +199,9 @@
       (set! i (%+ i 1)))
     (reverse acc))))
 
-;; A pointer's parts start with what its capability says.
+;; A pointer's parts start with what its capability says, and a sealed one's
+;; with its seal on a row of its own, since the summary is wider than the
+;; window.
 (define (parts x)
   (if (raw-capability? x)
       (capability-parts x)
@@ -209,7 +213,10 @@
                       ((package? x) (package-parts x))
                       ((%record? x) (record-parts x))
                       (else nil))))
-        (if (%cap-tag? x) (%cons (fact "capability" (cap-summary x)) ps) ps))))
+        (if (%cap-tag? x)
+            (%cons (fact "capability" (cap-summary x))
+                   (if (%cap-sealed? x) (%cons (fact "seal" (seal-string x)) ps) ps))
+            ps))))
 
 ;; ---------------------------------------------------------------- the window
 (define *count* 0)
