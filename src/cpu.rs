@@ -1296,7 +1296,7 @@ fn op_cheri_two(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
             if bt < bb as u64 || bb < ab || bt > at {
                 return capfault(m, s, CAPEX_LENGTH, pc, fuel);
             }
-            if b.perms() & !a.perms() != 0 {
+            if b.perms() & !a.perms() != 0 || (b.has(P_HD) && !a.heads_at(bb)) {
                 return capfault(m, s, CAPEX_SOFT_PERM, pc, fuel);
             }
             if b.otype() > OT_SENTRY {

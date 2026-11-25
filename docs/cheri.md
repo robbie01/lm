@@ -60,8 +60,8 @@ it saturate at 0xffffffff.
 the payload of a Lisp object whose header is the granule just below the
 base. Only the root mints it: `csetbounds` keeps HD when the base stays
 where it was or the authority is the whole address space, and drops it
-otherwise, so narrowing an object to one of its slots can never pass the
-slot below off as a header. Clearing it, like clearing any
+otherwise, and `cbuildcap` refuses HD by the same rule, so narrowing an
+object to one of its slots can never pass the slot below off as a header. Clearing it, like clearing any
 permission, only takes authority away: a headed object with HD cleared
 looks like an unheaded block, which is safe. A pair can never acquire it, so
 the processor never reads a header that is not there. The root has HD
@@ -302,8 +302,9 @@ EX (0x11). `csealclo` needs a headed capability whose header type is
 closure (0x04). `cseal` without SE in the authority is 0x17 and `cunseal`
 0x1b; an otype outside 1..15, or one that does not match, is 0x04 on the
 authority. `cbuildcap` refuses bounds outside its authority (0x01),
-permissions its authority lacks (0x08), and an otype past the sentry (0x04
-on `cs2`); it keeps a sentry sealed. `crrl` and `cram` read their length
+permissions its authority lacks, or HD at a base other than its authority's
+when the authority is not the whole address space (0x08), and an otype past
+the sentry (0x04 on `cs2`); it keeps a sentry sealed. `crrl` and `cram` read their length
 from the address of `cs1`.
 
 ### Xlm: the Lisp instructions

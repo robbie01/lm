@@ -271,12 +271,20 @@ impl Cap {
             return None;
         }
         let (bounds, exact) = encode(self.addr, top);
-        // HD says the base is an object's payload with its header below it.
-        // Only the root mints one: narrowing anything else to a new base
-        // leaves the object, and the result loses HD.
-        let whole = self.base() == 0 && self.top() == 1 << 32;
-        let meta = if whole || self.addr == self.base() { self.meta } else { self.meta & !(P_HD << PERM_SHIFT) };
+        let meta = if self.heads_at(self.addr) { self.meta } else { self.meta & !(P_HD << PERM_SHIFT) };
         Some((Cap { addr: self.addr, meta: (meta & !BOUNDS_MASK) | bounds, tag: true }, exact))
+    }
+
+    /// Whether a capability derived from this one with its base at `base`
+    /// may keep HD. HD says the base is an object's payload with its header
+    /// below it, so it survives at this capability's own base, and from one
+    /// that spans the whole address space, which is how the root mints it;
+    /// a new base anywhere else has left the object. `csetbounds` drops HD
+    /// where this says no, and `cbuildcap` refuses it.
+    #[inline]
+    pub fn heads_at(&self, base: u32) -> bool {
+        let (b, t) = self.bounds();
+        b == base || (b == 0 && t == 1 << 32)
     }
 
     /// Keep only the permissions in `mask`. A sealed capability loses its

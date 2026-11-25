@@ -543,6 +543,22 @@ pub fn run_all() -> bool {
         li32(&mut code, A2, P_LD);
         code.extend([csetboundsimm(A1, A1, 32), candperm(A3, A1, A2), ccleartag(A4, ROOT), cbuildcap(A5, A3, A4)]);
         ok("cbuildcap refuses more than its authority", go(&code).took(C_CAP, (A3 << 5) | CAPEX_LENGTH));
+        // cbuildcap under a headed object keeps HD only where csetbounds
+        // would: at the object's own base.
+        let obj = region(OBJ, 64, DATA | P_HD);
+        let build = |bits: Cap| {
+            let mut code = vec![];
+            li32(&mut code, A4, bits.addr);
+            li32(&mut code, A5, bits.meta);
+            code.extend([csethigh(A2, A4, A5), cbuildcap(A3, A1, A2)]);
+            go_with(&code, |m| m.set_reg(A1, obj))
+        };
+        let head = obj.with_bounds_exact(16).unwrap();
+        let o = build(head.without_tag());
+        ok("cbuildcap keeps HD at the object's base", o.clean() && o.c(A3) == head);
+        let slot = obj.with_addr(OBJ + 16).with_bounds_exact(16).unwrap();
+        let forged = Cap { meta: slot.meta | (P_HD << PERM_SHIFT), ..slot }.without_tag();
+        ok("cbuildcap refuses HD at a slot", build(forged).took(C_CAP, (A1 << 5) | CAPEX_SOFT_PERM));
     }
     {
         // Two capabilities to the same bytes with different permissions are

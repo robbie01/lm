@@ -63,7 +63,8 @@ pub const CAPEX_SEAL: u32 = 0x03;
 /// The wrong otype, or for `csealclo` an object that is not a closure.
 pub const CAPEX_TYPE: u32 = 0x04;
 /// ISAv9's software-defined permission violation, which `cbuildcap` raises
-/// for bits asking for a permission its authority lacks.
+/// for bits asking for a permission its authority lacks, or for HD at a base
+/// where its authority could not have kept it.
 pub const CAPEX_SOFT_PERM: u32 = 0x08;
 /// `csetboundsexact` of bounds that would round.
 pub const CAPEX_REPRESENTABLE: u32 = 0x0a;
