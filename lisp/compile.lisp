@@ -1087,7 +1087,12 @@
   ;; Untagged, with the metadata given: how an immediate is made from parts.
   (definline '%cap-set-high 2 (two-op i-csethigh))
   (definline '%cap=? 2 (two-test i-cseqx))
-  (definline '%cap-subset? 2 (two-test i-ctestsubset))
+  ;; Whether a's bounds and permissions lie within b's, both tagged or both
+  ;; not. `ctestsubset` asks it of its second operand against its first.
+  (definline '%cap-subset? 2
+    (lambda (c)
+      (i-ctestsubset (cx-asm c) $t2 $a1 $a0)
+      (emit-bool-from-flag c $t2 $a0)))
   ;; The length and the alignment mask the processor would round a request
   ;; for n bytes to, so an allocator can pad an object to bounds it can have.
   (definline '%rrl 1 (one-op i-crrl))
