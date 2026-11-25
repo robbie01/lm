@@ -476,9 +476,8 @@
 ;; which registers are live.
 ;;
 ;; The pair is built in t2 when the destination is also an operand.
-(define (emit-cons c car-reg cdr-reg dst)
-  (let* ((a (cx-asm c))
-         (p (if (if (%= dst car-reg) t (%= dst cdr-reg)) $t2 dst)))
+(define (emit-cons a car-reg cdr-reg dst)
+  (let ((p (if (if (%= dst car-reg) t (%= dst cdr-reg)) $t2 dst)))
     (i-csetboundsimm a p $gp (%* 2 value-bytes))
     (i-cincoffsetimm a $gp $gp (%* 2 value-bytes))
     (i-sc a car-reg p 0)
@@ -1010,7 +1009,7 @@
   (defop '%cdr 1 (op1 i-cdr))
   (defstore '%set-car! 2 (store-through i-set-car))
   (defstore '%set-cdr! 2 (store-through i-set-cdr))
-  (definline '%cons 2 (lambda (c) (emit-cons c $a0 $a1 $a0)))
+  (defop '%cons 2 (lambda (a d rs) (emit-cons a (%car rs) (cadr rs) (value-reg d))))
 
   ;; ---- fixnum arithmetic ----
   ;; One checked instruction each. The operands are checked to be fixnums,
@@ -1960,7 +1959,7 @@
 ;; Replace the slot's value with a pair holding it in its car.
 (define (emit-make-box c slot)
   (load-local c slot $a2)
-  (emit-cons c $a2 $tp $a2)
+  (emit-cons (cx-asm c) $a2 $tp $a2)
   (store-local c slot $a2))
 
 ;; The test is at the bottom, so a turn of the loop is the body and one
@@ -2218,7 +2217,7 @@
     (i-cincoffset a $t6 $s0 $t6)
     (i-lc a $a3 $t6 (local-off spill))
     (label a got)
-    (emit-cons c $a3 $a2 $a2)
+    (emit-cons a $a3 $a2 $a2)
     (i-addi a $t3 $t3 -1)
     (i-j a loop)
     (label a done)
