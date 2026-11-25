@@ -986,6 +986,17 @@ pub fn run_all() -> bool {
             m.set_reg(T0, k.seal(OT_CLOSURE));
         };
         ok("jcl needs an executable entry", go_with(&[jcl(RA, T0)], bad).took(C_CAP, (T0 << 5) | CAPEX_EXECUTE));
+        // jcl loads the entry through the closure, so the closure needs LD
+        // and LC as a capability load would.
+        for (name, p, code) in [("LD", P_LD, CAPEX_LOAD), ("LC", P_LC, CAPEX_LOAD_CAP)] {
+            let without = move |m: &mut Machine| {
+                let k = object(m, OBJ, T_CLOSURE, 3);
+                m.store_cap(OBJ, Cap::ROOT.with_addr(target));
+                emit(m, target, &[jalr(ZERO, RA, 0)]);
+                m.set_reg(T0, k.and_perms(P_ALL & !p).seal(OT_CLOSURE));
+            };
+            ok(&format!("jcl needs {name} in the closure"), go_with(&[jcl(RA, T0)], without).took(C_CAP, (T0 << 5) | code));
+        }
     }
 
     // ---- Xlm: indexed access ----

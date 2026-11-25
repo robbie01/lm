@@ -332,9 +332,10 @@ f3 1  vkind rd, rs1         rd <- the kind of rs1 (below). imm must be 0.
 f3 2  lvar  rd, imm(rs1)    rs1 a symbol, unsealed; rd <- the slot at rs1+imm,
                             and if that is the unbound marker, cause 24 with
                             mtval the number of rs1: an unbound variable.
-f3 3  jcl   rd, rs1         rs1 a closure (tagged, otype 2). rs1 <- it
-                            unsealed; rd <- a sentry for pc+4; pc <- its
-                            slot 0, which must be tagged with EX.
+f3 3  jcl   rd, rs1         rs1 a closure (tagged, otype 2) with LD and
+                            LC. rs1 <- it unsealed; rd <- a sentry for
+                            pc+4; pc <- its slot 0, which must be tagged
+                            with EX.
 f3 4  sref  rs2, imm(rs1)   rs1 a pair with SD and SC; nil is refused with
                             cause 24.
 f3 5  lhdr  rd, rs1, type   rs1 an object (HD, unsealed or a closure) of
@@ -344,8 +345,10 @@ f3 7  bnex  rs1, rs2, off   B-type: branch if not
 ```
 
 `car` and `cdr` are offsets 0 and 8 of `lref`. A null test is `beqx rs, tp`.
-`jcl` faults 0x02 or 0x11 on rs1 when slot 0 is untagged or not executable,
-and 0x01 when the entry is outside its own bounds.
+`jcl` of a closure without LD or LC faults 0x12 or 0x14 on rs1, as loading
+its slot 0 with `lc` would: the closure is the right kind, missing a
+permission. It faults 0x02 or 0x11 on rs1 when slot 0 is untagged or not
+executable, and 0x01 when the entry is outside its own bounds.
 
 Kinds, as `vkind` returns them, named `kind-*` in the layout:
 

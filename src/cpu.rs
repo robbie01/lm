@@ -1624,10 +1624,11 @@ pub fn kind(m: &Machine, c: Cap) -> u32 {
     }
 }
 
-/// `jcl rd, rs1`: call a closure. rs1 must be sealed as a closure; it is
-/// left unsealed for the callee, rd gets a sentry for the next instruction,
-/// and PCC becomes the entry capability in the closure's slot 0, which must
-/// be tagged and executable. The entry's window comes from the window cache
+/// `jcl rd, rs1`: call a closure. rs1 must be sealed as a closure, with LD
+/// and LC, since the entry is loaded through it; it is left unsealed for the
+/// callee, rd gets a sentry for the next instruction, and PCC becomes the
+/// entry capability in the closure's slot 0, which must be tagged and
+/// executable. The entry's window comes from the window cache
 /// when the same entry was called before.
 #[inline(never)]
 fn op_jcl(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
@@ -1636,6 +1637,10 @@ fn op_jcl(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let hh = hw(m, s);
     if hh & (TAG | M_OT) != TAG | M_CLOSURE {
         return m.fault(C_TYPE, s, pc, fuel);
+    }
+    // The entry is a capability loaded through the closure.
+    if hh & (M_LD | M_LC) != M_LD | M_LC {
+        return capfault(m, s, if hh & M_LD == 0 { CAPEX_LOAD } else { CAPEX_LOAD_CAP }, pc, fuel);
     }
     let a = r(m, s);
     if a & 7 != 0 || !in_win(a, m.wb[k], m.wl[k], 8) {
