@@ -12,6 +12,10 @@ struct Census {
     pairs: u32,
     objects: u32,
     other: u32,
+    /// Capabilities in the pool that name nothing: stack slots that hold
+    /// what an earlier call left there. The collector checks a header before
+    /// it believes one, and the compactor drops their tags.
+    stale: u32,
     /// Granules that hold a capability where none belongs, and capabilities
     /// that name something that is not there.
     wrong: Vec<(u32, String)>,
@@ -19,8 +23,9 @@ struct Census {
 
 /// A capability that names a pair or an object must name a live one: a pair
 /// in cons space below the bump pointer, an object whose header is a live
-/// header in object space. Code space holds machine code, and no capability
-/// but each block's owner; a string or a byte object holds none at all.
+/// header in object space, except in the pool, where a stack slot may hold a
+/// stale one. Code space holds machine code, and no capability but each
+/// block's owner; a string or a byte object holds none at all.
 fn census(h: &Heap) -> Census {
     let mut c = Census::default();
     let (cons_hi, obj_hi, code_hi) = (h.g(LG_CONS_PTR), h.g(LG_OBJ_PTR), h.g(LG_CODE_PTR));
@@ -47,12 +52,16 @@ fn census(h: &Heap) -> Census {
             let ok = (OBJ_BASE..obj_hi).contains(&hdr) && hdr_type(h.ld(hdr)) != T_FREE;
             if ok {
                 c.objects += 1;
+            } else if (POOL_BASE..POOL_END).contains(&at) {
+                c.stale += 1;
             } else {
                 c.wrong.push((at, format!("an object capability to {:#x}, where no object is", v.addr)));
             }
         } else if is_cons(v) {
             if v.addr < cons_hi {
                 c.pairs += 1;
+            } else if (POOL_BASE..POOL_END).contains(&at) {
+                c.stale += 1;
             } else {
                 c.wrong.push((at, format!("a pair capability to {:#x}, above the pairs", v.addr)));
             }
@@ -163,12 +172,15 @@ pub fn run(path: &str, names: &[String]) -> i32 {
     let c = census(&h);
     println!(
         "  {} capabilities: {} nil, {} to pairs, {} to objects, {} raw",
-        c.nils + c.pairs + c.objects + c.other + c.wrong.len() as u32,
+        c.nils + c.pairs + c.objects + c.other + c.stale + c.wrong.len() as u32,
         c.nils,
         c.pairs,
         c.objects,
         c.other
     );
+    if c.stale > 0 {
+        println!("  {} stale capabilities in the pool's stacks, naming nothing", c.stale);
+    }
     if c.wrong.is_empty() {
         println!("  no heap addresses baked into code, and no capability names what is not there");
     } else {

@@ -267,6 +267,14 @@
       (reap-task (%car p))
       (set! p (%cdr p)))))
 
+;; The tasks a saved image held, when it resumes: none of them runs again, so
+;; each one's stack and context go back to the pool, as do those of any task
+;; that had ended and was waiting to be reaped. Called before `exec-init`
+;; makes the lists anew.
+(define (reap-saved-tasks tasks)
+  (dolist (task tasks) (reap-task task))
+  (reap-tasks))
+
 (define (task-ready! task)
   (set-tc-state! task ts-ready)
   (enqueue (ready-list) task))

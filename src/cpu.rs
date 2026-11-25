@@ -145,13 +145,27 @@ fn in_win(a: u32, b: u32, l: u32, sz: u32) -> bool {
     a.wrapping_sub(b) as u64 + sz as u64 <= l as u64
 }
 
-/// The fast authority test: register `s` has its window, is tagged and
-/// unsealed, holds the permissions `need`, and `[a, a + sz)` is inside the
-/// window, so inside its bounds and inside RAM.
+/// Register `s`'s metadata, with its window made first if it is tagged and
+/// has none yet. A capability loaded from memory has no window until it is
+/// used, and most are used at once: a pointer is loaded to be followed.
 #[inline(always)]
-fn auth(m: &Machine, s: u32, need: u64, a: u32, sz: u32) -> bool {
+fn hw(m: &mut Machine, s: u32) -> u64 {
+    let hh = h(m, s);
+    if hh & (READY | TAG) == TAG {
+        m.fill_window(s);
+        h(m, s)
+    } else {
+        hh
+    }
+}
+
+/// The fast authority test: register `s` is tagged and unsealed, holds the
+/// permissions `need`, and `[a, a + sz)` is inside its window, so inside its
+/// bounds and inside RAM.
+#[inline(always)]
+fn auth(m: &mut Machine, s: u32, need: u64, a: u32, sz: u32) -> bool {
     let k = (s & 31) as usize;
-    let hh = unsafe { *m.xm.get_unchecked(k) };
+    let hh = hw(m, s);
     hh & (READY | TAG | M_OT | need) == READY | TAG | need
         && in_win(a, unsafe { *m.wb.get_unchecked(k) }, unsafe { *m.wl.get_unchecked(k) }, sz)
 }
@@ -454,7 +468,7 @@ macro_rules! jump {
         let (m, w, pc, fuel): (&mut Machine, u32, u32, u32) = ($m, $w, $pc, $fuel);
         let (s, off, d): (u32, u32, u32) = ($s, $off, $d);
         let k = (s & 31) as usize;
-        let hh = h(m, s);
+        let hh = hw(m, s);
         let t = r(m, s).wrapping_add(off) & !1;
         let (b, l) = (m.wb[k], m.wl[k]);
         if hh & (READY | TAG | M_EX | M_OT_HI) != READY | TAG | M_EX
@@ -628,7 +642,7 @@ fn op_store(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let f = f3(w);
     if f == 3 {
         let need = if h(m, rs2(w)) & TAG != 0 { M_SD | M_SC } else { M_SD };
-        if a & 7 == 0 && auth(m, s, need, a, 8) && m.gcmode & 1 == 0 {
+        if a & 7 == 0 && auth(m, s, need, a, 8) && barrier(m, a, 8).is_none() {
             unsafe { st_cap(m, a, rs2(w)) };
             next!(m, pc.wrapping_add(4), fuel - 1)
         }
@@ -1350,15 +1364,15 @@ const PAIR_MASK: u64 = TAG | M_OT | M_HD;
 /// ```
 ///
 /// `car` and `cdr` are offsets 0 and 8 of `lref`. The fast paths are the
-/// common case of a register with its window; everything else is decided
-/// in `ref_slow`.
+/// common case, a reference through a capability that is what it should be
+/// to a slot inside its bounds; everything else is decided in `ref_slow`.
 #[inline(never)]
 fn op_ref(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let s = rs1(w);
     let k = (s & 31) as usize;
-    let hh = h(m, s);
     match f3(w) {
         0 => {
+            let hh = hw(m, s);
             let a = r(m, s).wrapping_add(imm_i(w));
             if hh & (READY | PAIR_MASK | M_LD | M_LC) == READY | TAG | M_LD | M_LC
                 && a & 7 == 0
@@ -1369,14 +1383,35 @@ fn op_ref(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
             }
         }
         4 => {
+            let hh = hw(m, s);
             let a = r(m, s).wrapping_add(imm_s(w));
             if hh & (READY | PAIR_MASK | M_SD | M_SC) == READY | TAG | M_SD | M_SC
                 && a & 7 == 0
                 && in_win(a, m.wb[k], m.wl[k], 8)
-                && m.gcmode & 1 == 0
+                && barrier(m, a, 8).is_none()
             {
                 unsafe { st_cap(m, a, rs2(w)) };
                 next!(m, pc.wrapping_add(4), fuel - 1)
+            }
+        }
+        2 => {
+            // lvar: a symbol is a headed object whose header, in the granule
+            // below its window, says so. The unbound marker is the trap's to
+            // report.
+            let hh = hw(m, s);
+            let a = r(m, s).wrapping_add(imm_i(w));
+            let (b, l) = (m.wb[k], m.wl[k]);
+            if hh & (READY | TAG | M_OT | M_HD | M_LD | M_LC) == READY | TAG | M_HD | M_LD | M_LC
+                && a & 7 == 0
+                && in_win(a, b, l, 8)
+                && b >= 8
+                && unsafe { m.rd32(b - 8) } & 0xff == T_SYMBOL
+            {
+                let v = unsafe { m.rd_cap(a) };
+                if v.tag || v.meta != IMM_UNBOUND {
+                    ld_cap(m, rd(w), a, hh);
+                    next!(m, pc.wrapping_add(4), fuel - 1)
+                }
             }
         }
         6 | 7 => {
@@ -1499,8 +1534,8 @@ pub fn kind(m: &Machine, c: Cap) -> u32 {
 /// `jcl rd, rs1`: call a closure. rs1 must be sealed as a closure; it is
 /// left unsealed for the callee, rd gets a sentry for the next instruction,
 /// and PCC becomes the entry capability in the closure's slot 0, which must
-/// be tagged and executable. The entry's window comes from `jcache` when the
-/// same entry was called before.
+/// be tagged and executable. The entry's window comes from the window cache
+/// when the same entry was called before.
 #[inline(never)]
 fn op_jcl(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let s = rs1(w);
@@ -1520,15 +1555,7 @@ fn op_jcl(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     if !e.tag || e.otype() > OT_SENTRY || !e.has(P_EX) {
         return capfault(m, s, if e.tag { CAPEX_EXECUTE } else { CAPEX_TAG }, pc, fuel);
     }
-    let bits = e.to_bits();
-    let slot = ((bits ^ (bits >> 29) ^ (bits >> 41)) as usize) & (JCACHE - 1);
-    let (b, l) = if m.jcache[slot].0 == bits && bits != 0 {
-        (m.jcache[slot].1, m.jcache[slot].2)
-    } else {
-        let (b, l) = ram_window(e, m.ramlen);
-        m.jcache[slot] = (bits, b, l);
-        (b, l)
-    };
+    let (b, l) = m.window(e);
     let t = e.addr & !1;
     if !in_win(t, b, l, 2) {
         return if e.covers(t, 2) {
@@ -1812,7 +1839,7 @@ fn c_sc(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let a = r(m, s).wrapping_add(clc_imm(w));
     let v = rcs(w, 2);
     let need = if h(m, v) & TAG != 0 { M_SD | M_SC } else { M_SD };
-    if a & 7 == 0 && auth(m, s, need, a, 8) && m.gcmode & 1 == 0 {
+    if a & 7 == 0 && auth(m, s, need, a, 8) && barrier(m, a, 8).is_none() {
         unsafe { st_cap(m, a, v) };
         next!(m, pc.wrapping_add(2), fuel - 1)
     }
@@ -1972,7 +1999,7 @@ fn c_scsp(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let a = r(m, 2).wrapping_add(scsp_imm(w));
     let v = (w >> 2) & 31;
     let need = if h(m, v) & TAG != 0 { M_SD | M_SC } else { M_SD };
-    if a & 7 == 0 && auth(m, 2, need, a, 8) && m.gcmode & 1 == 0 {
+    if a & 7 == 0 && auth(m, 2, need, a, 8) && barrier(m, a, 8).is_none() {
         unsafe { st_cap(m, a, v) };
         next!(m, pc.wrapping_add(2), fuel - 1)
     }

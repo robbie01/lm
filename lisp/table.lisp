@@ -1,9 +1,9 @@
 ;;; table.lisp - hash tables keyed by identity.
 ;;;
-;;; A symbol's identity is a small dense integer handed out by the one counter
-;;; both the forge and the machine intern through, which makes it a perfect
-;;; hash. Open addressing over two parallel vectors, with linear probing: a
-;;; table stores nothing but its keys and values.
+;;; A symbol's identity is a small integer handed out by the one counter both
+;;; the forge and the machine intern through. Open addressing over two
+;;; parallel vectors, with linear probing: a table stores nothing but its keys
+;;; and values.
 
 (in-package lm)
 
@@ -18,12 +18,20 @@
 ;; else by address, counted in granules. Objects never move, so an address is
 ;; stable; if that ever changes, every table has to be rehashed after a
 ;; collection.
+;;
+;; The number is scattered before a table masks it down to a slot: Fibonacci
+;; hashing, then the high half folded into the low. Identities are handed out
+;; in order, so as they are they would fill a table in runs, and a table
+;; holding a few thousand of a machine's tens of thousands of symbols has keys
+;; that share their low bits: both make long runs for a probe to walk.
 (define (eq-hash k)
-  (cond ((%symbol? k) (symbol-index k))
-        ((%fixnum? k) k)
-        ((%char? k) (%char->int k))
-        ((%null? k) 0)
-        (else (%/ (%addr-of k) value-bytes))))
+  (let ((h (%* (cond ((%symbol? k) (symbol-index k))
+                     ((%fixnum? k) k)
+                     ((%char? k) (%char->int k))
+                     ((%null? k) 0)
+                     (else (%/ (%addr-of k) value-bytes)))
+               -1640531535)))
+    (%logxor h (%lsh h -16))))
 
 (define (make-table . opts)
   (let* ((cap (if (%cons? opts) (%car opts) 8))

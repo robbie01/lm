@@ -106,12 +106,15 @@ pub fn rebuild(from: &str, out: &str, verbose: bool, check: bool) -> i32 {
         budget: 40_000_000_000,
         disk: if check { None } else { Some(out.to_string()) },
         // LM_FNPROF=1 profiles what the machine does during a rebuild, the
-        // same report `lm --fnprof` prints.
-        trace_exit: verbose || std::env::var_os("LM_FNPROF").is_some(),
-        isaprof: false,
+        // same report `lm --fnprof` prints, and LM_ISAPROF=1 counts what it
+        // executes, as `lm --isaprof` does.
+        trace_exit: verbose || std::env::var_os("LM_FNPROF").is_some() || std::env::var_os("LM_ISAPROF").is_some(),
+        isaprof: std::env::var_os("LM_ISAPROF").is_some(),
         fnprof: std::env::var_os("LM_FNPROF").is_some(),
         screenshot: None,
-        trace_traps: false,
+        // LM_TRACE_TRAPS=1 reports every trap the rebuild takes, as
+        // `lm --trace-traps` does.
+        trace_traps: std::env::var_os("LM_TRACE_TRAPS").is_some(),
     };
     let t = std::time::Instant::now();
     let code = crate::boot::boot(&o);
@@ -200,6 +203,9 @@ pub fn write_layout() {
     def!("gc-bitmap", GC_BITMAP);
     def!("kick-base", KICK_BASE);
     def!("reset-reserve", RESET_RESERVE);
+    // The first word of an image the machine writes itself, which is how the
+    // loader tells one from an image the forge built.
+    def!("snap-magic", crate::image::SNAP_MAGIC);
 
     // Each global is one value slot. One that holds an address or a count
     // holds it as a fixnum; one that holds a value holds the value.

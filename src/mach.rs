@@ -165,8 +165,8 @@ pub enum Stop {
 pub const XM_TAG: u64 = 1 << 32;
 pub const XM_READY: u64 = 1 << 33;
 
-/// How many entry capabilities `jcl` remembers the windows of.
-pub const JCACHE: usize = 256;
+/// How many windows of capabilities decoded in full are remembered.
+pub const WCACHE: usize = 1024;
 
 pub struct Machine {
     /// The register file. A register is a capability: its address in `x`,
@@ -203,10 +203,11 @@ pub struct Machine {
     pub mtdc: Cap,
     pub mscratchc: Cap,
     pub mepcc: Cap,
-    /// The windows of entry capabilities `jcl` has jumped through, keyed by
-    /// the capability's bits. A window is a function of the bits alone, so
-    /// nothing ever invalidates an entry.
-    pub jcache: Box<[(u64, u32, u32); JCACHE]>,
+    /// The windows of capabilities decoded in full, keyed by the
+    /// capability's bits: the entries `jcl` jumps through, and the return
+    /// addresses, frames and code objects a return loads back. A window is a
+    /// function of the bits alone, so nothing ever invalidates an entry.
+    pub wcache: Box<[(u64, u32, u32); WCACHE]>,
 
     ram: Box<[u8]>,
     /// Raw view of `ram` so the hot path skips the slice length load.
@@ -346,7 +347,7 @@ impl Machine {
             mtdc: Cap::NULL,
             mscratchc: Cap::NULL,
             mepcc: Cap::NULL,
-            jcache: Box::new([(0, 0, 0); JCACHE]),
+            wcache: Box::new([(0, 0, 0); WCACHE]),
             ram,
             ramp,
             ramlen: RAM_SIZE,
@@ -438,14 +439,50 @@ impl Machine {
     }
 
     /// Fill in the window of register `i` if it is tagged and has none yet.
-    #[inline(never)]
+    ///
+    /// Most capabilities that get here point at the base of a small object:
+    /// a pair, a symbol, a closure. Their bounds are exact (IE clear, E 0),
+    /// and an address whose low ten bits are B is the base itself, which
+    /// leaves the length as T - B in eight bits. Those are done in place;
+    /// anything else is decoded in full.
+    #[inline(always)]
     pub fn fill_window(&mut self, i: u32) {
         let i = (i & 31) as usize;
-        if self.xm[i] & (XM_TAG | XM_READY) == XM_TAG {
-            let (b, l) = ram_window(self.reg(i as u32), self.ramlen);
-            self.wb[i] = b;
-            self.wl[i] = l;
-            self.xm[i] |= XM_READY;
+        let xm = self.xm[i];
+        if xm & (XM_TAG | XM_READY) != XM_TAG {
+            return;
+        }
+        let (a, meta) = (self.x[i], xm as u32);
+        let len = (meta >> 10).wrapping_sub(meta) & 0xff;
+        if meta & IE_BIT == 0 && a & 0x3ff == meta & 0x3ff && len != 0 && a as u64 + len as u64 <= self.ramlen as u64 {
+            self.wb[i] = a;
+            self.wl[i] = len;
+            self.xm[i] = xm | XM_READY;
+        } else {
+            self.decode_window(i);
+        }
+    }
+
+    #[inline(never)]
+    fn decode_window(&mut self, i: usize) {
+        let (b, l) = self.window(self.reg(i as u32));
+        self.wb[i] = b;
+        self.wl[i] = l;
+        self.xm[i] |= XM_READY;
+    }
+
+    /// The window of a capability, from `wcache` when it was decoded before.
+    #[inline(always)]
+    pub fn window(&mut self, c: Cap) -> (u32, u32) {
+        let bits = c.to_bits();
+        let slot = ((bits ^ (bits >> 29) ^ (bits >> 41)) as usize) & (WCACHE - 1);
+        let e = self.wcache[slot];
+        if e.0 == bits && bits != 0 {
+            (e.1, e.2)
+        } else {
+            let (b, l) = ram_window(c, self.ramlen);
+            self.wcache[slot] = (bits, b, l);
+            (b, l)
         }
     }
 
@@ -900,5 +937,35 @@ pub fn heap_object(c: Cap) -> Option<u32> {
         (b >= 8 && (OBJ_BASE..OBJ_END).contains(&h)).then_some(h)
     } else {
         ((CONS_BASE..CONS_END).contains(&b) && t == b as u64 + 16).then_some(b)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The window made in place for a small exact capability is the one the
+    /// full decode gives, whatever the capability and wherever its address.
+    #[test]
+    fn windows_made_in_place_match_the_decode() {
+        let mut m = Machine::new();
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 16) as u32
+        };
+        for _ in 0..200_000 {
+            let base = next() & (RAM_SIZE - 1) & !7;
+            let len = next() % 600;
+            let Some(c) = Cap::ROOT.with_addr(base).with_bounds(len) else { continue };
+            let c = c.with_addr(c.base().wrapping_add(next() % (len + 16)).wrapping_sub(8));
+            m.set_reg(10, c);
+            m.fill_window(10);
+            let want = ram_window(c, m.ramlen);
+            let got = (m.wb[10], m.wl[10]);
+            assert!(got == want || (got.1 == 0 && want.1 == 0), "{c:x?}: {got:x?} against {want:x?}");
+        }
     }
 }
