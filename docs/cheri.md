@@ -289,6 +289,14 @@ from the address of `cs1`.
 
 ### Xlm: the Lisp instructions
 
+An Xlm instruction is one CHERI operation and one Lisp type check, done
+together. CHERI knows where a capability points and what it may do there;
+it does not know a pair from a vector, a fixnum from a character, or a
+bound variable from an unbound one. Those are the checks Xlm adds, and
+nothing else: memory safety is never an Xlm instruction's job. An
+instruction whose check CHERI already makes, or that the compiler can prove
+by construction (a closure's own environment after `jcl`), is not one.
+
 Each checks its operands as it uses them, so the check costs no extra
 instructions. A wrong kind of operand is cause 24 with `mtval` the number of
 the register that held it; the handler reads the value from the trap frame.
