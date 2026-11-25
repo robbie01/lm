@@ -12,10 +12,13 @@
 ;; ---------------------------------------------------------------- allocation
 ;; An object is a header granule and its payload. The header's first word is
 ;; (len << 8) | type and its second is zero, which is exactly a fixnum stored
-;; in the granule. The payload is a byte per element for a string or a byte
-;; vector, which hold no capabilities, and a slot per element for the rest.
+;; in the granule. The payload is a byte per element for a string, a byte
+;; vector or a function's text, which hold no capabilities, and a slot per
+;; element for the rest.
 (define (byte-payload? type)
-  (if (%= type t-string) t (%= type t-bytes)))
+  (cond ((%= type t-string) t)
+        ((%= type t-bytes) t)
+        (else (%= type t-text))))
 
 (define (object-payload type len)
   (cond ((byte-payload? type) len)
@@ -72,10 +75,9 @@
 ;; a number, not a capability, so nothing would keep it. Whatever the block
 ;; held before may still carry tags. So the whole of taking the block,
 ;; writing its header, filling the slots the collector would trace and
-;; minting the capability that keeps it is one critical section. The payload
-;; of a string or byte vector is never traced, so it is zeroed afterwards
-;; with interrupts on, while the capability keeps it: a screen bitmap is most
-;; of a megabyte.
+;; minting the capability that keeps it is one critical section. A byte
+;; payload is never traced, so it is zeroed afterwards with interrupts on,
+;; while the capability keeps it: a screen bitmap is most of a megabyte.
 ;;
 ;; The capability's bounds are the payload, rounded as the processor needs
 ;; to represent them: `%rrl` gives the length and `%ram` the alignment the
@@ -83,8 +85,8 @@
 ;; block, header and rounded payload, and that alignment mask, and answers
 ;; the address of a block whose payload starts suitably aligned, or 0. The
 ;; capability's permissions are `perms-object`, values and capabilities
-;; alike, or for a string or byte vector `perms-bytes`, data only. Both carry
-;; HD, which only an allocator mints.
+;; alike, or for a byte payload `perms-bytes`, data only. Both carry HD,
+;; which only an allocator mints.
 (define (alloc-object type len)
   (let* ((bytes (byte-payload? type))
          ;; A record, which is most of what gets made, is sized here rather

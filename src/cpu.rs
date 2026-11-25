@@ -2234,6 +2234,13 @@ fn store_target(m: &Machine, w: u32) -> Option<(u32, u32, u32)> {
     }
 }
 
+/// Where code can be: object space, where every function's text is, and the
+/// reset stub.
+fn in_code(a: u32) -> bool {
+    use crate::map::*;
+    (OBJ_BASE..OBJ_END).contains(&a) || (RESET_VECTOR..RESET_VECTOR + RESET_RESERVE).contains(&a)
+}
+
 /// The debugging watches, installed as the dispatch table when any of
 /// `LM_WATCH_S2`, `LM_WATCH_ADDR` or `LM_WATCH_HI` is set. They cost no
 /// cycles and no fuel, so installing them does not move a timing-dependent
@@ -2241,7 +2248,7 @@ fn store_target(m: &Machine, w: u32) -> Option<(u32, u32, u32)> {
 ///
 /// `s2` holds the running task and only `%set-this-task!` writes it, so it
 /// is either nil or a record in object space. Every jump through a register
-/// lands in code space. The first instruction that violates either rule is
+/// lands in code. The first instruction that violates either rule is
 /// reported together with the instruction before it. A store into the
 /// watched range, or of a word whose top half is the watched value, is
 /// reported with the function it came from.
@@ -2278,7 +2285,7 @@ fn watch_hook(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         // jump without a jump instruction, so it is checked too.
         let mret = if w == 0x3020_0073 { Some(m.mepcc.addr) } else { None };
         let jump_bad = match jump.map(|(_, t)| t).or(mret) {
-            Some(t) => t < crate::map::CODE_BASE || t >= crate::map::CODE_END,
+            Some(t) => !in_code(t),
             None => false,
         };
         if !s2_ok || jump_bad {

@@ -710,25 +710,15 @@
     a))
 
 ;; ---------------------------------------------------------------- placement
-;; Code space is never compacted, so the address a function is placed at is
-;; good for the life of the image. The code is copied in through DDC, by
-;; integer address, and the bytes from its end to size are zero, which is
-;; not an instruction.
-(define (copy-out a addr size)
-  (unsafe
-  (let ((len (asm-len a))
-        (buf (asm-buf a))
-        (i 0))
-    (while (%< i len)
-      (%st-byte! (%+ addr i) (%bytes-ref buf i))
-      (set! i (%+ i 1)))
-    (while (%< i size)
-      (%st-byte! (%+ addr i) 0)
-      (set! i (%+ i 1)))
-    addr)))
+;; A function's machine code is an object of its own, a text: bytes, in which
+;; no capability can be stored. What reaches it is its entry, a capability
+;; with EX bounded exactly to the code, and the return addresses into it,
+;; each of which keeps the text alive as any capability keeps the object it
+;; lies in. A jump within the code is relative to it, so the text can be
+;; anywhere, and the forge slides it with the rest of object space.
 
-;; The bytes a placed function occupies: its length rounded up to one that a
-;; capability can bound exactly. alloc-code aligns the base to match.
+;; The bytes placed code occupies: its length rounded up to one that a
+;; capability can bound exactly. The allocator aligns the text to match.
 (define (code-size a) (%rrl (asm-len a)))
 
 ;; The capability that enters placed code: bounds exactly its bytes, EX, and
@@ -739,30 +729,45 @@
    (%cap-bounds-exact (%from-addr (asm-origin a)) (code-size a))
    (if (asm-privileged a) (%logior perm-ex perm-sr) perm-ex))))
 
-;; Place at an address reserved earlier, and answer the address. The reset
-;; stub is assembled last, because it refers to everything else, but has to
-;; sit at the base of code space, where the processor starts with the root
-;; in PCC.
+;; The code into a fresh text, through the text's own capability: a word at
+;; a time, then the last bytes one by one.
+(define (copy-into a text)
+  (let ((len (asm-len a)) (buf (asm-buf a)) (i 0))
+    (while (%<= (%+ i 4) len)
+      (%cap-st-word! text i (%cap-ld-word buf i))
+      (set! i (%+ i 4)))
+    (while (%< i len)
+      (%cap-st-byte! text i (%bytes-ref buf i))
+      (set! i (%+ i 1)))))
+
+;; Place in a fresh text, and answer the entry capability. The text's own
+;; capability goes no further than this.
+(define (place a)
+  (resolve a)
+  (let ((text (alloc-object t-text (asm-len a))))
+    (copy-into a text)
+    (set-asm-origin! a (%addr-of text))
+    (entry-capability a)))
+
+;; Place at a fixed address, by number through DDC, and answer the address.
+;; The reset stub is assembled last, because it refers to everything else,
+;; and has to sit at the reset vector, where the processor starts with the
+;; root in PCC.
 (define (place-at a addr)
+  (unsafe
   (set-asm-origin! a addr)
   (resolve a)
-  (copy-out a addr (asm-len a)))
+  (let ((len (asm-len a)) (buf (asm-buf a)) (i 0))
+    (while (%< i len)
+      (%st-byte! (%+ addr i) (%bytes-ref buf i))
+      (set! i (%+ i 1))))
+  addr))
 
-;; Place in fresh code space, and answer the entry capability.
-(define (place a)
-  (unsafe
-  (resolve a)
-  (let* ((size (code-size a))
-         (addr (alloc-code size)))
-    (set-asm-origin! a addr)
-    (copy-out a addr size)
-    (entry-capability a))))
-
-;; The placed code as a heap object, which is how the collector sees both
-;; the machine code and every literal it refers to: slot 0 the entry
-;; capability, then the name, then the literals. The literals list is newest
-;; first, so it fills the object from the far end. The name is what a
-;; backtrace prints: every frame saves its caller's code object.
+;; The placed code as a heap object, which is how the collector sees every
+;; literal it refers to: slot 0 the entry capability, then the name, then
+;; the literals. The literals list is newest first, so it fills the object
+;; from the far end. The name is what a backtrace prints: every frame saves
+;; its caller's code object.
 (define (code-object a name)
   (unsafe
   (let* ((n (asm-nlits a))
@@ -773,7 +778,4 @@
     (dolist (l (asm-literals a))
       (%set-slot! v i l)
       (set! i (%- i 1)))
-    ;; Code space has no headers to walk, so the collector finds code through
-    ;; the registry.
-    (register-code v)
     v)))

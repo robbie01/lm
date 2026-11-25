@@ -17,8 +17,8 @@ use crate::map::*;
 use std::collections::HashMap;
 
 /// A pair is its 16 bytes. An object is its block, header included. A code
-/// object also counts the machine code its entry covers, which is how code
-/// space is attributed.
+/// object also counts the block of its text, which its entry reaches and
+/// which is how machine code is attributed.
 fn weight(h: &Heap, v: V) -> u32 {
     if is_cons(v) {
         return PAIR_BYTES;
@@ -26,15 +26,18 @@ fn weight(h: &Heap, v: V) -> u32 {
     let hdr = h.hdr(v);
     let mut n = block_size(hdr);
     if hdr_type(hdr) == T_CODE {
-        n += code_bytes(h, v);
+        n += text_block(h, v).map_or(0, |(_, size)| size);
     }
     n
 }
 
-/// The bytes of machine code a code object's entry covers.
-fn code_bytes(h: &Heap, code: V) -> u32 {
+/// Where the text a code object's entry covers starts, header included, and
+/// how many bytes its block occupies.
+fn text_block(h: &Heap, code: V) -> Option<(u32, u32)> {
     let entry = h.slot(code, CODE_ENTRY);
-    if entry.tag { entry.len() as u32 } else { 0 }
+    let at = entry.base().wrapping_sub(HEADER_BYTES);
+    let hdr = h.ld(at);
+    (entry.tag && hdr_type(hdr) == T_TEXT).then(|| (at, block_size(hdr)))
 }
 
 /// What `v` holds, by the rule the collector uses: every slot of a pair or
@@ -135,10 +138,18 @@ pub fn run(path: &str, json: bool) -> i32 {
     // until the forge compacts the image.
     let roots: Vec<V> = VALUE_GLOBALS.iter().map(|a| h.gv(*a)).collect();
     let obj_high = (h.g(LG_OBJ_PTR) - OBJ_BASE) as u64;
-    let code_high = (h.g(LG_CODE_PTR) - CODE_BASE) as u64;
+    let code_high = h.text_bytes() as u64;
     let pair_high = (h.g(LG_CONS_PTR) - CONS_BASE) as u64;
     let obj_pages = (obj_high as usize).div_ceil(4096);
     let mut page_used = vec![false; obj_pages.max(1)];
+    let mut used = |at: u32, size: u32| {
+        let start = at - OBJ_BASE;
+        for page in start / 4096..=(start + size - 1) / 4096 {
+            if let Some(u) = page_used.get_mut(page as usize) {
+                *u = true;
+            }
+        }
+    };
     let (mut live_pairs, mut live_objs, mut live_code) = (0u64, 0u64, 0u64);
     for v in reach(&h, &roots).into_values() {
         if is_cons(v) {
@@ -147,14 +158,11 @@ pub fn run(path: &str, json: bool) -> i32 {
         }
         let hdr = h.hdr(v);
         live_objs += block_size(hdr) as u64;
+        used(v.base() - HEADER_BYTES, block_size(hdr));
         if hdr_type(hdr) == T_CODE {
-            live_code += code_bytes(&h, v) as u64;
-        }
-        let start = v.base() - HEADER_BYTES - OBJ_BASE;
-        let end = start + block_size(hdr);
-        for page in start / 4096..=(end - 1) / 4096 {
-            if let Some(u) = page_used.get_mut(page as usize) {
-                *u = true;
+            if let Some((at, size)) = text_block(&h, v) {
+                live_code += size as u64;
+                used(at, size);
             }
         }
     }
@@ -209,9 +217,9 @@ pub fn run(path: &str, json: bool) -> i32 {
     println!("{path}: {reachable} bytes reachable from {} packages", pkgs.len());
     println!("  {live_all} bytes live in all, against what the image carries:");
     println!("    pairs   {live_pairs:>9} live of {pair_high:>9}");
-    println!("    objects {live_objs:>9} live of {obj_high:>9}");
+    println!("    objects {live_objs:>9} live of {:>9}", obj_high - code_high);
     println!("    code    {live_code:>9} live of {code_high:>9}");
-    let dead = obj_high - live_objs;
+    let dead = obj_high - live_objs - live_code;
     let blanked = (empty_pages * 4096) as u64;
     println!(
         "    {} KiB of object space is dead: {} KiB on {empty_pages} empty pages the writer skips,",

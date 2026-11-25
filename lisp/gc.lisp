@@ -25,10 +25,11 @@
 ;;; whatever its length, so a capability narrowed to a car or a cdr keeps its
 ;;; pair; one based in object space keeps the object whose block holds the
 ;;; granule below its base, found by the object-start map, so one narrowed to
-;;; a slot keeps its vector. Code, with EX, keeps alive the code object that
-;;; owns its block. Everything else, a stack, a device, a pool block, is
-;;; somebody else's. A task's cons run keeps the pair at its base: at most
-;;; one pair of floating garbage.
+;;; a slot keeps its vector. Machine code is an object too, a text, so an
+;;; entry or a return address keeps the function's text by the same rule.
+;;; Everything else, a stack, a device, a pool block, is somebody else's. A
+;;; task's cons run keeps the pair at its base: at most one pair of floating
+;;; garbage.
 ;;;
 ;;; What makes marking safe to interleave with running code is the machine's
 ;;; write barrier (`gcmode`): while it is on, any store that would overwrite a
@@ -268,11 +269,13 @@
           ((%= ty t-free) (%lsh n 3))
           (else (%+ 8 (%logand (%+ (%rrl (object-payload ty n)) 7) -8))))))
 
-;; Strings and byte vectors hold no tags, and a free block's are cleared.
+;; Strings, byte vectors and texts hold no tags, and a free block's are
+;; cleared.
 (defsubst (may-hold-tags? ty)
   (cond ((%= ty t-free) nil)
         ((%= ty t-string) nil)
         ((%= ty t-bytes) nil)
+        ((%= ty t-text) nil)
         (else t)))
 
 ;; ---------------------------------------------------------------- references
@@ -289,28 +292,12 @@
                 0
                 (let* ((w (%ld-word h)) (ty (%logand w 255)))
                   (if (%>= ty t-symbol)
-                      (if (%<= ty t-code)
+                      (if (%<= ty t-text)
                           (if (%<= (%+ h (obj-block-size w)) top) h 0)
                           0)
                       0)))
             0)
         0)))
-
-;; The code object that owns the block whose code starts at `base`, or nil.
-;; A code block's header is two granules below its code: its size, then its
-;; code object once registered (see `alloc-code`).
-(define (code-object-at base)
-  (if (%>= base (%+ code-base 16))
-      (if (%< base (%ld-word lg-code-ptr))
-          (let ((o (%ld-cap (%- base 8))))
-            (if (%cap-tag? o) (if (%= 0 (%logand (%cap-perms o) perm-hd)) nil o) nil))
-          nil)
-      nil))
-
-;; The header of that code object, or 0.
-(define (code-owner base)
-  (let ((o (code-object-at base)))
-    (if o (object-header (%cap-base o)) 0)))
 
 ;; The object whose block holds the granule below `base`, which any
 ;; capability based in object space keeps: its header, or 0. For an object's
@@ -350,18 +337,16 @@
         (%st-word! obj-starts-ready obj-starts-magic))))
 
 ;; Where the mark bit for a tagged capability lives: the pair its base lies
-;; in, the header of the object its base lies in, a code capability's code
-;; object's header; or 0 when the capability is not the collector's.
+;; in, or the header of the object its base lies in; or 0 when the
+;; capability is not the collector's.
 (define (gc-block-of v)
-  (let ((base (%cap-base v)) (perms (%cap-perms v)))
+  (let ((base (%cap-base v)))
     (cond ((%> base obj-base)
            (if (%<= base obj-limit) (interior-object base) 0))
           ((%>= base cons-base)
-           (if (%> (%logand perms perm-hd) 0)
+           (if (%> (%logand (%cap-perms v) perm-hd) 0)
                0
                (if (%< base (%ld-word lg-cons-ptr)) (%logand base -16) 0)))
-          ((%> (%logand perms perm-hd) 0) 0)
-          ((%> (%logand perms perm-ex) 0) (code-owner base))
           (else 0))))
 
 ;; Open-coded: marking asks this for every granule of every live block.
@@ -573,7 +558,6 @@
 
 ;; What the cycle found, for the budget and the report.
 (define *obj-freed* 0)       ; bytes of object space freed
-(define *code-freed* 0)      ; bytes of code space freed
 (define *cons-live* 0)       ; bytes of pairs kept
 (define *cons-holes* 0)      ; bytes of pairs handed back as runs
 (define *slices* 0)
@@ -583,20 +567,18 @@
 (define *barriers* 0)        ; barrier traps taken
 (define *t-start* 0)         ; the cycle counter when the cycle began
 ;; instrumentation: cycles per slice kind, small holes, dead pairs inside live words, refills
-(define *t-mark* 0) (define *t-code* 0) (define *t-objects* 0) (define *t-pairs* 0) (define *t-clear* 0)
+(define *t-mark* 0) (define *t-objects* 0) (define *t-pairs* 0) (define *t-clear* 0)
 (define *small-holes* 0) (define *inner-dead* 0) (define *refills* 0)
 
 (defconstant kind-start 1)
 (defconstant kind-mark 2)
-(defconstant kind-code 3)
-(defconstant kind-objects 4)
-(defconstant kind-pairs 5)
-(defconstant kind-clear 6)
+(defconstant kind-objects 3)
+(defconstant kind-pairs 4)
+(defconstant kind-clear 5)
 
 (define (kind-name k)
   (cond ((%= k kind-start) "the start")
         ((%= k kind-mark) "marking")
-        ((%= k kind-code) "the code sweep")
         ((%= k kind-objects) "the object sweep")
         ((%= k kind-pairs) "the pair sweep")
         (else "clearing")))
@@ -613,7 +595,6 @@
   (let ((d (cycles-since t0)))
     (set! *slices* (%+ *slices* 1))
     (cond ((%= *slice-kind* kind-mark) (set! *t-mark* (%+ *t-mark* d)))
-          ((%= *slice-kind* kind-code) (set! *t-code* (%+ *t-code* d)))
           ((%= *slice-kind* kind-objects) (set! *t-objects* (%+ *t-objects* d)))
           ((%= *slice-kind* kind-pairs) (set! *t-pairs* (%+ *t-pairs* d)))
           ((%= *slice-kind* kind-clear) (set! *t-clear* (%+ *t-clear* d)))
@@ -633,7 +614,7 @@
     (set! *t-start* t0)
     (set! *mark-sp* 0)
     (set! *slices* 0)
-    (set! *t-mark* 0) (set! *t-code* 0) (set! *t-objects* 0) (set! *t-pairs* 0) (set! *t-clear* 0)
+    (set! *t-mark* 0) (set! *t-objects* 0) (set! *t-pairs* 0) (set! *t-clear* 0)
     (set! *small-holes* 0) (set! *inner-dead* 0)
     (set! *slice-max* 0)
     (set! *slice-kind* kind-start)
@@ -680,15 +661,9 @@
 
 ;; ---------------------------------------------------------------- finish
 ;; The mark stack is empty and nothing can be pushed while interrupts are
-;; off: the barrier can go off, and the sweep can begin. Code before objects:
-;; the object sweep zeroes dead objects, and a dead code object's first slot
-;; is the capability to the code it owns.
+;; off: the barrier can go off, and the sweep can begin.
 (define (finish-mark)
   (%set-gc-mode! 0)
-  (set! *code-i* 0)
-  (set! *code-keep* 0)
-  (set! *code-n* (%ld-word lg-code-reg-n))
-  (set! *code-freed* 0)
   (gc-clear-bins)
   ;; What was made while marking is black and lies above the frontiers the
   ;; cycle began with; its bits come off after the sweep.
@@ -863,9 +838,7 @@
   (uart-num (%- (%lsh (%- *cons-hi* cons-base) -4) (%lsh *cons-live* -4)))
   (uart-string " pairs, ")
   (uart-num *obj-freed*)
-  (uart-string " object bytes, ")
-  (uart-num *code-freed*)
-  (uart-string " code bytes freed; ")
+  (uart-string " object bytes freed; ")
   (uart-num (%lsh *cons-live* -4))
   (uart-string " pairs live; ")
   (uart-num *slices*)
@@ -882,7 +855,6 @@
   (uart-string " bytes]")
   (uart-nl)
   (uart-string "  [phases: mark ") (uart-num *t-mark*)
-  (uart-string " code ") (uart-num *t-code*)
   (uart-string " objects ") (uart-num *t-objects*)
   (uart-string " pairs ") (uart-num *t-pairs*)
   (uart-string " clear ") (uart-num *t-clear*)
@@ -905,9 +877,7 @@
              (trace-some)
              (if (%= *mark-sp* 0) (finish-mark) nil))
             ((%= *phase* phase-sweeping)
-             (cond ((%< *code-i* *code-n*)
-                    (set! *slice-kind* kind-code) (sweep-code-some))
-                   ((%< *sweep-obj* *obj-hi*)
+             (cond ((%< *sweep-obj* *obj-hi*)
                     (set! *slice-kind* kind-objects) (sweep-objects-some))
                    ((%< *sweep-cons* *cons-hi*)
                     (set! *slice-kind* kind-pairs) (sweep-cons-some))
@@ -1240,155 +1210,6 @@
     (set-budget)
     (%lsh (%- cons-limit top) -4)))
 
-;; ---------------------------------------------------------------- code space
-;; Code is collected but not moved: this collector runs as compiled code, and
-;; sliding the function it is standing in is not possible. A code block is
-;; kept by its code object, and its code object by anything that holds it: a
-;; closure, a frame's saved s1, a literal. A code capability, a return
-;; address or an entry, keeps the code object too, through the block's
-;; header:
-;;
-;;   entry - 16    the block's size in bytes, header included
-;;   entry - 8     the code object that owns it, once registered
-;;   entry         the machine code
-;;
-;; Blocks are whole multiples of sixteen bytes, so every piece left over when
-;; one is carved can be a free block: its size, then the next free block.
-;;
-;; The registry of code objects is a plain array in the pool, not a list in
-;; the heap: a list would be a root, and a root would keep every version of
-;; every function alive.
-
-(defconstant code-registry-max 65536)
-(defconstant code-registry-bytes (%lsh code-registry-max 3))
-
-(define (code-registry)
-  (let ((r (%ld-word lg-code-reg)))
-    (if (%> r 0)
-        r
-        (let ((a (%addr-of (alloc-pool code-registry-bytes))))
-          (%st-word! lg-code-reg a)
-          (%st-word! lg-code-reg-n 0)
-          a))))
-
-;; Code space has no headers to walk, so the collector finds code through the
-;; registry, and a code capability finds its code object through the block.
-(define (register-code obj)
-  (without-interrupts
-  (let ((r (code-registry))
-        (n (%ld-word lg-code-reg-n)))
-    (if (%>= n code-registry-max)
-        (error "code registry full")
-        nil)
-    (%st-cap! (%+ r (%lsh n 3)) obj)
-    (%st-word! lg-code-reg-n (%+ n 1))
-    ;; Slot 0 is the entry, whose base is the code.
-    (%st-cap! (%- (%cap-base (%ld-cap (%cap-base obj))) 8) obj)
-    obj)))
-
-;; The first free block of at least `want` bytes, off the list, or 0.
-(define (code-take want)
-  (let ((prev 0) (p (%ld-word lg-code-free)) (got 0))
-    (while (if (%= got 0) (%> p 0) nil)
-      (let ((have (%ld-word p)) (next (%ld-word (%+ p 8))))
-        (if (%>= have want)
-            (begin
-              (if (%= prev 0)
-                  (%st-word! lg-code-free next)
-                  (%st-cap! (%+ prev 8) next))
-              (%st-word! lg-code-free-n (%- (%ld-word lg-code-free-n) have))
-              (set! got p))
-            (begin (set! prev p) (set! p next)))))
-    got))
-
-(define (code-free-block p size)
-  (%st-cap! p size)
-  (%st-cap! (%+ p 8) (%ld-word lg-code-free))
-  (%st-word! lg-code-free p)
-  (%st-word! lg-code-free-n (%+ (%ld-word lg-code-free-n) size)))
-
-;; Fresh ground: `want` bytes off the top of code space.
-(define (code-bump want)
-  (let ((q (%ld-word lg-code-ptr)))
-    (if (%> (%+ q want) (%ld-word lg-code-end))
-        (out-of-memory "code space")
-        nil)
-    (%st-word! lg-code-ptr (%+ q want))
-    q))
-
-;; Room for `nbytes` of machine code, answered as the address the code goes
-;; at: aligned as `%ram` asks for that length, so that a capability bounded
-;; exactly to it is representable, with at least `(%rrl nbytes)` bytes there.
-;; A free block first, then bump; what is in front of the block and behind
-;; it goes back on the free list. The block's tail past `nbytes` is zeroed,
-;; so a reused block carries nothing of the code it held before into an
-;; image.
-(define (alloc-code nbytes)
-  (without-interrupts
-  (let* ((size (%+ 16 (%logand (%+ (%rrl nbytes) 15) -16)))
-         (align (let ((a (%- 0 (%ram nbytes)))) (if (%< a 16) 16 a)))
-         (want (%+ size (%- align 16)))
-         (p (code-take want))
-         (have (if (%> p 0) (%ld-word p) want)))
-    (if (%= p 0) (set! p (code-bump want)) nil)
-    (let* ((at (%logand (%+ p (%+ 16 (%- align 1))) (%- 0 align)))
-           (start (%- at 16))
-           (end (%+ start size)))
-      (if (%> start p) (code-free-block p (%- start p)) nil)
-      (if (%< end (%+ p have)) (code-free-block end (%- (%+ p have) end)) nil)
-      (%st-cap! start size)
-      (%st-cap! (%+ start 8) 0)
-      (blank (%logand (%+ at nbytes) -8) end)
-      at))))
-
-;; Compact the registry in place, a stretch at a time, keeping the entries
-;; whose code object survived and handing the rest of code space back. The
-;; entries are those the registry held when marking finished; anything
-;; registered since sits above them, unmarked but not this cycle's business,
-;; and is moved down behind the survivors at the end. The tail that leaves is
-;; zeroed. A code object made while marking is black, like any other object,
-;; so it is kept. Answers the entries walked.
-(define *code-i* 0)
-(define *code-keep* 0)
-(define *code-n* 0)
-(defconstant sweep-code-entries 1024)
-
-(define (sweep-code-some)
-  (let* ((r (code-registry))
-         (n *code-n*)
-         (start *code-i*)
-         (i start)
-         (keep *code-keep*)
-         (lim (%+ i sweep-code-entries))
-         (hi (if (%< lim n) lim n))
-         (freed 0))
-    (while (%< i hi)
-      (let ((obj (%ld-cap (%+ r (%lsh i 3)))))
-        (if (marked? (%- (%cap-base obj) 8))
-            (begin
-              (%st-cap! (%+ r (%lsh keep 3)) obj)
-              (set! keep (%+ keep 1)))
-            (let ((entry (%ld-cap (%cap-base obj))))
-              (if (%cap-tag? entry)
-                  (let* ((b (%- (%cap-base entry) 16)) (size (%ld-word b)))
-                    (code-free-block b size)
-                    (set! freed (%+ freed size)))
-                  nil))))
-      (set! i (%+ i 1)))
-    (if (%>= i n)
-        (let ((now (%ld-word lg-code-reg-n)) (j n))
-          (while (%< j now)
-            (%st-cap! (%+ r (%lsh keep 3)) (%ld-cap (%+ r (%lsh j 3))))
-            (set! keep (%+ keep 1))
-            (set! j (%+ j 1)))
-          (blank (%+ r (%lsh keep 3)) (%+ r (%lsh now 3)))
-          (%st-word! lg-code-reg-n keep))
-        nil)
-    (set! *code-i* i)
-    (set! *code-keep* keep)
-    (set! *code-freed* (%+ *code-freed* freed))
-    (%- i start)))
-
 ;; ---------------------------------------------------------------- images
 ;; Zeroing the inside of every free block in object space makes a page with
 ;; nothing live on it a page of zeroes, which the image writer skips. Far too
@@ -1409,15 +1230,6 @@
             nil)
         (set! p (%+ p size))))
     zeroed))
-
-;; The same for the code that sweeping freed. A rebuild allocates its new
-;; code above the old, so without this every dead byte goes into the file.
-(define (blank-free-code)
-  (let ((p (%ld-word lg-code-free)))
-    (while (%> p 0)
-      (let ((size (%ld-word p)) (next (%ld-word (%+ p 8))))
-        (blank (%+ p 16) (%+ p size))
-        (set! p next)))))
 
 ;; ---- idle symbols ----
 ;; An image carries every symbol the reader ever interned, and most of them
@@ -1529,8 +1341,50 @@
       (%st-word! lg-cons-free-n (%lsh (%- cons-limit (%ld-word lg-cons-ptr)) -4))
       (blank (%ld-word lg-cons-ptr) *cons-dirty-top*)
       (clear-bitmap)))
-  (blank-free-code)
   (blank-free-objects))
+
+;; ---------------------------------------------------------------- walking
+;; Walks of object space for what no pointer leads to directly. Interrupts
+;; are off for the walk, so that no block is half made under it.
+
+;; The code object whose entry is the text at `base`, or nil: whose function
+;; a pc or a return address is in, for a backtrace. Nothing in a text says
+;; whose it is; a code object says which text is its own.
+(define (code-object-at base)
+  (without-interrupts
+    (let ((p obj-base) (hi (%ld-word lg-obj-ptr)) (found nil))
+      (while (%< p hi)
+        (let* ((h (%ld-word p)) (size (obj-block-size h)))
+          (if (%= (%logand h 255) t-code)
+              (let ((e (%ld-cap (%+ p value-bytes))))
+                (if (if (%cap-tag? e) (%= (%cap-base e) base) nil)
+                    (begin
+                      (set! found (%cap-and-perms
+                                   (%cap-bounds-exact (%from-addr (%+ p value-bytes))
+                                                      (%rrl (%lsh (%lsh h -8) 3)))
+                                   perms-object))
+                      (set! hi p))
+                    nil))
+              nil)
+          (if (%<= size 0) (gc-corrupt p) nil)
+          (set! p (%+ p size))))
+      found)))
+
+;; The bytes of object space that machine code occupies, headers included.
+(define (code-bytes)
+  (without-interrupts
+    (let ((p obj-base) (hi (%ld-word lg-obj-ptr)) (n 0))
+      (while (%< p hi)
+        (let* ((h (%ld-word p)) (size (obj-block-size h)))
+          (if (%<= size 0) (gc-corrupt p) nil)
+          (if (%= (%logand h 255) t-text) (set! n (%+ n size)) nil)
+          (set! p (%+ p size))))
+      n)))
+
+;; The bytes of object space in use as the last collection left it: below
+;; the frontier and in no free block.
+(define (object-bytes-used)
+  (%- (%- (%ld-word lg-obj-ptr) obj-base) (%ld-word lg-obj-free-n)))
 
 ;; ---------------------------------------------------------------- reporting
 (define (room)
@@ -1539,10 +1393,9 @@
   (emit-str " of ")
   (emit-str (number->string (%lsh (%- cons-limit cons-base) -4)))
   (emit-str ", object bytes used ")
-  (emit-str (number->string (%- (%ld-word lg-obj-ptr) obj-base)))
-  (emit-str ", code bytes used ")
-  (emit-str (number->string
-             (%- (%- (%ld-word lg-code-ptr) code-base) (%ld-word lg-code-free-n))))
+  (emit-str (number->string (object-bytes-used)))
+  (emit-str ", code bytes ")
+  (emit-str (number->string (code-bytes)))
   (emit-str ", collections ")
   (emit-str (number->string *count*))
   (if (busy?) (emit-str ", one in progress") nil)
@@ -1635,4 +1488,4 @@
   (%ld-word lg-cons-free-n))
 
 ;; These take raw addresses or hand out raw memory.
-(unsafe-names (quote (alloc-code register-code refill-cons-run scan-context drop-context-run)))
+(unsafe-names (quote (code-object-at refill-cons-run scan-context drop-context-run)))

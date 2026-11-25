@@ -39,8 +39,8 @@ enum Cmd {
     ///
     /// The sources are typed at the machine's console twice: once to make the
     /// running machine the new system, once to compile a fresh image with it.
-    /// The machine writes that image out, and the forge slides its object and
-    /// code space down. Nothing the old image held comes with it, and the
+    /// The machine writes that image out, and the forge slides its object
+    /// space down. Nothing the old image held comes with it, and the
     /// bootstrap interpreter is not involved.
     Rebuild {
         /// The image to build with
@@ -79,10 +79,9 @@ enum Cmd {
         #[arg(short, long)]
         verbose: bool,
 
-        /// Slide code space down too, and blank the pool's scratch. Only for
-        /// an image that boots through its kickstart, as `rebuild` makes; not
-        /// one from `(save-image)`, which holds code that no code object
-        /// owns, such as the stub every task returns into
+        /// Blank the pool's scratch too, the boot stack and the trap frames,
+        /// which an image that boots through its kickstart, as `rebuild`
+        /// makes, writes before it reads
         #[arg(long)]
         fresh: bool,
     },

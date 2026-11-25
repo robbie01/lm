@@ -42,18 +42,17 @@
 (export '(
   alloc-object *object-allocator* *collector* *pacer*
   ;; the generated layout: the names another package reads
-  low-end code-base reset-reserve cons-base cons-limit obj-base obj-limit pool-base pool-limit gc-bitmap obj-starts obj-starts-ready obj-starts-magic mmio-base
+  low-end reset-vector reset-reserve cons-base cons-limit obj-base obj-limit pool-base pool-limit gc-bitmap obj-starts obj-starts-ready obj-starts-magic mmio-base
   snap-magic
-  lg-bootlist lg-code-end lg-code-free lg-code-free-n lg-code-ptr lg-code-reg lg-code-reg-n
-  lg-cons-free lg-cons-free-n lg-cons-ptr lg-errhandler lg-gccount lg-imgentry lg-obarray
+  lg-bootlist lg-cons-free lg-cons-free-n lg-cons-ptr lg-errhandler lg-gccount lg-obarray
   lg-obj-end lg-obj-free-n lg-obj-ptr lg-package lg-packages lg-pool-free lg-poolend lg-poolptr
   lg-roots lg-stackbot lg-stacktop lg-startup lg-symlist lg-task-exit lg-toplevel lg-trapdepth
-  lg-traphook lg-trapsave lg-traptmp lg-traptmp2
+  lg-trap-entry lg-traphook lg-trapsave lg-traptmp lg-traptmp2
   value-bytes kind-fixnum kind-char kind-unbound kind-pair kind-object
-  perm-ld perm-sd perm-lc perm-sc perm-lm perm-ex perm-sr perm-se perm-hd perms-pair perms-nil
+  perm-ld perm-sd perm-lc perm-sc perm-lm perm-ex perm-sr perm-se perm-hd perms-pair perms-object perms-nil
   otype-sentry otype-closure
   obj-bins obj-bin-count t-free t-symbol t-string t-vector t-bytes t-closure t-record t-float
-  t-port t-bignum t-code code-entry code-name code-lits clo-entry clo-code clo-free
+  t-port t-bignum t-code t-text code-entry code-name code-lits clo-entry clo-code clo-free
   sym-name sym-value sym-function sym-plist sym-flags sym-package sym-macro sym-constant pkg-tag
   ctx-bytes reg-pc reg-ra reg-sp reg-gp reg-tp reg-t0 reg-t1 reg-t3 reg-s0 reg-s1 reg-s2
   reg-a0 reg-a7
@@ -76,7 +75,7 @@
   blit-done blit-pending blit-refused-src blit-refused-dst
   op-copy op-fill op-line
   ;; the primitives
-  %* %+ %- %/ %< %<= %= %> %>= %addr-of %alloc-code %alloc-pool %apply %ash
+  %* %+ %- %/ %< %<= %= %> %>= %addr-of %alloc-pool %apply %ash
   %bit-ref %bit-set! %min %max %popcount
   %bytes-length %bytes-ref %bytes-set! %bytes? %car %cdr %char->int %char?
   %closure? %cons %cons? %cycles %disable %display %ecall
@@ -175,11 +174,11 @@
 
 (in-package gc)
 (export '(
-  alloc-code forget-unused-packages
+  forget-unused-packages
   gc collect extra-roots collect-for-image
   invalidate-runs note-run! take-owed-run
   scan-context drop-context-run empty-cons-run install-allocator
-  refill-cons-run register-code code-registry-bytes code-object-at gc-scratch room
+  refill-cons-run code-object-at code-bytes object-bytes-used gc-scratch room
   barrier busy? step ensure-starts
 ))
 
@@ -225,7 +224,7 @@
   ;; the assembler and placing its code
   make-assembler asm-buf asm-len asm-labels asm-fixups asm-origin asm-nlits
   asm-privileged set-asm-len! set-asm-origin! set-asm-privileged!
-  label gensym-label literal literal-offset place place-at code-object
+  label label-offset gensym-label literal literal-offset place place-at code-object
   ;; CSRs, and the opcodes a trap handler decodes
   csr-cycle csr-cycleh csr-gcmode csr-mcause csr-mepc csr-mie csr-mip
   csr-mscratch csr-mstatus csr-mtval csr-mtvec csr-stklim

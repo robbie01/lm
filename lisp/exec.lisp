@@ -719,10 +719,6 @@
 ;; task's first frame saves as its return address, NULL until Exec builds it.
 (define *task-exit-stub* 0)
 
-;; The stub reads `task-finished` out of a low global, which takes integer
-;; addressing, so it is code with SR.
-(define kernel-code-perms (%logior perm-ex perm-sr))
-
 (define (task-finished)
   (let ((task (this-task)))
     ;; A section the task's function opened and returned without closing ends
@@ -738,17 +734,17 @@
     ;; `remove-task` on the current task never returns.
     (while t (reschedule))))
 
+;; The stub reads `task-finished` out of a low global, which takes integer
+;; addressing, so it is placed with SR. Exec builds it each time it starts,
+;; and the sentry in `*task-exit-stub*` keeps its text.
 (define (build-task-exit-stub)
   (let ((a (make-assembler)))
+    (set-asm-privileged! a t)
     (i-li a $t1 0)
     (i-lc a $t0 $zero lg-task-exit)
     (i-jcl a $ra $t0)
-    (place a)
     (%st-cap! lg-task-exit (%symbol-value 'task-finished))
-    (set! *task-exit-stub*
-          (%cap-seal-entry
-           (%cap-and-perms (%cap-bounds-exact (%from-addr (asm-origin a)) (asm-len a))
-                           kernel-code-perms)))
+    (set! *task-exit-stub* (%cap-seal-entry (place a)))
     *task-exit-stub*))
 
 ;; ---------------------------------------------------------------- ports

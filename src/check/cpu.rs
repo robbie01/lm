@@ -1143,7 +1143,7 @@ pub fn run_all() -> bool {
         li32(&mut code, A2, MMIO_BASE);
         code.push(sw_ddc(A1, A2));
         let mut m = Machine::new();
-        emit(&mut m, KICK_BASE, &code);
+        emit(&mut m, RESET_VECTOR, &code);
         m.uart.feed(b"K");
         m.mtimecmp = u64::MAX;
         m.gfx.next_vbl = u64::MAX;
@@ -1174,7 +1174,7 @@ pub fn run_all() -> bool {
         li32(&mut code, A0, blit + B_LIST);
         code.push(sc_ddc(A1, A0));
         code.push(jal(ZERO, 0));
-        emit(&mut m, KICK_BASE, &code);
+        emit(&mut m, RESET_VECTOR, &code);
         m.mtimecmp = u64::MAX;
         m.gfx.next_vbl = u64::MAX;
         run::run(&mut m, 400);
@@ -1206,7 +1206,7 @@ pub fn run_all() -> bool {
         li32(&mut code, A0, blit + B_STATUS);
         code.push(lw_ddc(A2, A0));
         code.push(jal(ZERO, 0));
-        emit(&mut m, KICK_BASE, &code);
+        emit(&mut m, RESET_VECTOR, &code);
         m.mtimecmp = u64::MAX;
         m.gfx.next_vbl = u64::MAX;
         run::run(&mut m, 2000);
@@ -1252,7 +1252,7 @@ pub fn run_all() -> bool {
         code.push(sw_ddc(A6, A5));
         code.push(lw_ddc(A7, A0));
         code.push(jal(ZERO, 0));
-        emit(&mut m, KICK_BASE, &code);
+        emit(&mut m, RESET_VECTOR, &code);
         m.mtimecmp = u64::MAX;
         m.gfx.next_vbl = u64::MAX;
         run::run(&mut m, 5000);
@@ -1334,7 +1334,7 @@ pub fn run_all() -> bool {
         reg(&mut code, D_CMD, CMD_READ);
         wait(&mut code, S7, S8);
         code.push(jal(ZERO, 0));
-        emit(&mut m, KICK_BASE, &code);
+        emit(&mut m, RESET_VECTOR, &code);
         m.mtimecmp = u64::MAX;
         m.gfx.next_vbl = u64::MAX;
         run::run(&mut m, 100_000);

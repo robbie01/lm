@@ -26,7 +26,7 @@
 (unsafe-file)
 
 (defconstant snap-header-blocks 1)
-(defconstant snap-regions 5)
+(defconstant snap-regions 4)
 
 ;; The header is put together in the collector's scratch memory, which no
 ;; allocator hands out, and each region's tag map after it.
@@ -112,8 +112,8 @@
 ;; anywhere else.
 (define *saved-tasks* nil)
 
-;; Five regions: low memory, the pool, code, pairs, objects, each from its
-;; base to as far as its allocator has reached, each followed by its tag map,
+;; Four regions: low memory, the pool, pairs, objects, each from its base to
+;; as far as its allocator has reached, each followed by its tag map,
 ;; which is built in the collector's scratch memory. The header goes out
 ;; last, so that a run that is interrupted leaves a file with no valid header
 ;; rather than a wrong one. Answers the blocks written, or minus the first
@@ -122,9 +122,8 @@
 (define (write-regions page)
   (put-region snap-header 0 0 low-end)
   (put-region snap-header 1 pool-base (%- (%ld-word lg-poolptr) pool-base))
-  (put-region snap-header 2 code-base (%- (%ld-word lg-code-ptr) code-base))
-  (put-region snap-header 3 cons-base (%- (%ld-word lg-cons-ptr) cons-base))
-  (put-region snap-header 4 obj-base (%- (%ld-word lg-obj-ptr) obj-base))
+  (put-region snap-header 2 cons-base (%- (%ld-word lg-cons-ptr) cons-base))
+  (put-region snap-header 3 obj-base (%- (%ld-word lg-obj-ptr) obj-base))
   (let ((i 0) (k snap-header-blocks) (bad 0))
     (while (%< i snap-regions)
       (let* ((base (peek (region-field snap-header i 0)))
@@ -138,7 +137,7 @@
         (set! k (%+ k (%+ n m))))
       (set! i (%+ i 1)))
     (poke snap-header snap-magic)
-    (poke (%+ snap-header 4) (%ld-word lg-imgentry))
+    (poke (%+ snap-header 4) reset-vector)
     (poke (%+ snap-header 8) snap-regions)
     (set! bad (first-bad bad (disk:write-raw page (blocks-at snap-header 1) 0 1)))
     (if (%= bad 0) k (%- 0 bad))))
@@ -170,8 +169,8 @@
   (emit-str "\n")
   (emit-str system-name)
   (emit-str " resumed, ")
-  (emit-str (number->string (%lsh (%- (%ld-word lg-code-ptr) code-base) -10)))
-  (emit-str "k of code\n")
+  (emit-str (number->string (%lsh (object-bytes-used) -10)))
+  (emit-str "k of objects\n")
   (repl)
   0)
 
@@ -199,7 +198,7 @@
     ;; which the stub needs: the one way into it from compiled code, which
     ;; only ever jumps through a closure.
     (let ((c (alloc-object t-closure clo-free)))
-      (%set-slot! c clo-entry (%cap-set-addr (%root) (%ld-word lg-imgentry)))
+      (%set-slot! c clo-entry (%cap-set-addr (%root) reset-vector))
       (%funcall (%cap-seal-closure c)))))
 
 ;; Where the reset lands. The symbols still hold the builder's definitions,
@@ -260,9 +259,9 @@
     ;; anything may.
     (install-allocator)
     ;; The pool as the forge lays it out, its scratch, the stacks and the
-    ;; code registry, which is the last block it carves, and not what this
+    ;; trap frames, which end with the boot context, and not what this
     ;; machine carved from it since.
-    (%st-word! lg-poolptr (%+ (%ld-word lg-code-reg) code-registry-bytes))
+    (%st-word! lg-poolptr (%+ (%ld-word lg-trapsave) ctx-bytes))
     (%st-word! lg-pool-free 0)
     nil))
 

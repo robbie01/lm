@@ -41,9 +41,8 @@ pub const PAGE_TAG_BYTES: usize = (PAGE / 8 / 8) as usize;
 fn regions(m: &Machine) -> Vec<(u32, u32)> {
     let g = |off: u32| m.load_cap(off).addr;
     vec![
-        (0, LOW_END), // nil cell, globals, object bins
+        (0, LOW_END), // nil cell, globals, object bins, the reset stub
         (POOL_BASE, g(LG_POOLPTR)),
-        (CODE_BASE, g(LG_CODE_PTR)),
         (CONS_BASE, g(LG_CONS_PTR)),
         (OBJ_BASE, g(LG_OBJ_PTR)),
     ]
@@ -251,12 +250,12 @@ mod tests {
         h.set_gv(LG_ROOTS, l);
         let path = std::env::temp_dir().join(format!("lm-image-test-{}.img", std::process::id()));
         let path = path.to_str().unwrap();
-        save(&m, path, 0x0100_0000).unwrap();
+        save(&m, path, RESET_VECTOR).unwrap();
 
         let mut back = Machine::new();
         let loaded = load(&mut back, path).unwrap();
         let _ = std::fs::remove_file(path);
-        assert_eq!(loaded.entry, 0x0100_0000);
+        assert_eq!(loaded.entry, RESET_VECTOR);
         for (base, end) in regions(&m) {
             for a in (base..end).step_by(8) {
                 assert_eq!(m.load_cap(a), back.load_cap(a), "granule {a:#x}");
@@ -280,7 +279,7 @@ mod tests {
 
     fn header(version: u32, pages: &[u32]) -> Vec<u8> {
         let mut b = MAGIC.to_vec();
-        for w in [version, 0x0100_0000, pages.len() as u32].iter().chain(pages) {
+        for w in [version, RESET_VECTOR, pages.len() as u32].iter().chain(pages) {
             b.extend_from_slice(&w.to_le_bytes());
         }
         b

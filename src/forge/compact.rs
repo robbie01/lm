@@ -12,6 +12,13 @@
 //! tags say exactly where they are, so every one is found and none is
 //! guessed at.
 //!
+//! Machine code is in object space and slides with everything else. A jump
+//! within a function is relative to itself, and anything else reaches code
+//! through a capability, a code object's entry or a return address, which is
+//! rewritten like any other. The one capability to code that is not in
+//! memory is MTCC, and the reset stub loads that from `lg-trap-entry` every
+//! time the machine starts.
+//!
 //! Liveness is not recomputed. `collect-for-image` has already run a full
 //! collection with the machine's own root set, and it leaves object space as
 //! a walkable sequence of live blocks and `t-free` holes. The holes are the
@@ -20,6 +27,7 @@
 use crate::cap::{self, Cap};
 use crate::heap::*;
 use crate::map::*;
+use crate::mach::CTX_BYTES;
 
 pub struct Stats {
     pub before: u32,
@@ -217,207 +225,30 @@ pub fn compact_objects(h: &mut Heap, verbose: bool) -> Result<Stats, String> {
     Ok(stats)
 }
 
-pub struct CodeStats {
-    pub before: u32,
-    pub after: u32,
-    pub moved: u32,
-}
-
-/// A fresh image's pool holds nothing a booting machine reads. Below the code
-/// registry is the forge's scratch (trap frames, the trap stack, the boot
-/// stack), which is written before it is read; and the registry is live only
-/// as far as its count. What is left in them is stale values from the
-/// machine that wrote the image, and a stale capability keeps what it names
-/// alive and in the file.
+/// A fresh image's pool starts with the forge's scratch: the boot stack, the
+/// trap stack and the trap frames, ending with the boot context at
+/// `lg-trapsave`. A booting machine writes all of it before it reads any, so
+/// what is left there is stale values from the machine that wrote the image,
+/// and a stale capability keeps what it names alive and in the file.
 fn blank_fresh_pool(h: &mut Heap) {
-    let reg = h.g(LG_CODEREG);
-    if reg < POOL_BASE + 8 || reg >= POOL_END {
+    let end = h.g(LG_TRAPSAVE) + CTX_BYTES;
+    if end <= POOL_BASE || end > POOL_END {
         return;
     }
-    let block = reg - 8;
-    for a in (POOL_BASE..block).step_by(8) {
+    for a in (POOL_BASE..end).step_by(8) {
         h.stc(a, Cap::NULL);
     }
-    let end = (block + h.ld(block)).min(h.g(LG_POOLPTR)).min(POOL_END);
-    for a in (reg + h.g(LG_CODEREGN) * VALUE_BYTES..end).step_by(8) {
-        h.stc(a, Cap::NULL);
-    }
-}
-
-/// A block of code space starts with a header of two granules, its size and
-/// the code object that owns it, and its code follows (see `alloc-code` in
-/// gc.lisp). A free block's header is its size and the next free block.
-pub const CODE_HEADER_BYTES: u32 = 16;
-
-/// Where a code block's code is aligned: as its bounds need, and to the
-/// header at least.
-fn code_align(len: u32) -> u32 {
-    cap::ram(len) & !(CODE_HEADER_BYTES - 1)
-}
-
-/// Slide code space down, for an image that boots through its kickstart.
-///
-/// That is what makes it possible. Such an image resumes nothing, so no stack
-/// holds a return sentry into code; and compiled code names other code only
-/// through capabilities, a code object's entry and the closures made from
-/// it, while a jump within a function is relative to itself. So a code block
-/// can go anywhere, and what has to change with it is every capability into
-/// it, which the tags find.
-///
-/// An image from `(save-image)` holds code the running machine placed with
-/// no code object to own it, the stub every task returns into among it, and
-/// this must never be used on one.
-///
-/// Two things stay exactly where they are: the reset stub at the base, which
-/// has no header, and the trap stub at `lg-trap-entry`, which is a block no
-/// code object owns. Everything else that is not a live code object's block
-/// is garbage: dead code the collector freed, and code the forge ran once.
-pub fn compact_code(h: &mut Heap, verbose: bool) -> Result<CodeStats, String> {
-    let lo = CODE_BASE;
-    let hi = h.g(LG_CODE_PTR);
-    if hi <= lo + RESET_RESERVE {
-        let n = hi.saturating_sub(lo);
-        return Ok(CodeStats { before: n, after: n, moved: 0 });
-    }
-
-    // Every live code object's block: where it starts, its size, and the
-    // alignment its code needs.
-    let mut code: Vec<(u32, u32, u32)> = Vec::new();
-    for (b, _, _) in live_blocks(h)? {
-        if hdr_type(h.ld(b)) != T_CODE {
-            continue;
-        }
-        let entry = h.ldc(b + HEADER_BYTES + CODE_ENTRY * VALUE_BYTES);
-        let base = entry.base();
-        if !entry.tag || base < lo + RESET_RESERVE + CODE_HEADER_BYTES || base >= hi {
-            continue;
-        }
-        let start = base - CODE_HEADER_BYTES;
-        let size = h.g(start);
-        let len = entry.len() as u32;
-        if size < CODE_HEADER_BYTES + len || start + size > hi {
-            return Err(format!("the code block at {start:#x} says it is {size} bytes"));
-        }
-        code.push((start, size, code_align(len)));
-    }
-    code.sort();
-    for w in code.windows(2) {
-        if w[0].0 + w[0].1 > w[1].0 {
-            return Err(format!("two code objects share the bytes at {:#x}", w[1].0));
-        }
-    }
-
-    let mut pins: Vec<(u32, u32)> = vec![(lo, lo + RESET_RESERVE)];
-    let stub = h.g(LG_TRAPENTRY);
-    if stub >= lo + RESET_RESERVE + CODE_HEADER_BYTES && stub < hi {
-        let start = stub - CODE_HEADER_BYTES;
-        pins.push((start, (start + h.g(start)).min(hi)));
-    }
-    pins.sort();
-
-    // The only capability code space holds is a block's owner, in the
-    // second granule of its header.
-    for at in h.tagged().into_iter().filter(|a| (lo..hi).contains(a)) {
-        if !code.iter().any(|c| c.0 + 8 == at) {
-            return Err(format!("code space holds a capability that owns nothing, at {at:#x}"));
-        }
-    }
-
-    // Every block, in address order, into the first room past the last one
-    // placed where its code is aligned for its bounds and it does not run
-    // into something pinned.
-    let mut moves: Vec<Move> = Vec::with_capacity(code.len());
-    let mut free = lo;
-    let mut pi = 0;
-    for &(from, size, mask) in &code {
-        let place = |at: u32| align_up(at + CODE_HEADER_BYTES, mask) - CODE_HEADER_BYTES;
-        let mut to = place(free);
-        loop {
-            while pi < pins.len() && pins[pi].1 <= to {
-                pi += 1;
-            }
-            if pi < pins.len() && to + size > pins[pi].0 {
-                to = place(pins[pi].1);
-                continue;
-            }
-            break;
-        }
-        moves.push(Move { from, size, to });
-        free = to + size;
-    }
-    let new_hi = pins.iter().fold(free, |m, p| m.max(p.1));
-
-    // Capabilities into the pinned stubs stay as they are; every other one
-    // into code space must be into a code object's block.
-    let mut owners = moves.clone();
-    owners.extend(pins.iter().map(|&(s, e)| Move { from: s, size: e - s, to: s }));
-    owners.sort_by_key(|m| m.from);
-    rewrite(h, &owners, lo, hi, false)?;
-
-    // Take every block out, granule by granule with its tag, blank everything
-    // that is not pinned, and put the blocks back where they go. Copying out
-    // first is what lets a block land anywhere, without a care for what it
-    // overlaps.
-    let saved: Vec<Vec<Cap>> = moves
-        .iter()
-        .map(|m| (0..m.size / 8).map(|i| h.ldc(m.from + i * 8)).collect())
-        .collect();
-    let pinned = |a: u32| pins.iter().any(|p| a >= p.0 && a < p.1);
-    for a in (lo..hi.max(new_hi)).step_by(8) {
-        if !pinned(a) {
-            h.stc(a, Cap::NULL);
-        }
-    }
-    let mut moved = 0;
-    for (m, granules) in moves.iter().zip(&saved) {
-        for (k, c) in granules.iter().enumerate() {
-            h.stc(m.to + 8 * k as u32, *c);
-        }
-        if m.to != m.from {
-            moved += 1;
-        }
-    }
-
-    // The free list: every gap big enough for a header, which is the same
-    // rule the collector keeps to.
-    let mut spans: Vec<(u32, u32)> = pins.clone();
-    spans.extend(moves.iter().map(|m| (m.to, m.to + m.size)));
-    spans.sort();
-    let mut head = 0u32;
-    let mut freen = 0u32;
-    let mut at = lo;
-    for &(s, e) in &spans {
-        if s >= at + CODE_HEADER_BYTES {
-            h.set_g(at, s - at);
-            h.set_g(at + 8, head);
-            head = at;
-            freen += s - at;
-        }
-        at = at.max(e);
-    }
-    h.set_g(LG_CODEFREE, head);
-    h.set_g(LG_CODEFREEN, freen);
-    h.set_g(LG_CODE_PTR, new_hi);
-
-    let stats = CodeStats { before: hi - lo, after: new_hi - lo, moved };
-    if verbose {
-        eprintln!(
-            "compacted code: {} KiB to {} KiB, {} of {} code objects moved",
-            stats.before / 1024,
-            stats.after / 1024,
-            stats.moved,
-            moves.len()
-        );
-    }
-    Ok(stats)
 }
 
 /// Compact a saved image, without running it.
 ///
-/// The same pass the build uses, on an image that came off the disk. A fresh
-/// image, which `rebuild` makes and which boots through its kickstart and
-/// resumes nothing, can have more done to it: the pool's scratch is blanked,
-/// and code space is slid down as well.
+/// The same pass the build uses, on an image that came off the disk. Code is
+/// in object space and slides with the rest: a jump within a function is
+/// relative to itself, and everything else reaches code through a
+/// capability, an entry or a return address, which the rewrite finds like
+/// any other. A fresh image, which `rebuild` makes and which boots through
+/// its kickstart and resumes nothing, can have its pool's scratch blanked as
+/// well.
 pub fn compact_image(from: &str, out: &str, verbose: bool, fresh: bool) -> i32 {
     let mut m = crate::mach::Machine::new();
     let loaded = match crate::image::load(&mut m, from) {
@@ -439,23 +270,14 @@ pub fn compact_image(from: &str, out: &str, verbose: bool, fresh: bool) -> i32 {
             return 1;
         }
     };
-    let code = if fresh {
-        match compact_code(&mut h, verbose) {
-            Ok(s) => format!("code {} KiB to {} KiB, ", s.before / 1024, s.after / 1024),
-            Err(e) => {
-                eprintln!("lm: compacting code in {from}: {e}");
-                return 1;
-            }
-        }
-    } else {
-        String::new()
-    };
+    let code = h.text_bytes();
     match crate::image::save(&m, out, entry) {
         Ok((pages, bytes)) => {
             println!(
-                "{out}: objects {} KiB to {} KiB live, {code}{} pages ({} KiB)",
+                "{out}: objects {} KiB to {} KiB live, {} KiB of it code, {} pages ({} KiB)",
                 stats.before / 1024,
                 stats.used / 1024,
+                code / 1024,
                 pages,
                 bytes / 1024
             );

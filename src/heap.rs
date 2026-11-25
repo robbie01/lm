@@ -11,15 +11,16 @@
 //! tagged, HD               an object: the header is the granule below
 //!                          the base, and the bounds are the payload
 //! tagged, HD, otype 2      a closure, sealed
-//! tagged, otherwise        a raw capability: code, a stack, a pool block
+//! tagged, otherwise        a raw capability: an entry or a return address
+//!                          into machine code, a stack, a pool block
 //! ```
 //!
 //! nil is a read-only capability to the 16-byte cell at address 0, whose car
 //! and cdr hold nil, so `car` and `cdr` of nil need no test.
 //!
 //! An object's header word 0 is `(len << 8) | type`, and word 1 is 0. `len`
-//! counts elements: 8-byte value slots, or bytes for a string or a byte
-//! object. A payload whose length is not exactly representable as bounds is
+//! counts elements: 8-byte value slots, or bytes for a string, a byte
+//! object or machine code. A payload whose length is not exactly representable as bounds is
 //! rounded up to one that is, and its base aligned to match; the space the
 //! alignment skips is a free hole.
 //!
@@ -184,6 +185,12 @@ pub const T_PORT: u32 = 8; // values
 /// so any value that fits is a fixnum and `eq?` works on small numbers.
 pub const T_BIGNUM: u32 = 9;
 pub const T_CODE: u32 = 10; // entry, name, literals
+/// A function's machine code, as bytes. Once the code is placed nothing
+/// holds the text's own headed capability: what reaches it is its code
+/// object's entry, an EX capability bounded exactly to the code, and the
+/// return addresses into it, each of which keeps the text alive as any
+/// capability based in object space keeps the object it lies in.
+pub const T_TEXT: u32 = 11;
 
 pub const SYM_SLOTS: u32 = 6;
 pub const SYM_NAME: u32 = 0;
@@ -245,7 +252,7 @@ pub const VALUE_GLOBALS: &[u32] = &[
     LG_TRAPHOOK,
     LG_STARTUP,
     LG_TASKEXIT,
-    LG_BOOTARG,
+    LG_TRAPENTRY,
 ];
 
 #[inline]
@@ -260,10 +267,11 @@ pub fn hdr_len(h: u32) -> u32 {
 pub fn hdr_type(h: u32) -> u32 {
     h & 0xff
 }
-/// Strings and byte objects hold bytes; every other type holds values.
+/// Strings, byte objects and machine code hold bytes; every other type
+/// holds values.
 #[inline]
 pub fn is_byte_type(ty: u32) -> bool {
-    ty == T_STRING || ty == T_BYTES
+    ty == T_STRING || ty == T_BYTES || ty == T_TEXT
 }
 
 /// The payload's length in bytes, which is the length its bounds round up
@@ -376,8 +384,6 @@ impl<'a> Heap<'a> {
         self.set_g(LG_CONS_END, CONS_END);
         self.set_g(LG_OBJ_PTR, OBJ_BASE);
         self.set_g(LG_OBJ_END, OBJ_END);
-        self.set_g(LG_CODE_PTR, CODE_BASE);
-        self.set_g(LG_CODE_END, CODE_END);
         self.set_g(LG_POOLPTR, POOL_BASE);
         self.set_g(LG_POOLEND, POOL_END);
         for g in VALUE_GLOBALS {
@@ -434,18 +440,6 @@ impl<'a> Heap<'a> {
             self.stc(a, fill);
         }
         cap_to(base, span, object_perms(ty))
-    }
-
-    /// Room for `nbytes` of machine code, aligned so that a capability can
-    /// have exactly those bytes as its bounds. Answers the address.
-    pub fn alloc_code(&mut self, nbytes: u32) -> u32 {
-        let p = align_up(self.g(LG_CODE_PTR), cap::ram(nbytes));
-        let end = p + round8(cap::rrl(nbytes));
-        if end > self.g(LG_CODE_END) {
-            panic!("code space exhausted");
-        }
-        self.set_g(LG_CODE_PTR, end);
-        p
     }
 
     /// Exec pool: raw memory, never collected, never moved, aligned the same
@@ -537,6 +531,13 @@ impl<'a> Heap<'a> {
             p += sz;
         }
         Ok(out)
+    }
+
+    /// The bytes of object space that machine code occupies, headers
+    /// included.
+    pub fn text_bytes(&self) -> u32 {
+        let blocks = self.blocks().unwrap_or_default();
+        blocks.iter().filter(|(_, h)| hdr_type(*h) == T_TEXT).map(|(_, h)| block_size(*h)).sum()
     }
 
     // ---- lists ----
@@ -1100,6 +1101,7 @@ impl<'a> Heap<'a> {
                 out.push(')');
             }
             T_BYTES => out.push_str(&format!("#<bytes {} @{:#x}>", self.olen(v), v.addr)),
+            T_TEXT => out.push_str(&format!("#<text {} bytes @{:#x}>", self.olen(v), v.addr)),
             T_CODE => {
                 let entry = self.slot(v, CODE_ENTRY);
                 out.push_str(&format!(

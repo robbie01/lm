@@ -411,7 +411,7 @@ impl Machine {
             rng: 0x2545_F491_4F6C_DD1D,
             trace_traps: false,
         });
-        m.set_pcc(Cap::ROOT.with_addr(KICK_BASE));
+        m.set_pcc(Cap::ROOT.with_addr(RESET_VECTOR));
         m.set_ddc(Cap::ROOT);
         m
     }

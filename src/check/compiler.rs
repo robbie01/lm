@@ -9,7 +9,7 @@
 use crate::cap::Cap;
 use crate::forge::hostlisp::Lisp;
 use crate::forge::{boot_host, write_layout};
-use crate::heap::{NIL, PERMS_PAIR};
+use crate::heap::{NIL, PERMS_PAIR, T_TEXT};
 use crate::mach::{Machine, Stop, C_ECALL, C_RANGE, C_TYPE};
 use crate::map::*;
 use crate::run;
@@ -19,7 +19,7 @@ use crate::rvenc::*;
 const ENTRY: u32 = 0x0000_0C00;
 /// The task stack: a capability to these bytes, entered at the top.
 const STACK_BASE: u32 = 0x00F0_0000;
-const STACK_TOP: u32 = 0x0100_0000; // top of the exec pool, below code space
+const STACK_TOP: u32 = 0x0100_0000; // the top of the exec pool
 /// Cause 28, a capability fault: mtval is (register << 5) | code.
 const CAUSE_CAP: u32 = 28;
 
@@ -525,8 +525,8 @@ pub fn run_one(l: &mut Lisp, src: &str) -> String {
     // task's would hold, and run. The stack and the cons run carry the
     // permissions of a pair, as a task's do, so that every pair cut from the
     // run is one. The cons run is the rest of cons space.
-    let trap = l.h.alloc_code(64);
-    let tramp = l.h.alloc_code(64);
+    let trap = l.h.alloc_obj(T_TEXT, 64).base();
+    let tramp = l.h.alloc_obj(T_TEXT, 64).base();
     let run_start = l.h.g(LG_CONS_PTR);
     let run_end = l.h.g(LG_CONS_END);
     let root = Cap::ROOT;
@@ -655,7 +655,7 @@ pub fn run_all(verbose: bool) -> bool {
     println!(
         "library compiled in {:.2}s, {} bytes of code",
         t.elapsed().as_secs_f64(),
-        l.h.g(LG_CODE_PTR) - CODE_BASE
+        l.h.text_bytes()
     );
     // The image installs the allocator from `kickstart`, which does not run
     // here. Without this the first test to make a vector would find nothing
@@ -678,7 +678,7 @@ pub fn run_all(verbose: bool) -> bool {
         if verbose {
             let cons = (l.h.g(LG_CONS_PTR) - CONS_BASE) / 8;
             let obj = l.h.g(LG_OBJ_PTR) - OBJ_BASE;
-            let code = l.h.g(LG_CODE_PTR) - CODE_BASE;
+            let code = l.h.text_bytes();
             eprintln!("[{cons} conses, {obj} obj bytes, {code} code bytes] {src}");
         }
         let got = run_one(&mut l, src);

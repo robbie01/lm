@@ -116,9 +116,9 @@ pub fn rebuild(from: &str, out: &str, verbose: bool, check: bool) -> i32 {
         return 1;
     }
     // The machine wrote that image with a collector that cannot move an
-    // object or a function, so it carries every hole it ever made. Nothing is
-    // running now, and a fresh image resumes nothing, so the forge can close
-    // them in both.
+    // object, so it carries every hole it ever made. Nothing is running now,
+    // and a fresh image resumes nothing, so the forge closes them and blanks
+    // the pool scratch the image will write before it reads.
     if compact::compact_image(out, out, verbose, true) != 0 {
         return 1;
     }
@@ -175,8 +175,6 @@ pub fn write_layout() {
     def!("low-end", LOW_END);
     def!("pool-base", POOL_BASE);
     def!("pool-limit", POOL_END);
-    def!("code-base", CODE_BASE);
-    def!("code-limit", CODE_END);
     def!("cons-base", CONS_BASE);
     def!("cons-limit", CONS_END);
     def!("obj-base", OBJ_BASE);
@@ -186,7 +184,7 @@ pub fn write_layout() {
     def!("obj-starts", OBJ_STARTS);
     def!("obj-starts-ready", OBJ_STARTS_READY);
     def!("obj-starts-magic", OBJ_STARTS_MAGIC);
-    def!("kick-base", KICK_BASE);
+    def!("reset-vector", RESET_VECTOR);
     def!("reset-reserve", RESET_RESERVE);
     // The first word of an image the machine writes itself, which is how the
     // loader tells one from an image the forge built.
@@ -258,6 +256,7 @@ pub fn write_layout() {
     def!("t-bignum", T_BIGNUM);
     def!("t-port", T_PORT);
     def!("t-code", T_CODE);
+    def!("t-text", T_TEXT);
     def!("code-entry", CODE_ENTRY);
     def!("code-name", CODE_NAME);
     def!("code-lits", CODE_LITS);
@@ -663,23 +662,22 @@ pub fn build(out: &str, verbose: bool) -> i32 {
     let note = |l: &Lisp, what: &str| {
         if verbose {
             eprintln!(
-                "{what}: {} pairs, {} obj bytes, {} code bytes",
+                "{what}: {} pairs, {} obj bytes",
                 (l.h.g(LG_CONS_PTR) - CONS_BASE) / PAIR_BYTES,
-                l.h.g(LG_OBJ_PTR) - OBJ_BASE,
-                l.h.g(LG_CODE_PTR) - CODE_BASE
+                l.h.g(LG_OBJ_PTR) - OBJ_BASE
             );
         }
     };
     note(&l, "host up");
 
-    // Claim the reset vector before any code is generated: code space is a
-    // bump allocator and the processor starts at its base.
-    if let Err(e) = drive(&mut l, "(boot:reserve-reset)") {
+    // The pool's first block is the forge's scratch: the boot stack, the trap
+    // stack and the trap frames, which a fresh image blanks.
+    if let Err(e) = drive(&mut l, "(boot:reserve-stub-memory)") {
         eprint!("{e}");
         return 1;
     }
 
-    note(&l, "reset reserved");
+    note(&l, "stub memory reserved");
     for f in SYSTEM {
         let script = if verbose {
             format!("(set! *compile-trace* t)(compile-file {f:?})")
@@ -708,14 +706,12 @@ pub fn build(out: &str, verbose: bool) -> i32 {
         }
         note(&l, step);
     }
-    let entry = match drive(&mut l, "(boot:build-boot-code)") {
-        Ok(v) => {
-            // (reset trap); the trap stub's address is kept where the
-            // collection before saving and the code compactor find it.
-            let trap = unfix(l.h.cadr(v)) as u32;
-            l.h.set_g(LG_TRAPENTRY, trap);
-            unfix(l.h.car(v)) as u32
-        }
+    // The trap stub goes into object space and its entry into
+    // `lg-trap-entry`, and the reset stub to the reset vector. The answer is
+    // where the reset stub stops the machine, which is where a function run
+    // from here returns to.
+    let back = match drive(&mut l, "(boot:build-boot-code)") {
+        Ok(v) => unfix(v) as u32,
         Err(e) => {
             eprint!("wiring the kickstart: {e}");
             return 1;
@@ -748,8 +744,6 @@ pub fn build(out: &str, verbose: bool) -> i32 {
         _ => {}
     }
 
-    l.h.set_g(LG_IMGENTRY, entry);
-
     // The forge declares packages for files it reads and never compiles (its
     // own I/O, the assembly stubs), and those reach the machine holding
     // nothing. Dropping them here is the last thing done to the heap, and it
@@ -773,15 +767,15 @@ pub fn build(out: &str, verbose: bool) -> i32 {
     // trees, assembler buffers, analysis lists) is garbage once the code is
     // placed, and nothing can see it except the interpreter, which is about
     // to be thrown away.
-    if !collect_before_saving(&mut l, verbose) {
+    if !collect_before_saving(&mut l, back, verbose) {
         return 1;
     }
 
     blank_run_scratch(&mut l);
 
-    // Objects are never moved by the machine, for reasons `gc.lisp` explains
-    // at length; nothing stops the forge doing it here, on a heap that has
-    // stopped, and it is most of the file.
+    // Objects, machine code among them, are never moved by the machine, for
+    // reasons `gc.lisp` explains at length; nothing stops the forge doing it
+    // here, on a heap that has stopped, and it is most of the file.
     match compact::compact_objects(&mut l.h, verbose) {
         Ok(_) => {}
         Err(e) => {
@@ -791,11 +785,12 @@ pub fn build(out: &str, verbose: bool) -> i32 {
     }
 
     let stats = format!(
-        "code {} KiB, objects {} KiB, live pairs {}",
-        (l.h.g(LG_CODE_PTR) - CODE_BASE) / 1024,
+        "objects {} KiB ({} KiB of it code), live pairs {}",
         (l.h.g(LG_OBJ_PTR) - OBJ_BASE) / 1024,
+        l.h.text_bytes() / 1024,
         (l.h.g(LG_CONS_PTR) - CONS_BASE) / PAIR_BYTES
     );
+    let entry = RESET_VECTOR;
     match crate::image::save(l.h.m, out, entry) {
         Ok((pages, bytes)) => {
             println!(
@@ -820,8 +815,8 @@ pub fn build(out: &str, verbose: bool) -> i32 {
 /// closure's entry. `sp` is the boot stack, `gp` the empty cons run, so the
 /// first pair faults into a refill, `tp` and `s2` nil, there being no task,
 /// and the trap vector and the trap frame are the image's own. The function
-/// returns into a stub of three instructions that halts the machine.
-fn call_on_machine(l: &mut Lisp, name: &str, trap: u32) -> Option<V> {
+/// returns to `back`, the end of the reset stub, which stops the machine.
+fn call_on_machine(l: &mut Lisp, name: &str, back: u32) -> Option<V> {
     use crate::cap::{OT_SENTRY, P_EX, P_SR};
     use crate::mach::Stop;
     use crate::rvenc::*;
@@ -831,17 +826,6 @@ fn call_on_machine(l: &mut Lisp, name: &str, trap: u32) -> Option<V> {
         eprintln!("lm: {name} is not a compiled function; skipping");
         return None;
     }
-    // sw.ddc zero, (t3): a store through DDC to the address in t3, which is
-    // the sys device's halt register.
-    let halt_code = [
-        lui(T3, MMIO_BASE >> 12),
-        (0x7c << 25) | (ZERO << 20) | (T3 << 15) | (2 << 7) | 0x5b,
-        jal(ZERO, 0),
-    ];
-    let halt = l.h.alloc_code(4 * halt_code.len() as u32);
-    for (i, &w) in halt_code.iter().enumerate() {
-        l.h.st(halt + 4 * i as u32, w);
-    }
     let region = |lo: u32, hi: u32| Cap::root().with_addr(lo).with_bounds(hi - lo);
     let (Some(stack), Some(frame)) = (
         region(l.h.g(LG_STACKBOT), l.h.g(LG_STACKTOP)),
@@ -850,9 +834,10 @@ fn call_on_machine(l: &mut Lisp, name: &str, trap: u32) -> Option<V> {
         eprintln!("lm: the boot stack or the trap frame is not set up");
         return None;
     };
-    let ret = cap_to(halt, 4 * halt_code.len() as u32, P_EX | P_SR).seal(OT_SENTRY);
+    let ret = cap_to(RESET_VECTOR, RESET_RESERVE, P_EX | P_SR).with_addr(back).seal(OT_SENTRY);
     let sp = stack.with_addr(l.h.g(LG_STACKTOP));
     let entry = l.h.slot(closure, CLO_ENTRY);
+    let trap = l.h.gv(LG_TRAPENTRY);
     let m = &mut *l.h.m;
     for r in 1..32 {
         m.set_reg(r, Cap::NULL);
@@ -864,7 +849,7 @@ fn call_on_machine(l: &mut Lisp, name: &str, trap: u32) -> Option<V> {
     m.set_reg(T0, closure.unseal());
     m.set_reg(T1, fix(0));
     m.set_reg(RA, ret);
-    m.mtcc = Cap::root().with_addr(trap);
+    m.mtcc = trap;
     m.mscratchc = frame;
     m.set_pcc(entry);
     m.halted = false;
@@ -903,9 +888,8 @@ fn blank_run_scratch(l: &mut Lisp) {
 
 /// Run the machine's own collector over everything the build made. An
 /// image written without it would carry everything the compiler consed.
-fn collect_before_saving(l: &mut Lisp, verbose: bool) -> bool {
-    let trap = l.h.g(LG_TRAPENTRY);
-    match call_on_machine(l, "gc:collect-for-image", trap) {
+fn collect_before_saving(l: &mut Lisp, back: u32, verbose: bool) -> bool {
+    match call_on_machine(l, "gc:collect-for-image", back) {
         Some(v) => {
             if verbose {
                 eprintln!("collected: {} bytes of dead object space blanked", unfix(v));

@@ -19,9 +19,9 @@ use crate::cap::*;
 use crate::mach::{Machine, MSTATUS_MIE, MSTATUS_MPIE};
 use crate::map::*;
 
-/// Where the fuzz code goes: the base of code space, which is also the reset
-/// vector, so the trap vector can point into it as well.
-const CODE_AT: u32 = CODE_BASE;
+/// Where the fuzz code goes: the reset vector, so the trap vector can point
+/// into it as well. Up to four kilobytes there run to below the pool.
+const CODE_AT: u32 = RESET_VECTOR;
 const CODE_MAX: usize = 4096;
 /// Instructions a run may execute before it is stopped.
 const EXEC_BUDGET: u64 = 50_000;
@@ -36,7 +36,7 @@ const LISP_FUEL: u64 = 2_000_000;
 /// the word after them says which are tagged, so random code gets random
 /// capabilities, bounds and permissions and all. The registers' addresses
 /// set the CSRs too, and bit 0 of the tag word takes SR away from PCC. The
-/// rest is code, placed at the base of code space, where the trap vector
+/// rest is code, placed at the reset vector, where the trap vector
 /// also points, so traps land back in the fuzz code. The machine is fresh:
 /// what the run does is a function of its input alone.
 pub fn exec(data: &[u8]) {
@@ -146,7 +146,7 @@ impl Rng {
 
 /// Addresses worth handing random code: each region, its edges, the chips.
 const PLACES: &[u32] = &[
-    0, 4, 8, LG_BASE, OBJ_BINS, LOW_END, POOL_BASE, POOL_END - 4, CODE_BASE, CODE_END - 4,
+    0, 4, 8, LG_BASE, OBJ_BINS, LOW_END, POOL_BASE, POOL_END - 4, RESET_VECTOR,
     CONS_BASE, CONS_END - 4, OBJ_BASE, OBJ_END - 4, FAST_BASE, RAM_SIZE - 4, RAM_SIZE,
     MMIO_BASE, MMIO_BASE + 0x1000, MMIO_BASE + 0x2000, MMIO_BASE + 0x3000,
     MMIO_BASE + 0x4000, MMIO_BASE + 0x5000, MMIO_BASE + 0x6000, MMIO_END - 4,
@@ -344,7 +344,7 @@ const TOKENS: &[&str] = &[
     "%alloc-obj", "%slot", "%set-slot!",
     "%obj-len", "%make-string", "%string-ref", "%string-set!", "%make-vector", "%vector-ref",
     "%vector-set!", "%make-bytes", "%bytes-ref", "%bytes-set!", "%intern", "%symbol-name",
-    "%symbol-value", "%set-symbol-value!", "%bit-ref", "%bit-set!", "%popcount", "%alloc-code",
+    "%symbol-value", "%set-symbol-value!", "%bit-ref", "%bit-set!", "%popcount",
     "%alloc-pool", "%record-ref", "%record-set!", "%obj-type", "%eq?", "%=", "%<",
     "string-append", "substring", "number->string", "string->number", "symbol->string",
     "make-assembler", "i-add", "i-lw", "i-sw", "place", "compile-top", "compile-file",

@@ -18,8 +18,8 @@
   (emit-str (number->string (%lsh (%- cons-limit cons-base) -14)))
   (emit-str "k pairs, object space ")
   (emit-str (number->string (%lsh (%- obj-limit obj-base) -10)))
-  (emit-str "k, code ")
-  (emit-str (number->string (%lsh (%- (%ld-word lg-code-ptr) code-base) -10)))
+  (emit-str "k, ")
+  (emit-str (number->string (%lsh (object-bytes-used) -10)))
   (emit-str "k used\n")
   nil)
 
@@ -569,10 +569,12 @@
 ;; Every prologue saves its return address, its caller's frame and its own
 ;; closure in the slots the compiler names `ra-slot`, `link-slot` and
 ;; `clo-slot` below s0. So a backtrace needs no side table: the slots that
-;; make a frame make the trace. Each line is named by its pc, a capability
-;; bounded to the code it is in, whose block names the code object that
-;; owns it. The frame pointer is a capability to the stack, and NULL at the
-;; bottom.
+;; make a frame make the trace, and a frame's line is named by the closure
+;; that built it. The pc a trap interrupted may be in a leaf or a prologue,
+;; with no frame of its own, so its line is named by the code object whose
+;; text it is in: the one in s1 once the prologue has loaded it, and
+;; otherwise the one a walk of object space finds. The frame pointer is a
+;; capability to the stack, and NULL at the bottom.
 (defconstant backtrace-limit 24)
 
 ;; The closure a call was about to enter.
@@ -597,37 +599,45 @@
               nil))
       nil))
 
-;; The code object whose code a pc, a return address or an entry is in, or
-;; nil.
-(define (code-of c) (if (%cap-tag? c) (code-object-at (%cap-base c)) nil))
+;; The code object whose text the pc is in, or nil: `s1` if that is the one.
+(define (code-of pc s1)
+  (cond ((%cap-tag? pc)
+         (if (if (code-object? s1) (%= (%cap-base (%cap-ld s1 0)) (%cap-base pc)) nil)
+             s1
+             (code-object-at (%cap-base pc))))
+        (else nil)))
+
+;; The code object of the closure that built the frame `f`, or nil.
+(define (frame-code f)
+  (let ((clo (%cap-ld f compiler::clo-slot)))
+    (if (%object? clo)
+        (if (%= (%obj-type clo) t-closure) (%cap-ld clo (%* value-bytes clo-code)) nil)
+        nil)))
 
 ;; Whether the function whose code object is `code` built the frame `f`.
 (define (frame-built-by? f code)
-  (let ((clo (%cap-ld f compiler::clo-slot)))
-    (if (if code (%object? clo) nil)
-        (if (%= (%obj-type clo) t-closure)
-            (%= (%cap-base (%cap-ld clo (%* value-bytes clo-code))) (%cap-base code))
-            nil)
-        nil)))
+  (let ((built (frame-code f)))
+    (if (if code built nil) (%= (%cap-base built) (%cap-base code)) nil)))
 
-(define (emit-frame-line pc)
+(define (emit-frame-line pc code)
   (emit-str "  ")
-  (emit-code-label (code-of pc))
+  (emit-code-label code)
   (emit-str " at ")
   (emit-str (number->hex (%addr-of pc)))
   (emit-str "\n"))
 
 ;; A leaf has no frame, and neither has a function stopped in its prologue:
 ;; s0 is still its caller's frame, and ra is where it returns to in the
-;; caller. So the first line is the function at the pc, then each frame.
-(define (print-backtrace pc ra s0)
+;; caller. So the first line is the function at the pc, then each frame:
+;; the pc or return address in the function that built it.
+(define (print-backtrace pc ra s0 s1)
   (emit-str "backtrace:\n")
-  (let ((f s0) (p pc) (i 0))
-    (if (if (frame-readable? f) (frame-built-by? f (code-of pc)) nil)
+  (let ((f s0) (p pc) (i 0) (code (code-of pc s1)))
+    (if (if (frame-readable? f) (frame-built-by? f code) nil)
         nil
-        (begin (emit-frame-line pc) (set! p ra)))
+        (begin (emit-frame-line pc code) (set! p ra)))
     (while (if (%< i backtrace-limit) (frame-readable? f) nil)
-      (emit-frame-line p)
+      (emit-frame-line p (frame-code f))
       (set! p (%cap-ld f compiler::ra-slot))
       (set! f (%cap-ld f compiler::link-slot))
       (set! i (%+ i 1)))
@@ -637,7 +647,8 @@
 (define (backtrace-from-context epc ctx)
   (print-backtrace (%cap-set-addr (ctx-ref ctx reg-pc) epc)
                    (ctx-ref ctx reg-ra)
-                   (ctx-ref ctx reg-s0)))
+                   (ctx-ref ctx reg-s0)
+                   (ctx-ref ctx reg-s1)))
 
 ;; One line for the fault, made by `what`, and the trace below it.
 (define (fault-report epc ctx what)

@@ -14,7 +14,7 @@
 (defpackage boot use lm gc hw asm compiler sys exec)
 (in-package boot)
 (unsafe-file)
-(export '(build-boot-code reserve-reset))
+(export '(build-boot-code reserve-stub-memory))
 
 ;; ---------------------------------------------------------------- context
 ;; 32 capability slots of 8 bytes: slot 0 is the pc, slots 1..31 are x1..x31.
@@ -57,10 +57,12 @@
   (i-csetaddr a cd root $t1))
 
 ;; ---------------------------------------------------------------- reset
-;; Placed at the base of code space, where the processor starts fetching.
-;; PCC, DDC and MTCC are the root and every other register is NULL. DDC keeps
-;; the root, because addressing memory by number is the privileged code's;
-;; everything else is made from it here.
+;; Placed at the reset vector, where the processor starts fetching. PCC, DDC
+;; and MTCC are the root and every other register is NULL. DDC keeps the
+;; root, because addressing memory by number is the privileged code's;
+;; everything else is made from it here, but for MTCC, which is the trap
+;; stub's entry, kept in a low global so that it is a root and moves with
+;; the stub's text when the forge slides object space.
 (define (emit-reset-stub)
   (let ((a (make-assembler)))
     (i-cspecialrw a $t0 scr-ddc $zero)
@@ -78,7 +80,7 @@
     ;; Where traps save registers, and where they go.
     (emit-region a $t2 $t0 trap-save ctx-bytes)
     (i-cspecialrw a $zero scr-mscratchc $t2)
-    (emit-at a $t2 $t0 (asm-origin *trap-asm*))
+    (i-lc a $t2 $zero lg-trap-entry)
     (i-cspecialrw a $zero scr-mtcc $t2)
     ;; An empty cons run, the one `empty-cons-run` in gc.lisp makes: the first
     ;; pair faults, and the trap handler hands out a real run.
@@ -91,14 +93,16 @@
     (i-lc a $t0 $zero lg-toplevel)
     (i-li a $t1 0)
     (i-jcl a $ra $t0)
-    ;; If it comes back, stop the machine with whatever it returned.
+    ;; If it comes back, stop the machine with whatever it returned. The
+    ;; forge returns here from what it runs on the machine.
+    (label a 'back)
     (i-cspecialrw a $t0 scr-ddc $zero)
     (emit-at a $t0 $t0 mmio-base)
     (i-sw a $a0 $t0 0)
     (label a 'spin)
     (i-j a 'spin)
     (if (%> (asm-len a) reset-reserve) (error "boot: the reset stub outgrew its reservation") nil)
-    (place-at a *reset-addr*)
+    (place-at a reset-vector)
     a))
 
 ;; ---------------------------------------------------------------- traps
@@ -115,14 +119,17 @@
 ;; the traps in progress.
 ;;
 ;; Every register is saved and restored as a capability, so the tags go back
-;; as they came. The stub runs on MTCC, which is the root and has SR, and
-;; reaches the low globals through DDC with x0 as the base.
+;; as they came. The stub is a text like any function's, and runs on MTCC,
+;; its entry, which has SR; it reaches the low globals through DDC with x0
+;; as the base. Its entry is kept in `lg-trap-entry`, where the reset stub
+;; finds it and the collector sees it.
 (define (emit-trap-stub)
   (let ((a (make-assembler))
         (outer (gensym-label "trap-outer"))
         (keepsp (gensym-label "trap-keepsp"))
         (nolink (gensym-label "trap-nolink"))
         (over (gensym-label "trap-over")))
+    (set-asm-privileged! a t)
     ;; Swap the frame into t0, which gives one register to work with and
     ;; destroys nothing: t0's own value is in MScratchC now.
     (i-cspecialrw a $t0 scr-mscratchc $t0)
@@ -234,21 +241,19 @@
     (i-li a $t1 exit-trap-spiral)
     (i-sw a $t1 $t0 0)
 
-    (place a)
+    (%st-cap! lg-trap-entry (place a))
     a))
 
 ;; ---------------------------------------------------------------- assembly
 (define boot-stack-size 262144)
 (define trap-stack-size 65536)
-(define *trap-asm* nil)
-(define *reset-asm* nil)
-
-(define *reset-addr* 0)
-
-;; The stacks and frames the stubs use, in one block of the pool, largest
-;; first from a multiple of the largest. Each is then a power of two at a
-;; multiple of itself, which a capability bounds exactly: the processor is
-;; not there to ask while the forge runs.
+;; Step one, before any Lisp is compiled: the stacks and frames the stubs
+;; use, in the pool's first block, largest first from a multiple of the
+;; largest. Each is then a power of two at a multiple of itself, which a
+;; capability bounds exactly: the processor is not there to ask while the
+;; forge runs. The boot context is the block's last piece. The low globals
+;; hold the boot stack and the boot context as integers; Exec makes its own
+;; capabilities to them for task zero.
 (define (reserve-stub-memory)
   (let* ((nest-bytes (%* trap-nest-stride trap-nest-max))
          (total (%+ boot-stack-size (%+ trap-stack-size (%+ nest-bytes ctx-bytes))))
@@ -257,24 +262,15 @@
     (set! boot-stack base)
     (set! trap-stack (%+ boot-stack boot-stack-size))
     (set! trap-nest (%+ trap-stack trap-stack-size))
-    (set! trap-save (%+ trap-nest nest-bytes))))
-
-;; Step one, before any Lisp is compiled: claim the reset vector. Code space
-;; is a bump allocator and the processor starts at its base, so whatever is
-;; allocated first is what runs first. The low globals hold the boot stack
-;; and the boot context as integers; Exec makes its own capabilities to them
-;; for task zero.
-(define (reserve-reset)
-  (set! *reset-addr* (%alloc-code reset-reserve))
-  (reserve-stub-memory)
+    (set! trap-save (%+ trap-nest nest-bytes)))
   (%st-word! lg-trapsave trap-save)
   (%st-word! lg-stacktop (%+ boot-stack boot-stack-size))
-  (%st-word! lg-stackbot boot-stack)
-  *reset-addr*)
+  (%st-word! lg-stackbot boot-stack))
 
 ;; Step two, once everything else has been compiled and the entry point is
-;; known. The forge takes the reset stub's address and the trap stub's.
+;; known: the trap stub, then the reset stub, which loads the trap stub's
+;; entry. Answers the address the reset stub stops the machine at, which is
+;; where the forge has what it runs on the machine return to.
 (define (build-boot-code)
-  (set! *trap-asm* (emit-trap-stub))
-  (set! *reset-asm* (emit-reset-stub))
-  (list *reset-addr* (asm-origin *trap-asm*)))
+  (emit-trap-stub)
+  (%+ reset-vector (label-offset (emit-reset-stub) 'back)))

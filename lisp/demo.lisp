@@ -198,8 +198,8 @@
     (emit-str " in ")
     (emit-str (number->string (%- (%cycles) t1)))
     (emit-str " cycles\n"))
-  (emit-str "  code space now ")
-  (emit-str (number->string (%lsh (%- (%ld-word lg-code-ptr) code-base) -10)))
+  (emit-str "  code now ")
+  (emit-str (number->string (%lsh (code-bytes) -10)))
   (emit-str "k\n")
   'ok))
 
@@ -998,8 +998,36 @@
       (gc)
       (num-check 'and-so-does-one-without-hd (%cap-ld u 0) '(kept 42)))))
 
+;; Machine code is an object, a text, and the collector takes it back like
+;; any other: a function defined again and again leaves the code and the
+;; objects in use after a collection as they were, give or take a function or
+;; two. A capability into a text, an entry or a return address, keeps it
+;; alive by the same rule a narrowed capability keeps its block.
+(define (redefine n)
+  (let ((i 0))
+    (while (< i n)
+      (eval '(define (redefined x) (list x (+ x 1) (* x 2) (vector x x x))))
+      (set! i (+ i 1)))))
+
+(define (entry-of f) (unsafe (%slot (open-closure f) clo-entry)))
+
+(define (code-is-collected)
+  (gc)
+  (let ((code (code-bytes)) (used (object-bytes-used)))
+    (redefine 1)
+    (let ((one (- (code-bytes) code)) (e (entry-of (%symbol-value 'redefined))))
+      (redefine 100)
+      (gc)
+      (num-check 'old-code-is-reclaimed (< (- (code-bytes) code) (* 3 one)) t)
+      (num-check 'and-so-are-its-objects (< (- (object-bytes-used) used) (* 12 one)) t)
+      (num-check 'an-entry-keeps-its-text
+                 (list (= (logand (unsafe (%ld-word (- (%cap-base e) 8))) 255) t-text)
+                       (logand (%cap-perms e) (logior perm-ex perm-ld perm-sd)))
+                 (list t perm-ex)))))
+
 (define (capabilities)
   (narrowed-survive)
+  (code-is-collected)
   (let* ((v (vector 1 2 3))
          (w (%cap-and-perms v (lognot perm-sd)))
          (p (cons 1 2))

@@ -1,5 +1,6 @@
 //! Look inside an image without running it.
 
+use crate::cap::P_EX;
 use crate::heap::*;
 use crate::image;
 use crate::mach::Machine;
@@ -11,6 +12,8 @@ struct Census {
     nils: u32,
     pairs: u32,
     objects: u32,
+    /// Entries and return addresses: capabilities with EX.
+    code: u32,
     other: u32,
     /// Capabilities in the pool that name nothing: stack slots that hold
     /// what an earlier call left there. The collector checks a header before
@@ -24,25 +27,21 @@ struct Census {
 /// A capability that names a pair or an object must name a live one: a pair
 /// in cons space below the bump pointer, an object whose header is a live
 /// header in object space, except in the pool, where a stack slot may hold a
-/// stale one. Code space holds machine code, and no capability but each
-/// block's owner; a string or a byte object holds none at all.
+/// stale one. One with EX, an entry or a return address, must lie in the
+/// text of a function or in the reset stub. A string, a byte object or a
+/// function's text holds no capability at all.
 fn census(h: &Heap) -> Census {
     let mut c = Census::default();
-    let (cons_hi, obj_hi, code_hi) = (h.g(LG_CONS_PTR), h.g(LG_OBJ_PTR), h.g(LG_CODE_PTR));
-    let byte_objects = byte_object_spans(h);
+    let (cons_hi, obj_hi) = (h.g(LG_CONS_PTR), h.g(LG_OBJ_PTR));
+    let spans = byte_spans(h);
+    let texts: Vec<&(u32, u32, u32)> = spans.iter().filter(|s| s.2 == T_TEXT).collect();
+    let stub = RESET_VECTOR..RESET_VECTOR + RESET_RESERVE;
     for at in h.tagged() {
         let v = h.ldc(at);
-        if (CODE_BASE..code_hi).contains(&at) {
-            if owns(h, v, at) {
-                c.objects += 1;
-            } else {
-                c.wrong.push((at, format!("a capability in code space, {}", h.write(v))));
-            }
-            continue;
-        }
-        let i = byte_objects.partition_point(|s| s.0 <= at);
-        if i > 0 && at < byte_objects[i - 1].1 {
-            c.wrong.push((at, "a capability inside a string or byte object".into()));
+        let i = spans.partition_point(|s| s.0 <= at);
+        if i > 0 && at < spans[i - 1].1 {
+            let what = if spans[i - 1].2 == T_TEXT { "machine code" } else { "a string or byte object" };
+            c.wrong.push((at, format!("a capability inside {what}")));
             continue;
         }
         if v == NIL {
@@ -65,6 +64,16 @@ fn census(h: &Heap) -> Census {
             } else {
                 c.wrong.push((at, format!("a pair capability to {:#x}, above the pairs", v.addr)));
             }
+        } else if v.perms() & P_EX != 0 {
+            let k = texts.partition_point(|s| s.0 <= v.base());
+            let in_text = k > 0 && v.top() <= texts[k - 1].1 as u64;
+            if in_text || (stub.contains(&v.base()) && v.top() <= stub.end as u64) {
+                c.code += 1;
+            } else if (POOL_BASE..POOL_END).contains(&at) {
+                c.stale += 1;
+            } else {
+                c.wrong.push((at, format!("code at {:#x}, where no function's text is", v.base())));
+            }
         } else {
             c.other += 1;
         }
@@ -72,22 +81,14 @@ fn census(h: &Heap) -> Census {
     c
 }
 
-/// Whether the capability `v` at `at` is the owner in a code block's header:
-/// the code object whose code starts in the next granule.
-fn owns(h: &Heap, v: V, at: u32) -> bool {
-    h.is_type(v, T_CODE) && {
-        let entry = h.slot(v, CODE_ENTRY);
-        entry.tag && entry.base() == at + 8
-    }
-}
-
-/// Where the payload of every string and byte object lies, in address order.
-fn byte_object_spans(h: &Heap) -> Vec<(u32, u32)> {
+/// Where the payload of every string, byte object and text lies, in address
+/// order, with its type.
+fn byte_spans(h: &Heap) -> Vec<(u32, u32, u32)> {
     let blocks = h.blocks().unwrap_or_else(|_| Vec::new());
     blocks
         .into_iter()
         .filter(|&(_, hdr)| is_byte_type(hdr_type(hdr)))
-        .map(|(p, hdr)| (p + HEADER_BYTES, p + block_size(hdr)))
+        .map(|(p, hdr)| (p + HEADER_BYTES, p + block_size(hdr), hdr_type(hdr)))
         .collect()
 }
 
@@ -120,9 +121,9 @@ pub fn run(path: &str, names: &[String]) -> i32 {
     let h = Heap::new(&mut m);
     println!("{path}: entry {:#x}", loaded.entry);
     println!(
-        "  code {} KiB, objects {} KiB, pairs {}",
-        (h.g(LG_CODE_PTR) - CODE_BASE) / 1024,
+        "  objects {} KiB ({} KiB of it code), pairs {}",
         (h.g(LG_OBJ_PTR) - OBJ_BASE) / 1024,
+        h.text_bytes() / 1024,
         (h.g(LG_CONS_PTR) - CONS_BASE) / PAIR_BYTES
     );
     println!(
@@ -156,17 +157,18 @@ pub fn run(path: &str, names: &[String]) -> i32 {
     }
 
     // Invariant: code holds no heap addresses. A pointer is a tagged
-    // capability, and code space is machine code reached through its code
-    // objects, so a tag in code space other than a block's owner is a
-    // pointer compiled into an instruction stream; an integer there can name
-    // nothing. Every other capability must name what it says it does.
+    // capability, and a function's text is a byte object, so a tag inside
+    // one is a pointer compiled into an instruction stream; an integer there
+    // can name nothing. Every other capability must name what it says it
+    // does.
     let c = census(&h);
     println!(
-        "  {} capabilities: {} nil, {} to pairs, {} to objects, {} raw",
-        c.nils + c.pairs + c.objects + c.other + c.stale + c.wrong.len() as u32,
+        "  {} capabilities: {} nil, {} to pairs, {} to objects, {} to code, {} raw",
+        c.nils + c.pairs + c.objects + c.code + c.other + c.stale + c.wrong.len() as u32,
         c.nils,
         c.pairs,
         c.objects,
+        c.code,
         c.other
     );
     if c.stale > 0 {
@@ -177,7 +179,7 @@ pub fn run(path: &str, names: &[String]) -> i32 {
     } else {
         println!("  {} capabilities are where none belongs:", c.wrong.len());
         for (at, what) in c.wrong.iter().take(8) {
-            let who = if (CODE_BASE..CODE_END).contains(at) {
+            let who = if what.contains("machine code") {
                 format!(" in {}", owner(&h, *at))
             } else {
                 String::new()
