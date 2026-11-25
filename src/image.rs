@@ -6,17 +6,29 @@
 //! it is a tagged capability, so the tags are saved with the bytes: without
 //! them a pointer would come back as a number.
 //!
-//! The file is a list of 4 KiB pages that hold something, each followed by
-//! its 512 tag bits, one per granule. Most of a running machine's memory is
-//! zero: stacks, the mark bitmap, unfilled heap. Skipping those pages keeps
-//! the file the size of its contents.
+//! The forge writes this layout, every word little-endian:
+//!
+//! ```text
+//! 0          8 bytes       the magic, "LMIMAGE1"
+//! 8          4             the format version, 2
+//! 12         4             the entry: where PCC starts
+//! 16         4             n, the number of pages
+//! 20         4n            each page's address, a multiple of 4096
+//! 20 + 4n    n x 4160      each page's 4096 bytes, then its 64 bytes of tags
+//! ```
+//!
+//! Bit j of tag byte k is the tag of the page's granule 8k + j. Only the
+//! pages of the saved regions that hold a byte or a tag are written: most of
+//! a machine's memory is zero, and the file is the size of its contents.
+//!
+//! The machine writes the other kind, a snapshot, through its disk (see
+//! `SNAP_MAGIC`); the loader tells them apart by the first word.
 
 use crate::mach::Machine;
 use crate::map::*;
 use std::io::{Read, Seek, Write};
 
 pub const MAGIC: &[u8; 8] = b"LMIMAGE1";
-/// Version 2 carries tags.
 pub const VERSION: u32 = 2;
 pub const PAGE: u32 = 4096;
 /// A page's tags: one bit per 8-byte granule, the lowest granule in bit 0
@@ -47,17 +59,16 @@ fn tags_of(m: &Machine, a: u32, n: u32) -> Vec<u8> {
     out
 }
 
-/// Set the tags of the granules from `a` to packed bits, one granule for
-/// each bit.
-fn set_tags(m: &mut Machine, a: u32, bits: &[u8]) {
+/// Set the tags of the `n` granules from `a` from packed bits. The caller
+/// has checked that they are in RAM and that `bits` holds `n`.
+fn set_tags(m: &mut Machine, a: u32, n: usize, bits: &[u8]) {
     let g = (a / 8) as usize;
-    let tags = m.tags_mut();
-    let n = (bits.len() * 8).min(tags.len().saturating_sub(g));
-    for (i, t) in tags[g..g + n].iter_mut().enumerate() {
+    for (i, t) in m.tags_mut()[g..g + n].iter_mut().enumerate() {
         *t = (bits[i / 8] >> (i % 8)) & 1;
     }
 }
 
+/// Write the image, answering the pages written and the file's size.
 pub fn save(m: &Machine, path: &str, entry: u32) -> std::io::Result<(usize, usize)> {
     let mut pages: Vec<(u32, &[u8], Vec<u8>)> = Vec::new();
     let ram = m.ram();
@@ -89,25 +100,45 @@ pub fn save(m: &Machine, path: &str, entry: u32) -> std::io::Result<(usize, usiz
         f.write_all(tags)?;
     }
     f.flush()?;
-    Ok((pages.len(), pages.len() * (PAGE as usize + PAGE_TAG_BYTES)))
+    Ok((pages.len(), 20 + pages.len() * (4 + PAGE as usize + PAGE_TAG_BYTES)))
 }
 
 pub struct Loaded {
     pub entry: u32,
 }
 
-/// A snapshot written by the machine itself, through the disk device. The
-/// first block is the header: the magic, the entry, the number of regions,
-/// and then for each region its base, its length in bytes, the block its
-/// bytes start at and the block its tags start at. The tags are one bit per
-/// granule of the region, packed as an image page's are. The machine cannot
-/// address a tag, so it writes them out as it finds them with `cgettag`.
+/// A snapshot, written by the machine itself through the disk device in
+/// 512-byte blocks (`lisp/snap.lisp`):
+///
+/// ```text
+/// block 0, word 0    the magic, "LMS2"
+///          word 1    the entry
+///          word 2    the number of regions
+///          12 + 16i  region i: its base, its length in bytes, the block its
+///                    bytes start at, the block its tags start at
+/// ```
+///
+/// A region's tags are one bit per granule, packed as an image page's are.
+/// The machine cannot address a tag, so it writes them as `cgettag` finds
+/// them.
 pub const SNAP_MAGIC: u32 = 0x3253_4D4C; // "LMS2", little-endian
+/// The magic of the snapshots written before memory had tags.
+const SNAP_MAGIC_UNTAGGED: u32 = 0x3153_4D4C; // "LMS1"
 const SNAP_REGION_BYTES: usize = 16;
 const SNAP_MAX_REGIONS: usize = (512 - 12) / SNAP_REGION_BYTES;
 
 fn invalid(msg: &str) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, msg.to_string())
+}
+
+/// A read that runs off the end of the file is a truncated image, which is
+/// what to say rather than that a buffer went unfilled.
+fn truncated(e: std::io::Error) -> std::io::Error {
+    if e.kind() == std::io::ErrorKind::UnexpectedEof {
+        invalid("the image ends early: it is truncated")
+    } else {
+        e
+    }
 }
 
 fn load_snapshot(m: &mut Machine, f: &mut (impl Read + Seek)) -> std::io::Result<Loaded> {
@@ -132,10 +163,11 @@ fn load_snapshot(m: &mut Machine, f: &mut (impl Read + Seek)) -> std::io::Result
         f.seek(std::io::SeekFrom::Start(blk as u64 * 512))?;
         let s = base as usize;
         f.read_exact(&mut ram[s..s + len as usize])?;
-        let mut bits = vec![0u8; (len as usize / 8).div_ceil(8)];
+        let n = len as usize / 8;
+        let mut bits = vec![0u8; n.div_ceil(8)];
         f.seek(std::io::SeekFrom::Start(tagblk as u64 * 512))?;
         f.read_exact(&mut bits)?;
-        set_tags(m, base, &bits);
+        set_tags(m, base, n, &bits);
     }
     Ok(Loaded { entry })
 }
@@ -147,17 +179,28 @@ pub fn load(m: &mut Machine, path: &str) -> std::io::Result<Loaded> {
 
 /// Load from anything readable: a file, or bytes in memory.
 pub fn load_from(m: &mut Machine, f: &mut (impl Read + Seek)) -> std::io::Result<Loaded> {
+    load_any(m, f).map_err(truncated)
+}
+
+fn load_any(m: &mut Machine, f: &mut (impl Read + Seek)) -> std::io::Result<Loaded> {
     let mut head = [0u8; 20];
     f.read_exact(&mut head)?;
-    if u32::from_le_bytes(head[0..4].try_into().unwrap()) == SNAP_MAGIC {
-        return load_snapshot(m, f);
+    match u32::from_le_bytes(head[0..4].try_into().unwrap()) {
+        SNAP_MAGIC => return load_snapshot(m, f),
+        SNAP_MAGIC_UNTAGGED => {
+            return Err(invalid("a snapshot from before memory had tags: save the image again"))
+        }
+        _ => {}
     }
     if &head[0..8] != MAGIC {
         return Err(invalid("not an LM image"));
     }
     let version = u32::from_le_bytes(head[8..12].try_into().unwrap());
     if version != VERSION {
-        return Err(invalid(&format!("image format version {version} is not supported")));
+        let why = if version < VERSION { ", which has no tags" } else { "" };
+        return Err(invalid(&format!(
+            "image format version {version}{why}; this machine reads version {VERSION}, which `lmforge build` writes"
+        )));
     }
     let entry = u32::from_le_bytes(head[12..16].try_into().unwrap());
     let n = u32::from_le_bytes(head[16..20].try_into().unwrap()) as usize;
@@ -176,14 +219,13 @@ pub fn load_from(m: &mut Machine, f: &mut (impl Read + Seek)) -> std::io::Result
     let mut page = vec![0u8; PAGE as usize];
     let mut tags = [0u8; PAGE_TAG_BYTES];
     for &a in &addrs {
+        if a % PAGE != 0 || a as usize + PAGE as usize > m.ram().len() {
+            return Err(invalid(&format!("the image names a page at {a:#x}, which is not a page of memory")));
+        }
         f.read_exact(&mut page)?;
         f.read_exact(&mut tags)?;
-        let s = a as usize;
-        let e = s + PAGE as usize;
-        if a % PAGE == 0 && e <= m.ram().len() {
-            m.ram_mut()[s..e].copy_from_slice(&page);
-            set_tags(m, a, &tags);
-        }
+        m.ram_mut()[a as usize..(a + PAGE) as usize].copy_from_slice(&page);
+        set_tags(m, a, (PAGE / 8) as usize, &tags);
     }
     Ok(Loaded { entry })
 }
@@ -225,14 +267,29 @@ mod tests {
         assert_eq!(h.write(l), "(#(-7 #\\x round-trip nil) 1073741824 round-trip)");
     }
 
-    /// An image of format version 1, which has no tags, is refused.
-    #[test]
-    fn untagged_format_is_refused() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(MAGIC);
-        bytes.extend_from_slice(&1u32.to_le_bytes());
-        bytes.extend_from_slice(&[0; 8]);
+    fn refusal(bytes: Vec<u8>) -> String {
         let mut m = Machine::new();
-        assert!(load_from(&mut m, &mut std::io::Cursor::new(bytes)).is_err());
+        match load_from(&mut m, &mut std::io::Cursor::new(bytes)) {
+            Ok(_) => panic!("loaded"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    fn header(version: u32, pages: &[u32]) -> Vec<u8> {
+        let mut b = MAGIC.to_vec();
+        for w in [version, 0x0100_0000, pages.len() as u32].iter().chain(pages) {
+            b.extend_from_slice(&w.to_le_bytes());
+        }
+        b
+    }
+
+    /// An image of format version 1, which has no tags, is refused, and so
+    /// is one that ends early or names a page that is not one.
+    #[test]
+    fn damage_is_refused_and_named() {
+        assert!(refusal(header(1, &[])).contains("no tags"));
+        assert!(refusal(header(VERSION, &[0x2000])).contains("truncated"));
+        assert!(refusal(header(VERSION, &[0x2008])).contains("not a page"));
+        assert!(refusal(header(VERSION, &[0xF000_0000])).contains("not a page"));
     }
 }

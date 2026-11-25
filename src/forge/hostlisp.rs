@@ -15,7 +15,6 @@
 use crate::cap::{self, Cap, OT_CLOSURE, OT_SENTRY, P_LC, P_LD, P_LM, P_SC, P_SD, P_SE};
 use crate::heap::*;
 use crate::mach::Machine;
-use crate::map::*;
 use crate::forge::read::Reader;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -78,9 +77,6 @@ macro_rules! bail {
 /// string comparison.
 pub struct Syms {
     pub quote: V,
-    pub quasiquote: V,
-    pub unquote: V,
-    pub unquote_splicing: V,
     pub if_: V,
     pub lambda: V,
     pub set: V,
@@ -93,7 +89,6 @@ pub struct Syms {
     pub t: V,
     pub optional: V,
     pub rest: V,
-    pub macro_flag: V,
 }
 
 pub struct Lisp<'a> {
@@ -107,7 +102,6 @@ pub struct Lisp<'a> {
     /// exit. For running text nobody wrote.
     pub sandbox: bool,
     pub load_path: Vec<String>,
-    pub trace_calls: bool,
     /// Build-time global bindings.
     ///
     /// These deliberately do NOT live in the symbols' value cells. The value
@@ -122,16 +116,12 @@ pub struct Lisp<'a> {
     /// namespace, while the sources it reads are divided into packages, so
     /// the same function is `hw:dev-addr` to the compiler and plain
     /// `dev-addr` here. The interpreter has to find it under the name the
-    /// compiler asks for.
-    // Indexed by the name id (see `Heap::name_id`), so a global reference is
-    // one index. The build is the compiler interpreted, and the compiler is
-    // mostly calls to named functions, so this is the hottest lookup in the
-    // forge.
+    /// compiler asks for. The index is the name's id (`Heap::name_id`), so a
+    /// global reference, the hottest lookup in the forge, is one index.
     pub globals: Vec<Option<V>>,
-    /// Build-time macros, kept out of the symbols' function cells for the same
-    /// reason as `globals`: the function cell is where `compile-top` puts the
-    /// compiled expander the machine's own compiler will use.
-    /// Keyed by name, for the same reason `globals` is.
+    /// Build-time macros, kept out of the symbols' function cells and keyed
+    /// by name for the same reasons as `globals`: the function cell is where
+    /// `compile-top` puts the compiled expander the machine's compiler uses.
     pub macros: Vec<Option<V>>,
     /// Environments captured by interpreted closures. A heap slot cannot hold
     /// an Rc, so the closure stores an index into this table instead.
@@ -228,9 +218,6 @@ impl<'a> Lisp<'a> {
         h.format();
         let s = Syms {
             quote: h.intern("quote"),
-            quasiquote: h.intern("quasiquote"),
-            unquote: h.intern("unquote"),
-            unquote_splicing: h.intern("unquote-splicing"),
             if_: h.intern("if"),
             lambda: h.intern("lambda"),
             set: h.intern("set!"),
@@ -243,7 +230,6 @@ impl<'a> Lisp<'a> {
             t: h.intern("t"),
             optional: h.intern("&optional"),
             rest: h.intern("&rest"),
-            macro_flag: h.intern("%macro"),
         };
         // `t` evaluates to itself, and is the canonical true value.
         let tt = s.t;
@@ -255,7 +241,6 @@ impl<'a> Lisp<'a> {
             fuel: u64::MAX,
             sandbox: false,
             load_path: vec!["lisp".into()],
-            trace_calls: false,
             globals: Vec::new(),
             macros: Vec::new(),
             envs: Vec::new(),
@@ -392,7 +377,7 @@ impl<'a> Lisp<'a> {
             let args = self.h.cdr(form);
 
             if self.h.is_symbol(head) {
-                // ---- the nine special forms ----
+                // ---- the special forms ----
                 if head == self.s.quote {
                     break Ok(self.h.car(args));
                 }
@@ -656,7 +641,7 @@ impl<'a> Lisp<'a> {
         let calls: u64 = prims.iter().map(|x| x.1).sum();
         eprintln!("-- primitive calls: {calls}");
         for (i, c) in prims.iter().take(30) {
-            eprintln!("{:12}  {}", c, PRIMS[*i].0);
+            eprintln!("{:12}  {}", c, PRIMS[*i]);
         }
     }
 
@@ -822,11 +807,9 @@ impl<'a> Lisp<'a> {
     /// for the caller to continue with in tail position.
     ///
     /// Building `(begin . body)` and looping on that would cost one pair per
-    /// call. The forge has no collector, so
-    /// pairs spent are pairs gone, and the interpreter reads and compiles the
-    /// whole system, which is millions of calls. This does the same thing and
-    /// allocates nothing, on either side: it walks the list where it lies
-    /// rather than copying it into a vector first.
+    /// call, and the forge has no collector: pairs spent are pairs gone, over
+    /// millions of calls. This walks the list where it lies and allocates
+    /// nothing.
     fn body_tail(&mut self, body: V, env: &Env) -> Result<V, LErr> {
         if !is_cons(body) {
             return Ok(NIL);
@@ -906,7 +889,6 @@ impl<'a> Lisp<'a> {
             "anonymous function".into()
         }
     }
-
 
     // ------------------------------------------------------------- loading
     pub fn eval_string(&mut self, text: &str, file: &str) -> Res {
@@ -1003,11 +985,10 @@ impl<'a> Lisp<'a> {
     }
 
     fn install_primitives(&mut self) {
-        for (i, (name, _)) in PRIMS.iter().enumerate() {
+        for (i, name) in PRIMS.iter().enumerate() {
             self.defprim(name, i as u32);
         }
     }
-
 
     fn need(&self, argv: &[V], n: usize, who: &str) -> Result<(), LErr> {
         if argv.len() < n {
@@ -1110,7 +1091,7 @@ impl<'a> Lisp<'a> {
         if let Some(p) = self.prof.as_mut() {
             p.prim_calls[idx] += 1;
         }
-        let (name, _) = PRIMS[idx];
+        let name = PRIMS[idx];
         macro_rules! n {
             ($i:expr) => {
                 self.num(a[$i], name)?
@@ -1286,9 +1267,8 @@ impl<'a> Lisp<'a> {
                     (v >> ((-s) & 31)) as i32
                 })
             }
-            // The bit maps, popcount, and min/max on numbers of either kind:
-            // what the compiler open-codes, so that the same source runs
-            // interpreted. A bit map is named by its address, through the root.
+            // The bit maps and popcount, which the collector's source calls.
+            // A bit map is named by its address, through the root.
             Prim::BitRef => {
                 need!(2);
                 let i = n!(1) as u32;
@@ -1307,16 +1287,6 @@ impl<'a> Lisp<'a> {
                 need!(1);
                 fix((n!(0) as u32).count_ones() as i32)
             }
-            Prim::Min => {
-                need!(2);
-                let c = self.cmp2(a, name)?;
-                if c <= 0 { a[0] } else { a[1] }
-            }
-            Prim::Max => {
-                need!(2);
-                let c = self.cmp2(a, name)?;
-                if c >= 0 { a[0] } else { a[1] }
-            }
 
             // ---- identity and type ----
             Prim::EqP => {
@@ -1326,10 +1296,6 @@ impl<'a> Lisp<'a> {
             Prim::NullP => {
                 need!(1);
                 self.bool(a[0] == NIL)
-            }
-            Prim::Vkind => {
-                need!(1);
-                fix(vkind(&self.h, a[0]) as i32)
             }
             Prim::FixnumP => {
                 need!(1);
@@ -1567,13 +1533,6 @@ impl<'a> Lisp<'a> {
                 need!(2);
                 a[0].inc(a[1].addr)
             }
-            Prim::CapBounds => {
-                need!(2);
-                match a[0].with_bounds(a[1].addr) {
-                    Some(c) => c,
-                    None => bail!("{name}: {} bytes are not within {}", a[1].addr, self.h.write(a[0])),
-                }
-            }
             Prim::CapBoundsExact => {
                 need!(2);
                 match a[0].with_bounds_exact(a[1].addr) {
@@ -1589,10 +1548,6 @@ impl<'a> Lisp<'a> {
                 need!(2);
                 a[0].and_perms(a[1].addr)
             }
-            Prim::CapClearTag => {
-                need!(1);
-                a[0].without_tag()
-            }
             Prim::CapSealEntry => {
                 need!(1);
                 self.sealable(a[0], name)?;
@@ -1604,12 +1559,6 @@ impl<'a> Lisp<'a> {
                     bail!("{name}: {} is not an unsealed closure", self.h.write(a[0]))
                 }
                 a[0].seal(OT_CLOSURE)
-            }
-            Prim::CapSeal => {
-                need!(2);
-                let ot = self.sealer(a[1], name)?;
-                self.sealable(a[0], name)?;
-                a[0].seal(ot)
             }
             Prim::CapUnseal => {
                 need!(2);
@@ -1623,16 +1572,8 @@ impl<'a> Lisp<'a> {
                 need!(2);
                 Cap { addr: a[0].addr, meta: a[1].addr, tag: false }
             }
-            Prim::CapEqP => {
-                need!(2);
-                self.bool(a[0] == a[1])
-            }
             // As `ctestsubset` reads its operands: whether the second lies
             // within the first.
-            Prim::CapSubsetP => {
-                need!(2);
-                self.bool(a[1].is_subset_of(&a[0]))
-            }
             Prim::Rrl => {
                 need!(1);
                 fix(cap::rrl(a[0].addr) as i32)
@@ -1646,7 +1587,6 @@ impl<'a> Lisp<'a> {
             // stack to scan and no collector to scan it, so the ranges are
             // empty and the switches do nothing. ----
             Prim::StackPointer => fix(0),
-            Prim::FramePointer => fix(0),
             Prim::WaitForInterrupt => NIL,
             Prim::Ecall => NIL,
             // The forge conses by bumping its own pointer, so the run it
@@ -1661,7 +1601,6 @@ impl<'a> Lisp<'a> {
             Prim::ThisTask => NIL,
             Prim::SetThisTaskX => NIL,
             Prim::SetStackLimitX => NIL,
-            Prim::StackLimit => fix(0),
             Prim::SetGcModeX => NIL,
             Prim::Context => fix(0),
             Prim::Cycles => fix(0),
@@ -1834,8 +1773,6 @@ impl<'a> Lisp<'a> {
                 self.h.set_slot(a[0], SYM_FLAGS, a[1]);
                 a[1]
             }
-            Prim::AllSymbols => self.h.gv(LG_SYMLIST),
-            Prim::Obarray => self.h.obarray(),
 
             // ---- characters ----
             Prim::CharToInt => {
@@ -1896,14 +1833,6 @@ impl<'a> Lisp<'a> {
                     Err(e) => bail!("cannot read {path}: {e}"),
                 }
             }
-            Prim::Load => {
-                need!(1);
-                if self.sandbox {
-                    bail!("no files in the sandbox");
-                }
-                let n = self.h.str_of(a[0]);
-                return self.load(&n);
-            }
             Prim::Macroexpand1 => {
                 need!(1);
                 let form = a[0];
@@ -1932,13 +1861,6 @@ impl<'a> Lisp<'a> {
                 need!(1);
                 return self.eval(a[0], &None);
             }
-            Prim::Exit => {
-                if self.sandbox {
-                    bail!("no exit from the sandbox");
-                }
-                let c = if a.is_empty() { 0 } else { n!(0) };
-                std::process::exit(c);
-            }
         };
         Ok(r)
     }
@@ -1952,176 +1874,163 @@ impl<'a> Lisp<'a> {
     }
 }
 
-// Every primitive, once. The same list makes the table the interpreter
-// installs from and the enum `call_prim` dispatches on, so the two cannot
-// disagree about which number is which. An enum match is a jump.
+// Every primitive, once: what the prelude, the compiler and the macros call
+// while the forge runs them, and nothing else. The same list makes the table
+// the interpreter installs from and the enum `call_prim` dispatches on, so
+// the two cannot disagree about which number is which.
 macro_rules! prims {
-    ($($id:ident $name:literal $arity:literal;)*) => {
+    ($($id:ident $name:literal;)*) => {
         #[derive(Clone, Copy)]
         enum Prim { $($id),* }
-        /// (name, arity hint). The arity hint is documentation; checks happen inline.
-        pub static PRIMS: &[(&str, u32)] = &[$(($name, $arity)),*];
+        /// Every primitive's name, by its number.
+        pub static PRIMS: &[&str] = &[$($name),*];
         static PRIM_OF: &[Prim] = &[$(Prim::$id),*];
     };
 }
 
 prims! {
-    Cons               "%cons" 2;
-    Car                "%car" 1;
-    Cdr                "%cdr" 1;
-    SetCarX            "%set-car!" 2;
-    SetCdrX            "%set-cdr!" 2;
-    Add                "%+" 2;
-    Sub                "%-" 2;
-    Mul                "%*" 2;
-    Div                "%/" 2;
-    Mod                "%mod" 2;
-    AddO               "%+o" 2;
-    SubO               "%-o" 2;
-    MulO               "%*o" 2;
-    Rem                "%rem" 2;
-    NumEq              "%=" 2;
-    Lt                 "%<" 2;
-    Gt                 "%>" 2;
-    Le                 "%<=" 2;
-    Ge                 "%>=" 2;
-    Logand             "%logand" 2;
-    Logior             "%logior" 2;
-    Logxor             "%logxor" 2;
-    Lognot             "%lognot" 1;
-    Ash                "%ash" 2;
-    Lsh                "%lsh" 2;
-    EqP                "%eq?" 2;
-    NullP              "%null?" 1;
-    Vkind              "%vkind" 1;
-    FixnumP            "%fixnum?" 1;
-    ConsP              "%cons?" 1;
-    SymbolP            "%symbol?" 1;
-    StringP            "%string?" 1;
-    VectorP            "%vector?" 1;
-    BytesP             "%bytes?" 1;
-    ClosureP           "%closure?" 1;
-    CharP              "%char?" 1;
-    FloatP             "%float?" 1;
-    BignumP            "%bignum?" 1;
-    ObjectP            "%object?" 1;
-    RecordP            "%record?" 1;
-    BitRef             "%bit-ref" 2;
-    BitSetX            "%bit-set!" 2;
-    Popcount           "%popcount" 1;
-    Min                "%min" 2;
-    Max                "%max" 2;
-    AllocObj           "%alloc-obj" 2;
-    ObjType            "%obj-type" 1;
-    ObjLen             "%obj-len" 1;
-    Slot               "%slot" 2;
-    SetSlotX           "%set-slot!" 3;
-    RecordRef          "%record-ref" 2;
-    RecordSetX         "%record-set!" 3;
-    LdByte             "%ld-byte" 1;
-    LdHalf             "%ld-half" 1;
-    LdWord             "%ld-word" 1;
-    LdCap              "%ld-cap" 1;
-    StByteX            "%st-byte!" 2;
-    StHalfX            "%st-half!" 2;
-    StWordX            "%st-word!" 2;
-    StCapX             "%st-cap!" 2;
-    Root               "%root" 0;
-    FromAddr           "%from-addr" 1;
-    CapLd              "%cap-ld" 2;
-    CapStX             "%cap-st!" 3;
-    CapLdWord          "%cap-ld-word" 2;
-    CapStWordX         "%cap-st-word!" 3;
-    CapLdByte          "%cap-ld-byte" 2;
-    CapStByteX         "%cap-st-byte!" 3;
-    AddrOf             "%addr-of" 1;
-    CapBase            "%cap-base" 1;
-    CapLen             "%cap-len" 1;
-    CapTop             "%cap-top" 1;
-    CapPerms           "%cap-perms" 1;
-    CapOtype           "%cap-otype" 1;
-    CapOffset          "%cap-offset" 1;
-    CapTagP            "%cap-tag?" 1;
-    CapSealedP         "%cap-sealed?" 1;
-    CapHigh            "%cap-high" 1;
-    CapSetAddr         "%cap-set-addr" 2;
-    CapInc             "%cap-inc" 2;
-    CapBounds          "%cap-bounds" 2;
-    CapBoundsExact     "%cap-bounds-exact" 2;
-    CapAndPerms        "%cap-and-perms" 2;
-    CapClearTag        "%cap-clear-tag" 1;
-    CapSealEntry       "%cap-seal-entry" 1;
-    CapSealClosure     "%cap-seal-closure" 1;
-    CapSeal            "%cap-seal" 2;
-    CapUnseal          "%cap-unseal" 2;
-    CapSetHigh         "%cap-set-high" 2;
-    CapEqP             "%cap=?" 2;
-    CapSubsetP         "%cap-subset?" 2;
-    Rrl                "%rrl" 1;
-    Ram                "%ram" 1;
-    StackPointer       "%stack-pointer" 0;
-    FramePointer       "%frame-pointer" 0;
-    WaitForInterrupt   "%wait-for-interrupt" 0;
-    Ecall              "%ecall" 1;
-    ConsRun            "%cons-run" 0;
-    SetConsRunX        "%set-cons-run!" 1;
-    SetContextX        "%set-context!" 1;
-    EnableInterruptLines "%enable-interrupt-lines" 0;
-    ThisTask           "%this-task" 0;
-    SetThisTaskX       "%set-this-task!" 1;
-    SetStackLimitX     "%set-stack-limit!" 1;
-    SetGcModeX         "%set-gc-mode!" 1;
-    Context            "%context" 0;
-    StackLimit         "%stack-limit" 0;
-    Cycles             "%cycles" 0;
-    Unbound            "%unbound" 0;
-    Disable            "%disable" 0;
-    RestoreInterrupts  "%restore-interrupts" 1;
-    EnableAfterTrap    "%enable-after-trap" 0;
-    Enable             "%enable" 0;
-    Halt               "%halt" 1;
-    AllocCode          "%alloc-code" 1;
-    AllocPool          "%alloc-pool" 1;
-    MakeString         "%make-string" 1;
-    StringLength       "%string-length" 1;
-    StringRef          "%string-ref" 2;
-    StringSetX         "%string-set!" 3;
-    MakeVector         "%make-vector" 1;
-    VectorLength       "%vector-length" 1;
-    VectorRef          "%vector-ref" 2;
-    VectorSetX         "%vector-set!" 3;
-    MakeBytes          "%make-bytes" 1;
-    BytesLength        "%bytes-length" 1;
-    BytesRef           "%bytes-ref" 2;
-    BytesSetX          "%bytes-set!" 3;
-    Intern             "%intern" 1;
-    SymbolName         "%symbol-name" 1;
-    SymbolValue        "%symbol-value" 1;
-    FluidValue         "%fluid-value" 1;
-    SetFluidValueX     "%set-fluid-value!" 2;
-    SetSymbolValueX    "%set-symbol-value!" 2;
-    SymbolFunction     "%symbol-function" 1;
-    SetSymbolFunctionX "%set-symbol-function!" 2;
-    SymbolPlist        "%symbol-plist" 1;
-    SetSymbolPlistX    "%set-symbol-plist!" 2;
-    SymbolFlags        "%symbol-flags" 1;
-    SetSymbolFlagsX    "%set-symbol-flags!" 2;
-    AllSymbols         "%all-symbols" 0;
-    Obarray            "%obarray" 0;
-    CharToInt          "%char->int" 1;
-    IntToChar          "%int->char" 1;
-    Apply              "%apply" 2;
-    Funcall            "%funcall" 1;
-    Write              "%write" 1;
-    Display            "%display" 1;
-    Newline            "%newline" 0;
-    Flush              "%flush" 0;
-    Error              "%error" 1;
-    ReadFile           "%read-file" 1;
-    Load               "%load" 1;
-    Macroexpand1       "%macroexpand-1" 1;
-    MacroP             "%macro?" 1;
-    Gensym             "%gensym" 0;
-    Eval               "%eval" 1;
-    Exit               "%exit" 0;
+    Cons               "%cons";
+    Car                "%car";
+    Cdr                "%cdr";
+    SetCarX            "%set-car!";
+    SetCdrX            "%set-cdr!";
+    Add                "%+";
+    Sub                "%-";
+    Mul                "%*";
+    Div                "%/";
+    Mod                "%mod";
+    AddO               "%+o";
+    SubO               "%-o";
+    MulO               "%*o";
+    Rem                "%rem";
+    NumEq              "%=";
+    Lt                 "%<";
+    Gt                 "%>";
+    Le                 "%<=";
+    Ge                 "%>=";
+    Logand             "%logand";
+    Logior             "%logior";
+    Logxor             "%logxor";
+    Lognot             "%lognot";
+    Ash                "%ash";
+    Lsh                "%lsh";
+    EqP                "%eq?";
+    NullP              "%null?";
+    FixnumP            "%fixnum?";
+    ConsP              "%cons?";
+    SymbolP            "%symbol?";
+    StringP            "%string?";
+    VectorP            "%vector?";
+    BytesP             "%bytes?";
+    ClosureP           "%closure?";
+    CharP              "%char?";
+    FloatP             "%float?";
+    BignumP            "%bignum?";
+    ObjectP            "%object?";
+    RecordP            "%record?";
+    BitRef             "%bit-ref";
+    BitSetX            "%bit-set!";
+    Popcount           "%popcount";
+    AllocObj           "%alloc-obj";
+    ObjType            "%obj-type";
+    ObjLen             "%obj-len";
+    Slot               "%slot";
+    SetSlotX           "%set-slot!";
+    RecordRef          "%record-ref";
+    RecordSetX         "%record-set!";
+    LdByte             "%ld-byte";
+    LdHalf             "%ld-half";
+    LdWord             "%ld-word";
+    LdCap              "%ld-cap";
+    StByteX            "%st-byte!";
+    StHalfX            "%st-half!";
+    StWordX            "%st-word!";
+    StCapX             "%st-cap!";
+    Root               "%root";
+    FromAddr           "%from-addr";
+    CapLd              "%cap-ld";
+    CapStX             "%cap-st!";
+    CapLdWord          "%cap-ld-word";
+    CapStWordX         "%cap-st-word!";
+    CapLdByte          "%cap-ld-byte";
+    CapStByteX         "%cap-st-byte!";
+    AddrOf             "%addr-of";
+    CapBase            "%cap-base";
+    CapLen             "%cap-len";
+    CapTop             "%cap-top";
+    CapPerms           "%cap-perms";
+    CapOtype           "%cap-otype";
+    CapOffset          "%cap-offset";
+    CapTagP            "%cap-tag?";
+    CapSealedP         "%cap-sealed?";
+    CapHigh            "%cap-high";
+    CapSetAddr         "%cap-set-addr";
+    CapInc             "%cap-inc";
+    CapBoundsExact     "%cap-bounds-exact";
+    CapAndPerms        "%cap-and-perms";
+    CapSealEntry       "%cap-seal-entry";
+    CapSealClosure     "%cap-seal-closure";
+    CapUnseal          "%cap-unseal";
+    CapSetHigh         "%cap-set-high";
+    Rrl                "%rrl";
+    Ram                "%ram";
+    StackPointer       "%stack-pointer";
+    WaitForInterrupt   "%wait-for-interrupt";
+    Ecall              "%ecall";
+    ConsRun            "%cons-run";
+    SetConsRunX        "%set-cons-run!";
+    SetContextX        "%set-context!";
+    EnableInterruptLines "%enable-interrupt-lines";
+    ThisTask           "%this-task";
+    SetThisTaskX       "%set-this-task!";
+    SetStackLimitX     "%set-stack-limit!";
+    SetGcModeX         "%set-gc-mode!";
+    Context            "%context";
+    Cycles             "%cycles";
+    Unbound            "%unbound";
+    Disable            "%disable";
+    RestoreInterrupts  "%restore-interrupts";
+    EnableAfterTrap    "%enable-after-trap";
+    Enable             "%enable";
+    Halt               "%halt";
+    AllocCode          "%alloc-code";
+    AllocPool          "%alloc-pool";
+    MakeString         "%make-string";
+    StringLength       "%string-length";
+    StringRef          "%string-ref";
+    StringSetX         "%string-set!";
+    MakeVector         "%make-vector";
+    VectorLength       "%vector-length";
+    VectorRef          "%vector-ref";
+    VectorSetX         "%vector-set!";
+    MakeBytes          "%make-bytes";
+    BytesLength        "%bytes-length";
+    BytesRef           "%bytes-ref";
+    BytesSetX          "%bytes-set!";
+    Intern             "%intern";
+    SymbolName         "%symbol-name";
+    SymbolValue        "%symbol-value";
+    FluidValue         "%fluid-value";
+    SetFluidValueX     "%set-fluid-value!";
+    SetSymbolValueX    "%set-symbol-value!";
+    SymbolFunction     "%symbol-function";
+    SetSymbolFunctionX "%set-symbol-function!";
+    SymbolPlist        "%symbol-plist";
+    SetSymbolPlistX    "%set-symbol-plist!";
+    SymbolFlags        "%symbol-flags";
+    SetSymbolFlagsX    "%set-symbol-flags!";
+    CharToInt          "%char->int";
+    IntToChar          "%int->char";
+    Apply              "%apply";
+    Funcall            "%funcall";
+    Write              "%write";
+    Display            "%display";
+    Newline            "%newline";
+    Flush              "%flush";
+    Error              "%error";
+    ReadFile           "%read-file";
+    Macroexpand1       "%macroexpand-1";
+    MacroP             "%macro?";
+    Gensym             "%gensym";
+    Eval               "%eval";
 }

@@ -28,7 +28,7 @@
 //! compiler builds is what the machine runs.
 
 use crate::cap::{self, Cap, P_EX, P_HD, P_LC, P_LD, P_LM, P_SC, P_SD};
-use crate::mach::Machine;
+use crate::mach::{Machine, KIND_CAP, KIND_NIL, KIND_OBJECT, KIND_PAIR};
 use crate::map::*;
 use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
@@ -53,8 +53,6 @@ pub const PERMS_NIL: u32 = P_LD | P_LC;
 /// A code object's entry: execute, and nothing else. `unsafe` code adds SR.
 pub const PERMS_CODE: u32 = P_EX;
 
-/// The bytes nil names: its car and its cdr.
-pub const NIL_BYTES: u32 = 16;
 /// A pair's bounds.
 pub const PAIR_BYTES: u32 = 16;
 
@@ -65,17 +63,6 @@ pub const NIL: V = Cap::NIL;
 pub use crate::cap::{IMM_CHAR, IMM_DEFAULT, IMM_EOF, IMM_FIXNUM, IMM_UNBOUND, IMM_VOID};
 
 pub const UNBOUND: V = Cap::imm(IMM_UNBOUND, 0);
-pub const EOF: V = Cap::imm(IMM_EOF, 0);
-pub const VOID: V = Cap::imm(IMM_VOID, 0);
-pub const DEFAULT: V = Cap::imm(IMM_DEFAULT, 0);
-
-// ---- kinds, as `vkind` answers them ----
-/// 0..15 is an untagged value's metadata; these are the tagged kinds.
-pub const VK_NIL: u32 = 16;
-pub const VK_PAIR: u32 = 17;
-pub const VK_CAP: u32 = 31;
-/// An object's kind is this plus its header type.
-pub const VK_OBJECT: u32 = 32;
 
 // ---- values ----
 #[inline]
@@ -121,24 +108,37 @@ pub fn is_cons(v: V) -> bool {
         && !v.has(P_HD)
         && v.bounds() == (v.addr, (v.addr + PAIR_BYTES) as u64)
 }
-/// A tagged capability with HD into object space: an object, sealed or not.
-/// The root has HD as it has every permission, but it is not an object.
+/// A tagged capability with HD whose base is in object space: an object,
+/// sealed or not. The root has HD as it has every permission, but it is not
+/// an object.
 #[inline]
 pub fn is_obj(v: V) -> bool {
-    v.tag && v.has(P_HD) && (OBJ_BASE + HEADER_BYTES..OBJ_END).contains(&v.addr)
+    v.tag && v.has(P_HD) && (OBJ_BASE + HEADER_BYTES..OBJ_END).contains(&base_of(v))
+}
+
+/// An object's base, where its payload starts. Nearly every capability to an
+/// object has its address there, and for a small one the mantissa says so
+/// without a decode: with IE clear, B is the base's low bits.
+#[inline(always)]
+fn base_of(v: V) -> u32 {
+    if v.meta & cap::IE_BIT == 0 && v.addr & 0x3ff == v.meta & 0x3ff {
+        v.addr
+    } else {
+        v.base()
+    }
 }
 /// What `vkind` answers for this value.
 pub fn vkind(h: &Heap, v: V) -> u32 {
     if !v.tag {
         v.meta.min(15)
     } else if v == NIL {
-        VK_NIL
+        KIND_NIL
     } else if is_obj(v) {
-        VK_OBJECT + hdr_type(h.hdr(v))
+        KIND_OBJECT + hdr_type(h.hdr(v))
     } else if is_cons(v) {
-        VK_PAIR
+        KIND_PAIR
     } else {
-        VK_CAP
+        KIND_CAP
     }
 }
 
@@ -477,21 +477,16 @@ impl<'a> Heap<'a> {
     pub fn cddr(&self, v: V) -> V {
         self.cdr(self.cdr(v))
     }
-    pub fn caddr(&self, v: V) -> V {
-        self.car(self.cddr(v))
-    }
-    pub fn cdddr(&self, v: V) -> V {
-        self.cdr(self.cddr(v))
-    }
-    pub fn cadddr(&self, v: V) -> V {
-        self.car(self.cdddr(v))
-    }
 
     // ---- objects ----
+    // An object is its bounds, as the processor reads it: the header is the
+    // granule below the base and slot i is 8i bytes above it, wherever the
+    // capability's address has been moved.
+
     /// Header word 0 of an object.
     #[inline]
     pub fn hdr(&self, v: V) -> u32 {
-        self.ld(v.addr - HEADER_BYTES)
+        self.ld(base_of(v) - HEADER_BYTES)
     }
     /// The header type of an object, and 0 for anything else.
     pub fn obj_type(&self, v: V) -> u32 {
@@ -506,14 +501,34 @@ impl<'a> Heap<'a> {
     }
     #[inline]
     pub fn slot(&self, v: V, i: u32) -> V {
-        self.ldc(v.addr + i * VALUE_BYTES)
+        self.ldc(base_of(v) + i * VALUE_BYTES)
     }
     #[inline]
     pub fn set_slot(&mut self, v: V, i: u32, x: V) {
-        self.stc(v.addr + i * VALUE_BYTES, x)
+        self.stc(base_of(v) + i * VALUE_BYTES, x)
     }
     pub fn is_type(&self, v: V, t: u32) -> bool {
         is_obj(v) && hdr_type(self.hdr(v)) == t
+    }
+
+    /// Every block of object space from its base to the allocator's pointer,
+    /// objects and holes alike, as its address and its header word. A header
+    /// that claims no bytes, or more than are left, is corrupt: the error is
+    /// its address.
+    pub fn blocks(&self) -> Result<Vec<(u32, u32)>, u32> {
+        let hi = self.g(LG_OBJ_PTR);
+        let mut out = Vec::new();
+        let mut p = OBJ_BASE;
+        while p < hi {
+            let h = self.ld(p);
+            let sz = block_size(h);
+            if sz == 0 || sz > hi - p {
+                return Err(p);
+            }
+            out.push((p, h));
+            p += sz;
+        }
+        Ok(out)
     }
 
     // ---- lists ----
@@ -580,8 +595,8 @@ impl<'a> Heap<'a> {
         if !self.is_type(v, T_STRING) {
             return String::new();
         }
-        let n = self.olen(v);
-        (0..n).map(|i| self.m.peek8(v.addr + i) as char).collect()
+        let (b, n) = (base_of(v), self.olen(v));
+        (0..n).map(|i| self.m.peek8(b + i) as char).collect()
     }
 
     pub fn vector(&mut self, items: &[V]) -> V {
@@ -915,36 +930,6 @@ impl<'a> Heap<'a> {
     pub fn sym_function(&self, s: V) -> V {
         self.slot(s, SYM_FUNCTION)
     }
-    pub fn set_sym_function(&mut self, s: V, v: V) {
-        self.set_slot(s, SYM_FUNCTION, v)
-    }
-
-    /// A property list lookup on a symbol, used for compiler annotations.
-    pub fn get_prop(&self, s: V, key: V) -> V {
-        let mut p = self.slot(s, SYM_PLIST);
-        while is_cons(p) {
-            if self.car(p) == key {
-                return self.cadr(p);
-            }
-            p = self.cddr(p);
-        }
-        NIL
-    }
-    pub fn put_prop(&mut self, s: V, key: V, val: V) {
-        let mut p = self.slot(s, SYM_PLIST);
-        while is_cons(p) {
-            if self.car(p) == key {
-                let c = self.cdr(p);
-                self.set_car(c, val);
-                return;
-            }
-            p = self.cddr(p);
-        }
-        let old = self.slot(s, SYM_PLIST);
-        let c1 = self.cons(val, old);
-        let c2 = self.cons(key, c1);
-        self.set_slot(s, SYM_PLIST, c2);
-    }
 
     // ---- code and closures ----
     /// The name a code object or a closure goes by, if it has one.
@@ -1180,10 +1165,10 @@ mod tests {
         assert_eq!(h.cdr(NIL), NIL);
         assert_eq!(vkind(&h, fix(3)), IMM_FIXNUM);
         assert_eq!(vkind(&h, UNBOUND), IMM_UNBOUND);
-        assert_eq!(vkind(&h, NIL), VK_NIL);
-        assert_eq!(vkind(&h, p), VK_PAIR);
-        assert_eq!(vkind(&h, s), VK_OBJECT + T_STRING);
-        assert_eq!(vkind(&h, Cap::root()), VK_CAP);
+        assert_eq!(vkind(&h, NIL), KIND_NIL);
+        assert_eq!(vkind(&h, p), KIND_PAIR);
+        assert_eq!(vkind(&h, s), KIND_OBJECT + T_STRING);
+        assert_eq!(vkind(&h, Cap::root()), KIND_CAP);
         assert_eq!(h.write(v), "#((1) \"abc\")");
     }
 
@@ -1210,13 +1195,25 @@ mod tests {
             assert!(o.base() as u64 - HEADER_BYTES as u64 >= last_top);
             last_top = o.top();
         }
-        let mut p = OBJ_BASE;
-        while p < h.g(LG_OBJ_PTR) {
-            let sz = block_size(h.ld(p));
-            assert!(sz > 0);
-            p += sz;
-        }
-        assert_eq!(p, h.g(LG_OBJ_PTR));
+        assert!(h.blocks().is_ok());
+    }
+
+    /// An object is named by its bounds, as the processor reads it: a
+    /// capability whose address has moved inside the object finds the same
+    /// header below its base and the same slots above it.
+    #[test]
+    fn an_object_is_found_by_its_base() {
+        let mut m = heap();
+        let mut h = Heap::new(&mut m);
+        let v = h.vector(&[fix(1), fix(2), fix(3)]);
+        let s = h.string("abc");
+        let (w, t) = (v.inc(8), s.inc(2));
+        assert!(w.tag && t.tag);
+        assert_eq!(vkind(&h, w), KIND_OBJECT + T_VECTOR);
+        assert_eq!(h.olen(w), 3);
+        assert_eq!(h.slot(w, 0), fix(1));
+        assert_eq!(vkind(&h, t), KIND_OBJECT + T_STRING);
+        assert_eq!(h.str_of(t), "abc");
     }
 
     #[test]

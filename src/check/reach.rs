@@ -14,7 +14,7 @@ use crate::heap::*;
 use crate::image;
 use crate::mach::Machine;
 use crate::map::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// A pair is its 16 bytes. An object is its block, header included. A code
 /// object also counts the machine code its entry covers, which is how code
@@ -59,24 +59,20 @@ fn walkable(v: V) -> bool {
     is_cons(v) || is_obj(v)
 }
 
-/// Everything reachable from `roots`.
-fn reach(h: &Heap, roots: &[V]) -> HashSet<V> {
-    let mut seen: HashSet<V> = HashSet::new();
-    let mut stack: Vec<V> = Vec::new();
+/// Everything reachable from `roots`, keyed by the base of each pair or
+/// object: two capabilities to one object, a sealed closure and the same
+/// closure unsealed or a read-only view and the original, are one cell.
+fn reach(h: &Heap, roots: &[V]) -> HashMap<u32, V> {
+    let mut seen: HashMap<u32, V> = HashMap::new();
+    let mut stack: Vec<V> = roots.to_vec();
     let mut kids: Vec<V> = Vec::new();
-    for r in roots {
-        if walkable(*r) && seen.insert(*r) {
-            stack.push(*r);
-        }
-    }
     while let Some(v) = stack.pop() {
+        if !walkable(v) || seen.insert(v.base(), v).is_some() {
+            continue;
+        }
         kids.clear();
         edges(h, v, &mut kids);
-        for k in kids.drain(..) {
-            if walkable(k) && seen.insert(k) {
-                stack.push(k);
-            }
-        }
+        stack.extend_from_slice(&kids);
     }
     seen
 }
@@ -123,118 +119,62 @@ pub fn run(path: &str, json: bool) -> i32 {
     }
 
     // One walk per package, ORing its bit into every cell it reached.
-    let mut mask: HashMap<V, u32> = HashMap::new();
+    let mut mask: HashMap<u32, (V, u32)> = HashMap::new();
     let mut totals: Vec<u64> = vec![0; pkgs.len()];
     for (i, pkg) in pkgs.iter().enumerate() {
-        let seen = reach(&h, &pkg.syms);
-        for v in seen {
-            let w = weight(&h, v) as u64;
-            totals[i] += w;
-            *mask.entry(v).or_insert(0) |= 1 << i;
+        for (base, v) in reach(&h, &pkg.syms) {
+            totals[i] += weight(&h, v) as u64;
+            mask.entry(base).or_insert((v, 0)).1 |= 1 << i;
         }
     }
 
-    // Context: everything the collector would keep, and how much of object
-    // space is neither kept nor given back. The machine never moves an
-    // object, so what it discarded stays in the file as holes until the
-    // image is compacted.
+    // Context: everything the collector would keep, against what the image
+    // carries. A page of zeroes costs the file nothing, and
+    // `collect-for-image` blanks every free block, so only a page with
+    // something live on it is written; what is dead on such a page stays
+    // until the forge compacts the image.
     let roots: Vec<V> = VALUE_GLOBALS.iter().map(|a| h.gv(*a)).collect();
+    let obj_high = (h.g(LG_OBJ_PTR) - OBJ_BASE) as u64;
+    let code_high = (h.g(LG_CODE_PTR) - CODE_BASE) as u64;
+    let pair_high = (h.g(LG_CONS_PTR) - CONS_BASE) as u64;
+    let obj_pages = (obj_high as usize).div_ceil(4096);
+    let mut page_used = vec![false; obj_pages.max(1)];
     let (mut live_pairs, mut live_objs, mut live_code) = (0u64, 0u64, 0u64);
-    for v in reach(&h, &roots) {
+    for v in reach(&h, &roots).into_values() {
         if is_cons(v) {
             live_pairs += PAIR_BYTES as u64;
-        } else {
-            let hdr = h.hdr(v);
-            live_objs += block_size(hdr) as u64;
-            if hdr_type(hdr) == T_CODE {
-                live_code += code_bytes(&h, v) as u64;
+            continue;
+        }
+        let hdr = h.hdr(v);
+        live_objs += block_size(hdr) as u64;
+        if hdr_type(hdr) == T_CODE {
+            live_code += code_bytes(&h, v) as u64;
+        }
+        let start = v.base() - HEADER_BYTES - OBJ_BASE;
+        let end = start + block_size(hdr);
+        for page in start / 4096..=(end - 1) / 4096 {
+            if let Some(u) = page_used.get_mut(page as usize) {
+                *u = true;
             }
         }
     }
     let live_all = live_pairs + live_objs + live_code;
-    let obj_high = (h.g(LG_OBJ_PTR) - OBJ_BASE) as u64;
-    let code_high = (h.g(LG_CODE_PTR) - CODE_BASE) as u64;
-    let pair_high = (h.g(LG_CONS_PTR) - CONS_BASE) as u64;
-
-    // Dead object space, split by whether it can leave the file. The writer
-    // skips a page of zeroes, and `collect-for-image` blanks every free block, so a
-    // page with nothing live on it costs nothing. A page with one survivor on
-    // it costs the whole page; compacting would reclaim that part.
-    let obj_pages = (obj_high as usize + 4095) / 4096;
-    let mut page_used = vec![false; obj_pages.max(1)];
-    for v in reach(&h, &roots) {
-        if is_cons(v) {
-            continue;
-        }
-        let start = v.addr - HEADER_BYTES;
-        let end = start + block_size(h.hdr(v));
-        let mut a = start;
-        while a < end {
-            let i = ((a - OBJ_BASE) / 4096) as usize;
-            if i < page_used.len() {
-                page_used[i] = true;
-            }
-            a += 4096 - (a % 4096);
-        }
-    }
     let empty_pages = page_used.iter().filter(|u| !**u).count();
 
-    // What compacting would cost and buy: how much live data sits on each
-    // page, and how much would have to be copied to close the gaps. A nearly
-    // full page is not worth evacuating; the histogram counts pages by how
-    // full they are.
-    let mut page_live = vec![0u64; obj_pages.max(1)];
-    for v in reach(&h, &roots) {
-        if is_cons(v) {
-            continue;
-        }
-        let start = v.addr - HEADER_BYTES;
-        let end = start + block_size(h.hdr(v));
-        let mut a = start;
-        while a < end {
-            let page = (a - OBJ_BASE) / 4096;
-            let upto = ((a / 4096) + 1) * 4096;
-            let stop = end.min(upto);
-            if (page as usize) < page_live.len() {
-                page_live[page as usize] += (stop - a) as u64;
-            }
-            a = stop;
-        }
-    }
-    let mut bands = [0usize; 5]; // 0, <25%, <50%, <75%, >=75%
-    let mut sparse_bytes = 0u64;
-    for l in &page_live {
-        let f = *l as f64 / 4096.0;
-        let b = if *l == 0 {
-            0
-        } else if f < 0.25 {
-            1
-        } else if f < 0.5 {
-            2
-        } else if f < 0.75 {
-            3
-        } else {
-            4
-        };
-        bands[b] += 1;
-        if f < 0.5 {
-            sparse_bytes += *l;
-        }
-    }
     // The regions: bytes that exactly this set of packages can reach and no
     // other package does.
     let mut region: HashMap<u32, u64> = HashMap::new();
-    let mut live: u64 = 0;
-    for (v, bits) in &mask {
+    let mut reachable: u64 = 0;
+    for (v, bits) in mask.values() {
         let w = weight(&h, *v) as u64;
         *region.entry(*bits).or_insert(0) += w;
-        live += w;
+        reachable += w;
     }
 
     if json {
         println!("{{");
         println!("  \"image\": {path:?},");
-        println!("  \"reachable_bytes\": {live},");
+        println!("  \"reachable_bytes\": {reachable},");
         println!("  \"live_bytes\": {live_all},");
         println!("  \"live\": {{\"pairs\": {live_pairs}, \"objects\": {live_objs}, \"code\": {live_code}}},");
         println!("  \"object_pages\": {{\"total\": {obj_pages}, \"empty\": {empty_pages}}},");
@@ -266,7 +206,7 @@ pub fn run(path: &str, json: bool) -> i32 {
         return 0;
     }
 
-    println!("{path}: {live} bytes reachable from {} packages", pkgs.len());
+    println!("{path}: {reachable} bytes reachable from {} packages", pkgs.len());
     println!("  {live_all} bytes live in all, against what the image carries:");
     println!("    pairs   {live_pairs:>9} live of {pair_high:>9}");
     println!("    objects {live_objs:>9} live of {obj_high:>9}");
@@ -282,15 +222,6 @@ pub fn run(path: &str, json: bool) -> i32 {
         "      {} KiB stranded on {} pages that still hold something live",
         dead.saturating_sub(blanked) / 1024,
         obj_pages - empty_pages
-    );
-    println!(
-        "    object pages by how full they are: {} empty, {} under a quarter, {} under half, {} under three quarters, {} fuller",
-        bands[0], bands[1], bands[2], bands[3], bands[4]
-    );
-    println!(
-        "    evacuating every page under half full would copy {} KiB and free {} pages",
-        sparse_bytes / 1024,
-        bands[1] + bands[2]
     );
     if homeless > 0 {
         println!("  ({homeless} symbols belong to no package)");

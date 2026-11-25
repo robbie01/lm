@@ -10,11 +10,12 @@ use clap::{Parser, Subcommand};
     name = "lmdev",
     version,
     about = "Test and inspect the Lisp machine",
-    long_about = "The test bench.\n\n\
-                  `cpu` checks the processor against the manual. `asm` checks \
-                  the Lisp assembler against an independent Rust encoder. \
-                  `compiler` puts source in one end and compares what comes \
-                  out of the far end, having been through everything."
+    long_about = "The test bench, and tools for looking inside an image.\n\n\
+                  `cpu` checks the processor against the manual, `asm` the Lisp \
+                  assembler against an independent Rust encoder, `compiler` \
+                  source against what it computes on the machine, `readers` \
+                  name resolution, `display` the window's filter, and `check` \
+                  runs the machine's own suites. `all` runs every one."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -62,7 +63,7 @@ enum Cmd {
     /// Run every suite, and the machine's own if kick.img is there
     All,
 
-    /// Measure the interpreter
+    /// Measure how many instructions a second the processor runs
     Bench,
 
     /// Compile and run one expression, and print what it evaluated to
@@ -74,7 +75,11 @@ enum Cmd {
         exprs: Vec<String>,
     },
 
-    /// Look inside an image without running it
+    /// What is in an image, without running it
+    ///
+    /// Counts the code, objects, pairs and symbols, and checks that code
+    /// holds no heap addresses and that no capability names what is not
+    /// there; fails if one does.
     Inspect {
         /// Image to examine
         #[arg(default_value = "kick.img")]

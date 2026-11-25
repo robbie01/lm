@@ -1,6 +1,6 @@
 //! The bootstrap reader. Text in, heap structure out, and nothing else.
 //!
-//! It knows how to make a list, a string, a number and a symbol. It does not
+//! It makes lists, vectors, strings, numbers, characters and symbols. It does not
 //! know what a package is, what `pkg:name` means, or that `in-package` is
 //! anything but a call. All of that lives in `lisp/read.lisp`, in one copy,
 //! and this reader exists only to get far enough to run it.
@@ -228,16 +228,19 @@ impl<'a, 'b> Reader<'a, 'b> {
         }
     }
 
+    /// Promoting, as a decimal literal does: one too wide for a fixnum is a
+    /// bignum.
     fn read_radix(&mut self, radix: u32) -> R<Option<V>> {
         let tok = self.token();
-        match i64::from_str_radix(&tok, radix) {
-            Ok(n) => Ok(Some(fix(n as i32))),
-            Err(_) => self.err(format!("bad radix-{radix} literal {tok:?}")),
+        match BigInt::parse_bytes(tok.as_bytes(), radix) {
+            Some(n) if !tok.starts_with('+') => Ok(Some(self.h.from_big(&n))),
+            _ => self.err(format!("bad radix-{radix} literal {tok:?}")),
         }
     }
 
+    /// A single character, a name such as `space`, or `x` and the code in
+    /// hex: the names `lisp/read.lisp` knows, and no others.
     fn read_char(&mut self) -> R<V> {
-        // A named character, or a single literal one.
         let first = match self.bump() {
             None => return self.err("end of input after #\\"),
             Some(c) => c,
@@ -257,17 +260,17 @@ impl<'a, 'b> Reader<'a, 'b> {
                 return Ok(chr(first as u32));
             }
             let c = match name.as_str() {
-                "space" => ' ',
-                "newline" | "linefeed" => '\n',
-                "tab" => '\t',
-                "return" => '\r',
-                "nul" | "null" => '\0',
-                "escape" | "esc" => '\x1b',
-                "backspace" => '\x08',
-                "delete" | "rubout" => '\x7f',
-                _ => return self.err(format!("unknown character name {name:?}")),
+                "space" => ' ' as u32,
+                "newline" => '\n' as u32,
+                "tab" => '\t' as u32,
+                "return" => '\r' as u32,
+                "backspace" => 8,
+                _ => match name.strip_prefix('x').map(|hex| u32::from_str_radix(hex, 16)) {
+                    Some(Ok(code)) => code,
+                    _ => return self.err(format!("unknown character name {name:?}")),
+                },
             };
-            return Ok(chr(c as u32));
+            return Ok(chr(c));
         }
         Ok(chr(first as u32))
     }
@@ -287,8 +290,6 @@ impl<'a, 'b> Reader<'a, 'b> {
                         'n' => '\n',
                         't' => '\t',
                         'r' => '\r',
-                        '0' => '\0',
-                        'e' => '\x1b',
                         other => other,
                     });
                 }
@@ -423,4 +424,31 @@ pub fn parse_number(tok: &str) -> Option<Num> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mach::Machine;
+
+    fn read_one(text: &str) -> String {
+        let mut m = Machine::new();
+        let mut h = Heap::new(&mut m);
+        h.format();
+        let v = Reader::new(&mut h, text, "<test>").read().unwrap().unwrap();
+        h.write(v)
+    }
+
+    /// A literal reads as `lisp/read.lisp` reads it: a radix literal too wide
+    /// for a fixnum is a bignum, as a decimal one is, and `#\xNN` is the
+    /// character with that code.
+    #[test]
+    fn literals_read_as_the_lisp_reader_reads_them() {
+        assert_eq!(read_one("#xffffffff"), "4294967295");
+        assert_eq!(read_one("#x-80000001"), "-2147483649");
+        assert_eq!(read_one("#x7fffffff"), "2147483647");
+        assert_eq!(read_one("4294967296"), "4294967296");
+        assert_eq!(read_one("#\\x41"), "#\\A");
+        assert_eq!(read_one("#\\x"), "#\\x");
+    }
 }
