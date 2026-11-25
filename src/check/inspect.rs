@@ -112,12 +112,8 @@ pub fn run(path: &str, names: &[String]) -> i32 {
         (h.g(LG_OBJ_PTR) - OBJ_BASE) / 1024,
         (h.g(LG_CONS_PTR) - CONS_BASE) / PAIR_BYTES
     );
-    let run = h.gv(LG_CONS_RUN);
     println!(
-        "  cons run {:#x}..{:#x} at {:#x}, boot list {} thunks, obarray {:#x}",
-        run.base(),
-        run.top(),
-        run.addr,
+        "  boot list {} thunks, obarray {:#x}",
         h.list_len(h.gv(LG_BOOTLIST)),
         h.gv(LG_OBARRAY).addr
     );

@@ -140,6 +140,13 @@ pub fn vkind(h: &Heap, v: V) -> u32 {
     }
 }
 
+/// The cons run with nothing in it: no bytes at the base of cons space, so
+/// the first pair cut from it faults and asks for a real one. It is not a
+/// pair, being no pair's length.
+pub fn empty_cons_run() -> Cap {
+    cap_to(CONS_BASE, 0, PERMS_PAIR)
+}
+
 /// A capability to `len` bytes at `base`, with `perms`, derived from the
 /// root. The bounds must be exactly representable.
 pub fn cap_to(base: u32, len: u32, perms: u32) -> Cap {
