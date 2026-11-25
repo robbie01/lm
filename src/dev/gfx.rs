@@ -223,8 +223,11 @@ impl Gfx {
             return true;
         }
         // Converting a frame takes the machine's own thread; do not convert
-        // many more than a display can show. A frame held back stays owed.
-        if !self.force && self.last_present.elapsed().as_micros() < 12_000 {
+        // many more than a display can show, which only a machine running
+        // ahead of the wall clock would. Half a frame apart and not a whole
+        // one, so that a frame shown late in its blank does not hold back the
+        // next, shown early in its own. A frame held back stays owed.
+        if !self.force && self.last_present.elapsed().as_micros() < 8_000 {
             return true;
         }
         self.owed = false;
