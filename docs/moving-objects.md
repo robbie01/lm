@@ -67,6 +67,34 @@ name no object, and the reset stub mints them again.
 On the machine, the pair compactor in gc.lisp, for the image collection.
 There is no object compactor in Lisp.
 
+## Identity
+
+A table keyed by identity has to find a key wherever the key has gone. A
+symbol hashes by its index, and any other object by the identity hash in
+the second word of its header: filled in the first time a table asks, from
+the object's address at the time, and copied with the rest of the header by
+every mover, both compactors included. An object can move any number of
+times and no table notices.
+
+A pair has no header, and a capability that is no object, a slot narrowed
+out of its vector or a stack pointer, names an address and nothing else, so
+both hash by address. A table holding such a key keeps the count of moves
+it laid its keys out at (`*moves*` in table.lisp), and one holding none
+keeps nil and never looks at the count. The pair compactor counts a move
+with interrupts still off, and an image counts one as it resumes, because
+the forge may have slid its object space while it was on the disk. A probe
+that misses in a table laid out before the last move lays the table out
+again and probes once more; a hit was found by `eq?` and is right whatever
+has moved. So a move costs nothing until a table that holds a pair misses,
+and then one rebuild of that table. Rehashing every table after a move
+would need a list of the tables, which would keep every one alive without
+weak references, and a side table of pair hashes would be keyed by address
+in its turn.
+
+A mover written later keeps both halves of this: it copies headers whole,
+and if it moves pairs, or what an unheaded capability names, it counts a
+move before anything can look in a table again.
+
 ## The options, in order
 
 **A low immobile region.** Make everything below a watermark immobile, and

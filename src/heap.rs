@@ -18,7 +18,9 @@
 //! nil is a read-only capability to the 16-byte cell at address 0, whose car
 //! and cdr hold nil, so `car` and `cdr` of nil need no test.
 //!
-//! An object's header word 0 is `(len << 8) | type`, and word 1 is 0. `len`
+//! An object's header word 0 is `(len << 8) | type`, and word 1 is its
+//! identity hash, 0 until the machine first asks for it (`identity-hash` in
+//! runtime.lisp), which a mover carries with the rest of the header. `len`
 //! counts elements: 8-byte value slots, or bytes for a string, a byte
 //! object or machine code. A payload whose length is not exactly representable as bounds is
 //! rounded up to one that is, and its base aligned to match; the space the

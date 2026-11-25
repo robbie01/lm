@@ -26,10 +26,11 @@
 
 ;; ---------------------------------------------------------------- allocation
 ;; An object is a header granule and its payload. The header's first word is
-;; (len << 8) | type and its second is zero, which is exactly a fixnum stored
-;; in the granule. The payload is a byte per element for a string, a byte
-;; vector or a function's text, which hold no capabilities, and a slot per
-;; element for the rest.
+;; (len << 8) | type and its second the object's identity hash, zero until
+;; something asks for it (`identity-hash`), so a new header is exactly a
+;; fixnum stored in the granule. The payload is a byte per element for a
+;; string, a byte vector or a function's text, which hold no capabilities,
+;; and a slot per element for the rest.
 (define (byte-payload? type)
   (cond ((%= type t-string) t)
         ((%= type t-bytes) t)
@@ -400,6 +401,53 @@
 ;; deterministically.
 (define (symbol-index s) (%lsh (%slot s sym-flags) -8))
 (define (symbol-flags s) (%logand (%slot s sym-flags) 255))
+
+;; Any other object's identity is a number in the second word of its header,
+;; which does not depend on where the object is: whatever moves an object
+;; copies its header with it. The allocator leaves the word zero, and the
+;; first request fills it in with the object's address at the time, in
+;; granules, which is never zero. Two objects share a number only when one
+;; has moved to where the other was when it was asked, which is a collision
+;; and nothing worse. Filling it in is a critical section, so two tasks
+;; asking at once agree. `obj` is an object: headed, based in object space.
+(define (identity-hash obj)
+  (let* ((at (%cap-set-addr (kernel-ref kb-objects) (%- (%cap-base obj) 4)))
+         (h (%cap-ld-word at 0)))
+    (if (%= h 0)
+        (without-interrupts
+          (set! h (%cap-ld-word at 0))
+          (if (%= h 0)
+              (begin (set! h (%lsh (%cap-base obj) -3)) (%cap-st-word! at 0 h))
+              nil)
+          h)
+        h)))
+
+;; What a table keyed by identity hashes (table.lisp). Symbols hash by
+;; identity, fixnums and characters by value, and any other object by its
+;; identity hash: none of these depends on where anything is. A pair has no
+;; header to keep a hash in, so it hashes by its address, counted in
+;; granules, and so does a capability that is no object, such as a slot
+;; narrowed out of its vector; a table holding such a key watches for moves.
+;; A hash only says where a probe starts: a key is found by `eq?`, which
+;; stays exact.
+;;
+;; The number is scattered before a table masks it down to a slot: Fibonacci
+;; hashing, then the high half folded into the low. Identities are handed out
+;; in order, so as they are they would fill a table in runs, and a table
+;; holding a few thousand of a machine's tens of thousands of symbols has keys
+;; that share their low bits: both make long runs for a probe to walk.
+(define (eq-hash k)
+  (let ((h (%* (cond ((%symbol? k) (%lsh (%slot k sym-flags) -8))
+                     ((%fixnum? k) k)
+                     ((%char? k) (%char->int k))
+                     ((%null? k) 0)
+                     ((%object? k)
+                      (let ((w (%cap-ld-word-at (%slot (%kernel) kb-objects)
+                                                (%- (%cap-base k) 4))))
+                        (if (%= w 0) (identity-hash k) w)))
+                     (else (%/ (%addr-of k) value-bytes)))
+               -1640531535)))
+    (%logxor h (%lsh h -16))))
 
 ;; ---------------------------------------------------------------- diagnostics
 (define (out-of-memory what)

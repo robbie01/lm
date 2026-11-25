@@ -53,7 +53,9 @@ enum Cmd {
     ///
     /// Every check is counted on the machine, which halts with exit code 0
     /// if all held and 1 if not. A scratch disk is attached so that the
-    /// disk driver's suite runs too.
+    /// disk driver's suite runs too, and the machine the last suite saves
+    /// to it is resumed, as it is and slid down by the forge, and checked
+    /// again.
     Check {
         /// Image to boot
         #[arg(default_value = "kick.img")]
@@ -189,16 +191,36 @@ fn main() -> std::process::ExitCode {
 
 /// Boot `image` headless with a scratch disk attached and type `(check)`,
 /// which runs every suite on the machine and halts with the verdict as the
-/// exit code.
+/// exit code. The last suite saves the machine to the disk; that image is
+/// resumed, and resumed again once the forge has slid its object space
+/// down, and each is asked `(tables-resumed)`, whether what moved is still
+/// found where it went.
 fn run_check(image: &str) -> bool {
     let disk = std::path::Path::new("target").join("check.disk");
+    let disk = disk.to_string_lossy().into_owned();
     let _ = std::fs::create_dir_all("target");
     let o = lm::boot::Options {
         image: image.to_string(),
         script: Some("(check)\n".to_string()),
         interactive: false,
-        disk: Some(disk.to_string_lossy().into_owned()),
+        disk: Some(disk.clone()),
         ..Default::default()
     };
-    lm::boot::boot(&o) == 0
+    if lm::boot::boot(&o) != 0 {
+        return false;
+    }
+    let slid = std::path::Path::new("target").join("check-slid.img");
+    let slid = slid.to_string_lossy().into_owned();
+    if lm::forge::compact::compact_image(&disk, &slid, false, false) != 0 {
+        return false;
+    }
+    [disk, slid].iter().all(|image| {
+        let o = lm::boot::Options {
+            image: image.clone(),
+            script: Some("(tables-resumed)\n".to_string()),
+            interactive: false,
+            ..Default::default()
+        };
+        lm::boot::boot(&o) == 0
+    })
 }

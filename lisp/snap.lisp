@@ -159,8 +159,11 @@
 ;; rebuilt, because the task that saved is not the task that resumes, and
 ;; the drivers start again in `exec-init`, each taking its page afresh. The
 ;; tasks that were saved never run again: the new Exec's lists do not hold
-;; them, and the collector takes them back with their stacks.
+;; them, and the collector takes them back with their stacks. An image on
+;; the disk may have had its object space slid down by the forge, so it
+;; counts a move before anything can look in a table.
 (define (resume-kickstart)
+  (note-move!)
   (kernel-set! kb-trap-hook (%symbol-value 'handle-trap))
   (set! *error-handler* (%symbol-value 'error-trap))
   (exec-init)

@@ -174,8 +174,9 @@ exact equality of tag, metadata and address; a character and a fixnum with
 the same payload differ in metadata.
 
 An object's header word 0 holds the type in its low eight bits and the
-length in elements above them; word 1 is zero. The capability to an object
-is bounded to its payload and has HD, so the header is outside the bounds
+length in elements above them; word 1 is the object's identity hash, zero
+until something asks for it. The capability to an object is bounded to
+its payload and has HD, so the header is outside the bounds
 and no holder of the object can write it. The types are symbol, string,
 vector, bytes, closure, record, float, port, bignum, code and text, a
 function's machine code. A string, a byte object or a text holds bytes, and
@@ -512,9 +513,17 @@ bindings back to where they stood when it started.
 
 **Symbols.** Interning gives every symbol a dense identity in its flags
 word, and `lisp/table.lisp` hashes on it: open addressing over two parallel
-vectors. `gensym` makes uninterned symbols, printed `#:g1`, so a macro's
-temporaries do not accumulate in the obarray; the image writer drops
-interned symbols that hold nothing and that nothing reaches.
+vectors. Any other object hashes by the identity hash in its header, filled
+in from its address the first time a table asks and copied with the header
+whenever the object moves, so neither depends on where anything is. A pair
+has no header and hashes by its address, as does a capability that is no
+object; a table holding such a key keeps the count of moves it was laid out
+at, the pair compactor and a resumed image count one, and a probe that
+misses in a table laid out before the last move looks again once the table
+has been laid out afresh. `gensym` makes uninterned symbols, printed
+`#:g1`, so a macro's temporaries do not accumulate in the obarray; the
+image writer drops interned symbols that hold nothing and that nothing
+reaches.
 
 **Numbers.** Fixnums are 32-bit machine integers, two's complement with no
 tag: `li a0, 5` makes the fixnum 5, and a word loaded from memory is a
@@ -665,7 +674,8 @@ collector is written in the language it collects, and runs in and reaches
 its own functions and constants through objects. Pairs are compacted only on the way into an image, by the
 compactor in gc.lisp: plan where every live pair goes, rewrite every
 capability to a pair to its destination with the same permissions and
-offset, slide. The tags say exactly where every pointer is, so the rewrite
+offset, slide, and count the move for the tables that hash a pair by its
+address. The tags say exactly where every pointer is, so the rewrite
 is a walk over memory. Forwarding is not stored per pair; each word of the
 mark bitmap, 256 bytes of cons space, records where the free pointer had
 reached when the walk arrived, and a lookup adds a popcount over the word.
@@ -965,7 +975,7 @@ The machine's own suites are Lisp, typed at the prompt. `lmdev check` boots
 an image headless with a scratch disk and types `(check)`, which runs every
 one of them, counts, and halts the machine with the verdict as its exit
 code; `lmdev all` includes it when `kick.img` is there. By hand, each suite
-is a function, and `(drivers)` needs a disk:
+is a function, and `(drivers)` and `(tables)` need a disk:
 
 ```
 lm kick.img --no-window --batch --disk scratch.disk \
@@ -989,7 +999,12 @@ once the collector has run, while an entry still held keeps its text, and
 that a walk which finds that text's old code object keeps it if the cycle
 is marking and passes over it if the cycle is sweeping.
 `(devices)` checks that the display refuses a number for a bitmap and
-keeps the bitmap it shows alive when nothing else holds it.
+keeps the bitmap it shows alive when nothing else holds it. `(tables)`,
+the last suite, keys a table by pairs, objects of every kind, symbols and
+numbers, saves the machine to the disk, which slides the pairs down, and
+checks that the table finds every key; `lmdev check` then resumes the
+saved image, and the same image with its object space slid down by `lmforge
+compact`, and types `(tables-resumed)` at each, which checks again.
 
 Instrumentation, all off by default:
 

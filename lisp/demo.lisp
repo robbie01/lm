@@ -251,7 +251,7 @@
   (set! *check-count* 0)
   (set! *check-failures* 0)
   (numbers) (words) (nesting) (talking) (locking) (blitting) (devices)
-  (drivers) (capabilities)
+  (drivers) (capabilities) (tables)
   (princ *check-count*) (princ " checks, ")
   (princ *check-failures*) (princ " failed") (newline)
   (%halt (if (= *check-failures* 0) exit-ok exit-error))))
@@ -1282,3 +1282,57 @@
       (num-check 'but-its-symbols-are-not (eq? (car k) 'a) t)))
   (princ "capabilities: done (nothing above = all correct)")
   (newline))
+
+;; ---------------------------------------------------------------- tables
+;; `(tables)` checks that a table finds its keys wherever they have gone. A
+;; pair has no header and hashes by its address, and saving the machine
+;; slides the pairs down; any other object hashes by the identity hash in
+;; its header, which goes with it when the forge slides object space. So a
+;; table of every kind of key is asked before the machine is saved and
+;; after, and `lmdev check` resumes the saved image, and the same image
+;; with its object space slid down by the forge, and has each ask again
+;; with `(tables-resumed)`. Saving needs a disk.
+(define *kept-table* nil)
+(define *kept-keys* nil)
+
+;; Each kept key, looked up, answers its own place in the list.
+(define (kept-keys-found)
+  (let ((n 0) (i 0))
+    (dolist (k *kept-keys*)
+      (if (eq? (table-ref *kept-table* k 'missing) i) (set! n (+ n 1)) nil)
+      (set! i (+ i 1)))
+    n))
+
+(define (tables)
+  (let* ((pair (list 'a 'list))
+         (keys (list pair (cons 1 2) (vector 3 4) "a string" (make-bytes 5)
+                     (lambda (x) x) (make-table) 'a-symbol 6 #\7 nil))
+         (i 0))
+    (while (< i 300) (set! keys (cons (list i) keys)) (set! i (+ i 1)))
+    (set! *kept-keys* keys)
+    (set! *kept-table* (make-table))
+    (set! i 0)
+    (dolist (k keys) (table-set! *kept-table* k i) (set! i (+ i 1)))
+    (num-check 'a-table-finds-its-keys (kept-keys-found) (length keys))
+    (if (= (disk:read-blocks 0 1 (make-bytes 512)) 1)
+        (begin
+          (princ "tables: no disk attached, so no saving - start with --disk FILE")
+          (newline))
+        (let ((was (%addr-of pair)))
+          (save-image)
+          (num-check 'saving-moved-the-pairs (= (%addr-of pair) was) nil)
+          (num-check 'and-the-table-still-finds-them (kept-keys-found) (length keys)))))
+  (princ "tables: done (nothing above = all correct)")
+  (newline))
+
+;; What `lmdev check` types at a saved image it has resumed: the table kept
+;; finds its keys, and the machine stops with the verdict.
+(define (tables-resumed)
+  (set! *check-count* 0)
+  (set! *check-failures* 0)
+  (num-check 'a-resumed-table-finds-its-keys (kept-keys-found) (length *kept-keys*))
+  (table-set! *kept-table* (list 'one 'more) 'added)
+  (num-check 'and-takes-new-ones (table-count *kept-table*) (+ (length *kept-keys*) 1))
+  (princ *check-count*) (princ " checks, ")
+  (princ *check-failures*) (princ " failed") (newline)
+  (unsafe (%halt (if (= *check-failures* 0) exit-ok exit-error))))

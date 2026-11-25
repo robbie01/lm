@@ -1310,6 +1310,8 @@
 ;; throughout. Afterwards every live pair is below the new top, everything
 ;; above it is zero, there are no holes, and every run has been given up.
 ;; The map is stale everywhere below the frontiers; the caller clears it.
+;; A pair's address is its hash in a table, so the move is counted before
+;; anything can look in one.
 (define (compact)
   (let* ((cons-hi (cons-ptr))
          (top (plan-cons cons-hi)))
@@ -1319,6 +1321,7 @@
     (update-pairs cons-hi)
     (update-range (object-space) obj-base (obj-ptr) cons-hi)
     (move-cons cons-hi)
+    (note-move!)
     (blank (cons-space) top cons-hi)
     (if (%> cons-hi *cons-dirty-top*) (set! *cons-dirty-top* cons-hi) nil)
     (set-cons-ptr! top)
