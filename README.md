@@ -392,7 +392,9 @@ caller's code object in `s11`, and its prologue after the arity check is two
 instructions. A leaf may cons, since a pair is no call; a collection begun
 in the refill sees every register exactly. Leaf-ness is decided from the
 source before code is emitted, and checked afterwards by reading the bytes:
-a leaf that writes `ra` is a build failure.
+a leaf that writes `ra` is a build failure. An open-coded operator reads a
+leaf's locals in their registers and can write its result straight into
+one, so `(set! i (+ i 1))` is one `faddio` on its register.
 
 **Self-calls.** A function calling its own name, with the right number of
 arguments and nothing local shadowing the name, reloads the unsealed closure
@@ -403,7 +405,8 @@ inside it, the same bargain the open-coded operators make.
 **Open coding.** `car`, `+`, `<`, `vector-ref`, record accessors and about
 fifty other operators compile to their instructions when called with the
 right number of arguments. A comparison in a test position becomes the
-branch. Redefining one of these does not affect code already compiled
+branch, and a `while` tests at the bottom, so a turn of a loop is its body
+and one branch back. Redefining one of these does not affect code already compiled
 against it.
 
 ## The language
