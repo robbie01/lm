@@ -37,18 +37,24 @@
           (present win))))))
 
 (define (balls . opts)
-  (let* ((n (if (%cons? opts) (%car opts) 8))
-         (win (make-demo-window 420 300 "Balls"))
-         (i 0))
+  (let ((n (if (%cons? opts) (%car opts) 8))
+        (win (make-demo-window 420 300 "Balls")))
     (win-fill win 0 0 (win-inner-w win) (win-inner-h win) white)
-    ;; The named colours from 2, after black and white: a white ball on the
-    ;; white field would not be seen.
-    (while (%< i n)
-      (add-task (string-append "ball" (number->string i))
-                0
-                (ball-task win (%+ 2 (%mod i 11)) (%+ 3 (%* i 37))))
-      (set! i (%+ i 1)))
+    ;; The window's task starts the balls as its children and then has
+    ;; nothing more to do, so closing the window ends every ball with it.
+    (set-win-task! win (add-task "balls" 0 (lambda () (start-balls win n))))
     win))
+
+;; The named colours from 2, after black and white: a white ball on the
+;; white field would not be seen.
+(define (start-balls win n)
+  (let ((i 0))
+    (while (%< i n)
+      (spawn (string-append "ball" (number->string i))
+             0
+             (ball-task win (%+ 2 (%mod i 11)) (%+ 3 (%* i 37))))
+      (set! i (%+ i 1))))
+  (wait (exec::alloc-signal (this-task))))
 
 ;; ---------------------------------------------------------------- mandelbrot
 ;; Fixed point with twelve fractional bits. A fixnum holds thirty-one bits and
