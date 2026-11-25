@@ -169,18 +169,19 @@
 (define gc-clear-w 1024)
 
 ;; n bytes of zero at `at`, as rows the blitter can take, through the
-;; collector's own descriptor ring.
+;; collector's own descriptor ring. The chip is handed the root narrowed to
+;; the rows and to storing data.
 (define (gc-fill-bytes at n)
   (if (%<= n 0)
       nil
       (let* ((w (if (%< n gc-clear-w) n gc-clear-w))
              (rows (%/ (%+ n (%- w 1)) w))
              (b (gc-blit-descriptor)))
-        (poke (%+ b bl-dst) at)
-        (poke (%+ b bl-w) w)
-        (poke (%+ b bl-h) rows)
-        (poke (%+ b bl-dmod) w)
-        (poke (%+ b bl-val) 0)
+        (%cap-st! b bl-dst (%cap-and-perms (%cap-bounds (%from-addr at) (%* rows w)) perm-sd))
+        (%cap-st-word! b bl-w w)
+        (%cap-st-word! b bl-h rows)
+        (%cap-st-word! b bl-dmod w)
+        (%cap-st-word! b bl-val 0)
         (blit-go b op-fill)))
   nil)
 
@@ -371,10 +372,19 @@
 ;; context with `scan-context`.
 (define (extra-roots) nil)
 
+;; What the blitter holds for blits it has not finished: every tagged granule
+;; of every task's descriptor ring (see `*blit-rings*`).
+(define (scan-blit-rings)
+  (let ((p *blit-rings*))
+    (while (%cons? p)
+      (scan-granules (%car p) (%+ (%car p) blit-ring-bytes))
+      (set! p (%cdr p)))))
+
 ;; Low memory holds the globals, each an 8-byte slot holding a value or a
 ;; number, so every tagged granule below the pool is a root.
 (define (roots)
   (scan-granules 0 pool-base)
+  (scan-blit-rings)
   (gc-push (%this-task))
   ;; This task's own stack, from where it stands.
   (scan-stack (%stack-pointer))
