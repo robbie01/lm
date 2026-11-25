@@ -23,7 +23,7 @@ $ ./target/release/lmforge build   # compile the Lisp sources into kick.img
 $ ./target/release/lm              # boot it
 
 LM 0.1 - a lisp machine
-cons space 8192k pairs, object space 65536k, 1016k used
+cons space 8192k pairs, object space 65536k, 1600k used
 exec: 6 tasks
 type (help) for what to try
 
@@ -74,7 +74,7 @@ interpreter nor the tests.
 | `lisp/read.lisp` `lisp/print.lisp` | the reader and the printer |
 | `lisp/asm.lisp` `lisp/compile.lisp` | the assembler and the compiler |
 | `lisp/gc.lisp` | the collector |
-| `lisp/hw.lisp` | the chips: devices, bitmaps, rastports, the blitter, the pool |
+| `lisp/hw.lisp` | the chips: devices, bitmaps, rastports, the blitter |
 | `lisp/sys.lisp` | the kickstart: traps, fault reports, the prompt, rebuild |
 | `lisp/exec.lisp` | the kernel: tasks, signals, ports, mutexes, interrupts |
 | `lisp/disk.lisp` `lisp/input.lisp` `lisp/gfx.lisp` `lisp/console.lisp` | the drivers |
@@ -264,29 +264,29 @@ and the value:
 
 ```
 > (car 5)
-*** car: expected a pair, got 5, at pc a0ff02c
+*** car: expected a pair, got 5, at pc 919198c
 > (vector-ref "abc" 0)
-*** vector-ref: expected a vector, got "abc", at pc a0ff886
+*** vector-ref: expected a vector, got "abc", at pc 91921e6
 > (let ((f 5)) (f 1))
-*** call: expected a function, got 5, at pc a0ef86e
+*** call: expected a function, got 5, at pc 91902ee
 > (+ nil 1)
-*** +: expected a number, got nil, at pc a100894
+*** +: expected a number, got nil, at pc 91931f4
 > (car undefined)
-*** unbound variable: undefined, at pc a101096
+*** unbound variable: undefined, at pc 91939f6
 > (set-car! nil 1)
-*** set-car!: nil has no cell, at pc a101866
+*** set-car!: nil has no cell, at pc 91941c6
 > (vector-ref (make-vector 3 0) 5)
-*** vector-ref: index 5 is outside a vector of 3, at pc a10207c
+*** vector-ref: index 5 is outside a vector of 3, at pc 914cfdc
 > (define w (%cap-and-perms (vector 1 2 3) (lognot perm-sd)))
 w
 > (vector-set! w 0 9)
-*** vector-set!: #(1 2 3) is read-only, at pc a102e46
+*** vector-set!: #(1 2 3) is read-only, at pc 9195746
 > (%cap-ld-word (make-bytes 8) 8)
-*** load: outside the bounds of #<bytes 8>, at pc a103688
+*** load: outside the bounds of #<bytes 8>, at pc 9195f88
 > (define (deep n) (+ 1 (deep (+ n 1))))
 deep
 > (deep 0)
-*** stack overflow at pc a103f26, value 41fd0
+*** stack overflow at pc 9196826, value 9033fd0
 ```
 
 Each report is followed by a backtrace.
@@ -299,10 +299,11 @@ still bounded to its task's stack, so nothing beneath a stack can be
 written whatever the limit says.
 
 Traps nest. MScratchC names the frame a trap saves into: the running task's
-context block at the outermost level, and a frame from an array of eight
-below that. A trap inside the handler is normal, because the handler's own
-arithmetic may widen and its own pairs may use up the cons run. Nine deep
-halts the machine with exit code 9.
+context at the outermost level, and below that one of eight frames, objects
+the forge made and a vector in a low global holds. A trap inside the
+handler is normal, because the handler's own arithmetic may widen and its
+own pairs may use up the cons run. Nine deep halts the machine with exit
+code 9.
 
 What the processor guarantees, what `unsafe` still means and what is
 unchecked is in [docs/memory-safety.md](docs/memory-safety.md).
@@ -314,14 +315,18 @@ unchecked is in [docs/memory-safety.md](docs/memory-safety.md).
 0x0000_0100  low-memory globals, one 8-byte slot each (the lg-* names in layout.lisp)
 0x0000_0400  the free bins of object space
 0x0000_0800  the reset stub, 256 bytes, where the processor starts
-0x0000_2000  the pool: raw memory for stacks, contexts, descriptors
-0x0100_0000  unused, 16 MiB
-0x0200_0000  cons space, 128 MiB, eight million pairs
-0x0A00_0000  object space, 64 MiB, machine code among the objects, swept in
-             place; the forge compacts it
-0x0E00_0000  the mark bitmap, the mark stack, scratch
+0x0100_0000  cons space, 128 MiB, eight million pairs
+0x0900_0000  object space, 64 MiB: every object, machine code, stacks and
+             register contexts among them, swept in place; the forge
+             compacts it
+0x0D00_0000  the mark bitmap, the object-start map, the mark stack, scratch
 0xF000_0000  device pages, 4 KiB each
 ```
+
+The low page is the first 4 KiB, and an image saves it whole; nothing lies
+between it and cons space, which starts at 16 MiB so that its runs fall on
+round boundaries. Everything the machine hands out is a pair or an object,
+and the collector is the only thing that frees one.
 
 Machine code is an object like any other. A function's code is a text, a
 byte object no capability can be stored in, and what reaches it is its
@@ -333,6 +338,12 @@ machine stands at a fixed address but the reset stub, which the processor
 needs to find with nothing else set up; it lies in the low block, which an
 image saves whole. The trap stub is a text like the rest, and MTCC its
 entry, which the reset stub loads from `lg-trap-entry`.
+
+A stack is an object too, a `t-stack`, and so is a task's register
+context, a `t-context` of thirty-two slots. The boot stack, the trap stack,
+the boot context and the frames for nested traps are objects the forge
+makes, which low globals hold and the stubs load: `lg-boot-stack`,
+`lg-trap-stack`, `lg-trapsave` and `lg-trap-nest`.
 
 Every slot is 8 bytes: a global, a value slot of an object, a frame slot, a
 saved register. A low global that holds an address holds it as a fixnum,
@@ -397,11 +408,13 @@ sc            cdr, 8(a0)
 The bounds check is the limit check. When the run is used up the
 `csetboundsimm` faults on `gp`; the trap handler hands the task a fresh run
 without allocating, writes it into the saved `gp` and the live one, and the
-instruction runs again. Each task allocates out of its own run, carved up to
-256 KiB at a time on boundaries where its bounds are exact, so the sequence
-needs no lock and a timer interrupt cannot land between two tasks' stores. A
-task starts on an empty run, bounded to no bytes, and its first pair asks
-for a real one.
+instruction runs again. Each task allocates out of its own run, so the
+sequence needs no lock and a timer interrupt cannot land between two tasks'
+stores. A task starts on an empty run, bounded to no bytes, and its first
+pair asks for a real one: 4 KiB, and each run after it twice the last, up
+to 256 KiB, carved where its bounds are exact. A task that makes a few
+pairs and ends takes a few pairs' worth of cons space, and a busy one
+refills seldom.
 
 **Leaves.** A function that calls nothing builds no frame: `ra` survives, and
 no callee can clobber its locals. Its locals live in `s3` to `s10`, its
@@ -487,8 +500,8 @@ the end, a store through a read-only reference is a report naming the
 value, never a corrupted word. The raw vocabulary is what reaches memory by
 number or touches the machine's state: `%root`, `%from-addr`, the loads and
 stores through DDC, `%slot`, the CSR and context operations, `open-closure`,
-and the functions that hand out raw memory or make a device's page, such as
-`peek`, `poke`, `alloc-pool` and `device-page`. Each such name carries a bit in
+and the functions that reach memory by number or make a device's page, such
+as `peek`, `poke` and `device-page`. Each such name carries a bit in
 its symbol, and the compiler refuses a call to one, or a reference to one as
 a value, unless the site is inside an `unsafe` form or the file said
 `(unsafe-file)` after its `in-package`:
@@ -535,11 +548,16 @@ Mark, then sweep in place, in slices. A collection is a cycle:
 
 The collector is precise everywhere, because the machine is: a granule holds
 a pointer if and only if its tag is set, and only a capability store sets
-one. The roots are the tagged granules of low memory, of every stack from
-its stack pointer to its top, and of every saved register context. Marking
-an object is pushing every tagged granule of its payload; the type matters
-only to skip strings, byte objects and texts, which hold none. Nothing is guessed,
-so nothing is pinned. What the port to capabilities took away: the
+one. The roots are the tagged granules of the low page, of every stack in
+use from its stack pointer to its top, and of every register context in
+use: the running task's stack, the contexts of the traps in progress, and
+every suspended task's. Marking an object is pushing every tagged granule
+of its payload; the type matters only to skip strings, byte objects and
+texts, which hold none, and stacks and contexts, whose slots in use the
+roots have scanned and whose other slots hold whatever an earlier call or a
+long-dead register left there. A stack or a context is kept by what holds
+it, a task, a low global, a frame pointer into it, like any object, and
+freed with its task. Nothing is guessed, so nothing is pinned. What the port to capabilities took away: the
 allocator's mask of live registers, the conservative scan of a suspended
 task's registers and the pins it left, and the rule that kept every word
 between `sp` and the closure slot a tagged value.
@@ -552,9 +570,9 @@ narrowed to a car or to a vector's slot keeps its pair or its vector, and the
 processor's barrier and both compactors follow the same rule. An entry or a
 return address keeps its function's text alive the same way, with nothing
 to say which code object the text belongs to: the code object is kept by
-the closures and frames that hold it. A stack, a device page or a pool
-block is somebody else's; a task's cons run keeps at most the one pair at
-its base.
+the closures and frames that hold it. A stack pointer or a frame pointer
+keeps its stack the same way. A device page is somebody else's; a task's
+cons run keeps at most the one pair at its base.
 
 Free memory holds no tags. The sweep zeroes every dead object that could
 hold a pointer and every dead stretch of pairs, so an allocator's stores
@@ -569,10 +587,20 @@ would overwrite a tagged granule in cons or object space whose object is
 unmarked traps with cause 29 before writing; the handler marks that object
 and the store re-executes. So the collector sees a snapshot: nothing
 reachable when the cycle began can be lost, because the last copy of a
-pointer cannot be overwritten unseen. Everything allocated during the cycle
-is black from the start, a run of pairs by marking the run when it is handed
-out, an object when it is taken, so nothing new needs tracing and the roots
-are scanned once.
+pointer cannot be overwritten unseen. A store into a stack or a context is
+let through: one in use was scanned whole when the cycle began, so what it
+held then is marked already, and a frame pushed or a register saved since
+over a stale pointer loses nothing. Without that a context switch, which
+saves thirty-one registers, and every call that pushes a frame would trap
+over whatever an earlier one left, and asking which object holds each
+granule would cost a rebuild a quarter of its time. The store's authority
+says it instead: a stack pointer, a frame pointer and a context's
+capability are based at the payload of their object, whose header, at an
+object start, says what it is, which is two loads. A store through DDC is
+always watched. Everything allocated during the cycle is black from the
+start, a run of pairs by marking the run when it is handed out, an object
+when it is taken, so nothing new needs tracing and the roots are scanned
+once.
 
 A cycle is scheduled by budget: when allocation since the last reaches
 twice the live data or 8 MiB, whichever is more. The longest stretch with
@@ -626,16 +654,16 @@ machine, so the compiler and macros doing the work are the new ones;
 table for the image; `snap:save-fresh` warm-resets the machine through its
 reset stub into the image's own `finish-fresh`, which gives every symbol what
 the table says, collects from the image's own roots, and writes the file.
-The forge then slides object space down in it and blanks the pool's scratch,
-which a fresh image writes before it reads. The result is a fresh image,
-not an updated one.
+The forge then slides object space down in it and blanks the stacks and
+frames the stubs stand on, which a fresh image writes before it reads. The
+result is a fresh image, not an updated one.
 
 ```
 lmforge build                       kick.img, 1.2 MiB
 lmforge rebuild --from kick.img     next.img
 lmforge rebuild --check             compile everything twice, collect, write nothing
 lmforge compact [-f IMG] [-o OUT]   slide object space down in a saved image;
-                                    --fresh blanks the pool's scratch too
+                                    --fresh blanks the stubs' stacks and frames too
 lmforge layout                      regenerate lisp/layout.lisp from the Rust definitions
 ```
 
@@ -658,10 +686,12 @@ restores from there on the way out, so switching tasks is pointing MScratchC
 at another task's block. Preemption is the timer interrupt; a task that
 blocks asks for a reschedule with an `ecall`, so the switch always happens
 inside the handler. Which task is running is the register `s2`. A task's
-stack and its context block come from the pool, and the task holds each as a
-capability bounded exactly to it, sealed with an otype of the kernel's: a
-task record is anybody's to read, and its frames and saved registers are
-nobody's but the kernel's.
+stack and its context are objects, and the task holds each as a capability
+bounded exactly to it, sealed with an otype of the kernel's: a task record
+is anybody's to read, and its frames and saved registers are nobody's but
+the kernel's. When nothing holds the task, the collector takes back all
+three; a task that ends lets go of them at the switch that takes it off
+the processor.
 
 **Signals.** Four bits are fixed: `sigf-vblank` (5), `sigf-blit` (7),
 `sigf-mutex` (8) and `sigf-timer` (9), the same bit in every task, so waking
@@ -737,18 +767,20 @@ when the last reference goes. Drawing goes through a rastport, a bitmap with
 an origin and a clip region.
 
 **The blitter** is asynchronous. A task fills a descriptor from its own ring
-of eight and links it onto the chain; the chip walks the chain on its own
-clock, charged by bandwidth, and writes a done word back into each
-descriptor. A descriptor's source, destination and link are capabilities,
-a bitmap's pixels among them, and the chip refuses a transfer they do not
-cover, moving nothing and saying why in the done word; the disk controller
-likewise takes its buffer as a capability. A descriptor is pool memory, so
-taking and linking one are unsafe names, and the rectangle calls in
-hw.lisp, which take bitmaps, are how everything else blits. `blit-sync`
-waits for this task's last descriptor,
-sleeping on `sigf-blit` if the wait would be long; `blit-drain` waits for
-the chip. Anything that reads or writes pixels directly calls `blit-sync`
-first.
+of eight, a vector its binding holds, and links it onto the chain; the chip
+walks the chain on its own clock, charged by bandwidth, and writes a done
+word back into each descriptor. A descriptor's source, destination and link
+are capabilities, a bitmap's pixels among them, and the chip refuses a
+transfer they do not cover, moving nothing and saying why in the done word;
+the disk controller likewise takes its buffer as a capability. The
+collector marks through a ring as through any vector, so what a blit in
+flight names stays alive until it lands, and a task that ends waits for its
+ring first. A descriptor is what the chip acts on, so taking and linking
+one are unsafe names, and the rectangle calls in hw.lisp, which take
+bitmaps, are how everything else blits. `blit-sync` waits for this task's
+last descriptor, sleeping on `sigf-blit` if the wait would be long;
+`blit-drain` waits for the chip. Anything that reads or writes pixels
+directly calls `blit-sync` first.
 
 Details of the model are in [docs/drivers.md](docs/drivers.md).
 
@@ -940,10 +972,9 @@ drawn it.
 - Marking costs about 220 cycles a pair, and while a cycle is marking the
   program allocating pays for it.
 - Calls with more than eight arguments are never tail calls.
-- Nothing is temporally safe outside the collector's heap. The pool holds
-  stacks, contexts and descriptors by number; `free-pool` gives a block back
-  while capabilities and addresses to it may still be held, nothing revokes
-  them, and a stale one reaches whatever the block holds next.
+- Nothing is freed by hand, so a capability always names the block it was
+  made for; an address held as a number does not, and `unsafe` code that
+  makes one a capability again reaches whatever is there now.
 - The root is everything. Code compiled `unsafe` can make any capability,
   including one that writes an object's header or opens any closure.
 - `eq?` is exact: two capabilities to the same object with different

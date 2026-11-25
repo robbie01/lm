@@ -601,13 +601,14 @@ unsafe fn st_data(m: &mut Machine, a: u32, f: u32, v: u32) {
     }
 }
 
-/// The write barrier, asked before every store into RAM.
+/// The write barrier, asked before every store into RAM, with the register
+/// the store goes through, or `CAPEX_REG_DDC`.
 #[inline(always)]
-fn barrier(m: &Machine, a: u32, sz: u32) -> Option<u32> {
+fn barrier(m: &Machine, a: u32, sz: u32, who: u32) -> Option<u32> {
     if m.gcmode & 1 == 0 {
         None
     } else {
-        m.barrier_hit(a, sz)
+        m.barrier_hit(a, sz, who)
     }
 }
 
@@ -700,7 +701,7 @@ fn op_store(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     if f < 4 && fits(f, a) {
         let sz = SIZE[f as usize];
         let need = store_needs(m, f, v);
-        if authority(m, s, need, a, sz).is_some() && barrier(m, a, sz).is_none() {
+        if authority(m, s, need, a, sz).is_some() && barrier(m, a, sz, s).is_none() {
             store(m, a, f, v);
             next!(m, pc.wrapping_add(4), fuel - 1)
         }
@@ -718,7 +719,7 @@ fn op_ddc(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         let (f, v) = (rd(w), rs2(w));
         if f < 4 && fits(f, a) {
             let sz = SIZE[f as usize];
-            if ddc_auth(m, store_needs(m, f, v), a, sz) && barrier(m, a, sz).is_none() {
+            if ddc_auth(m, store_needs(m, f, v), a, sz) && barrier(m, a, sz, CAPEX_REG_DDC).is_none() {
                 store(m, a, f, v);
                 next!(m, pc.wrapping_add(4), fuel - 1)
             }
@@ -871,7 +872,7 @@ fn mem_slow(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
             w_(m, d.data, v);
         }
     } else if d.store {
-        if let Some(g) = barrier(m, d.a, sz) {
+        if let Some(g) = barrier(m, d.a, sz, who) {
             return m.fault(C_BARRIER, g, pc, fuel);
         }
         store(m, d.a, d.f, d.data);
@@ -1442,7 +1443,7 @@ fn op_ref(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
             if hh & (READY | PAIR_MASK | M_SD | M_SC) == READY | TAG | M_SD | M_SC
                 && a & 7 == 0
                 && in_win(a, m.wb[k], m.wl[k], 8)
-                && barrier(m, a, 8).is_none()
+                && barrier(m, a, 8, s).is_none()
             {
                 unsafe { st_cap(m, a, rs2(w)) };
                 next!(m, pc.wrapping_add(4), fuel - 1)
@@ -1550,7 +1551,7 @@ fn ref_slow(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
                 Err((cause, tval)) => return m.fault(cause, tval, pc, fuel),
             }
             if store {
-                if let Some(g) = barrier(m, a, 8) {
+                if let Some(g) = barrier(m, a, 8, s) {
                     return m.fault(C_BARRIER, g, pc, fuel);
                 }
                 unsafe { st_cap(m, a, rs2(w)) };
@@ -1737,7 +1738,7 @@ fn op_index(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         return capfault(m, s, code, pc, fuel);
     }
     if f & 1 != 0 {
-        if let Some(g) = barrier(m, a, sz) {
+        if let Some(g) = barrier(m, a, sz, s) {
             return m.fault(C_BARRIER, g, pc, fuel);
         }
         if bytes {
@@ -1912,7 +1913,7 @@ fn c_lc(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 fn c_sw(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let s = rcs(w, 7);
     let a = r(m, s).wrapping_add(clw_imm(w));
-    if auth(m, s, M_SD, a, 4) && barrier(m, a, 4).is_none() {
+    if auth(m, s, M_SD, a, 4) && barrier(m, a, 4, s).is_none() {
         let v = r(m, rcs(w, 2));
         unsafe { m.wr32(a, v) };
         next!(m, pc.wrapping_add(2), fuel - 1)
@@ -1926,7 +1927,7 @@ fn c_sc(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let a = r(m, s).wrapping_add(clc_imm(w));
     let v = rcs(w, 2);
     let need = if h(m, v) & TAG != 0 { M_SD | M_SC } else { M_SD };
-    if a & 7 == 0 && auth(m, s, need, a, 8) && barrier(m, a, 8).is_none() {
+    if a & 7 == 0 && auth(m, s, need, a, 8) && barrier(m, a, 8, s).is_none() {
         unsafe { st_cap(m, a, v) };
         next!(m, pc.wrapping_add(2), fuel - 1)
     }
@@ -2069,7 +2070,7 @@ fn c_lcsp(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 #[inline(never)]
 fn c_swsp(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let a = r(m, 2).wrapping_add(swsp_imm(w));
-    if auth(m, 2, M_SD, a, 4) && barrier(m, a, 4).is_none() {
+    if auth(m, 2, M_SD, a, 4) && barrier(m, a, 4, 2).is_none() {
         let v = r(m, (w >> 2) & 31);
         unsafe { m.wr32(a, v) };
         next!(m, pc.wrapping_add(2), fuel - 1)
@@ -2082,7 +2083,7 @@ fn c_scsp(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let a = r(m, 2).wrapping_add(scsp_imm(w));
     let v = (w >> 2) & 31;
     let need = if h(m, v) & TAG != 0 { M_SD | M_SC } else { M_SD };
-    if a & 7 == 0 && auth(m, 2, need, a, 8) && barrier(m, a, 8).is_none() {
+    if a & 7 == 0 && auth(m, 2, need, a, 8) && barrier(m, a, 8, 2).is_none() {
         unsafe { st_cap(m, a, v) };
         next!(m, pc.wrapping_add(2), fuel - 1)
     }

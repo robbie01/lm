@@ -48,14 +48,15 @@ cleared; a disk command answers `disk-refused`. What either chip writes is
 data, its tags cleared.
 
 **And in time.** A capability a chip holds for a transfer it has not
-finished keeps its object alive. The blitter clears a descriptor's
-capability slots as it finishes it, so the tagged granules of the tasks'
-descriptor rings are exactly what blits in flight hold, and the collector
-takes them as roots: a bitmap dropped while a blit into it is still running
-is freed by a later collection, after the blit has landed. The disk takes
-its buffer out of the register when a command starts and drops it when the
-command ends, and the command's caller is blocked holding the buffer
-throughout.
+finished keeps its object alive. A blitter descriptor is a run of slots in
+its task's ring, a vector the task's binding holds, so the collector marks
+what a blit in flight names as it marks through any vector; the chip clears
+a descriptor's capability slots only once it has finished with them, and a
+task that ends waits for its ring to drain before it lets go of it. A
+bitmap dropped while a blit into it is still running is freed by a later
+collection, after the blit has landed. The disk takes its buffer out of the
+register when a command starts and drops it when the command ends, and the
+command's caller is blocked holding the buffer throughout.
 
 **Unforgeability, by tags.** A granule's tag is out of band, and only a
 capability store from a tagged register sets it. Integer instructions write
@@ -70,7 +71,9 @@ from, stored into, narrowed or moved; its free variables are the closure's
 own code's. A return address is a sentry: it can be jumped to, at its own
 address, and nothing else. A task's stack and saved registers are sealed in
 its record with an otype of the kernel's, so anyone can name a task and
-only the task and the kernel can read its frames. Opening a sealed
+only the task and the kernel can read its frames. A task's descriptor ring,
+and a descriptor anywhere but in the hands of the code filling it, is
+sealed with an otype of the chips' the same way. Opening a sealed
 capability by other means takes an SE authority, and the only one is the
 root. This is what a driver's device page rests on: the driver keeps it in
 its closures and its frames, and nothing else holds it.
@@ -91,8 +94,9 @@ and `set-cdr!` check for a pair; the indexed forms check the type in the
 header, that the index is a fixnum, and the bound; a call checks for a
 closure and the prologue the arity; fixnum arithmetic checks both operands
 and widens on overflow; the stack limit stops a frame before it is built;
-and the write barrier now watches every store, raw or checked, while a
-collection is marking.
+and the write barrier watches every store, raw or checked, while a
+collection is marking, but one into a stack or a register context, which
+the collector scanned whole when marking began.
 
 `(capabilities)` checks each of these at the prompt.
 
@@ -116,9 +120,8 @@ compiler and the processor.
 | `open-closure` | a closure unsealed with the root | its free variables and entry |
 | `%set-context!` `%set-stack-limit!` `%set-gc-mode!` `%ecall` `%disable` `%enable` `%cons-run` `%set-cons-run!` `%set-this-task!` `%halt` | the machine's own state | arbitrary machine state |
 | `task-stack` `task-context` | a task's stack or saved registers, unsealed | another task's frames and registers |
-| `alloc-pool` `free-pool` | pool memory, by number | a freed block reused under a holder; never traced |
 | `device-page` | any device's page, made from the root | any register of any device, one a driver holds included |
-| `blit-descriptor` `blit-go` | a descriptor: pool memory that holds capabilities | a descriptor written after it was linked, under the chip |
+| `blit-descriptor` `blit-go` | a descriptor the chip reads, unsealed | a descriptor written after it was linked, under the chip |
 | `code-object-at`, `refill-cons-run` in gc | a code object by its text's address, a fresh cons run | the collector's invariants |
 
 What left the list with the port: `%addr-of` is safe, because a number is
@@ -145,23 +148,31 @@ was given.
 
 ## What remains unchecked
 
-**Temporal safety of the pool.** The collector's heap is temporally safe: a
-block is freed only when no tag anywhere names it, and whatever in it could
-hold a pointer is zeroed as it is freed. The pool is not the collector's. `alloc-pool` hands out a block by
-number, a task's stack and context are capabilities derived from the root
-over pool blocks, and `free-pool` gives a block back without finding what
-still names it. A stale stack or context capability, or a stale address
-used through DDC, reaches whatever the block holds next. There is no
-revocation. `alloc-pool` zeroes the block it hands out, so the new owner
-never sees the old one's data, but the old owner can see the new one's.
+**Temporal safety, outside the capabilities.** Nothing is freed by hand.
+Every block of RAM the machine hands out is a pair or an object in the
+collector's heap: a value, a function's text, a task's stack and register
+context, a trap frame, the trap and boot stacks, a descriptor ring. The
+collector frees a block only when no tag anywhere names it, and zeroes
+whatever in it could hold a pointer as it frees it, so a capability always
+names the block it was made for. What a capability cannot vouch for:
 
-**The display.** The display chip reads a bitmap by number, and only reads.
+- an address held as a number. A number is no authority, but code with the
+  root can make it a capability again with `%from-addr`, and by then the
+  block may be free or somebody else's. The collector, the image writer and
+  `peek`/`poke` work this way, inside `unsafe`.
+- the display, which is handed the screen's pixels by number and reads
+  whatever is there; it only reads, and `*screen*` holds the bitmap it is
+  showing.
+- the collector's own scratch above object space, the mark map, the mark
+  stack and the image writer's tag maps, which no allocator hands out and
+  which hold addresses, not capabilities.
 
 **Inside `unsafe`.** Code with SR has the root, and the root reaches
-everything: an object's header, the nil cell, a sealed closure's slots, code
-space. The write barrier still sees a raw store, so a pointer cannot be lost
-during a mark, but a raw store can still corrupt one. Headers are written
-only by the allocators and the collector, through DDC.
+everything: an object's header, the nil cell, a sealed closure's slots, a
+function's text, another task's stack. The write barrier still sees a raw
+store into the heap, but one into a stack or a context, so a pointer cannot
+be lost during a mark, but a raw store can still corrupt one. Headers are
+written only by the allocators and the collector, through DDC.
 
 **Stale frame slots.** A frame's local slots are not cleared on entry, so a
 slot an earlier call left tagged is a root until it is written. The
@@ -178,14 +189,10 @@ longer lose a pointer. A store from `unsafe` code through the root into the
 heap is still possible, by design: the collector and the image writer are
 made of such stores.
 
-**2. Poison the pool on free. OPEN**, and its shape has changed. Filling a
-freed block with a bad pointer was a way to make a stale use fault; with
-capabilities, the fault comes from the capability, not the contents. The
-real fix is revocation: on `free-pool`, find every tagged capability whose
-bounds lie in the block and clear its tag, which the tags make exact, as
-the pair compactor's walk over memory already does. The cost is a walk of
-the roots and the heap per free, most of them task stacks at task end;
-batching frees into the sweep is the shape to measure.
+**2. Poison the pool on free. CLOSED**, by retiring the pool. Its stacks,
+register contexts, trap frames and descriptor rings are objects, freed by
+the collector when nothing names them, so there is no free to poison and no
+capability to revoke.
 
 **3. Make the blitter's guard the chip's behaviour. CLOSED**, by handing
 the chips capabilities. The blitter's descriptors and the disk's buffer

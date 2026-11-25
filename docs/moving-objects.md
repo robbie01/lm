@@ -35,13 +35,14 @@ authority. Only privileged code can do it, which a mover is anyway. The new
 address must also be one the object's bounds can be exact at: a block keeps
 the alignment `cram` gave it.
 
-**Numbers are not pointers.** An address held as a fixnum, in a low global,
-in a pool block, in a chip's register or a blitter descriptor, carries no
-tag, and no compactor will find it. The display register and every queued
-blit hold the address of a bitmap's pixels, which is why drivers.md can say
-the address of the pixels is good for ever. A machine that moved objects
-would have to pin byte objects a chip has been told about, or move them only
-with the chips idle and their registers rewritten.
+**Numbers are not pointers.** An address held as a fixnum, in a low global
+or in a chip's register, carries no tag, and no compactor will find it. The
+display register holds the address of a bitmap's pixels, which is why
+drivers.md can say the address of the pixels is good for ever, and the
+blitter latches the capabilities of the transfer it is making. A machine
+that moved objects would have to pin byte objects a chip has been told
+about, or move them only with the chips idle and their registers
+rewritten.
 
 ## What is built
 
@@ -54,8 +55,14 @@ move with the rest: a jump within a function is relative to it, and every
 other way into code is a capability, an entry or a return sentry, which is
 derived again where the text went and sealed again. A saved image's stacks
 hold return sentries, and they move with their texts like any other
-capability. MTCC is the one capability to code outside memory, and the
-reset stub loads it from `lg-trap-entry` whenever the machine starts.
+capability. The stacks themselves are objects, as are the register contexts
+and the trap frames, and slide with the rest; a slot in one that names
+nothing, left there by an earlier call or a long-dead register, loses its
+tag. Nothing the machine needs at reset is outside memory: the reset stub
+loads `sp`, MScratchC and MTCC from `lg-boot-stack`, `lg-trapsave` and
+`lg-trap-entry`, and the trap stub its stack and its nested frames from
+`lg-trap-stack` and `lg-trap-nest`, every one a low global the rewrite
+covers.
 
 On the machine, the pair compactor in gc.lisp, for the image collection.
 There is no object compactor in Lisp.

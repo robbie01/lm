@@ -153,6 +153,19 @@ now charged when it has been used up, for its own size, to the task that
 was handed it: 42 thousand cycles for that first cons, and the erroring
 task ends within a vertical blank instead of six.
 
+**A short-lived task took a whole chunk of cons space. RESOLVED.** Found
+when stacks became objects. Every task's first pair took a fresh 256 KiB
+run, so a thousand tasks that each made three pairs and ended took 250 MiB
+of cons space between them, and every cycle's sweep blanked every dead run
+below the frontier again. With the exec pool that churn ran 334 million
+instructions and filled cons space until a collection stopped the machine
+for 112 million of them; with stacks in object space paying the collector
+for themselves it ran 1.6 billion, because cycles came eighteen times
+instead of four. A task's first run is now 4 KiB and each after it twice
+the last, up to the chunk: the same churn is 210 million instructions with
+no stretch of interrupts off over 1.6 million, and a rebuild takes as
+long as it did.
+
 **The scheduler gave the idle task every other quantum. RESOLVED.** Found
 while measuring: `switch-tasks` took the head of the ready list without
 comparing priorities, and the idle task is always on it, so a busy task at

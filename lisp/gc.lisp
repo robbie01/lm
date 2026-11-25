@@ -953,12 +953,23 @@
     (set! *budget* (if (%> (%* 2 live) budget-min) (%* 2 live) budget-min))))
 
 ;; ---------------------------------------------------------------- refill
-;; How much cons space a task is given at a time: big enough that refilling
-;; is rare, small enough that a task which stops allocating is not sitting on
-;; much. The run is the task's alone until it is used up, which is what makes
-;; the four-instruction allocator safe without a lock. Fresh ground is carved
-;; on boundaries of this size, where a run's bounds are exact.
+;; How much cons space a task is given at a time: a task's first run is
+;; `run-first` bytes, and each after it twice the one before, up to
+;; `cons-chunk`. Big enough that a busy task refills rarely, small enough
+;; that a task which makes a few pairs and ends, or stops allocating, is not
+;; sitting on much. The run is the task's alone until it is used up, which is
+;; what makes the four-instruction allocator safe without a lock. Fresh
+;; ground is carved within boundaries of the chunk, where a run's bounds are
+;; exact.
 (defconstant cons-chunk 262144)     ; 16384 pairs
+(defconstant run-first 4096)        ; 256 pairs
+
+;; The run to hand a task whose last run was `last` bytes long, and 0 for a
+;; task that has had none.
+(define (run-size last)
+  (cond ((%< last run-first) run-first)
+        ((%< last cons-chunk) (%lsh last 1))
+        (else cons-chunk)))
 
 ;; The run from `start` up to `end`, as a capability: bounded exactly, so the
 ;; stretch is cut down to what the processor can represent, its base rounded
@@ -976,22 +987,33 @@
     (if (%= *phase* phase-marking) (mark-pairs b (%+ b len)) (clear-range b (%+ b len)))
     (%cap-and-perms (%cap-bounds-exact (%from-addr b) len) perms-pair)))
 
-;; A hole the sweep left, else fresh ground up to the next chunk boundary.
-;; Answers nil when there is neither. A piece of fresh ground too small to be
-;; worth a run is stepped over; it lies below the frontier, where the next
-;; sweep finds it. Interrupts off.
-(define (next-run)
+;; A run of `want` bytes, or less: the front of a hole the sweep left, else
+;; fresh ground, never past the next chunk boundary. A hole with room to
+;; spare is split, and what is left of it stays first on the list, described
+;; in its own first pair. Answers nil when there is neither. A piece of fresh
+;; ground too small to be worth a run is stepped over; it lies below the
+;; frontier, where the next sweep finds it. Interrupts off.
+(define (next-run want)
   (let ((hole (%ld-word lg-cons-free)))
     (if (%> hole 0)
-        (let ((end (%ld-word hole)))
-          (%st-word! lg-cons-free (%ld-word (%+ hole 8)))
-          (if (%= (%ld-word lg-cons-free) 0) (set! *run-last* 0) nil)
-          (hand-out-run hole end))
+        (let ((end (%ld-word hole)) (next (%ld-word (%+ hole 8))))
+          (if (%>= (%- end hole) (%+ want gap-min))
+              (let ((rest (%+ hole want)))
+                (%st-cap! rest end)
+                (%st-cap! (%+ rest 8) next)
+                (%st-word! lg-cons-free rest)
+                (if (%= *run-last* hole) (set! *run-last* rest) nil)
+                (hand-out-run hole rest))
+              (begin
+                (%st-word! lg-cons-free next)
+                (if (%= next 0) (set! *run-last* 0) nil)
+                (hand-out-run hole end))))
         (let* ((p (%ld-word lg-cons-ptr))
                (top (%logand (%+ p cons-chunk) (%- 0 cons-chunk))))
           (if (%< (%- top p) gap-min)
               (begin (set! p top) (set! top (%+ top cons-chunk)))
               nil)
+          (if (%>= (%- top p) (%+ want gap-min)) (set! top (%+ p want)) nil)
           (if (%> top cons-limit) (set! top cons-limit) nil)
           (if (%< (%- top p) gap-min)
               nil
@@ -1002,21 +1024,23 @@
 ;; The trap handler calls this when a task's run is used up: a length fault
 ;; on `gp`. It answers the task's next run, which the handler writes into the
 ;; saved `gp` and the live one before it retries the instruction. The
-;; collector's share of work comes first, paid for the run just used up,
-;; whatever its size: a task's first run is paid for when it asks for its
-;; second, so a fresh task is not stalled on its first cons by a collection
-;; in progress. Never allocates a pair: the run it would come from is the
-;; one that is used up.
+;; collector's share of work comes first, paid for the run just used up, or
+;; given up when a cycle began, whatever its size: a task's first run is paid
+;; for when it asks for its second, so a fresh task is not stalled on its
+;; first cons by a collection in progress. What is owed is also how long that
+;; run was, which the next one doubles. Never allocates a pair: the run it
+;; would come from is the one that is used up.
 (define (refill-cons-run)
-  (pace (take-owed-run))
-  (without-interrupts
-    (let ((run (next-run)))
-      (if run
-          run
-          (begin
-            (collect)
-            (set! run (next-run))
-            (if run run (out-of-memory "cons space")))))))
+  (let ((last (take-owed-run)))
+    (pace last)
+    (without-interrupts
+      (let* ((want (run-size last)) (run (next-run want)))
+        (if run
+            run
+            (begin
+              (collect)
+              (set! run (next-run want))
+              (if run run (out-of-memory "cons space"))))))))
 
 ;; ---------------------------------------------------------------- allocation
 ;; What `alloc-object` calls, with interrupts off: the address of a block of

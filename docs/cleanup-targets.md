@@ -86,8 +86,8 @@ its stack; the report is composed in the handler and printed by the
 restart; a mutex held on the abandoned stack is handed on marked
 abandoned. Keeping the faulting stack alive means a third task list for
 the collector to scan, a reaper that must not free it, an inverse of
-`enter-closure` to resume it, a window to choose from, and a pool that
-fills with 64 KiB corpses nobody dismissed. `ts-except` is reserved for the
+`enter-closure` to resume it, a window to choose from, and an object space
+that fills with 64 KiB corpses nobody dismissed. `ts-except` is reserved for the
 day. *Trigger:* a prompt in a window wanting retry.
 
 ## The kernel
@@ -129,11 +129,10 @@ list the timer interrupt walks every quantum, in the machine's own ticks;
 
 ## The chips and the workbench
 
-**hw.lisp is five things. WONTFIX.** Drawing is 518 of its 905 lines and is
-itself eight sections; the pool is used by both hw and exec, in both
-directions; a split needs three packages, a change to every `use` line, and
-a load order that keeps the pool before exec. The section headers do the
-job the packages would. *Trigger:* a second consumer of the drawing code
+**hw.lisp is four things. WONTFIX.** Drawing is about half of its 742
+lines and is itself five sections; a split needs more packages and a change
+to every `use` line, and the section headers do the job the packages
+would. *Trigger:* a second consumer of the drawing code
 that does not want the chips.
 
 **Two fonts, two APIs. WONTFIX**, with the dead half removed. Charcoal is a

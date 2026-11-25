@@ -85,8 +85,8 @@ one for each register access, a few instructions and no allocation, which
 is what lets the trap handler and interrupt servers use them. The image
 writer makes the disk's from the root. Such a page lives in a frame of the
 code that made it, so it goes when that code returns, or with the task's
-stack if the task ends first, and a stack that has gone back to the pool is
-reached only by number.
+stack if the task ends first, which the collector takes back once nothing
+holds it.
 
 ## A bitmap is a value
 
@@ -115,13 +115,16 @@ is filled.
 ## The blitter
 
 The chip walks a chain of descriptors in memory. A descriptor is
-`blit-list-size` bytes: three capability slots, the source, the destination
-and the link to the next descriptor, each written with a capability store
-so that it keeps its tag; then width, height, the two strides, a value, the
-operation, a line's two ends and a done word, each a machine word. The list
-register is a capability register: a capability store of a descriptor's
-capability starts the chain there. Each task has a ring of eight in the
-pool, and the collector has one of its own.
+`blit-list-size` bytes, a field to each 8-byte slot: three capability
+slots, the source, the destination and the link to the next descriptor,
+each written with a capability store so that it keeps its tag; then width,
+height, the two strides, a value, the operation, a line's two ends and a
+done word, each a machine word in the low half of its slot, so the slot
+reads as a fixnum. The list register is a capability register: a capability
+store of a descriptor's capability starts the chain there. Each task has a
+ring of eight, a vector of a slot saying which is next and the eight
+descriptors after it, held by the task's binding of `*blit-ring*`, and the
+collector has one of its own.
 
 The chip checks what it is handed, as the processor would. It loads each
 slot the way `lc` does through the descriptor's own capability, which must
@@ -136,18 +139,21 @@ completes either way, so nothing waits for a blit that will never land. A
 link that is no capability ends the chain; one the chip may not follow ends
 it as refused. When it finishes a descriptor the chip clears its three
 capability slots, so a finished descriptor holds no authority over anything.
-So the tagged granules of the tasks' rings, which hw lists in `*blit-rings*`,
-are exactly what blits in flight hold, and the collector takes them as
-roots: a bitmap dropped while a blit into it is still running stays alive
-until the blit has landed.
+Until then the descriptor's slots are a vector's, and the collector marks
+through them as through any vector: a bitmap dropped while a blit into it
+is still running stays alive until the blit has landed. A ring lives as
+long as its task's binding, and a task that ends waits for its ring to
+drain first, so no descriptor the chip has yet to finish is ever garbage.
 
 A bitmap's pixels are handed over as their byte object's capability, moved
 to the first pixel, so building a descriptor names no memory by number. A
-descriptor is pool memory that can hold capabilities, written under the
-chip once it is linked, so `blit-descriptor` and `blit-go` stay unsafe
-names: rings, the chain's tail and the waiting functions name descriptors
-by number, and the capability to one exists only while it is being filled. The rectangle calls
-in hw.lisp, which take bitmaps, are how everything else blits.
+descriptor is read by the chip once it is linked, so `blit-descriptor` and
+`blit-go` stay unsafe names, and everywhere another task could read one,
+a ring in a binding, the chain's tail in a global, a sleeper's descriptor on
+the completion server's list, it is sealed with an otype of hw's: the
+capability to an open descriptor exists only while it is being filled. The
+rectangle calls in hw.lisp, which take bitmaps, are how everything else
+blits.
 
 A blit is queued by filling the next free descriptor of the ring and linking
 it onto the chain. Linking follows the hardware rule: link only while the

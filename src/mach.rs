@@ -912,24 +912,28 @@ impl Machine {
         }
     }
 
-    /// The write barrier's question for a store of `sz` bytes at `a`, asked
-    /// only while it is on: the address of a granule the store touches that
-    /// holds a capability to an unmarked heap object, if there is one and it
-    /// is not in a stack or a context. Which object holds the granule is
-    /// asked last, only of a store that would otherwise trap.
+    /// The write barrier's question for a store of `sz` bytes at `a` through
+    /// register `who`, or DDC, asked only while it is on: the address of a
+    /// granule the store touches that holds a capability to an unmarked heap
+    /// object, if there is one and the store is not into a stack or a
+    /// context. That is asked first, being two loads, where finding the
+    /// object a capability keeps can be a walk of the object-start map.
     #[inline(never)]
-    pub fn barrier_hit(&self, a: u32, sz: u32) -> Option<u32> {
+    pub fn barrier_hit(&self, a: u32, sz: u32, who: u32) -> Option<u32> {
         let first = a & !7;
         let last = a.wrapping_add(sz - 1) & !7;
         for g in [first, last] {
             if g < CONS_BASE || g >= OBJ_END || !unsafe { self.rd_tag(g) } {
                 continue;
             }
+            if self.in_state(g, who) {
+                continue;
+            }
             let old = unsafe { self.rd_cap(g) };
             if let Some(obj) = self.referent(old) {
                 let bit = (obj - CONS_BASE) >> 3;
                 let word = unsafe { self.rd32(GC_BITMAP + ((bit >> 5) << 2)) };
-                if word & (1 << (bit & 31)) == 0 && !self.in_state(g) {
+                if word & (1 << (bit & 31)) == 0 {
                     return Some(g);
                 }
             }
@@ -937,15 +941,30 @@ impl Machine {
         None
     }
 
-    /// Whether the granule at `g` lies in a stack or a register context: the
-    /// type in the header of the object holding it, which is the nearest
-    /// object start at or below it. A tagged granule is never in a free
-    /// block, so that object holds it.
-    fn in_state(&self, g: u32) -> bool {
-        g >= OBJ_BASE
-            && self
-                .object_start(g)
-                .is_some_and(|h| crate::heap::is_state_type(unsafe { self.rd32(h) } & 0xff))
+    /// Whether a store through register `who` into the granule at `g` is a
+    /// store into a stack or a register context: whether the authority is
+    /// based at the payload of one, as every stack pointer, frame pointer
+    /// and context capability is, and the granule lies in that payload. The
+    /// granule below the base must be an object start, a header the
+    /// allocator wrote, and not a slot that happens to hold its number.
+    fn in_state(&self, g: u32, who: u32) -> bool {
+        let base = if who == CAPEX_REG_DDC {
+            self.ddc.base()
+        } else if self.xm[who as usize] & XM_READY != 0 {
+            self.wb[who as usize]
+        } else {
+            self.reg(who).base()
+        };
+        if base <= OBJ_BASE || base > OBJ_END {
+            return false;
+        }
+        let h = base - 8;
+        let i = (h - OBJ_BASE) >> 3;
+        let starts = unsafe { self.rd32(OBJ_STARTS + ((i >> 5) << 2)) };
+        let hdr = unsafe { self.rd32(h) };
+        starts & (1 << (i & 31)) != 0
+            && crate::heap::is_state_type(crate::heap::hdr_type(hdr))
+            && g < base + crate::heap::bounds_bytes(hdr)
     }
 
     /// The heap block a tagged capability keeps alive, as the address its

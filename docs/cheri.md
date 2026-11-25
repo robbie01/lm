@@ -29,7 +29,8 @@ Metadata:
 29  LC   load capabilities         25  SR   system registers: CSRs, SCRs, DDC
 28  SC   store capabilities        24  SE   seal and unseal (authority over otypes)
                                    23  HD   headed: a Lisp object with a header
-22..19  otype   0 unsealed, 1 sentry, 2 closure, 3 a task's stack or context; 4..15 unused
+22..19  otype   0 unsealed, 1 sentry, 2 closure, 3 a task's stack or context,
+                4 a blitter ring or descriptor; 5..15 unused
 18      IE      internal exponent
 17..10  T[7:0]  top mantissa
 9..0    B[9:0]  base mantissa
@@ -49,8 +50,8 @@ one with IE. E is at most 24, for which T = 0x100 is a top of 2^32. The
 representable region, the corrections, and the instructions that round
 (`crrl`, `cram`) are as ISAv9 defines them for this MW. The allocators ask
 `crrl` and `cram` what a length rounds to, and pad and align objects,
-machine code among them, cons runs, stacks and contexts to bounds that are
-exact.
+machine code, stacks and contexts among them, and cons runs to bounds that
+are exact.
 
 The root is every permission over `[0, 2^32)`. `cgetlen` and `cgettop` of
 it saturate at 0xffffffff.
@@ -82,7 +83,9 @@ an authority. `cseal` and `cunseal` with an explicit authority, for any
 otype from 1 to 15, need a capability with SE whose address, inside its
 bounds, is the otype; the root is one, which is how the escape hatch opens a
 closure. Exec seals a task's stack and context in its record with otype 3,
-and only Exec unseals them.
+and only Exec unseals them; hw seals a blitter ring, and a descriptor
+anywhere another task could read it, with otype 4, and only hw unseals
+them.
 
 **Untagged capabilities are data.** Every integer instruction reads the
 address field of its operands and writes an untagged result whose metadata
@@ -106,8 +109,8 @@ tagged, the nil cell      nil
 tagged, unsealed, no HD   a pair: 16 bytes at its base, car at 0, cdr at 8
 tagged, HD                an object: header at base-8, payload from base
 tagged, HD, otype 2       a closure
-tagged, otherwise         a raw capability: an entry or a return address, a stack,
-                          a device, a pool block, a cons run
+tagged, otherwise         a raw capability: an entry or a return address, a stack
+                          or frame pointer, a device, a cons run
 ```
 
 The layout names the untagged kinds `imm-fixnum` to `imm-default`.
@@ -156,10 +159,14 @@ hole the sweep walks like any other.
 | 9 bignum | `perms-object` | 0 the sign, then 32-bit limbs as fixnums, least significant first |
 | 10 code | `perms-object` | 0 entry, 1 name, 2.. literals |
 | 11 text | `perms-bytes` | a function's machine code |
+| 12 stack | `perms-object` | a task's stack, in value slots |
+| 13 context | `perms-object` | a task's 32 saved registers, or a trap frame's 32 and a link |
 
 `perms-pair` is LD SD LC SC LM; `perms-object` is that and HD; `perms-bytes`
 is LD SD HD, so no capability can be stored in a string, a byte object or a
-text, and none is ever found there. A value slot starts as nil.
+text, and none is ever found there. A value slot starts as nil, and a
+stack's or a context's as zero. A stack pointer is a stack's capability
+with `perms-pair`, standing at its top.
 
 **Code** is an object. A function's machine code is a text, its length in
 bytes in the header, allocated and aligned as any byte object is. A code
@@ -183,11 +190,18 @@ The one piece of code that is not an object is the reset stub, in the
 `reset-reserve` bytes at `reset-vector` in the low block. The trap stub is a
 text, and its entry is kept in `lg-trap-entry`.
 
+**Stacks and contexts** are objects. The collector marks one as it marks
+any object, by what holds it, a task's record, a frame pointer into it or a
+low global, and never traces it: what is live in a stack runs from its
+stack pointer to its top, and the roots scan exactly that, and of every
+context in use. The write barrier lets a store into one through.
+
 ## Authority
 
 At reset PCC, DDC and MTCC are the root and the general registers are NULL.
-The reset stub derives nil, the boot stack and the trap frames from DDC,
-loads MTCC from `lg-trap-entry`, and leaves the root in DDC.
+The reset stub derives nil and the empty cons run from DDC, loads `sp`,
+MScratchC and MTCC from `lg-boot-stack`, `lg-trapsave` and
+`lg-trap-entry`, and leaves the root in DDC.
 
 **Integer addressing is a privilege.** A load or store whose base register
 is `x0`, and the explicit DDC loads and stores, address memory through DDC
@@ -412,7 +426,11 @@ on `sp`, which the handler also reports as a stack overflow.
 **The write barrier** (`gcmode`, CSR 0x7c1, bit 0): while it is on, any
 store of any width, through a capability or through DDC, that would
 overwrite a tagged granule in cons or object space whose capability points
-at an unmarked heap object traps with cause 29, before writing. A tagged
+at an unmarked heap object traps with cause 29, before writing, unless the
+store is into a stack or a context: its authority is based at the payload
+of an object whose header, at an object start, says stack or context, and
+the granule lies in that payload. Every stack pointer, frame pointer and
+context capability is so based, and a store through DDC never is. A tagged
 capability keeps alive the block its base lies in, whatever its length: one
 without HD based in cons space, the pair at its base rounded down to 16; one
 based in object space, headed or not, the object whose header is the
@@ -431,13 +449,14 @@ unseen.
 0x0000_0100  low-memory globals, one 8-byte slot each
 0x0000_0400  the free bins of object space, one 8-byte slot each
 0x0000_0800  the reset stub, `reset-reserve` bytes at `reset-vector`
-0x0000_2000  the pool: stacks, contexts, descriptors
-0x0100_0000  unused, 16 MiB
-0x0200_0000  cons space, 128 MiB, eight million pairs
-0x0A00_0000  object space, 64 MiB, machine code among the objects
-0x0E00_0000  the mark bitmap, the object-start map, the mark stack, scratch
+0x0100_0000  cons space, 128 MiB, eight million pairs
+0x0900_0000  object space, 64 MiB, machine code, stacks and contexts among the objects
+0x0D00_0000  the mark bitmap, the object-start map, the mark stack, scratch
 0xF000_0000  device pages, 4 KiB each, 32-bit registers and two capability registers
 ```
+
+The low page ends at `low-end`, 4 KiB; nothing lies between it and cons
+space.
 
 A low global that held an address holds it as a fixnum; authority to what
 it names comes from DDC. One that holds a value holds the value, and starts
@@ -457,11 +476,14 @@ processor would refuse the access (see drivers.md).
 
 ## Contexts and the cons run
 
-**Contexts.** A task's register save area is 32 capability slots, 256
-bytes: slot 0 the pc (MEPCC), slots 1..31 `x1..x31`. MScratchC names the
-one the trap stub saves into, and switching tasks is pointing MScratchC at
-another block. A trap inside the handler saves into a frame of its own, one
-of eight in the pool, each with a link to the frame it interrupted.
+**Contexts.** A task's register save area is a context object of 32
+capability slots, 256 bytes: slot 0 the pc (MEPCC), slots 1..31 `x1..x31`.
+MScratchC names the one the trap stub saves into, and switching tasks is
+pointing MScratchC at another task's. A trap inside the handler saves into
+a frame of its own, the one for its depth in the vector of eight at
+`lg-trap-nest`, each a context with a slot after the registers for a link
+to the frame it interrupted. The handler runs on the trap stack at
+`lg-trap-stack`.
 
 **The cons run** is `gp`: a capability with `perms-pair` bounded to the
 running task's current run of cons space, its address the next free pair.
@@ -478,9 +500,10 @@ The fault is the refill. The trap handler takes cause 28 with `mtval`
 `(3 << 5) | 0x01` at a `csetboundsimm` whose `cs1` is `gp` as a request
 for a fresh run, takes one for the task without allocating a pair, writes
 it into the saved `gp` and the live one, and returns to the instruction. A
-run is a hole the sweep left or fresh ground up to the next 256 KiB
-boundary, its base rounded up and its length down to what `cram` makes
-exact. The empty run is `perms-pair` bounded to no bytes at `CONS_BASE`: the
+run is the front of a hole the sweep left or fresh ground, never past a
+256 KiB boundary, its base rounded up and its length down to what `cram`
+makes exact; a task's first is 4 KiB and each after it twice the last, up
+to 256 KiB. The empty run is `perms-pair` bounded to no bytes at `CONS_BASE`: the
 reset stub, every new task and every task whose run a collection gave up
 start on it, and their first pair asks for a real one. It is not sixteen
 bytes long, so it is never taken for a pair.
