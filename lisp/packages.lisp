@@ -239,7 +239,7 @@
   kickstart macro-form? print-backtrace
   rebuild rebuild-end genesis *fresh-image* record-initialiser register-macro repl
   resume-kickstart print-report
-  ctx-pc ctx-reg trap-reg trap-raw
+  ctx-ref ctx-set! enter-closure data-region stack-capability
   system-name top-level-form
 ))
 
