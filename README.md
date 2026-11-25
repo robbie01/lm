@@ -553,7 +553,8 @@ averaged as light. At a whole-number scale that copies the display's pixels;
 at any other every display pixel still covers the same area of the window,
 and only the window pixels across an edge between two are a mixture of
 them. `--scale N` opens the window at N times the display's size as the
-desktop scales sizes, and `WGPU_BACKEND=vulkan`, `dx12`, `metal` or `gl`
+desktop scales sizes, and makes it that again whenever the display changes
+size, as it does when the workbench starts; and `WGPU_BACKEND=vulkan`, `dx12`, `metal` or `gl`
 chooses what it draws with.
 
 ## The workbench

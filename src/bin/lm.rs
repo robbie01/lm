@@ -27,9 +27,10 @@ struct Cli {
 
     /// Open the display window at 1 to 4 times the display's size
     ///
-    /// The window can be resized. The display is drawn as large as the window
-    /// allows without changing its shape, with every pixel covering the same
-    /// area of the window.
+    /// The window can be resized, and is made N times the display's size
+    /// again when the display changes size. The display is drawn as large as
+    /// the window allows without changing its shape, with every pixel
+    /// covering the same area of the window.
     #[arg(long, value_name = "N", default_value_t = 1,
           value_parser = clap::value_parser!(u32).range(1..=4))]
     scale: u32,
