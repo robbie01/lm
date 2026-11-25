@@ -67,7 +67,7 @@ unsafe file; see below.
 | `%addr-of` | none | any pointer becomes an integer |
 | `%from-addr` | none | any integer becomes a pointer, which every checked instruction then trusts |
 | `%slot` `%set-slot!` | object tag and bound, any type | a closure's raw entry word read as a value |
-| `%set-context!` `%set-stack-limit!` `%set-gc-mode!` `%ecall` `%disable` `%enable` `%sync-cons-run` `%reload-cons-run` `%set-this-task!` `%halt` | none | arbitrary machine state |
+| `%set-context!` `%set-stack-limit!` `%set-gc-mode!` `%ecall` `%disable` `%enable` `%cons-run` `%set-cons-run!` `%set-this-task!` `%halt` | none | arbitrary machine state |
 | `alloc-pool` `free-pool` | a header tag on free | a freed block reused under a holder; never scanned |
 | `dev-reg`, `bm-at`, `bm-addr`, and the blitter's descriptors | ownership of the device | a DMA anywhere in RAM |
 | `slot`, `alloc-code` in gc | none | a root walk of any address; code space handed out raw |
