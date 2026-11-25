@@ -67,7 +67,7 @@
 ;;
 ;; Three other families exist for code with a reason not to promote:
 ;;
-;;   wrap+   wrap-   wrap*     modulo 2^31, silently: hashing, fixed point
+;;   wrap+   wrap-   wrap*     modulo 2^32, silently: hashing, fixed point
 ;;   strict+ strict- strict*   an error if the answer is not a fixnum
 ;;   sat+    sat-    sat*      clamped to the ends of the fixnum range
 (define (+ . xs)
@@ -116,8 +116,8 @@
       (set! xs (%cdr xs)))
     acc))
 
-(define most-positive-fixnum 1073741823)
-(define most-negative-fixnum -1073741824)
+(define most-positive-fixnum 2147483647)
+(define most-negative-fixnum -2147483648)
 
 (define (fixnum-only op r)
   (if (%fixnum? r) r (error "fixnum overflow in" op)))
@@ -226,12 +226,12 @@
 
 ;; An arithmetic shift is a multiplication or division by a power of two, so
 ;; it promotes and demotes like the rest of the arithmetic. `%ash` is the fast
-;; path when the value is a fixnum and the shift is small; a left shift is
-;; checked by shifting back, because `%ash` takes its count modulo thirty-two
-;; and drops bits off the top. `lsh` is the raw logical shift and stays raw.
+;; path when the value is a fixnum and the count is under thirty-two either
+;; way; a left shift is checked by shifting back, because `%ash` drops bits
+;; off the top. `lsh` is the logical shift of the word and stays one.
 (define (ash n k)
   (if (%fixnum? n)
-      (if (if (%> k -31) (%< k 15) nil)
+      (if (if (%> k -32) (%< k 32) nil)
           (let ((r (%ash n k)))
             (if (%<= k 0)
                 r
@@ -523,13 +523,12 @@
 ;; numeric equality has to be asked for them; fixnums are always `eq?`,
 ;; because every result that fits is demoted to one.
 (define (eqv? a b)
-  (unsafe
   (cond
    ((%eq? a b) t)
    ((%bignum? a) (if (%bignum? b) (%= a b) nil))
    ((%float? a)
-    (if (%float? b) (%= (%ld-fixnum (%addr-of a)) (%ld-fixnum (%addr-of b))) nil))
-   (else nil))))
+    (if (%float? b) (%= (%cap-ld-word a 0) (%cap-ld-word b 0)) nil))
+   (else nil)))
 
 (define (equal? a b)
   (if (%eq? a b)
@@ -679,7 +678,7 @@
    ((%= n 0) "0")
    ;; Its magnitude is one more than the largest fixnum, so negating it
    ;; wraps straight back to itself.
-   ((%= n -1073741824) "-1073741824")
+   ((%= n most-negative-fixnum) "-2147483648")
    (else
       (let ((neg (%< n 0)) (acc nil))
         (if neg (set! n (%- 0 n)) nil)
