@@ -800,11 +800,11 @@
 ;; Each emitter reads every operand before it writes the result, since the
 ;; result may be an operand's register.
 ;;
-;; A store defined with `defstore` takes a value of 0 from x0. Nothing else
-;; does: a trap that widens an operation, or names the value it refused,
-;; reads the operand's register out of the saved context, where slot zero is
-;; the pc. A store's value is never read there; a store that trips the write
-;; barrier runs again.
+;; A store defined with `defstore` takes a value of 0 from x0, and so does a
+;; comparison in a test position. Nothing else does: a trap that names the
+;; value it refused reads the operand's register out of the saved context,
+;; where slot zero is the pc. A store's value is never read there, a store
+;; that trips the write barrier runs again, and widening reads x0 as 0.
 (define *in-place-ops* nil)   ; (name emitter zero-at)
 
 (define (defop name arity fn) (defop-1 name arity fn nil))
@@ -1415,7 +1415,7 @@
      ((if (%= n 1) (predicate? op) nil)
       (emit-predicate-jump c op to (compile-operand c (cadr form)) holds))
      ((if (%= n 2) (comparison? op) nil)
-      (let ((rs (compile-operands c (%cdr form) t nil)))
+      (let ((rs (compile-operands c (%cdr form) t t)))
         (emit-compare-jump c op to (%car rs) (cadr rs) holds)))
      ;; An `if` in a test position is `and`, `or` or `not` spelled out, and
      ;; is walked rather than built: each arm's test becomes its own branch.
@@ -1496,13 +1496,19 @@
 
 ;; Argument i in register a{i}, or, when `in-place` says the operator can
 ;; read any register, a leaf's local where it is. Argument `zero-at`, if it
-;; is a written-down 0, is read from x0, which reads as the fixnum 0.
-;; Answers the registers.
+;; is a written-down 0, is read from x0, which reads as the fixnum 0; t
+;; allows that of every argument. Answers the registers.
 (define (compile-operands c args in-place zero-at)
-  (let ((a (cx-asm c)) (plan nil) (pushed 0) (i 0) (last -1) (regs nil))
+  (let ((a (cx-asm c)) (plan nil) (pushed 0) (i 0) (last -1) (regs nil)
+        (a0-free nil))
     (dolist (x args)
       (if (simple-arg? x) nil (set! last i))
       (set! i (%+ i 1)))
+    ;; The last value computed can stay in a0 when the first argument is
+    ;; read where it is and wants no register of its own.
+    (if (if in-place (%> last 0) nil)
+        (set! a0-free (operand-home c (%car args) (zero-ok? zero-at 0)))
+        nil)
     ;; pass one: evaluate and park the complicated ones but the last
     (set! i 0)
     (dolist (x args)
@@ -1510,8 +1516,11 @@
        ((simple-arg? x) (set! plan (%cons (%cons 'simple x) plan)))
        ((%= i last)
         (compile-expr c x nil)
-        (if (%= i 0) nil (i-mv a (%+ $a0 i) $a0))
-        (set! plan (%cons (%cons 'done nil) plan)))
+        (if (if (%= i 0) t a0-free)
+            (set! plan (%cons (%cons 'done $a0) plan))
+            (begin
+              (i-mv a (%+ $a0 i) $a0)
+              (set! plan (%cons (%cons 'done (%+ $a0 i)) plan)))))
        (else
         (compile-expr c x nil)
         (emit-push c $a0)
@@ -1530,18 +1539,23 @@
     ;; pass three: the simple ones, which cannot disturb anything
     (set! i 0)
     (dolist (p plan)
-      (let ((r (%+ $a0 i)))
-        (if (%eq? (%car p) 'simple)
-            (let ((home (if in-place
-                            (if (if (%eq? i zero-at) (%eq? (%cdr p) 0) nil)
-                                $zero
-                                (in-place-reg c (%cdr p)))
-                            nil)))
-              (if home (set! r home) (compile-simple-into c (%cdr p) r)))
-            nil)
+      (let ((r (%+ $a0 i)) (kind (%car p)))
+        (cond
+         ((%eq? kind 'simple)
+          (let ((home (if in-place (operand-home c (%cdr p) (zero-ok? zero-at i)) nil)))
+            (if home (set! r home) (compile-simple-into c (%cdr p) r))))
+         ((%eq? kind 'done) (set! r (%cdr p)))
+         (else nil))
         (set! regs (%cons r regs)))
       (set! i (%+ i 1)))
     (reverse regs)))
+
+(define (zero-ok? zero-at i) (if (%eq? zero-at t) t (%eq? zero-at i)))
+
+;; Where a simple operand can be read without a register of its own: x0 for
+;; a written-down 0 where that is allowed, a leaf's local where it lives.
+(define (operand-home c form zero-ok)
+  (if (if zero-ok (%eq? form 0) nil) $zero (in-place-reg c form)))
 
 (define (compile-simple-into c form reg)
   (cond
@@ -1918,9 +1932,15 @@
          (saved-n (cx-nlocals c))
          (slots nil))
     (dolist (b binds)
-      (compile-expr c (cadr b) nil)
-      (let ((slot (cx-alloc-local c)))
-        (store-local c slot $a0)
+      ;; In a leaf an operator can write the register the binding is about
+      ;; to have. Nothing in scope lives there: the slot is past every live one.
+      (let* ((n (cx-nlocals c))
+             (home (if (cx-leaf c) (if (%< n leaf-locals) (local-reg n) nil) nil))
+             (slot (if (if home (compile-operation c (cadr b) home) nil)
+                       (cx-alloc-local c)
+                       (begin
+                         (compile-expr c (cadr b) nil)
+                         (let ((s (cx-alloc-local c))) (store-local c s $a0) s)))))
         (set! slots (%cons (%cons (%car b) slot) slots))))
     (dolist (s (reverse slots))
       (cx-bind c (%car s) (box-or-plain c (%car s) (%cdr s))))
