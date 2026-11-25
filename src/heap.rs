@@ -12,7 +12,7 @@
 //!                          the base, and the bounds are the payload
 //! tagged, HD, otype 2      a closure, sealed
 //! tagged, otherwise        a raw capability: an entry or a return address
-//!                          into machine code, a stack, a pool block
+//!                          into machine code, a stack, a cons run
 //! ```
 //!
 //! nil is a read-only capability to the 16-byte cell at address 0, whose car
@@ -191,6 +191,14 @@ pub const T_CODE: u32 = 10; // entry, name, literals
 /// return addresses into it, each of which keeps the text alive as any
 /// capability based in object space keeps the object it lies in.
 pub const T_TEXT: u32 = 11;
+/// A task's stack, in value slots. Marking does not trace one: what is live
+/// in it runs from the stack pointer to the top, and the roots scan exactly
+/// that, while the slots below hold whatever earlier calls left there.
+pub const T_STACK: u32 = 12;
+/// A task's saved registers, 32 value slots, or a trap frame, which has a
+/// link to the frame it interrupted after them. The roots scan the ones in
+/// use, and marking does not trace one.
+pub const T_CONTEXT: u32 = 13;
 
 pub const SYM_SLOTS: u32 = 6;
 pub const SYM_NAME: u32 = 0;
@@ -211,6 +219,9 @@ pub const SYM_UNSAFE: i32 = 4;
 /// Bit 3 says the name is a constant, defined with `defconstant`: the
 /// compiler puts its value where a use of it would load the variable.
 pub const SYM_CONSTANT: i32 = 8;
+/// Bit 4 says the symbol was taken out of the obarray for the collection
+/// that makes an image, and goes back if anything still reaches it.
+pub const SYM_DETACHED: i32 = 16;
 
 /// A package: a name, and the list of packages whose exports it inherits.
 /// What a package holds is not stored here: the obarray is keyed by package
@@ -253,6 +264,10 @@ pub const VALUE_GLOBALS: &[u32] = &[
     LG_STARTUP,
     LG_TASKEXIT,
     LG_TRAPENTRY,
+    LG_BOOTSTACK,
+    LG_TRAPSTACK,
+    LG_TRAPNEST,
+    LG_TRAPSAVE,
 ];
 
 #[inline]
@@ -272,6 +287,14 @@ pub fn hdr_type(h: u32) -> u32 {
 #[inline]
 pub fn is_byte_type(ty: u32) -> bool {
     ty == T_STRING || ty == T_BYTES || ty == T_TEXT
+}
+
+/// A stack or a register context: a task's state, which the roots scan
+/// where it is in use, which marking does not trace, and which the write
+/// barrier does not watch.
+#[inline]
+pub fn is_state_type(ty: u32) -> bool {
+    ty == T_STACK || ty == T_CONTEXT
 }
 
 /// The payload's length in bytes, which is the length its bounds round up
@@ -384,8 +407,6 @@ impl<'a> Heap<'a> {
         self.set_g(LG_CONS_END, CONS_END);
         self.set_g(LG_OBJ_PTR, OBJ_BASE);
         self.set_g(LG_OBJ_END, OBJ_END);
-        self.set_g(LG_POOLPTR, POOL_BASE);
-        self.set_g(LG_POOLEND, POOL_END);
         for g in VALUE_GLOBALS {
             self.set_gv(*g, NIL);
         }
@@ -410,8 +431,8 @@ impl<'a> Heap<'a> {
         self.st(at + 4, 0);
     }
 
-    /// A fresh object of `len` elements: values start as nil, bytes as
-    /// zero. Its base is aligned for its bounds, and a hole fills whatever
+    /// A fresh object of `len` elements: values start as nil, bytes and a
+    /// task's state as zero. Its base is aligned for its bounds, and a hole fills whatever
     /// the alignment skipped.
     pub fn alloc_obj(&mut self, ty: u32, len: u32) -> V {
         let h = header(len, ty);
@@ -435,27 +456,31 @@ impl<'a> Heap<'a> {
         let w = OBJ_STARTS + (bit >> 5) * 4;
         let old = self.m.peek32(w);
         self.m.poke32(w, old | (1 << (bit & 31)));
-        let fill = if is_byte_type(ty) { Cap::NULL } else { NIL };
+        let fill = if is_byte_type(ty) || is_state_type(ty) { Cap::NULL } else { NIL };
         for a in (base..end).step_by(8) {
             self.stc(a, fill);
         }
         cap_to(base, span, object_perms(ty))
     }
 
-    /// Exec pool: raw memory, never collected, never moved, aligned the same
-    /// way so that a block can be handed out as a capability. Answers the
-    /// address.
-    pub fn alloc_pool(&mut self, nbytes: u32) -> u32 {
-        let p = align_up(self.g(LG_POOLPTR), cap::ram(nbytes));
-        let end = p + round8(cap::rrl(nbytes));
-        if end > self.g(LG_POOLEND) {
-            panic!("exec pool exhausted");
+    /// What the stubs stand on: the boot stack, the trap stack, the boot
+    /// context and the frames for nested traps, every one an object a low
+    /// global holds. A machine writes all of it before it reads any, so what
+    /// an image carries there is whatever the machine that wrote it last had
+    /// in hand, and a stale capability would keep what it names alive and in
+    /// the file. This zeroes them.
+    pub fn blank_stub_state(&mut self) {
+        let mut state: Vec<V> = [LG_BOOTSTACK, LG_TRAPSTACK, LG_TRAPSAVE].iter().map(|&g| self.gv(g)).collect();
+        let nest = self.gv(LG_TRAPNEST);
+        if self.is_type(nest, T_VECTOR) {
+            state.extend((0..self.olen(nest)).map(|i| self.slot(nest, i)));
         }
-        self.set_g(LG_POOLPTR, end);
-        for a in (p..end).step_by(8) {
-            self.stc(a, Cap::NULL);
+        for c in state.into_iter().filter(|c| c.tag && *c != NIL) {
+            let (lo, hi) = c.bounds();
+            for a in (lo..hi as u32).step_by(8) {
+                self.stc(a, Cap::NULL);
+            }
         }
-        p
     }
 
     // ---- pairs ----

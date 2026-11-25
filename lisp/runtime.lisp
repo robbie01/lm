@@ -20,6 +20,11 @@
         ((%= type t-bytes) t)
         (else (%= type t-text))))
 
+;; A task's stack or its register context: slots the collector never traces,
+;; because the roots scan the part of each that is in use.
+(define (state-payload? type)
+  (if (%= type t-stack) t (%= type t-context)))
+
 (define (object-payload type len)
   (cond ((byte-payload? type) len)
         ((%= type t-symbol) (%* value-bytes sym-slots))
@@ -76,8 +81,9 @@
 ;; held before may still carry tags. So the whole of taking the block,
 ;; writing its header, filling the slots the collector would trace and
 ;; minting the capability that keeps it is one critical section. A byte
-;; payload is never traced, so it is zeroed afterwards with interrupts on,
-;; while the capability keeps it: a screen bitmap is most of a megabyte.
+;; payload, a stack and a context are never traced, so they are zeroed
+;; afterwards with interrupts on, while the capability keeps them: a screen
+;; bitmap is most of a megabyte, and a stack sixty-four kilobytes.
 ;;
 ;; The capability's bounds are the payload, rounded as the processor needs
 ;; to represent them: `%rrl` gives the length and `%ram` the alignment the
@@ -89,6 +95,7 @@
 ;; which only an allocator mints.
 (define (alloc-object type len)
   (let* ((bytes (byte-payload? type))
+         (later (if bytes t (state-payload? type)))
          ;; A record, which is most of what gets made, is sized here rather
          ;; than by a call.
          (payload (if (%= type t-record) (%* value-bytes len) (object-payload type len)))
@@ -105,10 +112,10 @@
                         (if (%= p 0) (out-of-memory "object space") nil))
                       nil)
                   (%st-cap! p (%logior (%lsh len 8) type))
-                  (if bytes nil (fill-granules (%+ p value-bytes) (%+ p size) (fresh-slot type)))
+                  (if later nil (fill-granules (%+ p value-bytes) (%+ p size) (fresh-slot type)))
                   (%cap-and-perms (%cap-bounds-exact (%from-addr (%+ p value-bytes)) span)
                                   (if bytes perms-bytes perms-object))))))
-    (if bytes
+    (if later
         (let ((b (%cap-base obj)))
           (fill-granules b (%+ b (%- size value-bytes)) 0))
         nil)

@@ -42,19 +42,19 @@
 (export '(
   alloc-object *object-allocator* *collector* *pacer*
   ;; the generated layout: the names another package reads
-  low-end reset-vector reset-reserve cons-base cons-limit obj-base obj-limit pool-base pool-limit gc-bitmap obj-starts obj-starts-ready obj-starts-magic mmio-base
+  low-end reset-vector reset-reserve cons-base cons-limit obj-base obj-limit gc-bitmap obj-starts obj-starts-ready obj-starts-magic mmio-base
   snap-magic
   lg-bootlist lg-cons-free lg-cons-free-n lg-cons-ptr lg-errhandler lg-gccount lg-obarray
-  lg-obj-end lg-obj-free-n lg-obj-ptr lg-package lg-packages lg-pool-free lg-poolend lg-poolptr
-  lg-roots lg-stackbot lg-stacktop lg-startup lg-symlist lg-task-exit lg-toplevel lg-trapdepth
-  lg-trap-entry lg-traphook lg-trapsave lg-traptmp lg-traptmp2
+  lg-obj-end lg-obj-free-n lg-obj-ptr lg-package lg-packages
+  lg-roots lg-boot-stack lg-trap-stack lg-trap-nest lg-startup lg-symlist lg-task-exit
+  lg-toplevel lg-trapdepth lg-trap-entry lg-traphook lg-trapsave lg-traptmp lg-traptmp2
   value-bytes kind-fixnum kind-char kind-unbound kind-pair kind-object
   perm-ld perm-sd perm-lc perm-sc perm-lm perm-ex perm-sr perm-se perm-hd perms-pair perms-object perms-nil
   otype-sentry otype-closure
   obj-bins obj-bin-count t-free t-symbol t-string t-vector t-bytes t-closure t-record t-float
-  t-port t-bignum t-code t-text code-entry code-name code-lits clo-entry clo-code clo-free
-  sym-name sym-value sym-function sym-plist sym-flags sym-package sym-macro sym-constant pkg-tag
-  ctx-bytes reg-pc reg-ra reg-sp reg-gp reg-tp reg-t0 reg-t1 reg-t3 reg-s0 reg-s1 reg-s2
+  t-port t-bignum t-code t-text t-stack t-context code-entry code-name code-lits clo-entry clo-code clo-free
+  sym-name sym-value sym-function sym-plist sym-flags sym-package sym-macro sym-constant sym-detached pkg-tag
+  ctx-slots ctx-bytes reg-pc reg-ra reg-sp reg-gp reg-tp reg-t0 reg-t1 reg-t3 reg-s0 reg-s1 reg-s2
   reg-a0 reg-a7
   scr-ddc scr-mtcc scr-mscratchc scr-mepcc
   ecall-arity ecall-oom ecall-error ecall-reschedule ecall-record
@@ -75,7 +75,7 @@
   blit-done blit-pending blit-refused-src blit-refused-dst
   op-copy op-fill op-line
   ;; the primitives
-  %* %+ %- %/ %< %<= %= %> %>= %addr-of %alloc-pool %apply %ash
+  %* %+ %- %/ %< %<= %= %> %>= %addr-of %apply %ash
   %bit-ref %bit-set! %min %max %popcount
   %bytes-length %bytes-ref %bytes-set! %bytes? %car %cdr %char->int %char?
   %closure? %cons %cons? %cycles %disable %display %ecall
@@ -188,9 +188,9 @@
   blit-busy? blit-drain blit-sync blit-wait-descriptor blit-wait-ring
   device-page device-page-bytes
   disk-go disk-status disk-busy? disk-blocks disk-interrupts!
-  *blit-ring* *gc-blit-ring* *blit-rings* blit-ring-bytes *in-interrupt*
-  blit-descriptor gc-blit-descriptor blit-go
-  *screen* alloc-pool bm-blit-rect bm-fill-rect
+  *blit-ring* *gc-blit-ring* *in-interrupt*
+  blit-descriptor gc-blit-descriptor ensure-gc-blit-ring blit-go
+  *screen* bm-blit-rect bm-fill-rect
   bm-plot bm-point bm-index bm-w bm-h
   make-bitmap-rastport make-rastport-on rp-bitmap
   blit-rect
@@ -202,12 +202,12 @@
   rect-intersect rect-contains? rect-subtract region-subtract-rect region-area
   region-intersect-rect region-subtract
   fill-circle check-colour
-  fill-rect free-pool
+  fill-rect
   rgb
   int-ack int-disable int-enable int-pending int-raise millis timer-hz
   peek peek8 plot poke poke8
   input-take input-inject input-interrupts! input-buttons input-mods
-  pool-free-bytes pool-tag pool-used random screen-height
+  random screen-height
   screen-width
   timer-never timer-set-in
   gfx-show gfx-colour! gfx-vblank-irq! gfx-present!
@@ -275,7 +275,7 @@
   kickstart macro-form?
   rebuild rebuild-end genesis *fresh-image* record-initialiser register-macro repl
   resume-kickstart print-report
-  ctx-set! enter-closure data-region stack-capability
+  ctx-set! enter-closure
   system-name top-level-form
 ))
 
@@ -290,7 +290,7 @@
   ;; what `mutex-lock` answers instead of `t` when the last owner ended holding it
   abandoned
   preemption-off preemption-on
-  task-snapshot task? reap-saved-tasks
+  task-snapshot task?
   this-task
   remove-task reschedule sigf-vblank signal sigf-blit
   ;; ---- talking between tasks ----

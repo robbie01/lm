@@ -38,11 +38,14 @@ pub const C_DIVZERO: u32 = 27;
 pub const C_CAP: u32 = 28;
 /// The write barrier. With bit 0 of `gcmode` set, a store of any width that
 /// would overwrite a tagged granule in cons or object space whose capability
-/// points at an unmarked heap object traps before writing. `mtval` is the
-/// address of that granule; the handler marks the object and the store
-/// re-executes. This is what lets the collector mark while everything else
-/// runs: nothing reachable when marking began can be lost, because the last
-/// pointer to it cannot be overwritten without the collector seeing it first.
+/// points at an unmarked heap object traps before writing, unless the
+/// granule lies in a stack or a register context. `mtval` is the address of
+/// that granule; the handler marks the object and the store re-executes.
+/// This is what lets the collector mark while everything else runs: nothing
+/// reachable when marking began can be lost, because the last pointer to it
+/// cannot be overwritten without the collector seeing it first. A stack or a
+/// context in use is a root, scanned whole when marking begins, so what it
+/// held then is already marked, and a store into one loses nothing.
 pub const C_BARRIER: u32 = 29;
 /// A capability offset moved sp below `stklim` with interrupts on. `mtval`
 /// is where it would have gone; sp is left as it was.
@@ -911,7 +914,9 @@ impl Machine {
 
     /// The write barrier's question for a store of `sz` bytes at `a`, asked
     /// only while it is on: the address of a granule the store touches that
-    /// holds a capability to an unmarked heap object, if there is one.
+    /// holds a capability to an unmarked heap object, if there is one and it
+    /// is not in a stack or a context. Which object holds the granule is
+    /// asked last, only of a store that would otherwise trap.
     #[inline(never)]
     pub fn barrier_hit(&self, a: u32, sz: u32) -> Option<u32> {
         let first = a & !7;
@@ -924,12 +929,23 @@ impl Machine {
             if let Some(obj) = self.referent(old) {
                 let bit = (obj - CONS_BASE) >> 3;
                 let word = unsafe { self.rd32(GC_BITMAP + ((bit >> 5) << 2)) };
-                if word & (1 << (bit & 31)) == 0 {
+                if word & (1 << (bit & 31)) == 0 && !self.in_state(g) {
                     return Some(g);
                 }
             }
         }
         None
+    }
+
+    /// Whether the granule at `g` lies in a stack or a register context: the
+    /// type in the header of the object holding it, which is the nearest
+    /// object start at or below it. A tagged granule is never in a free
+    /// block, so that object holds it.
+    fn in_state(&self, g: u32) -> bool {
+        g >= OBJ_BASE
+            && self
+                .object_start(g)
+                .is_some_and(|h| crate::heap::is_state_type(unsafe { self.rd32(h) } & 0xff))
     }
 
     /// The heap block a tagged capability keeps alive, as the address its

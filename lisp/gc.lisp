@@ -15,9 +15,13 @@
 ;;;
 ;;; The collector is precise because the machine is: a granule of memory, eight
 ;;; bytes, holds a pointer if and only if its tag is set. The roots are the
-;;; tagged granules of low memory, of every stack from its stack pointer to its
-;;; top, and of every saved register context. Marking an object is pushing
-;;; every tagged granule of its payload.
+;;; tagged granules of low memory, of every stack in use from its stack
+;;; pointer to its top, and of every register context in use. Marking an
+;;; object is pushing every tagged granule of its payload, except for a stack
+;;; or a context, which is an object like any other and is kept by what holds
+;;; it, but whose slots are what the roots scan: the part of a stack below its
+;;; stack pointer holds whatever earlier calls left there, and tracing it would
+;;; keep that alive.
 ;;;
 ;;; A tagged capability keeps alive the block its base lies in. With HD it
 ;;; is an object, its header in the granule below its base. Without, one
@@ -26,10 +30,10 @@
 ;;; pair; one based in object space keeps the object whose block holds the
 ;;; granule below its base, found by the object-start map, so one narrowed to
 ;;; a slot keeps its vector. Machine code is an object too, a text, so an
-;;; entry or a return address keeps the function's text by the same rule.
-;;; Everything else, a stack, a device, a pool block, is somebody else's. A
-;;; task's cons run keeps the pair at its base: at most one pair of floating
-;;; garbage.
+;;; entry or a return address keeps the function's text by the same rule, and
+;;; a stack pointer or a frame pointer keeps its stack. A device page is
+;;; somebody else's. A task's cons run keeps the pair at its base: at most one
+;;; pair of floating garbage.
 ;;;
 ;;; What makes marking safe to interleave with running code is the machine's
 ;;; write barrier (`gcmode`): while it is on, any store that would overwrite a
@@ -41,7 +45,10 @@
 ;;; start survives the cycle, and what was allocated during it is made black
 ;;; on the spot, a run of pairs by marking the whole run when it is handed out
 ;;; and an object by marking it when it is taken. Nothing new needs tracing,
-;;; and the roots need scanning once.
+;;; and the roots need scanning once. The barrier lets a store into a stack or
+;;; a context through: one in use is a root, scanned at the start, so what it
+;;; held then is marked already, and a frame pushed or a register saved
+;;; afterwards over a stale pointer loses nothing.
 ;;;
 ;;; Free memory holds no tags. The sweep zeroes every dead object that could
 ;;; hold a pointer and every dead stretch of pairs, so an allocator's stores
@@ -63,9 +70,7 @@
 ;;; functions through symbol value cells and its constants through its own
 ;;; code object. Nothing here may allocate. `let` and `while` are free;
 ;;; `%cons` is not, and anything that conses would recurse into the condition
-;;; being handled. The Exec pool is a separate heap, raw, unmoving and never
-;;; traced, holding stacks, register contexts and command blocks; only the
-;;; stacks and contexts in it are roots, and only from their owners.
+;;; being handled.
 
 (in-package gc)
 (unsafe-file)
@@ -278,6 +283,13 @@
         ((%= ty t-text) nil)
         (else t)))
 
+;; What marking traces: everything that may hold tags but a stack and a
+;; context, whose slots in use are roots.
+(defsubst (traced? ty)
+  (cond ((%= ty t-stack) nil)
+        ((%= ty t-context) nil)
+        (else (may-hold-tags? ty))))
+
 ;; ---------------------------------------------------------------- references
 ;; The header of the object whose payload starts at `base`, or 0 when there is
 ;; none. A stale stack slot can name an object that has since been freed and
@@ -292,7 +304,7 @@
                 0
                 (let* ((w (%ld-word h)) (ty (%logand w 255)))
                   (if (%>= ty t-symbol)
-                      (if (%<= ty t-text)
+                      (if (%<= ty t-context)
                           (if (%<= (%+ h (obj-block-size w)) top) h 0)
                           0)
                       0)))
@@ -395,7 +407,7 @@
               (gc-push (%ld-cap (%+ b 8)))
               (set! done (%+ done 16)))
             (let* ((w (%ld-word b)) (size (obj-block-size w)))
-              (if (may-hold-tags? (%logand w 255)) (scan-granules (%+ b 8) (%+ b size)) nil)
+              (if (traced? (%logand w 255)) (scan-granules (%+ b 8) (%+ b size)) nil)
               (set! done (%+ done size))))))
     done))
 
@@ -438,19 +450,13 @@
 ;; context with `scan-context`.
 (define (extra-roots) nil)
 
-;; What the blitter holds for blits it has not finished: every tagged granule
-;; of every task's descriptor ring (see `*blit-rings*`).
-(define (scan-blit-rings)
-  (let ((p *blit-rings*))
-    (while (%cons? p)
-      (scan-granules (%car p) (%+ (%car p) blit-ring-bytes))
-      (set! p (%cdr p)))))
-
-;; Low memory holds the globals, each an 8-byte slot holding a value or a
-;; number, so every tagged granule below the pool is a root.
+;; The low page holds the globals, each an 8-byte slot holding a value or a
+;; number, so every tagged granule in it is a root. The stacks, contexts and
+;; descriptor rings in use are objects that something holds, a task, a
+;; binding or a low global, and are marked as any object is; what is in use
+;; of a stack or a context is scanned here.
 (define (roots)
-  (scan-granules 0 pool-base)
-  (scan-blit-rings)
+  (scan-granules 0 low-end)
   (gc-push (%this-task))
   ;; This task's own stack, from where it stands.
   (scan-stack (%stack-pointer))
@@ -1091,8 +1097,8 @@
 ;; Updating before moving is what makes this work without a forwarding word
 ;; per pair: while pass 3 runs, everything is still where the map says. The
 ;; tags say exactly where every pointer is, so pass 3 is a walk over memory:
-;; low memory and the pool, where the globals, stacks and contexts are; the
-;; live pairs; and object space, whose free blocks hold no tags.
+;; the low page, where the globals are; the live pairs; and object space,
+;; stacks and contexts among it, whose free blocks hold no tags.
 ;;
 ;; Objects do not move. This collector is written in the language it
 ;; collects, and between updating and moving it calls functions and reaches
@@ -1196,7 +1202,7 @@
          (top (plan-cons cons-hi)))
     ;; Rewrite every pointer to a pair. Nothing may follow a pair between
     ;; here and the end of the slide.
-    (update-range 0 (%ld-word lg-poolptr) cons-hi)
+    (update-range 0 low-end cons-hi)
     (update-pairs cons-hi)
     (update-range obj-base (%ld-word lg-obj-ptr) cons-hi)
     (move-cons cons-hi)
@@ -1235,13 +1241,11 @@
 ;; An image carries every symbol the reader ever interned, and most of them
 ;; are the names of local variables: unbound, unreferenced, and in the way of
 ;; every lookup that walks their bucket. Before an image is collected the
-;; idle ones are taken out of the obarray and the symbol list. The collection
-;; then keeps the ones something still refers to, a quoted symbol in
-;; compiled code or a record's tag, and those go back afterwards. The rest are
-;; garbage, and a later read of the same name interns a fresh symbol.
-;;
-;; The candidates wait in a pool block while the collection runs, because
-;; the pool is not traced: a list of them on the stack would be a root.
+;; idle ones are flagged and taken out of the obarray and the symbol list.
+;; The collection then keeps the ones something still refers to, a quoted
+;; symbol in compiled code or a record's tag, and a walk of object space
+;; afterwards puts every symbol still flagged back. The rest are garbage, and
+;; a later read of the same name interns a fresh symbol.
 
 (define (symbol-idle? s)
   (if (%eq? (%symbol-value s) (%unbound))
@@ -1252,74 +1256,68 @@
               (if (symbol-exported? s) nil (if (symbol-package s) t nil))))
       nil))
 
+(define (detached? s) (%> (%logand (%symbol-flags s) sym-detached) 0))
+
 (define (symbol-bucket s)
   (%mod (qualified-hash (package-name (symbol-package s)) (%symbol-name s))
         (%vector-length (%ld-cap lg-obarray))))
 
-;; Splice every idle symbol out of a list, in place, allocating nothing.
-(define (drop-idle-symbols l)
+;; Splice every detached symbol out of a list, in place, allocating nothing.
+(define (drop-detached-symbols l)
   (let ((head l))
-    (while (if (%cons? head) (symbol-idle? (%car head)) nil)
+    (while (if (%cons? head) (detached? (%car head)) nil)
       (set! head (%cdr head)))
     (let ((prev head))
       (while (%cons? prev)
         (let ((next (%cdr prev)))
-          (if (if (%cons? next) (symbol-idle? (%car next)) nil)
+          (if (if (%cons? next) (detached? (%car next)) nil)
               (%set-cdr! prev (%cdr next))
               (set! prev next)))))
     head))
 
-;; Answers a pool block holding the count and then the detached symbols, or
-;; nil when there are none.
 (define (detach-idle-symbols)
-  (let ((n 0) (l (%ld-cap lg-symlist)))
+  (let ((l (%ld-cap lg-symlist)))
     (while (%cons? l)
-      (if (symbol-idle? (%car l)) (set! n (%+ n 1)) nil)
-      (set! l (%cdr l)))
-    (if (%= n 0)
-        nil
-        (let* ((block (alloc-pool (%lsh (%+ n 1) 3)))
-               (a (%addr-of block))
-               (i 1))
-          (set! l (%ld-cap lg-symlist))
-          (while (%cons? l)
-            (let ((s (%car l)))
-              (if (symbol-idle? s)
-                  (begin
-                    (%st-cap! (%+ a (%lsh i 3)) s)
-                    (set! i (%+ i 1)))
-                  nil))
-            (set! l (%cdr l)))
-          (%st-cap! a n)
-          (let* ((ob (%ld-cap lg-obarray)) (k 0) (nb (%vector-length ob)))
-            (while (%< k nb)
-              (%vector-set! ob k (drop-idle-symbols (%vector-ref ob k)))
-              (set! k (%+ k 1))))
-          (%st-cap! lg-symlist (drop-idle-symbols (%ld-cap lg-symlist)))
-          block))))
+      (let ((s (%car l)))
+        (if (symbol-idle? s) (%set-symbol-flags! s (%logior (%symbol-flags s) sym-detached)) nil))
+      (set! l (%cdr l))))
+  (let* ((ob (%ld-cap lg-obarray)) (k 0) (nb (%vector-length ob)))
+    (while (%< k nb)
+      (%vector-set! ob k (drop-detached-symbols (%vector-ref ob k)))
+      (set! k (%+ k 1))))
+  (%st-cap! lg-symlist (drop-detached-symbols (%ld-cap lg-symlist))))
 
-;; After the collection: the mark bits are still those of the collection
-;; just done, and objects do not move, so a detached symbol's bit says
-;; whether anything reached it.
-(define (reattach-marked-symbols block)
-  (if block
-      (let* ((a (%addr-of block)) (n (%ld-word a)) (i 1) (ob (%ld-cap lg-obarray)))
-        (while (%<= i n)
-          (let ((s (%ld-cap (%+ a (%lsh i 3)))))
-            (if (marked? (%- (%cap-base s) 8))
-                (let ((b (symbol-bucket s)))
-                  (%vector-set! ob b (%cons s (%vector-ref ob b)))
-                  (%st-cap! lg-symlist (%cons s (%ld-cap lg-symlist))))
-                nil))
-          (set! i (%+ i 1)))
-        (blank a (%+ a (%lsh (%+ n 1) 3)))
-        (free-pool block))
-      nil))
+;; The object of a value type whose header is at `p`, as the capability its
+;; allocator made for it.
+(define (value-object-at p h)
+  (%cap-and-perms (%cap-bounds-exact (%from-addr (%+ p value-bytes))
+                                     (%rrl (object-payload (%logand h 255) (%lsh h -8))))
+                  perms-object))
+
+;; After the collection every symbol left in object space is live, so a
+;; flagged one is one something still reached.
+(define (reattach-detached-symbols)
+  (let ((p obj-base) (hi (%ld-word lg-obj-ptr)) (ob (%ld-cap lg-obarray)))
+    (while (%< p hi)
+      (let* ((h (%ld-word p)) (size (obj-block-size h)))
+        (if (%<= size 0) (gc-corrupt p) nil)
+        (if (%= (%logand h 255) t-symbol)
+            (let ((s (value-object-at p h)))
+              (if (detached? s)
+                  (let ((b (symbol-bucket s)))
+                    (%set-symbol-flags! s (%logand (%symbol-flags s) (%lognot sym-detached)))
+                    (%vector-set! ob b (%cons s (%vector-ref ob b)))
+                    (%st-cap! lg-symlist (%cons s (%ld-cap lg-symlist))))
+                  nil))
+            nil)
+        (set! p (%+ p size))))))
 
 ;; Collect for an image: drop the idle symbols, collect, compact the pairs,
 ;; and blank what was reclaimed so that the file is the size of what is in
 ;; it. A cycle already under way is finished first, because the compactor
-;; reads the marks of a cycle that kept them from its start.
+;; reads the marks of a cycle that kept them from its start. The mark map is
+;; cleared at the end through the collector's own descriptor ring, which is
+;; made first, while there is nothing to stop it being allocated.
 ;;
 ;; The reattached symbols' pairs come out of a run carved at the new top,
 ;; the only free cons space the compactor leaves. Afterwards the frontier
@@ -1327,20 +1325,21 @@
 ;; file holds the live pairs and nothing else, and the image starts with an
 ;; empty run. Answers the bytes of free object space blanked.
 (define (collect-for-image)
-  (let ((idle (detach-idle-symbols)))
-    (without-interrupts
-      (if (busy?) (collect) nil)
-      (set! *keep-marks* t)
-      (collect)
-      (compact)
-      (set! *keep-marks* nil)
-      (reattach-marked-symbols idle)
-      (let ((run (%cons-run)))
-        (if (%> (%cap-len run) 0) (%st-word! lg-cons-ptr (%addr-of run)) nil))
-      (%set-cons-run! (empty-cons-run))
-      (%st-word! lg-cons-free-n (%lsh (%- cons-limit (%ld-word lg-cons-ptr)) -4))
-      (blank (%ld-word lg-cons-ptr) *cons-dirty-top*)
-      (clear-bitmap)))
+  (ensure-gc-blit-ring)
+  (detach-idle-symbols)
+  (without-interrupts
+    (if (busy?) (collect) nil)
+    (set! *keep-marks* t)
+    (collect)
+    (compact)
+    (set! *keep-marks* nil)
+    (reattach-detached-symbols)
+    (let ((run (%cons-run)))
+      (if (%> (%cap-len run) 0) (%st-word! lg-cons-ptr (%addr-of run)) nil))
+    (%set-cons-run! (empty-cons-run))
+    (%st-word! lg-cons-free-n (%lsh (%- cons-limit (%ld-word lg-cons-ptr)) -4))
+    (blank (%ld-word lg-cons-ptr) *cons-dirty-top*)
+    (clear-bitmap))
   (blank-free-objects))
 
 ;; ---------------------------------------------------------------- walking
@@ -1358,12 +1357,7 @@
           (if (%= (%logand h 255) t-code)
               (let ((e (%ld-cap (%+ p value-bytes))))
                 (if (if (%cap-tag? e) (%= (%cap-base e) base) nil)
-                    (begin
-                      (set! found (%cap-and-perms
-                                   (%cap-bounds-exact (%from-addr (%+ p value-bytes))
-                                                      (%rrl (%lsh (%lsh h -8) 3)))
-                                   perms-object))
-                      (set! hi p))
+                    (begin (set! found (value-object-at p h)) (set! hi p))
                     nil))
               nil)
           (if (%<= size 0) (gc-corrupt p) nil)
@@ -1399,15 +1393,6 @@
   (emit-str ", collections ")
   (emit-str (number->string *count*))
   (if (busy?) (emit-str ", one in progress") nil)
-  (newline)
-  ;; The pool is the other heap: raw, unmoving, where stacks and command
-  ;; blocks come from, and the one that runs out quietly.
-  (emit-str "pool bytes claimed ")
-  (emit-str (number->string (pool-used)))
-  (emit-str ", free ")
-  (emit-str (number->string (pool-free-bytes)))
-  (emit-str " of ")
-  (emit-str (number->string (%- pool-limit pool-base)))
   (newline)
   nil)
 

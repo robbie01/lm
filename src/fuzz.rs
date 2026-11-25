@@ -20,7 +20,8 @@ use crate::mach::{Machine, MSTATUS_MIE, MSTATUS_MPIE};
 use crate::map::*;
 
 /// Where the fuzz code goes: the reset vector, so the trap vector can point
-/// into it as well. Up to four kilobytes there run to below the pool.
+/// into it as well. Up to four kilobytes there run past the low page into
+/// memory that is not cons space yet.
 const CODE_AT: u32 = RESET_VECTOR;
 const CODE_MAX: usize = 4096;
 /// Instructions a run may execute before it is stopped.
@@ -146,7 +147,7 @@ impl Rng {
 
 /// Addresses worth handing random code: each region, its edges, the chips.
 const PLACES: &[u32] = &[
-    0, 4, 8, LG_BASE, OBJ_BINS, LOW_END, POOL_BASE, POOL_END - 4, RESET_VECTOR,
+    0, 4, 8, LG_BASE, OBJ_BINS, LOW_END, RESET_VECTOR,
     CONS_BASE, CONS_END - 4, OBJ_BASE, OBJ_END - 4, FAST_BASE, RAM_SIZE - 4, RAM_SIZE,
     MMIO_BASE, MMIO_BASE + 0x1000, MMIO_BASE + 0x2000, MMIO_BASE + 0x3000,
     MMIO_BASE + 0x4000, MMIO_BASE + 0x5000, MMIO_BASE + 0x6000, MMIO_END - 4,
@@ -345,7 +346,7 @@ const TOKENS: &[&str] = &[
     "%obj-len", "%make-string", "%string-ref", "%string-set!", "%make-vector", "%vector-ref",
     "%vector-set!", "%make-bytes", "%bytes-ref", "%bytes-set!", "%intern", "%symbol-name",
     "%symbol-value", "%set-symbol-value!", "%bit-ref", "%bit-set!", "%popcount",
-    "%alloc-pool", "%record-ref", "%record-set!", "%obj-type", "%eq?", "%=", "%<",
+    "%record-ref", "%record-set!", "%obj-type", "%eq?", "%=", "%<",
     "string-append", "substring", "number->string", "string->number", "symbol->string",
     "make-assembler", "i-add", "i-lw", "i-sw", "place", "compile-top", "compile-file",
     "read-from-string", "write-to-string", "display", "gensym", "error", "in-package",

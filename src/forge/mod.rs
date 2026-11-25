@@ -118,7 +118,7 @@ pub fn rebuild(from: &str, out: &str, verbose: bool, check: bool) -> i32 {
     // The machine wrote that image with a collector that cannot move an
     // object, so it carries every hole it ever made. Nothing is running now,
     // and a fresh image resumes nothing, so the forge closes them and blanks
-    // the pool scratch the image will write before it reads.
+    // the stacks and frames the image will write before it reads.
     if compact::compact_image(out, out, verbose, true) != 0 {
         return 1;
     }
@@ -173,8 +173,6 @@ pub fn write_layout() {
     def!("nil-cell", NIL_CELL);
     def!("lg-base", LG_BASE);
     def!("low-end", LOW_END);
-    def!("pool-base", POOL_BASE);
-    def!("pool-limit", POOL_END);
     def!("cons-base", CONS_BASE);
     def!("cons-limit", CONS_END);
     def!("obj-base", OBJ_BASE);
@@ -257,6 +255,8 @@ pub fn write_layout() {
     def!("t-port", T_PORT);
     def!("t-code", T_CODE);
     def!("t-text", T_TEXT);
+    def!("t-stack", T_STACK);
+    def!("t-context", T_CONTEXT);
     def!("code-entry", CODE_ENTRY);
     def!("code-name", CODE_NAME);
     def!("code-lits", CODE_LITS);
@@ -274,14 +274,16 @@ pub fn write_layout() {
     def!("sym-exported", SYM_EXPORTED as u32);
     def!("sym-unsafe", SYM_UNSAFE as u32);
     def!("sym-constant", SYM_CONSTANT as u32);
+    def!("sym-detached", SYM_DETACHED as u32);
     def!("pkg-tag", PKG_TAG);
     def!("pkg-name", PKG_NAME);
     def!("pkg-use", PKG_USE);
     def!("pkg-slots", PKG_SLOTS);
 
     // The trap stub saves every register into a context, so a task's
-    // context and a trap frame are the same block: 32 value slots, slot 0
-    // the pc (MEPCC) and slot i register xi. These name the slots.
+    // context and a trap frame are the same shape: 32 value slots, slot 0
+    // the pc (MEPCC) and slot i register xi, and a frame for a nested trap
+    // has its link after them. These name the slots.
     s.push_str("\n;; ---- contexts and trap frames ----\n");
     def!("ctx-slots", 32);
     def!("ctx-bytes", 32 * VALUE_BYTES);
@@ -670,8 +672,8 @@ pub fn build(out: &str, verbose: bool) -> i32 {
     };
     note(&l, "host up");
 
-    // The pool's first block is the forge's scratch: the boot stack, the trap
-    // stack and the trap frames, which a fresh image blanks.
+    // What the stubs stand on, the boot stack, the trap stack and the
+    // frames, made first, before anything is compiled to run on them.
     if let Err(e) = drive(&mut l, "(boot:reserve-stub-memory)") {
         eprint!("{e}");
         return 1;
@@ -771,7 +773,10 @@ pub fn build(out: &str, verbose: bool) -> i32 {
         return 1;
     }
 
-    blank_run_scratch(&mut l);
+    // The collector ran on the boot stack, and its registers were saved in
+    // the boot context: values no longer live, whose tags would keep what
+    // they name in the image. A booting image starts on them afresh.
+    l.h.blank_stub_state();
 
     // Objects, machine code among them, are never moved by the machine, for
     // reasons `gc.lisp` explains at length; nothing stops the forge doing it
@@ -826,16 +831,12 @@ fn call_on_machine(l: &mut Lisp, name: &str, back: u32) -> Option<V> {
         eprintln!("lm: {name} is not a compiled function; skipping");
         return None;
     }
-    let region = |lo: u32, hi: u32| Cap::root().with_addr(lo).with_bounds(hi - lo);
-    let (Some(stack), Some(frame)) = (
-        region(l.h.g(LG_STACKBOT), l.h.g(LG_STACKTOP)),
-        region(l.h.g(LG_TRAPSAVE), l.h.g(LG_TRAPSAVE) + 32 * VALUE_BYTES),
-    ) else {
+    let (sp, frame) = (l.h.gv(LG_BOOTSTACK), l.h.gv(LG_TRAPSAVE));
+    if sp == NIL || frame == NIL {
         eprintln!("lm: the boot stack or the trap frame is not set up");
         return None;
-    };
+    }
     let ret = cap_to(RESET_VECTOR, RESET_RESERVE, P_EX | P_SR).with_addr(back).seal(OT_SENTRY);
-    let sp = stack.with_addr(l.h.g(LG_STACKTOP));
     let entry = l.h.slot(closure, CLO_ENTRY);
     let trap = l.h.gv(LG_TRAPENTRY);
     let m = &mut *l.h.m;
@@ -864,31 +865,15 @@ fn call_on_machine(l: &mut Lisp, name: &str, back: u32) -> Option<V> {
     Some(m.reg(A0))
 }
 
-/// The stack the machine ran the collector on, and the trap frame it would
-/// have saved registers into. Both live in the Exec pool, both are scratch,
-/// and both are full of whatever the collector last had in hand: values that
-/// are no longer live, whose tags would keep what they name in the image. A
-/// booting image sets its own stack in the reset stub, so nothing here
-/// survives.
-fn blank_run_scratch(l: &mut Lisp) {
-    let save = l.h.g(LG_TRAPSAVE);
-    let regions = [
-        (l.h.g(LG_STACKBOT), l.h.g(LG_STACKTOP)),
-        (save, save + 32 * VALUE_BYTES),
-    ];
-    for (lo, hi) in regions {
-        if lo == 0 || hi <= lo || hi > POOL_END {
-            continue;
-        }
-        for a in (lo & !7..hi).step_by(8) {
-            l.h.stc(a, Cap::NULL);
-        }
-    }
-}
-
 /// Run the machine's own collector over everything the build made. An
 /// image written without it would carry everything the compiler consed.
+/// The machine's allocator goes in first, as the kickstart would put it:
+/// the collection makes the descriptor ring it clears the mark map through.
 fn collect_before_saving(l: &mut Lisp, back: u32, verbose: bool) -> bool {
+    if call_on_machine(l, "gc:install-allocator", back).is_none() {
+        eprintln!("lm: the machine's allocator did not go in; no image written");
+        return false;
+    }
     match call_on_machine(l, "gc:collect-for-image", back) {
         Some(v) => {
             if verbose {

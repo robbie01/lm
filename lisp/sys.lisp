@@ -29,19 +29,6 @@
   (emit-str (if (%= (task-count) 1) " task" " tasks"))
   (newline))
 
-;; ---------------------------------------------------------------- authority
-;; The kernel makes its stacks and register contexts out of the root, and
-;; gives each capability only what it is for.
-
-;; `len` bytes of memory at `base`, as a capability to load and store values
-;; in them and nothing else, which is what a pair permits. The caller has
-;; made sure the bounds are exact.
-(define (data-region base len)
-  (%cap-and-perms (%cap-bounds-exact (%from-addr base) len) perms-pair))
-
-;; A stack runs down from its top, so its capability stands there.
-(define (stack-capability lo hi) (%cap-set-addr (data-region lo (%- hi lo)) hi))
-
 ;; ---------------------------------------------------------------- contexts
 ;; The registers a trap saved, reached through the capability to the block
 ;; they were saved in. Slot 0 is the pc, where x0 would be, and slots 1..31
@@ -733,12 +720,12 @@
 (define (error-trap args) (%ecall ecall-error))
 
 ;; A task restarts on its own stack, which is a capability standing at its
-;; top. Before there are tasks, on the boot stack, whose bounds the forge left
-;; in two low globals.
+;; top. Before there are tasks, on the boot stack, which a low global holds
+;; the same way.
 (define (restart-stack)
   (if *stack-top-fn*
       (%funcall *stack-top-fn*)
-      (stack-capability (%ld-word lg-stackbot) (%ld-word lg-stacktop))))
+      (%ld-cap lg-boot-stack)))
 
 ;; Where a restarted closure returns to when it finally does: on the machine
 ;; the sentry for the task exit stub, so a prompt in a window that is
@@ -1004,4 +991,4 @@
   0)
 
 ;; These hand out capabilities made from the root, or open a closure.
-(unsafe-names (quote (data-region stack-capability enter-closure)))
+(unsafe-names (quote (enter-closure)))

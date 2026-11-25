@@ -107,8 +107,8 @@
     (emit-code-label (%slot c clo-code))
     (emit-ch #\>))))
 
-;; A capability that is not a Lisp value: code, a stack, a device, a block of
-;; the pool. Its address, its bounds, what it permits and how it is sealed:
+;; A capability that is not a Lisp value: code, a stack, a device, a cons
+;; run. Its address, its bounds, what it permits and how it is sealed:
 ;;
 ;;   #<capability 0x2040 [0x2000,0x3000) rwRWm>
 ;;   #<capability 0x10002a4 [0x1000200,0x1000400) xs sentry>

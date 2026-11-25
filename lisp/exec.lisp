@@ -125,9 +125,11 @@
     (reverse acc)))
 
 ;; ---------------------------------------------------------------- Task
-;; The stack and the 256-byte register context are pool memory, and the task
-;; holds each as a capability bounded to it. The trap stub saves the
-;; registers into the context as thirty-two capabilities, tags and all.
+;; The stack and the 256-byte register context are objects, a stack and a
+;; context, and the task holds each as a capability to it. The trap stub
+;; saves the registers into the context as thirty-two capabilities, tags and
+;; all. What holds the task holds them, and when nothing does the collector
+;; takes all three back.
 ;;
 ;; Both are sealed in the record, with an otype of the kernel's. A task
 ;; record is anybody's to read, and a task's stack and saved registers hold
@@ -138,7 +140,6 @@
   state sigalloc sigwait sigrecvd
   stack                          ; the whole stack, standing at its top
   context                        ; the register block MScratchC names
-  blocks                         ; the pool blocks behind both, to give back
   fn                             ; the closure the task runs
   result switches
   binds                          ; this task's fluid bindings, innermost first
@@ -188,7 +189,7 @@
 
 ;; ---------------------------------------------------------------- critical
 ;; `without-interrupts` is for what an interrupt server touches, the
-;; scheduler's lists, the signal bits, the pool free list, and for the
+;; scheduler's lists and the signal bits, and for the
 ;; kernel's own sections of a few dozen instructions, the mutex's among them.
 ;; Nothing sleeps inside it: whatever would wake a sleeping task is another
 ;; task or an interrupt, which is what it holds off, so `wait`, `reschedule`,
@@ -265,8 +266,9 @@
 
 (define *reply-port* nil)   ; per task; see `initial-binds` and `reply-port`
 
-;; Dead tasks waiting to be reclaimed. A task cannot free the stack it is
-;; standing on, so it goes on this list and the next context switch does the
+;; Dead tasks waiting to let go of their stacks and contexts. A task cannot
+;; let go of the stack it is standing on, or of the context the switch away
+;; saves into, so it goes on this list and the next context switch does the
 ;; work, on the trap stack, once the corpse is saved and will never resume.
 (define *reaped* nil)
 
@@ -276,14 +278,6 @@
     (while (%cons? p)
       (reap-task (%car p))
       (set! p (%cdr p)))))
-
-;; The tasks a saved image held, when it resumes: none of them runs again, so
-;; each one's stack and context go back to the pool, as do those of any task
-;; that had ended and was waiting to be reaped. Called before `exec-init`
-;; makes the lists anew.
-(define (reap-saved-tasks tasks)
-  (dolist (task tasks) (reap-task task))
-  (reap-tasks))
 
 (define (task-ready! task)
   (set-tc-state! task ts-ready)
@@ -319,8 +313,8 @@
                 (set! *switch-count* (%+ *switch-count* 1))
                 (%set-context! (task-context next))
                 (%set-stack-limit! (task-stack-limit next))
-                ;; Only now, with the context switched away, is a dead task's
-                ;; stack safe to give back.
+                ;; Only now, with the context switched away, can a dead task
+                ;; let go of its stack.
                 (if *reaped* (reap-tasks) nil)))
     nil))
 
@@ -498,15 +492,14 @@
          (quarter (%lsh (%cap-len (tc-stack task)) -2)))
     (%+ lo (if (%< quarter stack-reserve) quarter stack-reserve))))
 
-;; Pool memory that a capability bounds exactly: the length rounded up, and
-;; the base aligned, the way the processor says a capability of that length
-;; needs. Answers the pool block, for giving it back, and the capability.
-(define (pool-region n)
-  (let* ((len (%rrl n))
-         (mask (%ram n))
-         (block (alloc-pool (%+ len (%lognot mask))))
-         (base (%logand (%+ block (%lognot mask)) mask)))
-    (%cons block (data-region base len))))
+;; A stack of `size` bytes, as a capability to its slots standing at its
+;; top, with a pair's permissions, which is what a stack pointer and a frame
+;; pointer need. The allocator rounds the length up and aligns the base the
+;; way the processor says bounds of that length must be, so the stack limit
+;; and the bounds are exact.
+(define (new-stack size)
+  (let ((s (%cap-and-perms (alloc-object t-stack (%lsh (%+ size 7) -3)) perms-pair)))
+    (%cap-set-addr s (%cap-top s))))
 
 ;; A fresh record's slots hold nil, and nil is not the fixnum zero, so
 ;; anything counted or masked is set before it is read.
@@ -526,9 +519,8 @@
   (let* ((binds (initial-binds))
          (size (if (%cons? opts) (%car opts) default-stack))
          (task (tc-alloc))
-         (ctx (pool-region ctx-bytes))
-         (stack (pool-region size))
-         (top (%cap-set-addr (%cdr stack) (%cap-top (%cdr stack)))))
+         (ctx (alloc-object t-context ctx-slots))
+         (top (new-stack size)))
     (set-node-name! task name)
     (set-node-pri! task pri)
     (set-tc-base! task pri)
@@ -536,8 +528,7 @@
     (zero-task-counters! task)
     (set-tc-state! task ts-added)
     (set-tc-stack! task (task-seal top))
-    (set-tc-context! task (task-seal (%cdr ctx)))
-    (set-tc-blocks! task (list (%car ctx) (%car stack)))
+    (set-tc-context! task (task-seal ctx))
     (set-tc-fn! task fn)
     (set-tc-binds! task binds)
     (set-tc-quantum! task *quantum*)
@@ -545,12 +536,12 @@
     ;; The context is built to look as though the task had just been
     ;; interrupted on the first instruction of its function, on a whole
     ;; stack, returning to the exit stub when it is done.
-    (enter-closure (%cdr ctx) fn top)
+    (enter-closure ctx fn top)
     ;; s2 says which task is running, so the context carries it the way it
     ;; carries the stack pointer.
-    (ctx-set! (%cdr ctx) reg-s2 task)
+    (ctx-set! ctx reg-s2 task)
     ;; Its first cons faults into a refill: the run it starts with is empty.
-    (ctx-set! (%cdr ctx) reg-gp (empty-cons-run))
+    (ctx-set! ctx reg-gp (empty-cons-run))
     task))
 
 ;; Onto the ready list: from here it runs when the scheduler says so.
@@ -644,24 +635,34 @@
   ;; that nothing can queue behind the last of these: `put-message` checks the
   ;; same mark.
   (fail-ports-of task)
+  ;; Its blits land first. A descriptor the chip has not finished is held by
+  ;; the task's ring, and the ring by the task's binding, which goes with the
+  ;; task.
+  (blit-wait-ring (task-blit-ring task))
   (if (%eq? task (this-task))
       (begin
-        ;; It cannot free its own stack while standing on it: onto the reaper
-        ;; list, and the switch that takes it off the processor frees it.
+        ;; It cannot let go of its own stack while standing on it: onto the
+        ;; reaper list, and the switch that takes it off the processor lets
+        ;; go.
         (set! *reaped* (%cons task *reaped*))
         (reschedule)
         nil)
       (begin (reap-task task) nil)))
 
-;; The stack and the register context are pool memory, given back by hand;
-;; the boot task's came from the forge and have no blocks to give. The task
-;; itself is an object, collected when the last reference goes; its links go
-;; first so that a task somebody still holds does not keep every task behind
-;; it alive.
+;; The task's blitter ring: the global while it runs, its binding while it
+;; does not.
+(define (task-blit-ring task)
+  (if (%eq? task (this-task))
+      *blit-ring*
+      (let ((b (assq '*blit-ring* (tc-binds task))))
+        (if b (%cdr b) 0))))
+
+;; The task is an object, collected when the last reference goes, and its
+;; stack and context with it. A task somebody still holds keeps neither: they
+;; go here, and its links first, so that it does not keep every task behind
+;; it alive either.
 (define (reap-task task)
   (forget-node task)
-  (dolist (b (tc-blocks task)) (free-pool b))
-  (set-tc-blocks! task nil)
   (set-tc-stack! task nil)
   (set-tc-context! task nil)
   nil)
@@ -1448,9 +1449,8 @@
   (set! *quantum* (%/ (timer-hz) ticks-per-second))
   (set! *ticks* 0)
   ;; The code that is already running becomes task zero. Its context is the
-  ;; block the trap stub has been using all along, and its stack the boot
-  ;; stack, both made by the reset stub from the bounds the forge left in the
-  ;; low globals.
+  ;; boot context the trap stub has been saving into all along, and its stack
+  ;; the boot stack, both objects the forge made and left in low globals.
   (let ((boot (tc-alloc)))
     (set-node-name! boot "boot")
     (set-node-pri! boot 0)
@@ -1459,9 +1459,8 @@
     (zero-task-counters! boot)
     (set-tc-quantum! boot *quantum*)
     (set-tc-state! boot ts-run)
-    (set-tc-context! boot (task-seal (data-region (%ld-word lg-trapsave) ctx-bytes)))
-    (set-tc-stack! boot
-                   (task-seal (stack-capability (%ld-word lg-stackbot) (%ld-word lg-stacktop))))
+    (set-tc-context! boot (task-seal (%ld-cap lg-trapsave)))
+    (set-tc-stack! boot (task-seal (%ld-cap lg-boot-stack)))
     (set-tc-sigalloc! boot sig-reserved)
     ;; Task zero takes whatever was bound before there were tasks.
     (set-tc-binds! boot *boot-binds*)
@@ -1525,9 +1524,9 @@
 ;; ---------------------------------------------------------------- gc roots
 ;; Exec's records are objects hanging off variables, so the collector finds
 ;; the tasks, ports, messages and interrupt servers and every value in them
-;; by itself. What it cannot reach are the stacks and register blocks the
-;; tasks were suspended on, which are pool memory. Nothing here may allocate:
-;; these run inside a collection.
+;; by itself, the stacks and contexts among them. What is in use of a
+;; suspended task's stack and context it is told here, because it does not
+;; trace either. Nothing here may allocate: these run inside a collection.
 
 ;; A cycle has begun: the run a suspended task was holding is not its own any
 ;; more, because whatever it makes from now on has to come from a run handed

@@ -26,7 +26,7 @@
 (unsafe-file)
 
 (defconstant snap-header-blocks 1)
-(defconstant snap-regions 4)
+(defconstant snap-regions 3)
 
 ;; The header is put together in the collector's scratch memory, which no
 ;; allocator hands out, and each region's tag map after it.
@@ -87,9 +87,6 @@
          (result
           (disk:exclusive
             (lambda ()
-              ;; Every task there is, for the resumed image to give back
-              ;; their stacks: none can start or end until this returns.
-              (set! *saved-tasks* (task-snapshot))
               ;; Collect first and blank what was reclaimed: afterwards the
               ;; live pairs are one block at the bottom of cons space and
               ;; everything above it is zero, which is what makes an image
@@ -104,15 +101,10 @@
               (%st-cap! lg-toplevel top)
               (let ((r (write-regions (device-page dev-disk))))
                 (%st-cap! lg-toplevel saved-top)
-                (set! *saved-tasks* nil)
                 r)))))
     (report-save result)))
 
-;; The tasks of the machine that saved, in the image it wrote, and nil
-;; anywhere else.
-(define *saved-tasks* nil)
-
-;; Four regions: low memory, the pool, pairs, objects, each from its base to
+;; Three regions: the low page, pairs, objects, each from its base to
 ;; as far as its allocator has reached, each followed by its tag map,
 ;; which is built in the collector's scratch memory. The header goes out
 ;; last, so that a run that is interrupted leaves a file with no valid header
@@ -121,9 +113,8 @@
 ;; controller's.
 (define (write-regions page)
   (put-region snap-header 0 0 low-end)
-  (put-region snap-header 1 pool-base (%- (%ld-word lg-poolptr) pool-base))
-  (put-region snap-header 2 cons-base (%- (%ld-word lg-cons-ptr) cons-base))
-  (put-region snap-header 3 obj-base (%- (%ld-word lg-obj-ptr) obj-base))
+  (put-region snap-header 1 cons-base (%- (%ld-word lg-cons-ptr) cons-base))
+  (put-region snap-header 2 obj-base (%- (%ld-word lg-obj-ptr) obj-base))
   (let ((i 0) (k snap-header-blocks) (bad 0))
     (while (%< i snap-regions)
       (let* ((base (peek (region-field snap-header i 0)))
@@ -155,13 +146,11 @@
 ;; Everything the boot list would set up is already in the image. Exec is
 ;; rebuilt, because the task that saved is not the task that resumes, and
 ;; the drivers start again in `exec-init`, each taking its page afresh. The
-;; tasks that were saved never run again, so their stacks and contexts go
-;; back to the pool first.
+;; tasks that were saved never run again: the new Exec's lists do not hold
+;; them, and the collector takes them back with their stacks.
 (define (resume-kickstart)
   (%st-cap! lg-traphook (%symbol-value 'handle-trap))
   (%st-cap! lg-errhandler (%symbol-value 'error-trap))
-  (reap-saved-tasks *saved-tasks*)
-  (set! *saved-tasks* nil)
   (exec-init)
   (exec-start)
   (if *resume-fn* (%funcall *resume-fn*) nil)
@@ -171,7 +160,10 @@
   (emit-str " resumed, ")
   (emit-str (number->string (%lsh (object-bytes-used) -10)))
   (emit-str "k of objects\n")
-  (repl)
+  ;; The machine's own prompt, as at a cold boot: when it says goodbye, so
+  ;; does the machine, whether or not an error has restarted it since.
+  (repl (lambda () (%halt exit-ok)))
+  (%halt exit-ok)
   0)
 
 ;; ---------------------------------------------------------------- fresh
@@ -258,11 +250,6 @@
     ;; nothing since the symbols changed has allocated, and from here on
     ;; anything may.
     (install-allocator)
-    ;; The pool as the forge lays it out, its scratch, the stacks and the
-    ;; trap frames, which end with the boot context, and not what this
-    ;; machine carved from it since.
-    (%st-word! lg-poolptr (%+ (%ld-word lg-trapsave) ctx-bytes))
-    (%st-word! lg-pool-free 0)
     nil))
 
 ;; The image's symbols: the ones its sources use, any it gives something to,

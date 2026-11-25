@@ -79,7 +79,7 @@ enum Cmd {
         #[arg(short, long)]
         verbose: bool,
 
-        /// Blank the pool's scratch too, the boot stack and the trap frames,
+        /// Blank the boot stack, the trap stack and the trap frames too,
         /// which an image that boots through its kickstart, as `rebuild`
         /// makes, writes before it reads
         #[arg(long)]

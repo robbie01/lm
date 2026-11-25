@@ -1617,12 +1617,6 @@ impl<'a> Lisp<'a> {
                 bail!("the build tried to halt the machine")
             }
 
-            // ---- the pool, answering addresses ----
-            Prim::AllocPool => {
-                need!(1);
-                fix(self.h.alloc_pool(n!(0) as u32) as i32)
-            }
-
             // ---- strings, vectors, bytes ----
             Prim::MakeString => {
                 need!(1);
@@ -1993,7 +1987,6 @@ prims! {
     EnableAfterTrap    "%enable-after-trap";
     Enable             "%enable";
     Halt               "%halt";
-    AllocPool          "%alloc-pool";
     MakeString         "%make-string";
     StringLength       "%string-length";
     StringRef          "%string-ref";

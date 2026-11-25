@@ -2128,7 +2128,7 @@ pub fn watch_backtrace(m: &Machine) -> String {
     for _ in 0..12 {
         out.push_str(&name_of(m, code));
         out.push_str(" <- ");
-        if s0 < crate::map::POOL_BASE + 32 || s0 >= crate::map::POOL_END {
+        if s0 < crate::map::OBJ_BASE + 32 || s0 >= crate::map::OBJ_END {
             break;
         }
         code = m.load_cap(s0.wrapping_sub(32));

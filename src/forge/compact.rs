@@ -27,7 +27,6 @@
 use crate::cap::{self, Cap};
 use crate::heap::*;
 use crate::map::*;
-use crate::mach::CTX_BYTES;
 
 pub struct Stats {
     pub before: u32,
@@ -65,12 +64,13 @@ fn slid(c: Cap, delta: u32) -> Cap {
 /// Rewrite every tagged capability in memory whose bounds lie in a block
 /// that moves, so that it names the block where it is going. One whose base
 /// lies in `lo..hi` but in no block would be a pointer to nothing, and is an
-/// error, except in the pool: a stack slot below a stack pointer, or one a
-/// frame has not written yet, holds what an earlier call left there, and the
-/// stacks of a saved image are all dead. The collector believes nothing it
-/// finds there without its header, so such a capability names nothing it
-/// kept, and loses its tag. One that reaches past its block names a region,
-/// not a block, and stays as it is.
+/// error, except in a stack or a register context: a stack slot below a
+/// stack pointer, or one a frame has not written yet, holds what an earlier
+/// call left there, and a context saved long ago holds what its task had in
+/// hand then. The collector believes nothing it finds there without its
+/// header, so such a capability names nothing it kept, and loses its tag.
+/// One that reaches past its block names a region, not a block, and stays
+/// as it is.
 ///
 /// In object space every capability names the block holding the granule
 /// below its base (`below`): a headed one's header, and one narrowed into a
@@ -96,7 +96,9 @@ fn rewrite(h: &mut Heap, moves: &[Move], lo: u32, hi: u32, below: bool) -> Resul
                 h.stc(at, n);
             }
             Some(_) => {}
-            None if (POOL_BASE..POOL_END).contains(&at) => h.stc(at, c.without_tag()),
+            None if mover(moves, at).is_some_and(|m| is_state_type(hdr_type(h.ld(m.from)))) => {
+                h.stc(at, c.without_tag())
+            }
             None => {
                 let holder = match mover(moves, at) {
                     Some(m) => format!("in the block at {:#x}, type {}", m.from, h.ld(m.from) & 255),
@@ -225,21 +227,6 @@ pub fn compact_objects(h: &mut Heap, verbose: bool) -> Result<Stats, String> {
     Ok(stats)
 }
 
-/// A fresh image's pool starts with the forge's scratch: the boot stack, the
-/// trap stack and the trap frames, ending with the boot context at
-/// `lg-trapsave`. A booting machine writes all of it before it reads any, so
-/// what is left there is stale values from the machine that wrote the image,
-/// and a stale capability keeps what it names alive and in the file.
-fn blank_fresh_pool(h: &mut Heap) {
-    let end = h.g(LG_TRAPSAVE) + CTX_BYTES;
-    if end <= POOL_BASE || end > POOL_END {
-        return;
-    }
-    for a in (POOL_BASE..end).step_by(8) {
-        h.stc(a, Cap::NULL);
-    }
-}
-
 /// Compact a saved image, without running it.
 ///
 /// The same pass the build uses, on an image that came off the disk. Code is
@@ -247,8 +234,8 @@ fn blank_fresh_pool(h: &mut Heap) {
 /// relative to itself, and everything else reaches code through a
 /// capability, an entry or a return address, which the rewrite finds like
 /// any other. A fresh image, which `rebuild` makes and which boots through
-/// its kickstart and resumes nothing, can have its pool's scratch blanked as
-/// well.
+/// its kickstart and resumes nothing, can have the stacks and frames its
+/// stubs stand on blanked as well.
 pub fn compact_image(from: &str, out: &str, verbose: bool, fresh: bool) -> i32 {
     let mut m = crate::mach::Machine::new();
     let loaded = match crate::image::load(&mut m, from) {
@@ -261,7 +248,7 @@ pub fn compact_image(from: &str, out: &str, verbose: bool, fresh: bool) -> i32 {
     let entry = loaded.entry;
     let mut h = Heap::new(&mut m);
     if fresh {
-        blank_fresh_pool(&mut h);
+        h.blank_stub_state();
     }
     let stats = match compact_objects(&mut h, verbose) {
         Ok(s) => s,

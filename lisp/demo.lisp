@@ -302,10 +302,10 @@
 ;; a fixnum. `peek` reads the word at an address as a number from -2^31 to
 ;; 2^31-1 and `poke` stores one back unchanged, so no word needs a bignum on
 ;; the way in or out, and a value that is not a word is refused rather than
-;; cut down to one.
+;; cut down to one. The words are a byte object's, by address.
 (define (words)
   (unsafe
-  (let ((p (alloc-pool 16)))
+  (let* ((b (make-bytes 16)) (p (%addr-of b)))
     ;; a word with its top bit set, built a byte at a time, is the most
     ;; negative fixnum
     (poke p 0)
@@ -327,7 +327,7 @@
     (num-check 'wider-than-a-word-is-refused (refused? (lambda () (poke p 2147483648))) t)
     (num-check 'not-a-number-is-refused (refused? (lambda () (poke p "word"))) t)
     (num-check 'a-refused-poke-stores-nothing (peek p) #x12345678)
-    (free-pool p))
+    (num-check 'and-the-bytes-are-the-words (bytes-ref b 3) #x12))
   (princ "words: done (nothing above = all correct)")
   (newline)))
 
@@ -431,8 +431,32 @@
       (add-task "knocker" 0 (lambda () (sleep 10) (signal me 65536)))
       (num-check 'signal-beat-the-clock (wait-timeout 65536 1000) 65536)
       (num-check 'old-deadline-forgotten (wait-timeout 65536 40) 0)))
+  (tasks-come-and-go)
   (princ "talking: done (nothing above = all correct)")
   (newline))
+
+;; A task's stack and its register context are objects, which the collector
+;; takes back with the task: a thousand tasks that have come and gone, a
+;; hundred at a time, leave object space as they found it, give or take less
+;; than one stack.
+(define (brief-tasks n)
+  (let ((i 0) (made nil))
+    (while (< i n)
+      (set! made (cons (add-task "brief" 0 (lambda () (list 1 2 3))) made))
+      (set! i (+ i 1)))
+    (dolist (task made) (while (task-alive? task) (sleep 10)))))
+
+(define (tasks-come-and-go)
+  (gc)
+  (let ((used (object-bytes-used)) (i 0))
+    (while (< i 10)
+      (brief-tasks 100)
+      (set! i (+ i 1)))
+    (gc)
+    (gc)
+    (num-check 'a-thousand-tasks-leave-nothing
+               (< (- (object-bytes-used) used) exec::default-stack)
+               t)))
 
 ;; ---------------------------------------------------------------- locking
 ;; `(locking)` checks the rules about waiting and the mutex: a critical
@@ -612,12 +636,15 @@
       (set! from (%+ from 1)))
     same))
 
-;; Start a long fill into a fresh bitmap and drop it: the only thing left
-;; holding the pixels is the descriptor the chip is working through. Answers
-;; their address, which is a number and keeps nothing alive.
+;; Start a ring's worth of long fills into a fresh bitmap and drop it: the
+;; only things left holding the pixels are the descriptors the chip is
+;; working through, about a million and a half cycles of them. Answers their
+;; address, which is a number and keeps nothing alive.
 (define (blit-and-drop)
-  (let ((b (alloc-bitmap 1024 768)))
-    (bm-fill-rect b 0 0 1024 768 4)
+  (let ((b (alloc-bitmap 1024 768)) (i 0))
+    (while (< i hw::blit-ring-size)
+      (bm-fill-rect b 0 0 1024 768 (+ i 1))
+      (set! i (+ i 1)))
     (%addr-of (bm-pixels b))))
 
 (define (blitting)
@@ -699,19 +726,26 @@
       (num-check 'what-they-cover-lands (blit-probe op-fill v src 8 4) blit-done)
       (num-check 'all-of-it (all-bytes? v 0 32 3) t)
       (num-check 'and-nothing-was-refused (blit-refused?) nil))
-    ;; A blit in flight keeps its bitmap alive: a collection that starts
-    ;; while the chip is still filling pixels nothing else holds marks them
-    ;; through the descriptor, and the fill lands in a live object.
+    ;; A blit in flight keeps its bitmap alive: the descriptor holding the
+    ;; pixels nothing else holds is a slot of this task's ring, and a
+    ;; collection that reaches the ring while the chip is still filling them
+    ;; marks them through it, as it would through any vector, and the fill
+    ;; lands in a live object.
     (gc)
     (let ((a (blit-and-drop)))
       (num-check 'a-dropped-bitmap-still-being-filled
                  (list (blit-busy?) gc::*phase*) (list t gc::phase-idle))
-      (unsafe (without-interrupts (gc::start-cycle)))
+      (unsafe (without-interrupts
+                (gc::start-cycle)
+                (gc::gc-push *blit-ring*)
+                (gc::trace-some)))
+      (num-check 'is-kept-by-its-descriptor
+                 (list (blit-busy?) (unsafe (gc::marked? (- a 8))))
+                 (list t t))
       (while (= gc::*phase* gc::phase-marking) (gc::step))
-      (num-check 'is-kept-by-its-descriptor (unsafe (gc::marked? (- a 8))) t)
       (gc)
       (blit-sync)
-      (num-check 'and-the-fill-landed-in-it (unsafe (%ld-byte (+ a (* 1024 767)))) 4)))
+      (num-check 'and-the-fill-landed-in-it (unsafe (%ld-byte (+ a (* 1024 767)))) hw::blit-ring-size)))
   (princ "blitting: done (nothing above = all correct)")
   (newline))
 
@@ -1084,13 +1118,11 @@
     (let ((forged (%cap-set-high (%addr-of v) (%cap-high v))))
       (num-check 'bits-are-not-a-pointer (list (%cap-tag? forged) (eq? forged v)) (list nil nil)))
     ;; A capability store keeps the tag, and any other store clears it.
-    (unsafe
-     (let ((m (alloc-pool 16)))
-       (%st-cap! m v)
-       (num-check 'a-capability-store-keeps-the-tag (eq? (%ld-cap m) v) t)
-       (%st-word! m (%addr-of v))
-       (num-check 'a-word-store-clears-it (%cap-tag? (%ld-cap m)) nil)
-       (free-pool m)))
+    (let ((m (make-vector 1 nil)))
+      (%cap-st! m 0 v)
+      (num-check 'a-capability-store-keeps-the-tag (eq? (%cap-ld m 0) v) t)
+      (%cap-st-word! m 0 (%addr-of v))
+      (num-check 'a-word-store-clears-it (%cap-tag? (%cap-ld m 0)) nil))
     (princ "capabilities: the errors below are on purpose")
     (newline)
     (num-check 'storing-into-nil-is-refused (refused? (lambda () (set-car! nil 1))) t)

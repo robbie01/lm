@@ -25,21 +25,12 @@
 ;; the layout's `scr-*`. nil has `perms-nil`: it may load and nothing else,
 ;; which keeps it the same capability whatever it is loaded through, because
 ;; a load through an authority without LM clears SD, SC and LM and nil has
-;; none of them. A stack, a frame and a run of cons space load and store
-;; values, which is `perms-pair`, as `data-region` in sys.lisp gives them.
+;; none of them. A stack and a run of cons space load and store values,
+;; which is `perms-pair`.
 
-(define trap-save 0)      ; filled in below, in the pool
-(define trap-stack 0)
-(define boot-stack 0)
-
-;; Frames for traps taken inside the trap handler; see `emit-trap-stub`. The
-;; stride is a frame plus its link slot, rounded up to a power of two so that
-;; indexing is a shift: the stub has no register to spare for a multiply.
-;; `trap-nest-limit` in sys.lisp is the same number as `trap-nest-max`.
-(define trap-nest-shift 9)
-(define trap-nest-stride (%lsh 1 trap-nest-shift))
+;; Frames for traps taken inside the trap handler; see `emit-trap-stub`.
+;; `trap-nest-limit` in sys.lisp is the same number.
 (define trap-nest-max 8)
-(define trap-nest 0)
 
 ;; cd <- the root, in `root`, narrowed to the `len` bytes at `base` with the
 ;; permissions of a pair, standing at `base`. t1 is the scratch register.
@@ -59,10 +50,10 @@
 ;; ---------------------------------------------------------------- reset
 ;; Placed at the reset vector, where the processor starts fetching. PCC, DDC
 ;; and MTCC are the root and every other register is NULL. DDC keeps the
-;; root, because addressing memory by number is the privileged code's;
-;; everything else is made from it here, but for MTCC, which is the trap
-;; stub's entry, kept in a low global so that it is a root and moves with
-;; the stub's text when the forge slides object space.
+;; root, because addressing memory by number is the privileged code's. nil
+;; and the empty cons run are made from it here; the boot stack, the boot
+;; context and the trap stub's entry are objects, kept in low globals so
+;; that they are roots and move with object space when the forge slides it.
 (define (emit-reset-stub)
   (let ((a (make-assembler)))
     (i-cspecialrw a $t0 scr-ddc $zero)
@@ -74,11 +65,10 @@
     (i-candperm a $tp $tp $t1)
     (i-sc a $tp $zero 0)
     (i-sc a $tp $zero 8)
-    ;; A stack to stand on, bounded to itself.
-    (emit-region a $sp $t0 boot-stack boot-stack-size)
-    (emit-at a $sp $sp (%+ boot-stack boot-stack-size))
+    ;; A stack to stand on, at its top.
+    (i-lc a $sp $zero lg-boot-stack)
     ;; Where traps save registers, and where they go.
-    (emit-region a $t2 $t0 trap-save ctx-bytes)
+    (i-lc a $t2 $zero lg-trapsave)
     (i-cspecialrw a $zero scr-mscratchc $t2)
     (i-lc a $t2 $zero lg-trap-entry)
     (i-cspecialrw a $zero scr-mtcc $t2)
@@ -112,11 +102,11 @@
 ;; MScratchC at a different one.
 ;;
 ;; MScratchC names the frame a trap saves its registers into: the running
-;; task's context block when nothing is in progress, and a frame out of
-;; `trap-nest` when a trap is taken inside the handler. That happens whenever
-;; the handler's own arithmetic outgrows a fixnum, since `+` is a trapping
-;; instruction, and whenever it uses up the cons run. `lg-trapdepth` counts
-;; the traps in progress.
+;; task's context block when nothing is in progress, and one of the frames
+;; in `lg-trap-nest` when a trap is taken inside the handler. That happens
+;; whenever the handler's own arithmetic outgrows a fixnum, since `+` is a
+;; trapping instruction, and whenever it uses up the cons run.
+;; `lg-trapdepth` counts the traps in progress.
 ;;
 ;; Every register is saved and restored as a capability, so the tags go back
 ;; as they came. The stub is a text like any function's, and runs on MTCC,
@@ -143,22 +133,17 @@
     (i-addi a $t1 $t1 -1)                  ; the depth before this trap
     (i-beqz a $t1 outer)                   ; nothing in progress: the task's block
 
-    ;; Nested. Take a frame out of the array and record the one we came from,
-    ;; so the way out can put it back.
+    ;; Nested. Take this depth's frame out of the vector and record the one
+    ;; we came from, so the way out can put it back.
     (i-addi a $t1 $t1 -1)                  ; index from zero
     (i-addi a $t1 $t1 (%- 0 trap-nest-max))
     (i-bge a $t1 $zero over)
     (i-addi a $t1 $t1 trap-nest-max)
-    (i-slli a $t1 $t1 trap-nest-shift)     ; times trap-nest-stride
+    (i-slli a $t1 $t1 3)                   ; a slot of the vector
     (i-sc a $t0 $zero lg-traptmp2)         ; the frame we came from
-    (i-li a $t0 trap-nest)
-    (i-add a $t1 $t1 $t0)                  ; the address of this frame
-    (i-cspecialrw a $t0 scr-ddc $zero)
-    (i-csetaddr a $t0 $t0 $t1)
-    (i-li a $t1 trap-nest-stride)
-    (i-csetboundsexact a $t0 $t0 $t1)
-    (i-li a $t1 perms-pair)
-    (i-candperm a $t0 $t0 $t1)
+    (i-lc a $t0 $zero lg-trap-nest)
+    (i-cincoffset a $t0 $t0 $t1)
+    (i-lc a $t0 $t0 0)                     ; this frame
     (i-lc a $t1 $zero lg-traptmp2)
     (i-sc a $t1 $t0 ctx-bytes)             ; the link, just past the registers
 
@@ -185,9 +170,7 @@
     (i-lw a $t1 $zero lg-trapdepth)
     (i-addi a $t1 $t1 -1)
     (i-bnez a $t1 keepsp)
-    (i-cspecialrw a $t2 scr-ddc $zero)
-    (emit-region a $sp $t2 trap-stack trap-stack-size)
-    (emit-at a $sp $sp (%+ trap-stack trap-stack-size))
+    (i-lc a $sp $zero lg-trap-stack)
     (label a keepsp)
 
     ;; The handler takes mcause, the pc and mtval as integers, and the frame.
@@ -247,25 +230,28 @@
 ;; ---------------------------------------------------------------- assembly
 (define boot-stack-size 262144)
 (define trap-stack-size 65536)
-;; Step one, before any Lisp is compiled: the stacks and frames the stubs
-;; use, in the pool's first block, largest first from a multiple of the
-;; largest. Each is then a power of two at a multiple of itself, which a
-;; capability bounds exactly: the processor is not there to ask while the
-;; forge runs. The boot context is the block's last piece. The low globals
-;; hold the boot stack and the boot context as integers; Exec makes its own
-;; capabilities to them for task zero.
+
+;; A stack object, as a capability to its slots standing at its top.
+(define (stack-object bytes)
+  (let ((s (%cap-and-perms (alloc-object t-stack (%lsh bytes -3)) perms-pair)))
+    (%cap-set-addr s (%cap-top s))))
+
+;; Step one, before any Lisp is compiled: what the stubs stand on, the boot
+;; stack, the trap stack, the boot context and a frame for each depth of
+;; trap inside a trap, one slot longer than a context for its link. Each is
+;; an object, made by the forge's allocator, which aligns it for exact
+;; bounds, and kept in a low global, which the stubs load it from and which
+;; makes it a root. Exec makes the boot context and the boot stack task
+;; zero's.
 (define (reserve-stub-memory)
-  (let* ((nest-bytes (%* trap-nest-stride trap-nest-max))
-         (total (%+ boot-stack-size (%+ trap-stack-size (%+ nest-bytes ctx-bytes))))
-         (block (%alloc-pool (%+ total boot-stack-size)))
-         (base (%logand (%+ block (%- boot-stack-size 1)) (%- 0 boot-stack-size))))
-    (set! boot-stack base)
-    (set! trap-stack (%+ boot-stack boot-stack-size))
-    (set! trap-nest (%+ trap-stack trap-stack-size))
-    (set! trap-save (%+ trap-nest nest-bytes)))
-  (%st-word! lg-trapsave trap-save)
-  (%st-word! lg-stacktop (%+ boot-stack boot-stack-size))
-  (%st-word! lg-stackbot boot-stack))
+  (%st-cap! lg-boot-stack (stack-object boot-stack-size))
+  (%st-cap! lg-trap-stack (stack-object trap-stack-size))
+  (%st-cap! lg-trapsave (alloc-object t-context ctx-slots))
+  (let ((nest (make-vector-n trap-nest-max nil)) (i 0))
+    (while (%< i trap-nest-max)
+      (%vector-set! nest i (alloc-object t-context (%+ ctx-slots 1)))
+      (set! i (%+ i 1)))
+    (%st-cap! lg-trap-nest nest)))
 
 ;; Step two, once everything else has been compiled and the entry point is
 ;; known: the trap stub, then the reset stub, which loads the trap stub's

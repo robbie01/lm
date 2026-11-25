@@ -15,9 +15,9 @@ struct Census {
     /// Entries and return addresses: capabilities with EX.
     code: u32,
     other: u32,
-    /// Capabilities in the pool that name nothing: stack slots that hold
-    /// what an earlier call left there. The collector checks a header before
-    /// it believes one, and the compactor drops their tags.
+    /// Capabilities in a stack or a context that name nothing: slots that
+    /// hold what an earlier call left there. The collector checks a header
+    /// before it believes one, and the compactor drops their tags.
     stale: u32,
     /// Granules that hold a capability where none belongs, and capabilities
     /// that name something that is not there.
@@ -26,14 +26,19 @@ struct Census {
 
 /// A capability that names a pair or an object must name a live one: a pair
 /// in cons space below the bump pointer, an object whose header is a live
-/// header in object space, except in the pool, where a stack slot may hold a
-/// stale one. One with EX, an entry or a return address, must lie in the
+/// header in object space, except in a stack or a context, where a slot may
+/// hold a stale one. One with EX, an entry or a return address, must lie in the
 /// text of a function or in the reset stub. A string, a byte object or a
 /// function's text holds no capability at all.
 fn census(h: &Heap) -> Census {
     let mut c = Census::default();
     let (cons_hi, obj_hi) = (h.g(LG_CONS_PTR), h.g(LG_OBJ_PTR));
-    let spans = byte_spans(h);
+    let spans = spans_of(h, is_byte_type);
+    let states = spans_of(h, is_state_type);
+    let stale = |at: u32| {
+        let k = states.partition_point(|s| s.0 <= at);
+        k > 0 && at < states[k - 1].1
+    };
     let texts: Vec<&(u32, u32, u32)> = spans.iter().filter(|s| s.2 == T_TEXT).collect();
     let stub = RESET_VECTOR..RESET_VECTOR + RESET_RESERVE;
     for at in h.tagged() {
@@ -51,7 +56,7 @@ fn census(h: &Heap) -> Census {
             let ok = (OBJ_BASE..obj_hi).contains(&hdr) && hdr_type(h.ld(hdr)) != T_FREE;
             if ok {
                 c.objects += 1;
-            } else if (POOL_BASE..POOL_END).contains(&at) {
+            } else if stale(at) {
                 c.stale += 1;
             } else {
                 c.wrong.push((at, format!("an object capability to {:#x}, where no object is", v.base())));
@@ -59,7 +64,7 @@ fn census(h: &Heap) -> Census {
         } else if is_cons(v) {
             if v.addr < cons_hi {
                 c.pairs += 1;
-            } else if (POOL_BASE..POOL_END).contains(&at) {
+            } else if stale(at) {
                 c.stale += 1;
             } else {
                 c.wrong.push((at, format!("a pair capability to {:#x}, above the pairs", v.addr)));
@@ -69,7 +74,7 @@ fn census(h: &Heap) -> Census {
             let in_text = k > 0 && v.top() <= texts[k - 1].1 as u64;
             if in_text || (stub.contains(&v.base()) && v.top() <= stub.end as u64) {
                 c.code += 1;
-            } else if (POOL_BASE..POOL_END).contains(&at) {
+            } else if stale(at) {
                 c.stale += 1;
             } else {
                 c.wrong.push((at, format!("code at {:#x}, where no function's text is", v.base())));
@@ -81,13 +86,13 @@ fn census(h: &Heap) -> Census {
     c
 }
 
-/// Where the payload of every string, byte object and text lies, in address
-/// order, with its type.
-fn byte_spans(h: &Heap) -> Vec<(u32, u32, u32)> {
+/// Where the payload of every object of the types `which` picks lies, in
+/// address order, with its type.
+fn spans_of(h: &Heap, which: fn(u32) -> bool) -> Vec<(u32, u32, u32)> {
     let blocks = h.blocks().unwrap_or_else(|_| Vec::new());
     blocks
         .into_iter()
-        .filter(|&(_, hdr)| is_byte_type(hdr_type(hdr)))
+        .filter(|&(_, hdr)| which(hdr_type(hdr)))
         .map(|(p, hdr)| (p + HEADER_BYTES, p + block_size(hdr), hdr_type(hdr)))
         .collect()
 }
@@ -172,7 +177,7 @@ pub fn run(path: &str, names: &[String]) -> i32 {
         c.other
     );
     if c.stale > 0 {
-        println!("  {} stale capabilities in the pool's stacks, naming nothing", c.stale);
+        println!("  {} stale capabilities in stacks and contexts, naming nothing", c.stale);
     }
     if c.wrong.is_empty() {
         println!("  no heap addresses baked into code, and no capability names what is not there");

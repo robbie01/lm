@@ -7,18 +7,19 @@
 //!   0000_0100  ..              the low-memory globals, one 8-byte slot each
 //!   0000_0400  ..  0000_05FF   the free bins of object space
 //!   0000_0800  ..  0000_08FF   the reset stub, where the processor starts
-//!   0000_2000  ..  00FF_FFFF   the pool: stacks, contexts, descriptors
-//!   0100_0000  ..  01FF_FFFF   unused
-//!   0200_0000  ..  09FF_FFFF   cons space, eight million pairs
-//!   0A00_0000  ..  0DFF_FFFF   object space, machine code among the objects
-//!   0E00_0000  ..  0FFF_FFFF   the mark bitmap, the object-start map, the
+//!   0100_0000  ..  08FF_FFFF   cons space, eight million pairs
+//!   0900_0000  ..  0CFF_FFFF   object space: every object, machine code,
+//!                              stacks and register contexts among them
+//!   0D00_0000  ..  0FFF_FFFF   the mark bitmap, the object-start map, the
 //!                              mark stack, scratch
 //!   F000_0000  ..              device pages, 4 KiB each, 32-bit registers
 //! ```
 //!
 //! One flat address space. Tags exist for RAM only: a device page holds no
 //! capabilities. Every slot below 0x800 is reachable with one load or store
-//! off x0, which addresses memory through DDC.
+//! off x0, which addresses memory through DDC. Nothing lies between the low
+//! page and cons space, which starts at 16 MiB so that its runs fall on
+//! round boundaries.
 
 /// RAM: chip RAM, the first 128 MiB, which a display bitmap must lie in,
 /// and fast RAM above it.
@@ -50,18 +51,15 @@ pub const RESET_RESERVE: u32 = 256;
 /// reset stub, which an image saves whole.
 pub const LOW_END: u32 = 0x0000_1000;
 
-pub const POOL_BASE: u32 = 0x0000_2000;
-pub const POOL_END: u32 = 0x0100_0000;
+pub const CONS_BASE: u32 = 0x0100_0000;
+pub const CONS_END: u32 = 0x0900_0000; // 128 MiB, eight million pairs
 
-pub const CONS_BASE: u32 = 0x0200_0000;
-pub const CONS_END: u32 = 0x0A00_0000; // 128 MiB, eight million pairs
+pub const OBJ_BASE: u32 = 0x0900_0000;
+pub const OBJ_END: u32 = 0x0D00_0000; // 64 MiB
 
-pub const OBJ_BASE: u32 = 0x0A00_0000;
-pub const OBJ_END: u32 = 0x0E00_0000; // 64 MiB
-
-/// Everything above this is unclaimed: the mark bitmap, the mark stack, and
-/// whatever a program wants a bitmap plane for.
-pub const FAST_BASE: u32 = 0x0E00_0000;
+/// Everything above this is the collector's: the mark bitmap, the
+/// object-start map, the mark stack, and scratch.
+pub const FAST_BASE: u32 = 0x0D00_0000;
 
 /// The collector's mark bitmap: one bit per eight bytes of heap from
 /// `CONS_BASE`, bit i of the word at index i/32. The write barrier reads it
@@ -128,35 +126,34 @@ globals! {
     LG_CONS_FREE  = 4,  "cons-free";    // free list head, cons space
     LG_OBARRAY    = 5,  "obarray";      // vector of symbol buckets
     LG_GCCOUNT    = 6,  "gccount";
-    LG_STACKTOP   = 7,  "stacktop";     // top of the boot stack
-    LG_STACKBOT   = 8,  "stackbot";
+    LG_BOOTSTACK  = 7,  "boot-stack";   // the boot stack, standing at its top
+    LG_TRAPSTACK  = 8,  "trap-stack";   // the trap handler's, likewise
     LG_TOPLEVEL   = 9,  "toplevel";     // closure the kickstart enters
-    LG_POOLPTR    = 10, "poolptr";      // Exec pool bump pointer
-    LG_POOLEND    = 11, "poolend";
+    LG_TRAPNEST   = 10, "trap-nest";    // a vector of frames for nested traps
+    LG_TRAPSAVE   = 11, "trapsave";     // the boot context, which MScratchC
+                                        // names at reset
     LG_ROOTS      = 12, "roots";        // vector of extra gc roots
     LG_ERRHANDLER = 13, "errhandler";   // closure called on a lisp error
-    LG_TRAPSAVE   = 14, "trapsave";     // the boot context the trap stub saves into
-    LG_SYMLIST    = 15, "symlist";      // every interned symbol, for the gc
-    LG_CONSFREEN  = 16, "cons-free-n";  // cells on the cons free list
-    LG_OBJFREEN   = 17, "obj-free-n";
-    LG_TRAPHOOK   = 18, "traphook";     // closure called from the trap stub
-    LG_BOOTLIST   = 19, "bootlist";     // thunks the kickstart runs in order
-    LG_CONS_RUN   = 20, "cons-run";     // the running task's cons run
-    LG_STARTUP    = 21, "startup";      // closure run before the repl
-    LG_TASKEXIT   = 22, "task-exit";    // the closure a task returns into
-    LG_TRAPENTRY  = 23, "trap-entry";   // the trap stub's entry, for MTCC
-    LG_SYMCOUNT   = 24, "symcount";     // symbols interned so far: the next
+    LG_SYMLIST    = 14, "symlist";      // every interned symbol, for the gc
+    LG_CONSFREEN  = 15, "cons-free-n";  // cells on the cons free list
+    LG_OBJFREEN   = 16, "obj-free-n";
+    LG_TRAPHOOK   = 17, "traphook";     // closure called from the trap stub
+    LG_BOOTLIST   = 18, "bootlist";     // thunks the kickstart runs in order
+    LG_CONS_RUN   = 19, "cons-run";     // the running task's cons run
+    LG_STARTUP    = 20, "startup";      // closure run before the repl
+    LG_TASKEXIT   = 21, "task-exit";    // the closure a task returns into
+    LG_TRAPENTRY  = 22, "trap-entry";   // the trap stub's entry, for MTCC
+    LG_SYMCOUNT   = 23, "symcount";     // symbols interned so far: the next
                                         // symbol's identity, and its hash
-    LG_POOLFREE   = 25, "pool-free";    // free list head, exec pool
-    LG_PACKAGES   = 26, "packages";     // every package, as a list
-    LG_PACKAGE    = 27, "package";      // the one a bare name is read in
-    LG_TRAPDEPTH  = 28, "trapdepth";    // traps in progress; 0 outside one
-    LG_TRAPTMP    = 29, "traptmp";      // the stub has no free register at
-    LG_TRAPTMP2   = 30, "traptmp2";     // entry, so two go here for a moment
+    LG_PACKAGES   = 24, "packages";     // every package, as a list
+    LG_PACKAGE    = 25, "package";      // the one a bare name is read in
+    LG_TRAPDEPTH  = 26, "trapdepth";    // traps in progress; 0 outside one
+    LG_TRAPTMP    = 27, "traptmp";      // the stub has no free register at
+    LG_TRAPTMP2   = 28, "traptmp2";     // entry, so two go here for a moment
 }
 
 // The globals must stay below the free bins, the bins below the reset stub,
 // and the stub in the low block.
-const _: () = assert!(LG_BASE + 8 * 31 <= OBJ_BINS);
+const _: () = assert!(LG_BASE + 8 * 29 <= OBJ_BINS);
 const _: () = assert!(OBJ_BINS + 8 * OBJ_BIN_COUNT <= RESET_VECTOR);
 const _: () = assert!(RESET_VECTOR + RESET_RESERVE <= LOW_END);

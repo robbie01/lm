@@ -230,41 +230,45 @@
 (define *blit-tail* 0)      ; the last descriptor put on the chain, anybody's
 (define *in-interrupt* nil) ; set by the trap handler, cleared before it returns
 
-;; A ring is a word saying which descriptor is next, then the descriptors.
-;; Rings, the tail and the waiting functions name a descriptor by number:
-;; the pool is not traced, so a capability to it must not lie in a global or
-;; on a list where any program could pick it up and hide a pointer from the
-;; collector in it.
-(define (ring-slot r i) (%+ r (%+ 8 (%* i blit-list-size))))
+;; Each of those holds its ring or its descriptor sealed, with an otype of
+;; the chips', as a sleeper's place on a waiting list does: a binding, a
+;; global and a list are anybody's to read, and a capability to a descriptor
+;; is authority over what the chip does next. Only the code here opens one.
+(defconstant otype-blit 4)
+(define (blit-seal c) (%cap-seal c (%cap-set-addr (%root) otype-blit)))
+(define (blit-unseal c) (%cap-unseal c (%cap-set-addr (%root) otype-blit)))
 
-;; The capability the descriptor at `d` is filled through and handed to the
-;; chip as: bounded to the descriptor, with a pair's permissions, so that the
-;; chip can load capabilities through it with their tags and write them
-;; mutable.
-(define (descriptor-cap d)
-  (%cap-and-perms (%cap-bounds-exact (%from-addr d) blit-list-size) perms-pair))
+;; A ring is a vector: a slot saying which descriptor is next, then the
+;; descriptors, each a run of value slots, a field to a slot, laid out as the
+;; chip reads them. A blit the chip has not finished holds the capabilities
+;; of its source and destination in its descriptor, so a ring is marked and
+;; traced as any vector is, and what a blit in flight reads and writes stays
+;; alive while it is in flight. A task's ring is held by its binding; one
+;; whose task ends is waited for first (`remove-task` in exec.lisp).
+(defconstant blit-ring-slots
+  (%+ 1 (%* blit-ring-size (%lsh blit-list-size -3))))
 
-;; The pool hands a block out zeroed: the next descriptor is the first, and
-;; every done word reads as done, so no descriptor that was never used waits
-;; for a write-back that never comes.
-(define blit-ring-bytes (%+ 8 (%* blit-ring-size blit-list-size)))
-(define (new-blit-ring) (alloc-pool blit-ring-bytes))
+;; A fresh ring holds zero in every slot: the next descriptor is the first,
+;; and every done word reads as done, so no descriptor that was never used
+;; waits for a write-back that never comes.
+(define (new-blit-ring) (make-vector blit-ring-slots 0))
 
-;; Every task's ring there has been, by number. A blit the chip has not
-;; finished holds the capabilities of its source and destination in its
-;; descriptor, in the pool, which is not traced; the chip clears them as it
-;; finishes, so the tagged granules of these rings are exactly what blits in
-;; flight hold, and the collector takes them as roots. The collector's own
-;; ring only ever names its mark map, which is not the heap.
-(define *blit-rings* nil)
+;; Descriptor i of ring r, as the capability it is filled through and handed
+;; to the chip as: bounded to the descriptor, with a pair's permissions, so
+;; that the chip can load capabilities through it with their tags and write
+;; them mutable.
+(define (ring-slot r i)
+  (%cap-and-perms (%cap-bounds-exact (%cap-inc r (%+ value-bytes (%* i blit-list-size)))
+                                     blit-list-size)
+                  perms-pair))
 
 ;; The ring's next descriptor, once the chip has finished with it.
 (define (ring-take r)
-  (let* ((i (%ld-word r))
+  (let* ((i (%vector-ref r 0))
          (d (ring-slot r i)))
     (blit-wait-descriptor d)
-    (%st-word! r (if (%= (%+ i 1) blit-ring-size) 0 (%+ i 1)))
-    (descriptor-cap d)))
+    (%vector-set! r 0 (if (%= (%+ i 1) blit-ring-size) 0 (%+ i 1)))
+    d))
 
 ;; A descriptor from the running task's ring. Not in an interrupt server: a
 ;; server runs with the world half saved, must not allocate or block, and
@@ -274,18 +278,17 @@
   (if *in-interrupt*
       (error "the blitter is task context only: signal a task instead")
       nil)
-  (if (%= *blit-ring* 0)
-      (let ((r (new-blit-ring)))
-        (without-interrupts (set! *blit-rings* (%cons r *blit-rings*)))
-        (set! *blit-ring* r))
-      nil)
-  (ring-take *blit-ring*))
+  (if (%cap-tag? *blit-ring*) nil (set! *blit-ring* (blit-seal (new-blit-ring))))
+  (ring-take (blit-unseal *blit-ring*)))
 
 ;; The collector's own ring. Not a fluid binding: a collection runs with
-;; interrupts off from end to end, so there is never a second one.
-(define (gc-blit-descriptor)
-  (if (%= *gc-blit-ring* 0) (set! *gc-blit-ring* (new-blit-ring)) nil)
-  (ring-take *gc-blit-ring*))
+;; interrupts off from end to end, so there is never a second one. It is
+;; made before a collection that uses it begins, because nothing may be
+;; allocated inside one.
+(define (ensure-gc-blit-ring)
+  (if (%cap-tag? *gc-blit-ring*) nil (set! *gc-blit-ring* (blit-seal (new-blit-ring)))))
+
+(define (gc-blit-descriptor) (ring-take (blit-unseal *gc-blit-ring*)))
 
 ;; ---------------------------------------------------------------- waiting
 ;; A blit takes time and `blit-go` returns before it has happened. Two
@@ -314,8 +317,10 @@
   (while (blit-busy?) nil)
   nil)
 
-;; Done, whether it landed or was refused.
-(define (blit-done? d) (if (%= blit-pending (%ld-word (%+ d bl-status))) nil t))
+;; Done, whether it landed or was refused: of a descriptor in hand, and of
+;; one a sleeper holds sealed.
+(define (descriptor-done? d) (if (%= blit-pending (%cap-ld-word d bl-status)) nil t))
+(define (blit-done? s) (descriptor-done? (blit-unseal s)))
 
 ;; How a task whose blit has not landed goes to sleep instead of spinning.
 ;; gfx.driver installs it, since the driver owns the completion interrupt.
@@ -336,28 +341,29 @@
 ;; A short spin first: most blits are small and done before a sleep could be
 ;; arranged.
 (define (blit-wait-descriptor b)
-  (if (if (%= b 0) t (blit-done? b))
+  (if (descriptor-done? b)
       nil
       (let ((n 0))
-        (while (if (blit-done? b) nil (%< n 64))
+        (while (if (descriptor-done? b) nil (%< n 64))
           (blit-busy?)
           (set! n (%+ n 1)))
-        (if (blit-done? b)
+        (if (descriptor-done? b)
             nil
             (if (if *blit-sleep* (if *in-interrupt* nil (interrupts-on?)) nil)
-                (%funcall *blit-sleep* b)
-                (while (if (blit-done? b) nil t) (blit-busy?))))))
+                (%funcall *blit-sleep* (blit-seal b))
+                (while (if (descriptor-done? b) nil t) (blit-busy?))))))
   nil)
 
-;; Every descriptor in a ring. The chain runs in order, so this is the same as
+;; Every descriptor in a ring, as a binding holds it: sealed, or 0 for a task
+;; that has never blitted. The chain runs in order, so this is the same as
 ;; waiting for the last one issued.
-(define (blit-wait-ring r)
-  (if (%= r 0)
-      nil
-      (let ((i 0))
+(define (blit-wait-ring s)
+  (if (%cap-tag? s)
+      (let ((r (blit-unseal s)) (i 0))
         (while (%< i blit-ring-size)
           (blit-wait-descriptor (ring-slot r i))
-          (set! i (%+ i 1)))))
+          (set! i (%+ i 1))))
+      nil)
   nil)
 
 (define (blit-sync) (blit-wait-ring *blit-ring*))
@@ -375,10 +381,10 @@
   (%cap-st! d bl-next 0)
   (%cap-st-word! d bl-status blit-pending)
   (without-interrupts
-    (let ((linked (if (if (%> *blit-tail* 0) (blit-busy?) nil)
-                      (begin (%cap-st! (descriptor-cap *blit-tail*) bl-next d) t)
+    (let ((linked (if (if (%cap-tag? *blit-tail*) (blit-busy?) nil)
+                      (begin (%cap-st! (blit-unseal *blit-tail*) bl-next d) t)
                       nil)))
-      (set! *blit-tail* (%addr-of d))
+      (set! *blit-tail* (blit-seal d))
       (if (if linked (blit-busy?) nil)
           nil
           (if (%= blit-pending (%cap-ld-word d bl-status))
@@ -730,122 +736,7 @@
 (define (disk-blocks p) (%cap-ld-word p dsk-blocks))
 (define (disk-interrupts! p on) (%cap-st-word! p dsk-ctrl (if on 1 0)))
 
-;; ---------------------------------------------------------------- pool
-;; Raw memory that nothing moves: task contexts, stacks and descriptor rings.
-;; Every block carries an eight byte header, its total size and then a tag,
-;; both machine words, and the free blocks are threaded on one list in
-;; address order, so coalescing is a comparison against the neighbour. First
-;; fit, split when the remainder is worth having. A block is a whole number of
-;; granules, so it can hold capabilities, and it is handed out zeroed by word
-;; stores, which clear every tag they touch: a block holds no capability its
-;; last owner left in it.
-;;
-;; What the forge handed out before the machine ran, the trap frames, the
-;; trap stack and the boot stack, has no header and is never freed. It sits
-;; below the bump pointer this allocator starts from, and the tag is what
-;; tells anyone who tries to free one that they have made a mistake.
-(defconstant pool-tag #x1feeded)     ; not a pool address, so it cannot be a link
-(defconstant pool-min 24)            ; a free block must hold its size and its link
-
-(define (pool-size b) (%ld-word b))
-(define (pool-next b) (%ld-word (%+ b 4)))
-(define (pool-set-size! b n) (%st-word! b n))
-(define (pool-set-next! b n) (%st-word! (%+ b 4) n))
-
-(define (pool-zero p n)
-  (let ((i 0))
-    (while (%< i n)
-      (%st-word! (%+ p i) 0)
-      (set! i (%+ i 4)))))
-
-;; A fresh block off the top, when nothing on the free list fits.
-(define (pool-extend need)
-  (let ((p (%ld-word lg-poolptr)))
-    (if (%> (%+ p need) (%ld-word lg-poolend))
-        (out-of-memory "exec pool")
-        nil)
-    (%st-word! lg-poolptr (%+ p need))
-    p))
-
-;; Hand out the front of a free block and put any worthwhile remainder back
-;; in its place on the list.
-(define (pool-take b prev need)
-  (let ((size (pool-size b))
-        (next (pool-next b)))
-    (if (%>= (%- size need) pool-min)
-        (let ((rest (%+ b need)))
-          (pool-set-size! rest (%- size need))
-          (pool-set-next! rest next)
-          (pool-set-size! b need)
-          (if prev (pool-set-next! prev rest) (%st-word! lg-pool-free rest)))
-        (if prev (pool-set-next! prev next) (%st-word! lg-pool-free next)))
-    b))
-
-;; Finding a block and claiming it is one act. Clearing it is not: once the
-;; block is claimed it belongs to this caller, and zeroing a large block with
-;; interrupts off would stall the machine.
-(define (alloc-pool nbytes)
-  (let ((b (claim-pool nbytes)))
-    (pool-zero (%+ b 8) (%- (pool-size b) 8))
-    (%+ b 8)))
-
-(define (claim-pool nbytes)
-  (without-interrupts
-  (let* ((need (let ((n (%logand (%+ (%+ nbytes 8) 7) -8)))
-                 (if (%< n pool-min) pool-min n)))
-         (b (let ((p (%ld-word lg-pool-free)) (prev nil) (found nil))
-              (while (if found nil (%> p 0))
-                (if (%>= (pool-size p) need)
-                    (set! found (pool-take p prev need))
-                    (begin (set! prev p) (set! p (pool-next p)))))
-              (if found found (let ((n (pool-extend need)))
-                                (pool-set-size! n need)
-                                n)))))
-    (%st-word! (%+ b 4) pool-tag)
-    b)))
-
-;; Insert in address order, joining up with either neighbour that touches.
-(define (free-pool p)
-  (let ((b (%- p 8)))
-    (if (%= (%ld-word (%+ b 4)) pool-tag)
-        nil
-        (error "free-pool: not an allocated block" p))
-    (without-interrupts
-      (let ((size (pool-size b))
-            (prev nil)
-            (q (%ld-word lg-pool-free)))
-        (while (if (%> q 0) (%< q b) nil)
-          (set! prev q)
-          (set! q (pool-next q)))
-        ;; forward: absorb the next block if it starts where this one ends
-        (if (if (%> q 0) (%= (%+ b size) q) nil)
-            (begin (set! size (%+ size (pool-size q))) (set! q (pool-next q)))
-            nil)
-        (pool-set-size! b size)
-        (pool-set-next! b q)
-        ;; backward: if the previous block runs up to this one, the two become
-        ;; one and this header disappears
-        (if (if prev (%= (%+ prev (pool-size prev)) b) nil)
-            (begin
-              (pool-set-size! prev (%+ (pool-size prev) size))
-              (pool-set-next! prev q))
-            (if prev
-                (pool-set-next! prev b)
-                (%st-word! lg-pool-free b)))
-        nil))))
-
-(define (pool-used) (%- (%ld-word lg-poolptr) pool-base))
-
-(define (pool-free-bytes)
-  (let ((p (%ld-word lg-pool-free)) (n 0))
-    (while (%> p 0)
-      (set! n (%+ n (pool-size p)))
-      (set! p (pool-next p)))
-    n))
-
-;; What reaches memory by number, hands it out or frees it, or makes a
-;; device's page: needs an `unsafe` around the call. A descriptor is pool
-;; memory that can hold capabilities, so handing one out and linking one are
-;; among them.
-(unsafe-names (quote (peek poke peek8 poke8 alloc-pool free-pool
-                      device-page blit-descriptor blit-go)))
+;; What reaches memory by number or makes a device's page: needs an
+;; `unsafe` around the call. A descriptor is what the chip is handed, so
+;; handing one out and linking one are among them.
+(unsafe-names (quote (peek poke peek8 poke8 device-page blit-descriptor blit-go)))

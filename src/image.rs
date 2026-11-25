@@ -42,7 +42,6 @@ fn regions(m: &Machine) -> Vec<(u32, u32)> {
     let g = |off: u32| m.load_cap(off).addr;
     vec![
         (0, LOW_END), // nil cell, globals, object bins, the reset stub
-        (POOL_BASE, g(LG_POOLPTR)),
         (CONS_BASE, g(LG_CONS_PTR)),
         (OBJ_BASE, g(LG_OBJ_PTR)),
     ]

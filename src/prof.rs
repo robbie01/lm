@@ -428,7 +428,7 @@ impl FnProf {
                     self.names.insert(code.addr, crate::cpu::name_of(m, code));
                 }
             }
-            if s0 < crate::map::POOL_BASE + 32 || s0 >= crate::map::POOL_END {
+            if s0 < crate::map::OBJ_BASE + 32 || s0 >= crate::map::OBJ_END {
                 break;
             }
             code = m.load_cap(s0.wrapping_sub(32));

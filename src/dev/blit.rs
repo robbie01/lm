@@ -33,15 +33,18 @@ pub const STATUS_REFUSED: u32 = 2;
 pub const CTRL_DRAINED: u32 = 1;
 pub const CTRL_EACH: u32 = 2;
 
-/// A descriptor, `LIST_BYTES` long and 8-byte aligned. The three capability
-/// slots come first, each a granule written with a capability store so that
-/// it keeps its tag; the rest are words.
+/// A descriptor, `LIST_BYTES` long and 8-byte aligned, a field to each
+/// granule. The three capability slots come first, each written with a
+/// capability store so that it keeps its tag; the rest are words, each in
+/// the low half of its granule with the high half zero, so that a run of
+/// descriptors reads as value slots holding fixnums and capabilities, which
+/// is what lets a ring of them be a vector.
 ///
 /// ```text
 ///      0 src    8 dst   16 next
-///     24 w     28 h     32 smod   36 dmod
-///     40 val   44 op    48 x0     52 y0     56 x1     60 y1
-///     64 status
+///     24 w     32 h     40 smod   48 dmod
+///     56 val   64 op    72 x0     80 y0     88 x1     96 y1
+///    104 status
 /// ```
 ///
 /// The chip loads each slot the way `lc` would through the descriptor's own
@@ -62,17 +65,17 @@ pub const L_SRC: u32 = 0;
 pub const L_DST: u32 = 8;
 pub const L_NEXT: u32 = 16;
 pub const L_W: u32 = 24;
-pub const L_H: u32 = 28;
-pub const L_SMOD: u32 = 32;
-pub const L_DMOD: u32 = 36;
-pub const L_VAL: u32 = 40;
-pub const L_OP: u32 = 44;
-pub const L_X0: u32 = 48;
-pub const L_Y0: u32 = 52;
-pub const L_X1: u32 = 56;
-pub const L_Y1: u32 = 60;
-pub const L_STATUS: u32 = 64;
-pub const LIST_BYTES: u32 = 72;
+pub const L_H: u32 = 32;
+pub const L_SMOD: u32 = 40;
+pub const L_DMOD: u32 = 48;
+pub const L_VAL: u32 = 56;
+pub const L_OP: u32 = 64;
+pub const L_X0: u32 = 72;
+pub const L_Y0: u32 = 80;
+pub const L_X1: u32 = 88;
+pub const L_Y1: u32 = 96;
+pub const L_STATUS: u32 = 104;
+pub const LIST_BYTES: u32 = 112;
 
 /// The done word. A refusal is `REFUSED_SRC` or `REFUSED_DST` for the
 /// capability that refused it, with the capability fault the processor would

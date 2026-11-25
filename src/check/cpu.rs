@@ -4,7 +4,7 @@
 //! the core.
 
 use crate::cap::*;
-use crate::heap::{T_BYTES, T_CLOSURE, T_STRING, T_SYMBOL, T_VECTOR};
+use crate::heap::{T_BYTES, T_CLOSURE, T_CONTEXT, T_STACK, T_STRING, T_SYMBOL, T_VECTOR};
 use crate::mach::*;
 use crate::map::*;
 use crate::run;
@@ -1056,15 +1056,27 @@ pub fn run_all() -> bool {
         // The pair at PAIR is unmarked too, so overwriting a pointer to it
         // from object space traps naming the slot.
         ok("an indexed store traps", go_with(&[stxi(ZERO, A2, 1, 0)], objs).took(C_BARRIER, OBJ + 8));
-        let stack = |m: &mut Machine| {
-            setup(false)(m);
-            let p = m.reg(A1);
-            m.store_cap(0x8000, p);
+        // A stack and a register context are scanned whole when marking
+        // begins, so the barrier lets a store into one through: the type in
+        // the header of the object holding the granule says which it is.
+        const STATE: u32 = OBJ + 0x200;
+        let state = |ty: u32| {
+            move |m: &mut Machine| {
+                setup(false)(m);
+                let s = object(m, STATE, ty, 4);
+                let bit = (STATE - 8 - OBJ_BASE) >> 3;
+                let w = OBJ_STARTS + (bit >> 5) * 4;
+                let old = m.peek32(w);
+                m.poke32(w, old | (1 << (bit & 31)));
+                let p = m.reg(A1);
+                m.store_cap(STATE + 16, p);
+                m.set_reg(A2, s);
+            }
         };
-        let mut v = vec![];
-        capr(&mut v, A2, 0x8000);
-        v.push(sc(ZERO, A2, 0));
-        ok("the pool is not watched", go_with(&v, stack).clean());
+        let over = [sc(ZERO, A2, 16)];
+        ok("a stack is not watched", go_with(&over, state(T_STACK)).clean());
+        ok("...nor a context", go_with(&over, state(T_CONTEXT)).clean());
+        ok("...but a vector is", go_with(&over, state(T_VECTOR)).took(C_BARRIER, STATE + 16));
 
         // A capability narrowed to the cdr of the inner pair keeps that pair:
         // overwriting it traps while the pair is unmarked, whatever its length.

@@ -9,7 +9,7 @@
 use crate::cap::Cap;
 use crate::forge::hostlisp::Lisp;
 use crate::forge::{boot_host, write_layout};
-use crate::heap::{NIL, PERMS_PAIR, T_TEXT};
+use crate::heap::{NIL, PERMS_PAIR, T_STACK, T_TEXT};
 use crate::mach::{Machine, Stop, C_ECALL, C_RANGE, C_TYPE};
 use crate::map::*;
 use crate::run;
@@ -17,9 +17,9 @@ use crate::rvenc::*;
 
 /// The granule the compiled entry's closure is left in for the trampoline.
 const ENTRY: u32 = 0x0000_0C00;
-/// The task stack: a capability to these bytes, entered at the top.
-const STACK_BASE: u32 = 0x00F0_0000;
-const STACK_TOP: u32 = POOL_END;
+/// The task stack: an object of this many bytes, made once and kept as the
+/// boot stack, entered at the top.
+const STACK_BYTES: u32 = 1 << 20;
 /// Cause 28, a capability fault: mtval is (register << 5) | code.
 const CAUSE_CAP: u32 = 28;
 
@@ -530,12 +530,11 @@ pub fn run_one(l: &mut Lisp, src: &str) -> String {
     let run_start = l.h.g(LG_CONS_PTR);
     let run_end = l.h.g(LG_CONS_END);
     let root = Cap::ROOT;
-    let stack = root
-        .with_addr(STACK_BASE)
-        .with_bounds_exact(STACK_TOP - STACK_BASE)
-        .expect("the test stack has exact bounds")
-        .and_perms(PERMS_PAIR)
-        .with_addr(STACK_TOP);
+    if l.h.gv(LG_BOOTSTACK) == NIL {
+        let s = l.h.alloc_obj(T_STACK, STACK_BYTES / 8).and_perms(PERMS_PAIR);
+        l.h.set_gv(LG_BOOTSTACK, s.with_addr(s.top() as u32));
+    }
+    let stack = l.h.gv(LG_BOOTSTACK);
     let cons_run = root
         .with_addr(run_start)
         .with_bounds(run_end - run_start)
