@@ -394,8 +394,9 @@ A cycle is scheduled by budget: when allocation since the last reaches
 twice the live data or 8 MiB, whichever is more. The longest stretch with
 interrupts off is a slice, a few hundred thousand cycles at most, whatever
 the heap holds: `lm --stats` reports it. A heap with no room left is
-collected to the end on the spot, and a rebuild does not collect at all
-until it writes its image.
+collected to the end on the spot. A fresh rebuild finishes any cycle still
+marking before the image's definitions replace the builder's, because the
+barrier's handler is reached through the very symbols being replaced.
 
 Objects and code are never moved by the machine: the collector is written in
 the language it collects, and reaches its own functions and constants

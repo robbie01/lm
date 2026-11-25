@@ -259,8 +259,9 @@ fn code_align(len: u32) -> u32 {
 /// can go anywhere, and what has to change with it is every capability into
 /// it, which the tags find.
 ///
-/// An image from `(save-image)` resumes, with return sentries all over its
-/// stacks, and this must never be used on one.
+/// An image from `(save-image)` holds code the running machine placed with
+/// no code object to own it, the stub every task returns into among it, and
+/// this must never be used on one.
 ///
 /// Two things stay exactly where they are: the reset stub at the base, which
 /// has no header, and the trap stub at `lg-trap-entry`, which is a block no

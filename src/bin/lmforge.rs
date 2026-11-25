@@ -79,8 +79,8 @@ enum Cmd {
 
         /// Slide code space down too, and blank the pool's scratch. Only for
         /// an image that boots through its kickstart, as `rebuild` makes; not
-        /// one from `(save-image)`, which resumes with return addresses on
-        /// its stacks
+        /// one from `(save-image)`, which holds code that no code object
+        /// owns, such as the stub every task returns into
         #[arg(long)]
         fresh: bool,
     },
