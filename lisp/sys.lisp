@@ -455,6 +455,11 @@
 (define (loads-data? c) (%= perm-ld (%logand (%cap-perms c) perm-ld)))
 (define (executes? c) (%= perm-ex (%logand (%cap-perms c) perm-ex)))
 
+;; A value as the printer writes it, unless the printer could not read it:
+;; then as the capability it is.
+(define (emit-value v)
+  (if (if (%cap-tag? v) (not (loads-data? v)) nil) (print-capability v) (write v)))
+
 (define (emit-sealed v)
   (cond ((%= (%cap-otype v) otype-closure) (emit-str " is a sealed function: only calling it opens it"))
         ((%= (%cap-otype v) otype-sentry) (emit-str " is a sealed entry: only jumping to it opens it"))
@@ -471,19 +476,19 @@
           (emit-str ": ")
           (cond
            ((%null? reg) (emit-str "integer addressing refused by the default data capability"))
-           ((not (%cap-tag? v)) (write v) (emit-str " is not a pointer"))
-           ((%cap-sealed? v) (write v) (emit-sealed v))
+           ((not (%cap-tag? v)) (emit-value v) (emit-str " is not a pointer"))
+           ((%cap-sealed? v) (emit-value v) (emit-sealed v))
            ((if store (not (stores-data? v)) nil)
-            (if (%null? v) (emit-str "nil has no cell") (begin (write v) (emit-str " is read-only"))))
-           ((if store nil (not (loads-data? v))) (write v) (emit-str " cannot be read"))
-           (else (emit-str "outside the bounds of ") (write v)))))))
+            (if (%null? v) (emit-str "nil has no cell") (begin (emit-value v) (emit-str " is read-only"))))
+           ((if store nil (not (loads-data? v))) (emit-value v) (emit-str " cannot be read"))
+           (else (emit-str "outside the bounds of ") (emit-value v)))))))
 
 ;; What refused a jump's target: the capability it was to run under.
 (define (emit-entry-refusal v)
-  (cond ((not (%cap-tag? v)) (write v) (emit-str " is not a pointer"))
-        ((%cap-sealed? v) (write v) (emit-sealed v))
-        ((not (executes? v)) (write v) (emit-str " is not code"))
-        (else (emit-str "outside the bounds of ") (write v))))
+  (cond ((not (%cap-tag? v)) (emit-value v) (emit-str " is not a pointer"))
+        ((%cap-sealed? v) (emit-value v) (emit-sealed v))
+        ((not (executes? v)) (emit-value v) (emit-str " is not code"))
+        (else (emit-str "outside the bounds of ") (emit-value v))))
 
 ;; The pc itself refused at the fetch, a jump or a branch out of its code,
 ;; or a jump or a call to a capability that cannot run there.
