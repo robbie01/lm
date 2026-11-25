@@ -641,6 +641,17 @@ start, a run of pairs by marking the run when it is handed out, an object
 when it is taken, so nothing new needs tracing and the roots are scanned
 once.
 
+A walk of object space finds garbage the sweep has not reached yet as well
+as what is live, and an object it hands out, such as the code object a
+backtrace looks up for a return address whose function has been defined
+again, is reachable again behind the snapshot's back. So a walk that hands
+out an object shades it first (`gc::shade`). While marking, the object is
+marked and pushed, as the barrier does, and traced with the rest. While
+sweeping, one the sweep has not reached that is not marked was garbage
+when the cycle began, and is not handed out at all, because what only it
+held may be freed already; the walk passes over it as it would once the
+sweep had freed it.
+
 A cycle is scheduled by budget: when allocation since the last reaches
 twice the live data or 8 MiB, whichever is more. The longest stretch with
 interrupts off is a slice, a few hundred thousand cycles at most, whatever
@@ -974,7 +985,9 @@ it, that `x0` is no authority even to code with SR, that the root and the
 kernel block take SR to read, that the write barrier names what a store
 would overwrite by its register and offset, and that a function defined a
 hundred times over leaves the code and the objects in use as they were
-once the collector has run, while an entry still held keeps its text.
+once the collector has run, while an entry still held keeps its text, and
+that a walk which finds that text's old code object keeps it if the cycle
+is marking and passes over it if the cycle is sweeping.
 `(devices)` checks that the display refuses a number for a bitmap and
 keeps the bitmap it shows alive when nothing else holds it.
 

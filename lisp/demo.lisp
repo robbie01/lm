@@ -1085,6 +1085,48 @@
                        (logand (%cap-perms e) (logior perm-ex perm-ld perm-sd)))
                  (list t perm-ex)))))
 
+;; A walk of object space that hands out what it finds shades it. A text
+;; outlives its code object when an entry into it is held and the function
+;; has been defined again: while a cycle is marking, the walk that finds the
+;; code object by its text marks it, and it survives the cycle like
+;; anything reachable; while a cycle is sweeping, the walk passes over it,
+;; because what only it held may be gone already. Each walk is made in a
+;; cycle of its own, driven here from its start to its end with interrupts
+;; off, so nothing else moves it on.
+(define (an-entry-without-its-code)
+  (redefine 1)
+  (let ((e (entry-of (%symbol-value 'redefined))))
+    (redefine 2)
+    e))
+
+(define (code-object-of? c e)
+  (if (%object? c)
+      (if (= (%obj-type c) t-code)
+          (let ((x (%cap-ld c 0))) (if (%cap-tag? x) (= (%cap-base x) (%cap-base e)) nil))
+          nil)
+      nil))
+
+;; The code object of the text `e` enters, as a walk finds it in a cycle
+;; once the cycle has reached `phase`.
+(define (code-found-in-cycle e phase)
+  (unsafe
+   (without-interrupts
+     (while (busy?) (gc:step))
+     (gc::start-cycle)
+     (while (if (busy?) (not (= gc::*phase* phase)) nil) (gc:step))
+     (let ((c (code-object-at (%cap-base e))))
+       (while (busy?) (gc:step))
+       c))))
+
+(define (walks-shade)
+  (let* ((e (an-entry-without-its-code))
+         (c (code-found-in-cycle e gc::phase-marking)))
+    (gc)
+    (num-check 'a-walk-while-marking-keeps-what-it-hands-out (code-object-of? c e) t))
+  (num-check 'a-walk-while-sweeping-hands-out-nothing-dead
+             (code-found-in-cycle (an-entry-without-its-code) gc::phase-sweeping)
+             nil))
+
 ;; Machine code as a closure: what `emit` assembles, then a return, with SR
 ;; when `privileged`, as code compiled `unsafe` has it.
 (define (raw-code privileged emit)
@@ -1099,6 +1141,7 @@
 (define (capabilities)
   (narrowed-survive)
   (code-is-collected)
+  (walks-shade)
   (let* ((v (vector 1 2 3))
          (w (%cap-and-perms v (lognot perm-sd)))
          (p (cons 1 2))

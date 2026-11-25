@@ -1411,15 +1411,17 @@
                   perms-object))
 
 ;; After the collection every symbol left in object space is live, so a
-;; flagged one is one something still reached.
+;; flagged one is one something still reached. The walk hands out what it
+;; finds, so it shades it (`shade` below), which between cycles, as here, is
+;; nothing to do.
 (define (reattach-detached-symbols)
   (let ((p obj-base) (hi (obj-ptr)) (ob (kernel-ref kb-obarray)) (o (object-space)))
     (while (%< p hi)
       (let* ((h (%cap-ld-word-at o p)) (size (obj-block-size h)))
         (if (%<= size 0) (gc-corrupt p) nil)
         (if (%= (%logand h 255) t-symbol)
-            (let ((s (value-object-at p h)))
-              (if (detached? s)
+            (let ((s (shade (value-object-at p h) p)))
+              (if (if s (detached? s) nil)
                   (let ((b (symbol-bucket s)))
                     (%set-symbol-flags! s (%logand (%symbol-flags s) (%lognot sym-detached)))
                     (%vector-set! ob b (%cons s (%vector-ref ob b)))
@@ -1461,10 +1463,41 @@
 ;; ---------------------------------------------------------------- walking
 ;; Walks of object space for what no pointer leads to directly. Interrupts
 ;; are off for the walk, so that no block is half made under it.
+;;
+;; A walk finds every object in object space, garbage the sweep has not
+;; reached among them, and handing one out makes it reachable behind the
+;; collector's back: the snapshot it is marking from never had it. So a walk
+;; that hands out an object shades it first, as the barrier shades what a
+;; store would overwrite and the allocator what it hands out. While marking,
+;; the object is marked and pushed, and traced with the rest: nothing is
+;; freed before the sweep, so everything it holds is still there. While
+;; sweeping, the marks are final. An object the sweep has kept, or one made
+;; since the cycle began, is live; one the sweep has not reached yet that is
+;; not marked was garbage when the cycle began, and is not handed out at
+;; all, because what only it held may be freed already, behind the sweep or
+;; in cons space: the walk passes over it as it would once the sweep had
+;; freed it. Between cycles every object is whole, and the next snapshot
+;; sees wherever it is put.
+
+;; `obj`, the object whose header is at `p`, shaded; or nil when it is
+;; garbage the sweep is about to free. Interrupts off.
+(define (shade obj p)
+  (cond ((%= *phase* phase-marking) (gc-push-1 obj) obj)
+        ((%= *phase* phase-sweeping)
+         (if (cond ((%>= p *obj-hi*) t)
+                   ((%>= p *sweep-obj*) (marked? (mark-map) p))
+                   ;; the dead run the sweep is in the middle of
+                   ((%> *sweep-runlen* 0) (%< p *sweep-run*))
+                   (else t))
+             obj
+             nil))
+        (else obj)))
 
 ;; The code object whose entry is the text at `base`, or nil: whose function
 ;; a pc or a return address is in, for a backtrace. Nothing in a text says
-;; whose it is; a code object says which text is its own.
+;; whose it is; a code object says which text is its own. A text can outlive
+;; its code object, through a return address left on a stack, and then the
+;; answer is nil.
 (define (code-object-at base)
   (without-interrupts
     (let ((p obj-base) (hi (obj-ptr)) (o (object-space)) (found nil))
@@ -1473,7 +1506,8 @@
           (if (%= (%logand h 255) t-code)
               (let ((e (%cap-ld-at o (%+ p value-bytes))))
                 (if (if (%cap-tag? e) (%= (%cap-base e) base) nil)
-                    (begin (set! found (value-object-at p h)) (set! hi p))
+                    (let ((c (shade (value-object-at p h) p)))
+                      (if c (begin (set! found c) (set! hi p)) nil))
                     nil))
               nil)
           (if (%<= size 0) (gc-corrupt p) nil)
