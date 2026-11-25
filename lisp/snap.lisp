@@ -12,7 +12,7 @@
 ;;;
 ;;; The file starts with one block describing the regions:
 ;;;
-;;;   word 0          the magic, "LMS2"
+;;;   word 0          the magic, "LMS2", `snap-magic` in the layout
 ;;;   word 1          the entry address
 ;;;   word 2          the number of regions
 ;;;   12 + 16i        region i: its base, its length in bytes, the first block
@@ -25,7 +25,6 @@
 (in-package snap)
 (unsafe-file)
 
-(define snap-magic 844385612)     ; "LMS2" as a little-endian word
 (define snap-header-blocks 1)
 (define snap-regions 5)
 
@@ -226,6 +225,12 @@
          (hdr (%addr-of (alloc-pool 512))))
     (%st-cap! lg-roots nil)
     (keep-image-symbols image seen)
+    ;; No trap may come while the cells change, and a collection still
+    ;; marking would bring one with the first store over an unmarked pointer:
+    ;; the barrier's handler is reached through those very cells. So the
+    ;; cycle is finished here, after the last allocation, and none can start
+    ;; again before the allocator is the image's.
+    (if (busy?) (collect) nil)
     (become-image all entries unbound macro-bit)
     ;; The image's own globals, as the forge sets them for an image it builds.
     (%st-cap! lg-toplevel (%symbol-value 'kickstart))

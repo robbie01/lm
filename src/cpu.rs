@@ -2028,7 +2028,9 @@ pub fn watch_backtrace(m: &Machine) -> String {
 }
 
 /// The code object whose machine code holds `pc`, found by walking object
-/// space: a code object's entry capability is bounded to its code.
+/// space: a code object's entry capability is bounded to its code. The answer
+/// is a headed capability whose base is the object's payload, as the
+/// allocator would make it, so the object's header and slots read through it.
 pub fn code_containing(m: &Machine, pc: u32) -> Option<Cap> {
     use crate::heap::{block_size, CODE_ENTRY, T_CODE};
     let end = m.peek32(crate::map::LG_OBJ_PTR);
@@ -2038,7 +2040,8 @@ pub fn code_containing(m: &Machine, pc: u32) -> Option<Cap> {
         if hdr & 0xff == T_CODE {
             let entry = m.load_cap(p + 8 + 8 * CODE_ENTRY);
             if entry.tag && pc >= entry.base() && (pc as u64) < entry.top() {
-                return Some(Cap::ROOT.with_addr(p + 8));
+                let len = 8 * (hdr >> 8);
+                return Cap::ROOT.with_addr(p + 8).with_bounds(len);
             }
         }
         let size = block_size(hdr);

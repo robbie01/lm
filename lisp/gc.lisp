@@ -1204,7 +1204,9 @@
 ;; at: aligned as `%ram` asks for that length, so that a capability bounded
 ;; exactly to it is representable, with at least `(%rrl nbytes)` bytes there.
 ;; A free block first, then bump; what is in front of the block and behind
-;; it goes back on the free list.
+;; it goes back on the free list. The block's tail past `nbytes` is zeroed,
+;; so a reused block carries nothing of the code it held before into an
+;; image.
 (define (alloc-code nbytes)
   (without-interrupts
   (let* ((size (%+ 16 (%logand (%+ (%rrl nbytes) 15) -16)))
@@ -1220,6 +1222,7 @@
       (if (%< end (%+ p have)) (code-free-block end (%- (%+ p have) end)) nil)
       (%st-cap! start size)
       (%st-cap! (%+ start 8) 0)
+      (blank (%logand (%+ at nbytes) -8) end)
       at))))
 
 ;; Compact the registry in place, a stretch at a time, keeping the entries

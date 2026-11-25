@@ -43,6 +43,7 @@
   alloc-object *object-allocator* *collector* *pacer*
   ;; the generated layout: the names another package reads
   code-base reset-reserve cons-base cons-limit obj-base obj-limit pool-base pool-limit gc-bitmap mmio-base
+  snap-magic
   lg-bootlist lg-code-end lg-code-free lg-code-free-n lg-code-ptr lg-code-reg lg-code-reg-n
   lg-cons-free lg-cons-free-n lg-cons-ptr lg-errhandler lg-gccount lg-imgentry lg-obarray
   lg-obj-end lg-obj-free-n lg-obj-ptr lg-package lg-packages lg-pool-free lg-poolend lg-poolptr
