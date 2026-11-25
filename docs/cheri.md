@@ -114,6 +114,14 @@ for the life of the machine.
 capabilities to the same object with different permissions are not `eq?`;
 nothing in the system makes such a pair by accident.
 
+**Constants are read-only.** The compiler takes SD and SC off a quoted
+constant and off every pair, vector, string, byte object and bignum inside
+it, rewriting it in place, so every literal naming an object is the same
+capability and `eq?` to every other; LM stays, so a symbol loaded out of a
+constant is the symbol itself. A capability to the object taken before it
+was compiled, which only a macro splicing a live object into a quote can
+hold, keeps its permissions and is not `eq?` to the literal.
+
 **Objects.** An object occupies a header granule and its payload:
 
 ```

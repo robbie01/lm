@@ -83,7 +83,7 @@
 ;; Byte offset of literal i from the code object capability, which s1 holds
 ;; while a compiled function runs. A literal is loaded with `lc reg, off(s1)`,
 ;; whose offset reaches 2047.
-(define (literal-offset i) (%* 8 (%+ code-lits i)))
+(define (literal-offset i) (%* value-bytes (%+ code-lits i)))
 
 (define (grow a need)
   (let ((buf (asm-buf a)))
@@ -476,9 +476,9 @@
 (define (i-lhdr a rd rs1 ty)   (i-i a rd rs1 ty 5 op-ref))
 
 (define (i-car a rd rs1)      (i-lref a rd rs1 0))
-(define (i-cdr a rd rs1)      (i-lref a rd rs1 8))
+(define (i-cdr a rd rs1)      (i-lref a rd rs1 value-bytes))
 (define (i-set-car a rs2 rs1) (i-sref a rs2 rs1 0))
-(define (i-set-cdr a rs2 rs1) (i-sref a rs2 rs1 8))
+(define (i-set-cdr a rs2 rs1) (i-sref a rs2 rs1 value-bytes))
 
 ;; custom-1. rd, object, index; for the stores rd is the value written.
 (define (i-ldx a rd obj idx ty)  (i-r a ty rd obj idx 0 op-index))

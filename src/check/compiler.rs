@@ -172,6 +172,28 @@ fn cases() -> Vec<Case> {
         Case("(%set-car! nil 1)", "TRAP: wrong type: 0xa"),
         Case("(set-cdr! nil 1)", "TRAP: wrong type: 0xa"),
         Case("(%cap-st! nil 0 1)", "TRAP: capability fault: reg 7"),
+        // ---- a constant is read-only all the way down ----
+        // SD and SC are gone from the literal and from every pair, vector,
+        // string and byte object inside it; LM stays.
+        Case("(%cap-perms '(1 2))", "336"),
+        Case("(%set-car! '(1 2) 3)", "TRAP: capability fault: reg 10 code 0x13"),
+        Case("(%set-cdr! (%cdr '(1 2 3)) 9)", "TRAP: capability fault: reg 10 code 0x13"),
+        Case("(%set-car! (%car '((1) 2)) 9)", "TRAP: capability fault: reg 10 code 0x13"),
+        Case("(string-set! \"abc\" 0 #\\z)", "TRAP: capability fault: reg 10 code 0x13"),
+        Case("(string-set! (%car '(\"abc\")) 0 #\\z)", "TRAP: capability fault: reg 10 code 0x13"),
+        Case("(vector-set! '#(1 2) 0 5)", "TRAP: capability fault: reg 10 code 0x13"),
+        Case("(vector-set! (vector-ref '#(#(1)) 0) 0 5)", "TRAP: capability fault: reg 10 code 0x13"),
+        // Reading one is unchanged, and a copy is the program's own.
+        Case("(%car (%cdr '(1 (2 3))))", "(2 3)"),
+        Case("(let ((l (append '(1 2) nil))) (%set-car! l 3) l)", "(3 2)"),
+        // Symbols inside a constant are the symbols themselves, so identity
+        // holds through a literal, and so does a global assigned through one.
+        Case("(%eq? (%car '(a)) 'a)", "t"),
+        Case("(%eq? (vector-ref '#(a) 0) 'a)", "t"),
+        Case("(%cap-perms (%car '(a)))", "497"),
+        Case("(begin (%set-symbol-value! (%car '(lit-sym)) 2) (%symbol-value 'lit-sym))", "2"),
+        // One constant is one capability, however often its quote runs.
+        Case("(define (k) '(1 2)) (%eq? (k) (k))", "t"),
         // A leaf that conses: the pair is carved from the run in four
         // instructions, with no call to make a frame for.
         Case("(define (two a b) (%cons a (%cons b nil))) (two 1 2)", "(1 2)"),
@@ -606,8 +628,8 @@ pub fn run_all(verbose: bool) -> bool {
         l.h.g(LG_CODE_PTR) - CODE_BASE
     );
     // The image installs the allocator from `kickstart`, which does not run
-    // here. Without this the first test to make a vector would call through
-    // an empty hook.
+    // here. Without this the first test to make a vector would find nothing
+    // in `*object-allocator*` to call.
     let r = run_one(&mut l, "(gc:install-allocator)");
     if r != "nil" {
         println!("installing the allocator: {r}");

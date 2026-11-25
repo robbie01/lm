@@ -73,7 +73,7 @@
 ;; and restores none of them.
 (define (local-reg n) (%+ $s3 n))
 (define leaf-locals 8)
-(define $lit-save $s11)
+(define $caller-code $s11)
 
 ;; ---------------------------------------------------------------- context
 ;; What the compiler knows while it compiles one function.
@@ -239,8 +239,9 @@
     r))
 
 ;; ---------------------------------------------------------------- constants
-;; nil is tp. A fixnum is the integer itself, and a character is its code
-;; retagged; neither is a pointer, so neither needs the literal vector.
+;; nil is tp, a fixnum is the integer itself, and a character is its code
+;; retagged. Anything else is loaded from one of the code object's literal
+;; slots, so the code holds no address and the collector sees the value.
 (define (emit-const c v reg)
   (let ((a (cx-asm c)))
     (cond
@@ -249,9 +250,48 @@
      ((%char? v)
       (i-li a reg (%char->int v))
       (i-retag a reg reg kind-fixnum kind-char))
-     ;; Anything else is loaded from the code object's literal slots, so the
-     ;; collector sees it there and the code holds no address.
-     (else (emit-literal c v reg)))))
+     (else (emit-literal c (freeze v) reg)))))
+
+;; A constant is read-only all the way down: the literal and every pair,
+;; vector, string, byte object and bignum inside it lose SD and SC, so
+;; (set-car! '(1 2) 3) and a store into the tail of a quoted list are both
+;; refused. LM stays, because a load through a capability without it would
+;; strip the symbols inside too, and (car '(a)) would not be eq? to 'a.
+;; Symbols, records, closures and code objects are left as they are.
+;;
+;; Freezing rewrites the constant in place, so every literal that names an
+;; object is the same capability, eq? to every other however many code
+;; objects hold it. A capability to the object taken before it was compiled,
+;; which only a macro splicing a live object into a quote can have, keeps
+;; its permissions and is not eq? to the literal: it is a different
+;; authority over the same object.
+(define (frozen v) (%cap-and-perms v (%lognot (%logior perm-sd perm-sc))))
+
+(define (writable? v) (%> (%logand (%cap-perms v) perm-sd) 0))
+
+(define (freeze v)
+  (cond
+   ((%cons? v)
+    ;; Along the spine by iteration, into each car by recursion.
+    (let ((p v))
+      (while (if (%cons? p) (writable? p) nil)
+        (%set-car! p (freeze (%car p)))
+        (let ((next (%cdr p)))
+          (%set-cdr! p (if (%cons? next) (frozen next) (freeze next)))
+          (set! p next))))
+    (frozen v))
+   ((%vector? v)
+    (if (writable? v)
+        (let ((i 0) (n (%vector-length v)))
+          (while (%< i n)
+            (%vector-set! v i (freeze (%vector-ref v i)))
+            (set! i (%+ i 1))))
+        nil)
+    (frozen v))
+   ((%string? v) (frozen v))
+   ((%bytes? v) (frozen v))
+   ((%bignum? v) (frozen v))
+   (else v)))
 
 (define (emit-literal c v reg)
   (let* ((a (cx-asm c))
@@ -285,14 +325,21 @@
           (label a ok)))))
 
 (define (record-getter type open k)
-  (lambda (c)
-    (emit-record-check c type open)
-    (i-ldxi (cx-asm c) $a0 $a0 k t-record)))
+  (let ((emit-ref (fixed-ref k t-record)))
+    (lambda (c) (emit-record-check c type open) (%funcall emit-ref c))))
 
 (define (record-setter type open k)
+  (let ((emit-set (fixed-set k t-record)))
+    (lambda (c) (emit-record-check c type open) (%funcall emit-set c))))
+
+;; Slot k of an object of type ty: read from the object in a0 into a0, or
+;; written from a1. The one indexed instruction checks the type and the
+;; bound.
+(define (fixed-ref k ty) (lambda (c) (i-ldxi (cx-asm c) $a0 $a0 k ty)))
+
+(define (fixed-set k ty)
   (lambda (c)
-    (emit-record-check c type open)
-    (i-stxi (cx-asm c) $a1 $a0 k t-record)
+    (i-stxi (cx-asm c) $a1 $a0 k ty)
     (i-mv (cx-asm c) $a0 $a1)))
 
 (define (install-record-inlines! s)
@@ -381,14 +428,11 @@
 ;; variable takes the box itself, so that the closure and the frame go on
 ;; sharing one cell.
 (define (emit-load-cell c loc reg)
-  (let ((a (cx-asm c)) (kind (%car loc)))
+  (let ((kind (%car loc)))
     (cond
-     ((%eq? kind 'local) (load-local c (cadr loc) reg))
-     ((%eq? kind 'boxed-local) (load-local c (cadr loc) reg))
-     ((%eq? kind 'free)
-      (i-lc a reg (closure-reg c $t6) (free-off (cadr loc))))
-     ((%eq? kind 'boxed-free)
-      (i-lc a reg (closure-reg c $t6) (free-off (cadr loc))))
+     ((memq kind '(local boxed-local)) (load-local c (cadr loc) reg))
+     ((memq kind '(free boxed-free))
+      (i-lc (cx-asm c) reg (closure-reg c $t6) (free-off (cadr loc))))
      (else (emit-load c loc reg)))))
 
 (define (boxed-location? loc)
@@ -435,8 +479,8 @@
 (define (emit-cons c car-reg cdr-reg dst)
   (let* ((a (cx-asm c))
          (p (if (if (%= dst car-reg) t (%= dst cdr-reg)) $t2 dst)))
-    (i-csetboundsimm a p $gp 16)
-    (i-cincoffsetimm a $gp $gp 16)
+    (i-csetboundsimm a p $gp (%* 2 value-bytes))
+    (i-cincoffsetimm a $gp $gp (%* 2 value-bytes))
     (i-sc a car-reg p 0)
     (i-sc a cdr-reg p value-bytes)
     (if (%= p dst) nil (i-mv a dst p))))
@@ -547,7 +591,7 @@
     ;; and ra survives because nothing here overwrites it.
     (if (cx-leaf c)
         (begin
-          (i-mv a $lit-save $s1)
+          (i-mv a $caller-code $s1)
           (i-lc a $s1 $t0 (slot-off clo-code)))
         (begin
           ;; A call by a function to its own name can skip the check above:
@@ -579,7 +623,7 @@
 (define (emit-epilogue c)
   (let ((a (cx-asm c)))
     (if (cx-leaf c)
-        (i-mv a $s1 $lit-save)
+        (i-mv a $s1 $caller-code)
         (begin
           (i-lc a $ra $s0 ra-slot)
           (i-lc a $t3 $s0 link-slot)
@@ -854,17 +898,15 @@
         nil)))
 
 (define (emit-indexed-imm c e args tail)
-  (let ((a (cx-asm c))
-        (ty (cadr e))
+  (let ((ty (cadr e))
         (i (cadr args)))
     (if (caddr e)
         (begin
           (compile-args c (list (%car args) (caddr args)) 2)
-          (i-stxi a $a1 $a0 i ty)
-          (i-mv a $a0 $a1))
+          (%funcall (fixed-set i ty) c))
         (begin
           (compile-expr c (%car args) nil)
-          (i-ldxi a $a0 $a0 i ty)))
+          (%funcall (fixed-ref i ty) c)))
     (if tail (emit-return c) nil)))
 
 ;; This runs once in the forge and again on the machine, so it starts by
@@ -1151,43 +1193,22 @@
   ;; ---- symbols ----
   ;; Through the typed indexed access, so the one instruction also checks
   ;; that it was given a symbol: these are in the checked vocabulary.
-  (definline '%symbol-name 1
-    (lambda (c) (i-ldxi (cx-asm c) $a0 $a0 sym-name t-symbol)))
-  (definline '%symbol-value 1
-    (lambda (c) (i-ldxi (cx-asm c) $a0 $a0 sym-value t-symbol)))
+  (definline '%symbol-name 1 (fixed-ref sym-name t-symbol))
+  (definline '%symbol-value 1 (fixed-ref sym-value t-symbol))
+  (definline '%set-symbol-value! 2 (fixed-set sym-value t-symbol))
   ;; What a reference to this name sees, and how to change it. On the machine
   ;; that is the symbol's value cell, so these are `%symbol-value` again. They
   ;; are spelled apart because the forge's interpreter keeps its own globals
   ;; in a map of its own, and a fluid binding has to land in the world doing
   ;; the reading.
-  (definline '%fluid-value 1
-    (lambda (c) (i-ldxi (cx-asm c) $a0 $a0 sym-value t-symbol)))
-  (definline '%set-fluid-value! 2
-    (lambda (c)
-      (i-stxi (cx-asm c) $a1 $a0 sym-value t-symbol)
-      (i-mv (cx-asm c) $a0 $a1)))
-  (definline '%set-symbol-value! 2
-    (lambda (c)
-      (i-stxi (cx-asm c) $a1 $a0 sym-value t-symbol)
-      (i-mv (cx-asm c) $a0 $a1)))
-  (definline '%symbol-function 1
-    (lambda (c) (i-ldxi (cx-asm c) $a0 $a0 sym-function t-symbol)))
-  (definline '%set-symbol-function! 2
-    (lambda (c)
-      (i-stxi (cx-asm c) $a1 $a0 sym-function t-symbol)
-      (i-mv (cx-asm c) $a0 $a1)))
-  (definline '%symbol-plist 1
-    (lambda (c) (i-ldxi (cx-asm c) $a0 $a0 sym-plist t-symbol)))
-  (definline '%set-symbol-plist! 2
-    (lambda (c)
-      (i-stxi (cx-asm c) $a1 $a0 sym-plist t-symbol)
-      (i-mv (cx-asm c) $a0 $a1)))
-  (definline '%symbol-flags 1
-    (lambda (c) (i-ldxi (cx-asm c) $a0 $a0 sym-flags t-symbol)))
-  (definline '%set-symbol-flags! 2
-    (lambda (c)
-      (i-stxi (cx-asm c) $a1 $a0 sym-flags t-symbol)
-      (i-mv (cx-asm c) $a0 $a1)))
+  (definline '%fluid-value 1 (fixed-ref sym-value t-symbol))
+  (definline '%set-fluid-value! 2 (fixed-set sym-value t-symbol))
+  (definline '%symbol-function 1 (fixed-ref sym-function t-symbol))
+  (definline '%set-symbol-function! 2 (fixed-set sym-function t-symbol))
+  (definline '%symbol-plist 1 (fixed-ref sym-plist t-symbol))
+  (definline '%set-symbol-plist! 2 (fixed-set sym-plist t-symbol))
+  (definline '%symbol-flags 1 (fixed-ref sym-flags t-symbol))
+  (definline '%set-symbol-flags! 2 (fixed-set sym-flags t-symbol))
 
   ;; ---- machine ----
   ;; Which task is running: s2, dedicated for the life of the machine like gp,
@@ -1197,12 +1218,9 @@
   (definline '%set-this-task! 1
     (lambda (c) (i-mv (cx-asm c) $s2 $a0)))
 
-  ;; The stack pointer and the frame pointer, as the capabilities they are:
-  ;; where a stack walk starts, bounded to the stack it walks.
+  ;; The stack pointer, as the capability it is: bounded to the task's stack.
   (definline '%stack-pointer 0
     (lambda (c) (i-mv (cx-asm c) $a0 $sp)))
-  (definline '%frame-pointer 0
-    (lambda (c) (i-mv (cx-asm c) $a0 $s0)))
 
   ;; The cons run is gp, bounded to the run and addressing its next free
   ;; pair; see gc.lisp. Reading it and replacing it are one move each.
@@ -1383,23 +1401,15 @@
 ;; Simple arguments go straight to their register. Anything that can run code
 ;; is evaluated first and parked on the stack, so evaluation order is left to
 ;; right.
-(define (simple-arg? c form)
-  (cond
-   ((%null? form) t)
-   ((%fixnum? form) t)
-   ((%char? form) t)
-   ((%string? form) t)
-   ((%vector? form) t)
-   ((%symbol? form) t)
-   ((%cons? form) (%eq? (%car form) 'quote))
-   (else t)))
+(define (simple-arg? form)
+  (if (%cons? form) (%eq? (%car form) 'quote) t))
 
 ;; Leaves argument i in register a{i}.
 (define (compile-args c args n)
   (let ((a (cx-asm c)) (plan nil) (pushed 0) (i 0))
     ;; pass one: evaluate and park the complicated ones
     (dolist (x args)
-      (if (simple-arg? c x)
+      (if (simple-arg? x)
           (set! plan (%cons (%cons 'simple x) plan))
           (begin
             (compile-expr c x nil)
@@ -2142,13 +2152,13 @@
             nil)
         (%cons 'let* (%cons binds body)))))
 
-;; `defrecord` is a macro, so that the interpreter has one to expand. Here it
-;; is caught before expansion: the compiler registers the shape so that the
-;; accessors are open-coded from here on.
-;; Three forms are directives to the compiler as much as code. `in-package`
-;; ends an unsafe file, and is then compiled as usual; `(unsafe-file)`
-;; begins one and compiles to nothing; `unsafe-names` marks its names now,
-;; for the code compiled after it here, as well as at boot for the machine.
+;; Four forms are directives to the compiler as much as code. `defrecord` is
+;; a macro, so that the interpreter has one to expand, and is caught here
+;; before expansion, so the shape is registered and the accessors are
+;; open-coded from here on. `in-package` ends an unsafe file, and is then
+;; compiled as usual; `(unsafe-file)` begins one and compiles to nothing;
+;; `unsafe-names` marks its names now, for the code compiled after it here,
+;; as well as at boot for the machine.
 (define (compile-top form)
   (set! *unsafe-ok* nil)
   (let ((h (if (%cons? form) (%car form) nil)))
