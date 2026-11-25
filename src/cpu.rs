@@ -2014,7 +2014,7 @@ fn c_jalr_mv(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 pub fn watch_backtrace(m: &Machine) -> String {
     let mut out = String::new();
     let mut s0 = m.x[8];
-    let mut code = m.reg(9);
+    let mut code = code_containing(m, m.mepcc.addr).unwrap_or(m.reg(9));
     for _ in 0..12 {
         out.push_str(&name_of(m, code));
         out.push_str(" <- ");
@@ -2025,6 +2025,29 @@ pub fn watch_backtrace(m: &Machine) -> String {
         s0 = m.load_cap(s0.wrapping_sub(16)).addr;
     }
     out
+}
+
+/// The code object whose machine code holds `pc`, found by walking object
+/// space: a code object's entry capability is bounded to its code.
+pub fn code_containing(m: &Machine, pc: u32) -> Option<Cap> {
+    use crate::heap::{block_size, CODE_ENTRY, T_CODE};
+    let end = m.peek32(crate::map::LG_OBJ_PTR);
+    let mut p = crate::map::OBJ_BASE;
+    while p < end {
+        let hdr = m.peek32(p);
+        if hdr & 0xff == T_CODE {
+            let entry = m.load_cap(p + 8 + 8 * CODE_ENTRY);
+            if entry.tag && pc >= entry.base() && (pc as u64) < entry.top() {
+                return Some(Cap::ROOT.with_addr(p + 8));
+            }
+        }
+        let size = block_size(hdr);
+        if size == 0 {
+            return None;
+        }
+        p += size;
+    }
+    None
 }
 
 /// The name of a code object, read through its name slot: a string, or a

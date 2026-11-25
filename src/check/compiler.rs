@@ -503,8 +503,11 @@ pub fn run_one(l: &mut Lisp, src: &str) -> String {
     let st = run::run(m, 400_000_000);
 
     if m.exit_code == 9 {
-        let (cause, epc, tval) = (m.mcause, m.mepc, m.mtval);
+        let (cause, epc, tval) = (m.mcause, m.mepcc.addr, m.mtval);
         let a7 = m.reg(A7).addr;
+        if std::env::var_os("LM_CTEST_TRACE").is_some() {
+            eprintln!("trap {cause} at {epc:#x} mtval {tval:#x}: {}", crate::cpu::watch_backtrace(m));
+        }
         // A wrong-type, range or capability trap is reported without the pc,
         // so a test can state the register exactly.
         if cause == C_TYPE {

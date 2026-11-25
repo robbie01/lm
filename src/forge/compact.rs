@@ -62,7 +62,9 @@ fn slid(c: Cap, delta: u32) -> Cap {
 fn rewrite(h: &mut Heap, moves: &[Move], lo: u32, hi: u32) -> Result<(), String> {
     for at in h.tagged() {
         let c = h.ldc(at);
-        let b = c.base();
+        // A headed capability's block is the one holding its header, which
+        // for an object with no payload is not the block its base is in.
+        let b = if c.perms() & cap::P_HD != 0 { c.base().wrapping_sub(8) } else { c.base() };
         if b < lo || b >= hi {
             continue;
         }
@@ -73,9 +75,16 @@ fn rewrite(h: &mut Heap, moves: &[Move], lo: u32, hi: u32) -> Result<(), String>
             }
             Some(_) => {}
             None => {
+                let holder = match mover(moves, at) {
+                    Some(m) => format!("in the block at {:#x}, type {}", m.from, h.ld(m.from) & 255),
+                    None => "outside every block".to_string(),
+                };
                 return Err(format!(
-                    "the capability at {at:#x} names {b:#x}, which nothing occupies"
-                ))
+                    "the capability at {at:#x} ({holder}) names {b:#x}                      (length {}, permissions {:#x}, header {:#x}), which nothing occupies",
+                    c.len(),
+                    c.perms(),
+                    h.ld(b)
+                ));
             }
         }
     }
@@ -197,9 +206,6 @@ pub fn compact_objects(h: &mut Heap, verbose: bool) -> Result<Stats, String> {
     }
     Ok(stats)
 }
-
-/// What `boot.lisp` reserves at the base of code space for the reset stub.
-const RESET_RESERVE: u32 = 256;
 
 pub struct CodeStats {
     pub before: u32,

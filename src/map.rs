@@ -43,6 +43,9 @@ pub const POOL_END: u32 = 0x0100_0000;
 /// Reset vector, and the base of code space.
 pub const KICK_BASE: u32 = 0x0100_0000;
 pub const CODE_BASE: u32 = 0x0100_0000;
+/// The reset stub's room at the base of code space. It is the one piece of
+/// code with no block header; code blocks start after it.
+pub const RESET_RESERVE: u32 = 256;
 pub const CODE_END: u32 = 0x0200_0000; // 16 MiB
 
 pub const CONS_BASE: u32 = 0x0200_0000;

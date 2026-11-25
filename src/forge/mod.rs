@@ -199,6 +199,7 @@ pub fn write_layout() {
     def!("fast-base", FAST_BASE);
     def!("gc-bitmap", GC_BITMAP);
     def!("kick-base", KICK_BASE);
+    def!("reset-reserve", RESET_RESERVE);
 
     // Each global is one value slot. One that holds an address or a count
     // holds it as a fixnum; one that holds a value holds the value.

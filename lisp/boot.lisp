@@ -244,7 +244,6 @@
 (define *trap-asm* nil)
 (define *reset-asm* nil)
 
-(define reset-reserve 256)
 (define *reset-addr* 0)
 
 ;; The stacks and frames the stubs use, in one block of the pool, largest
