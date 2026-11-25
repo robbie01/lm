@@ -12,8 +12,7 @@
 //! macro written in Lisp, so the interpreter and the compiler cannot disagree
 //! about the language.
 
-#![allow(dead_code)]
-
+use crate::cap::{self, Cap, OT_CLOSURE, OT_SENTRY, P_LC, P_LD, P_LM, P_SC, P_SD, P_SE};
 use crate::heap::*;
 use crate::mach::Machine;
 use crate::map::*;
@@ -356,11 +355,11 @@ impl<'a> Lisp<'a> {
             }
             self.fuel -= 1;
             // self-evaluating
-            if form == NIL || is_fixnum(form) || is_imm(form) {
+            if !form.tag || form == NIL {
                 break Ok(form);
             }
             if is_obj(form) {
-                if self.h.otype(form) == T_SYMBOL {
+                if self.h.obj_type(form) == T_SYMBOL {
                     if self.maybe_lexical(form) {
                         if let Some(v) = self.lookup(form, &env) {
                             break Ok(v);
@@ -723,9 +722,10 @@ impl<'a> Lisp<'a> {
         self.get_global(s).unwrap_or(UNBOUND)
     }
 
-    /// An interpreted closure. Slot 0 is zero, which is what marks it as
-    /// interpreted; the environment is held on the Rust side and referred to
-    /// by index, since an Rc cannot live in a heap slot.
+    /// An interpreted closure. It is unsealed, and slot 0 holds the fixnum 0
+    /// where a machine closure's entry capability would be, which is what
+    /// marks it as interpreted; the environment is held on the Rust side and
+    /// referred to by index, since an Rc cannot live in a heap slot.
     fn make_closure(&mut self, params: V, body: V, env: &Env, name: V) -> V {
         let mut p = params;
         while is_cons(p) {
@@ -737,7 +737,7 @@ impl<'a> Lisp<'a> {
         let idx = self.envs.len();
         self.envs.push(env.clone());
         let c = self.h.alloc_obj(T_CLOSURE, 5);
-        self.h.set_slot(c, CLO_ENTRY, 0);
+        self.h.set_slot(c, CLO_ENTRY, fix(0));
         self.h.set_slot(c, CLO_PARAMS, params);
         self.h.set_slot(c, CLO_BODY, body);
         self.h.set_slot(c, CLO_ENV, fix(idx as i32));
@@ -800,13 +800,13 @@ impl<'a> Lisp<'a> {
 
     fn apply_step(&mut self, f: V, argv: &[V]) -> Result<Step, LErr> {
         if self.h.is_type(f, T_PRIM) {
-            let idx = self.h.slot(f, 0);
+            let idx = unfix(self.h.slot(f, 0)) as usize;
             return Ok(Step::Val(self.call_prim(idx, argv)?));
         }
         if !self.h.is_type(f, T_CLOSURE) {
             bail!("cannot apply {}", self.h.write(f));
         }
-        if self.h.slot(f, CLO_ENTRY) != 0 {
+        if self.h.slot(f, CLO_ENTRY).tag {
             bail!("cannot run compiled code at build time");
         }
         let params = self.h.slot(f, CLO_PARAMS);
@@ -997,10 +997,9 @@ impl<'a> Lisp<'a> {
         let sym = self.h.intern(name);
         self.h.set_exported(sym);
         let p = self.h.alloc_obj(T_PRIM, 2);
-        self.h.set_slot(p, 0, idx);
+        self.h.set_slot(p, 0, fix(idx as i32));
         self.h.set_slot(p, 1, sym);
-        let s = self.h.intern(name);
-        self.set_global(s, p);
+        self.set_global(sym, p);
     }
 
     fn install_primitives(&mut self) {
@@ -1008,6 +1007,7 @@ impl<'a> Lisp<'a> {
             self.defprim(name, i as u32);
         }
     }
+
 
     fn need(&self, argv: &[V], n: usize, who: &str) -> Result<(), LErr> {
         if argv.len() < n {
@@ -1042,11 +1042,75 @@ impl<'a> Lisp<'a> {
         }
     }
 
-    fn call_prim(&mut self, idx: u32, a: &[V]) -> Res {
-        if let Some(p) = self.prof.as_mut() {
-            p.prim_calls[idx as usize] += 1;
+    /// An object the indexed instructions accept: headed, unsealed, and of
+    /// type `ty` unless that is 0. The value forms refuse a string or a byte
+    /// object, and the byte forms refuse anything else.
+    fn indexed(&self, o: V, ty: u32, bytes: bool, who: &str) -> Result<(), LErr> {
+        let t = self.h.obj_type(o);
+        let fits = is_obj(o)
+            && !o.is_sealed()
+            && (ty == 0 || t == ty)
+            && is_byte_type(t) == bytes;
+        if !fits {
+            bail!("{who}: wrong kind of object, {}", self.h.write(o));
         }
-        let (name, _) = PRIMS[idx as usize];
+        Ok(())
+    }
+
+    /// The address of element `i` of `o`, checked against its header.
+    fn element(&self, o: V, i: V, ty: u32, bytes: bool, who: &str) -> Result<u32, LErr> {
+        self.indexed(o, ty, bytes, who)?;
+        let i = self.num(i, who)? as u32;
+        if i >= self.h.olen(o) {
+            bail!("{who}: index {i} out of range for {}", self.h.write(o));
+        }
+        Ok(o.addr + if bytes { i } else { i * VALUE_BYTES })
+    }
+
+    /// The address `off` bytes from `c`'s, if `c` lets `size` bytes there be
+    /// touched with `perm`: what a load or store through a capability checks.
+    fn through(&self, c: V, off: V, size: u32, perm: u32, who: &str) -> Result<u32, LErr> {
+        let off = self.num(off, who)?;
+        if !c.tag {
+            bail!("{who}: {} is not a capability", self.h.write(c));
+        }
+        if c.is_sealed() {
+            bail!("{who}: {} is sealed", self.h.write(c));
+        }
+        if !c.has(perm) {
+            bail!("{who}: {} does not permit it", self.h.write(c));
+        }
+        let a = c.addr.wrapping_add(off as u32);
+        if !c.covers(a, size) {
+            bail!("{who}: {a:#x} is outside {}", self.h.write(c));
+        }
+        if a % size != 0 {
+            bail!("{who}: {a:#x} is misaligned");
+        }
+        Ok(a)
+    }
+
+    /// An authority to seal or unseal with: SE, and its address the otype.
+    fn sealer(&self, key: V, who: &str) -> Result<u32, LErr> {
+        if !(key.tag && !key.is_sealed() && key.has(P_SE) && key.covers(key.addr, 1)) {
+            bail!("{who}: {} is no authority over otypes", self.h.write(key));
+        }
+        Ok(key.addr)
+    }
+
+    /// What can be sealed: a tagged capability, not sealed already.
+    fn sealable(&self, c: V, who: &str) -> Result<(), LErr> {
+        if !c.tag || c.is_sealed() {
+            bail!("{who}: {} cannot be sealed", self.h.write(c));
+        }
+        Ok(())
+    }
+
+    fn call_prim(&mut self, idx: usize, a: &[V]) -> Res {
+        if let Some(p) = self.prof.as_mut() {
+            p.prim_calls[idx] += 1;
+        }
+        let (name, _) = PRIMS[idx];
         macro_rules! n {
             ($i:expr) => {
                 self.num(a[$i], name)?
@@ -1057,7 +1121,7 @@ impl<'a> Lisp<'a> {
                 self.need(a, $k, name)?
             };
         }
-        let r = match PRIM_OF[idx as usize] {
+        let r = match PRIM_OF[idx] {
             // ---- pairs ----
             Prim::Cons => {
                 need!(2);
@@ -1079,16 +1143,22 @@ impl<'a> Lisp<'a> {
             }
             Prim::SetCarX => {
                 need!(2);
+                if !is_cons(a[0]) {
+                    bail!("set-car! of {}", self.h.write(a[0]))
+                }
                 self.h.set_car(a[0], a[1]);
                 a[1]
             }
             Prim::SetCdrX => {
                 need!(2);
+                if !is_cons(a[0]) {
+                    bail!("set-cdr! of {}", self.h.write(a[0]))
+                }
                 self.h.set_cdr(a[0], a[1]);
                 a[1]
             }
 
-            // ---- arithmetic ----
+            // ---- arithmetic, wrapping at 32 bits ----
             Prim::Add => {
                 need!(2);
                 fix(n!(0).wrapping_add(n!(1)))
@@ -1102,26 +1172,26 @@ impl<'a> Lisp<'a> {
                 need!(2);
                 match self.h.num_add(a[0], a[1]) {
                     Some(v) => v,
-                    None => return Err(LErr::new(format!("{name} wants numbers"))),
+                    None => bail!("{name} wants numbers"),
                 }
             }
             Prim::SubO => {
                 need!(2);
                 match self.h.num_sub(a[0], a[1]) {
                     Some(v) => v,
-                    None => return Err(LErr::new(format!("{name} wants numbers"))),
+                    None => bail!("{name} wants numbers"),
                 }
             }
             Prim::MulO => {
                 need!(2);
                 match self.h.num_mul(a[0], a[1]) {
                     Some(v) => v,
-                    None => return Err(LErr::new(format!("{name} wants numbers"))),
+                    None => bail!("{name} wants numbers"),
                 }
             }
             Prim::Mulhi16 => {
                 need!(2);
-                fix((((n!(0) as u32) * (n!(1) as u32)) >> 16) as i32)
+                fix(((n!(0) as u32).wrapping_mul(n!(1) as u32) >> 16) as i32)
             }
             Prim::Sub => {
                 need!(2);
@@ -1145,7 +1215,7 @@ impl<'a> Lisp<'a> {
                 if d == 0 {
                     bail!("modulo by zero")
                 }
-                fix(n!(0).rem_euclid(d))
+                fix(n!(0).wrapping_rem_euclid(d))
             }
             Prim::Rem => {
                 need!(2);
@@ -1220,22 +1290,21 @@ impl<'a> Lisp<'a> {
                     (v >> ((-s) & 31)) as i32
                 })
             }
-            // The bit maps, popcount, and min/max on numbers of either kind: what
-            // the compiler open-codes, so that the same source runs interpreted.
+            // The bit maps, popcount, and min/max on numbers of either kind:
+            // what the compiler open-codes, so that the same source runs
+            // interpreted. A bit map is named by its address, through the root.
             Prim::BitRef => {
                 need!(2);
-                let base = n!(0) as u32;
                 let i = n!(1) as u32;
-                let w = self.h.m.peek32(base.wrapping_add((i >> 5) << 2));
+                let w = self.h.ld(a[0].addr.wrapping_add((i >> 5) << 2));
                 self.bool((w >> (i & 31)) & 1 != 0)
             }
             Prim::BitSetX => {
                 need!(2);
-                let base = n!(0) as u32;
                 let i = n!(1) as u32;
-                let at = base.wrapping_add((i >> 5) << 2);
-                let w = self.h.m.peek32(at);
-                self.h.m.poke32(at, w | (1 << (i & 31)));
+                let at = a[0].addr.wrapping_add((i >> 5) << 2);
+                let w = self.h.ld(at);
+                self.h.st(at, w | (1 << (i & 31)));
                 NIL
             }
             Prim::Popcount => {
@@ -1261,6 +1330,10 @@ impl<'a> Lisp<'a> {
             Prim::NullP => {
                 need!(1);
                 self.bool(a[0] == NIL)
+            }
+            Prim::Vkind => {
+                need!(1);
+                fix(vkind(&self.h, a[0]) as i32)
             }
             Prim::FixnumP => {
                 need!(1);
@@ -1311,78 +1384,271 @@ impl<'a> Lisp<'a> {
                 self.bool(self.h.is_type(a[0], T_RECORD))
             }
 
-            // ---- raw object access ----
+            // ---- objects ----
             Prim::AllocObj => {
                 need!(2);
                 self.h.alloc_obj(n!(0) as u32, n!(1) as u32)
             }
             Prim::ObjType => {
                 need!(1);
-                fix(self.h.otype(a[0]) as i32)
+                fix(self.h.obj_type(a[0]) as i32)
             }
             Prim::ObjLen => {
                 need!(1);
+                if !is_obj(a[0]) {
+                    bail!("{name}: {} is not an object", self.h.write(a[0]))
+                }
                 fix(self.h.olen(a[0]) as i32)
             }
-            // The bootstrap interpreter does not check the type the way the
-            // machine's instruction does; it is here so that the same source
-            // reads on both sides of the bootstrap.
-            Prim::Slot | Prim::RecordRef => {
+            Prim::Slot => {
                 need!(2);
-                self.h.slot(a[0], n!(1) as u32)
+                let at = self.element(a[0], a[1], 0, false, name)?;
+                self.h.ldc(at)
             }
-            Prim::SetSlotX | Prim::RecordSetX => {
+            Prim::SetSlotX => {
                 need!(3);
-                let i = n!(1) as u32;
-                self.h.set_slot(a[0], i, a[2]);
+                let at = self.element(a[0], a[1], 0, false, name)?;
+                self.h.stc(at, a[2]);
+                a[2]
+            }
+            Prim::RecordRef => {
+                need!(2);
+                let at = self.element(a[0], a[1], T_RECORD, false, name)?;
+                self.h.ldc(at)
+            }
+            Prim::RecordSetX => {
+                need!(3);
+                let at = self.element(a[0], a[1], T_RECORD, false, name)?;
+                self.h.stc(at, a[2]);
                 a[2]
             }
 
-            // ---- raw memory: the assembler and the kernel live here ----
+            // ---- memory by number, through the root ----
             Prim::LdByte => {
                 need!(1);
-                fix(self.h.m.peek8(n!(0) as u32) as i32)
+                fix(self.h.m.peek8(a[0].addr) as i32)
             }
             Prim::LdHalf => {
                 need!(1);
-                fix(self.h.m.peek16(n!(0) as u32) as i32)
+                fix(self.h.m.peek16(a[0].addr) as i32)
             }
-            Prim::LdFixnum => {
+            Prim::LdWord => {
                 need!(1);
-                let w = self.h.m.peek32(n!(0) as u32);
-                fix(w as i32)
+                fix(self.h.ld(a[0].addr) as i32)
+            }
+            Prim::LdCap => {
+                need!(1);
+                let at = a[0].addr;
+                if at % 8 != 0 {
+                    bail!("{name}: {at:#x} is misaligned")
+                }
+                self.h.ldc(at)
             }
             Prim::StByteX => {
                 need!(2);
-                self.h.m.poke8(n!(0) as u32, n!(1) as u8);
+                self.h.m.poke8(a[0].addr, a[1].addr as u8);
                 a[1]
             }
             Prim::StHalfX => {
                 need!(2);
-                let addr = n!(0) as u32;
-                let v = n!(1) as u32;
-                self.h.m.poke8(addr, v as u8);
-                self.h.m.poke8(addr + 1, (v >> 8) as u8);
+                let (at, v) = (a[0].addr, a[1].addr);
+                self.h.m.poke8(at, v as u8);
+                self.h.m.poke8(at.wrapping_add(1), (v >> 8) as u8);
                 a[1]
-            }
-            Prim::StFixnumX => {
-                need!(2);
-                self.h.m.poke32(n!(0) as u32, n!(1) as u32);
-                a[1]
-            }
-            // Read and write a word without retagging, for moving tagged
-            // values through raw addresses.
-            Prim::LdWord => {
-                need!(1);
-                self.h.m.peek32(n!(0) as u32)
             }
             Prim::StWordX => {
                 need!(2);
-                self.h.m.poke32(n!(0) as u32, a[1]);
+                self.h.st(a[0].addr, a[1].addr);
                 a[1]
             }
-            // At build time there is no machine stack to scan, and no
-            // collector to scan it, so the range is empty.
+            Prim::StCapX => {
+                need!(2);
+                let at = a[0].addr;
+                if at % 8 != 0 {
+                    bail!("{name}: {at:#x} is misaligned")
+                }
+                self.h.stc(at, a[1]);
+                a[1]
+            }
+            Prim::Root => Cap::root(),
+            Prim::FromAddr => {
+                need!(1);
+                Cap::root().with_addr(a[0].addr)
+            }
+
+            // ---- through a capability ----
+            Prim::CapLd => {
+                need!(2);
+                let at = self.through(a[0], a[1], 8, P_LD, name)?;
+                let mut v = self.h.ldc(at);
+                let perms = a[0].perms();
+                if perms & P_LC == 0 {
+                    v.tag = false;
+                } else if perms & P_LM == 0 && !v.is_sealed() {
+                    v = v.strip(P_SD | P_SC | P_LM);
+                }
+                v
+            }
+            Prim::CapStX => {
+                need!(3);
+                let perm = if a[2].tag { P_SD | P_SC } else { P_SD };
+                let at = self.through(a[0], a[1], 8, perm, name)?;
+                self.h.stc(at, a[2]);
+                a[2]
+            }
+            Prim::CapLdWord => {
+                need!(2);
+                let at = self.through(a[0], a[1], 4, P_LD, name)?;
+                fix(self.h.ld(at) as i32)
+            }
+            Prim::CapStWordX => {
+                need!(3);
+                let at = self.through(a[0], a[1], 4, P_SD, name)?;
+                self.h.st(at, a[2].addr);
+                a[2]
+            }
+            Prim::CapLdByte => {
+                need!(2);
+                let at = self.through(a[0], a[1], 1, P_LD, name)?;
+                fix(self.h.m.peek8(at) as i32)
+            }
+            Prim::CapStByteX => {
+                need!(3);
+                let at = self.through(a[0], a[1], 1, P_SD, name)?;
+                self.h.m.poke8(at, a[2].addr as u8);
+                a[2]
+            }
+
+            // ---- reading a capability ----
+            Prim::AddrOf => {
+                need!(1);
+                fix(a[0].addr as i32)
+            }
+            Prim::CapBase => {
+                need!(1);
+                fix(a[0].base() as i32)
+            }
+            // Both saturate: the whole space is 2^32 bytes long.
+            Prim::CapLen => {
+                need!(1);
+                fix(a[0].len().min(u32::MAX as u64) as i32)
+            }
+            Prim::CapTop => {
+                need!(1);
+                fix(a[0].top().min(u32::MAX as u64) as i32)
+            }
+            Prim::CapPerms => {
+                need!(1);
+                fix(a[0].perms() as i32)
+            }
+            Prim::CapOtype => {
+                need!(1);
+                fix(a[0].otype() as i32)
+            }
+            Prim::CapOffset => {
+                need!(1);
+                fix(a[0].addr.wrapping_sub(a[0].base()) as i32)
+            }
+            Prim::CapTagP => {
+                need!(1);
+                self.bool(a[0].tag)
+            }
+            Prim::CapSealedP => {
+                need!(1);
+                self.bool(a[0].is_sealed())
+            }
+            Prim::CapHigh => {
+                need!(1);
+                fix(a[0].meta as i32)
+            }
+
+            // ---- narrowing one ----
+            Prim::CapSetAddr => {
+                need!(2);
+                a[0].with_addr(a[1].addr)
+            }
+            Prim::CapInc => {
+                need!(2);
+                a[0].inc(a[1].addr)
+            }
+            Prim::CapBounds => {
+                need!(2);
+                match a[0].with_bounds(a[1].addr) {
+                    Some(c) => c,
+                    None => bail!("{name}: {} bytes are not within {}", a[1].addr, self.h.write(a[0])),
+                }
+            }
+            Prim::CapBoundsExact => {
+                need!(2);
+                match a[0].with_bounds_exact(a[1].addr) {
+                    Some(c) => c,
+                    None => bail!(
+                        "{name}: {} bytes are not exactly representable within {}",
+                        a[1].addr,
+                        self.h.write(a[0])
+                    ),
+                }
+            }
+            Prim::CapAndPerms => {
+                need!(2);
+                a[0].and_perms(a[1].addr)
+            }
+            Prim::CapClearTag => {
+                need!(1);
+                a[0].without_tag()
+            }
+            Prim::CapSealEntry => {
+                need!(1);
+                self.sealable(a[0], name)?;
+                a[0].seal(OT_SENTRY)
+            }
+            Prim::CapSealClosure => {
+                need!(1);
+                if !self.h.is_type(a[0], T_CLOSURE) || a[0].is_sealed() {
+                    bail!("{name}: {} is not an unsealed closure", self.h.write(a[0]))
+                }
+                a[0].seal(OT_CLOSURE)
+            }
+            Prim::CapSeal => {
+                need!(2);
+                let ot = self.sealer(a[1], name)?;
+                self.sealable(a[0], name)?;
+                a[0].seal(ot)
+            }
+            Prim::CapUnseal => {
+                need!(2);
+                let ot = self.sealer(a[1], name)?;
+                if !a[0].tag || a[0].otype() != ot {
+                    bail!("{name}: {} is not sealed with {ot}", self.h.write(a[0]))
+                }
+                a[0].unseal()
+            }
+            Prim::CapSetHigh => {
+                need!(2);
+                Cap { addr: a[0].addr, meta: a[1].addr, tag: false }
+            }
+            Prim::CapEqP => {
+                need!(2);
+                self.bool(a[0] == a[1])
+            }
+            // As `ctestsubset` reads its operands: whether the second lies
+            // within the first.
+            Prim::CapSubsetP => {
+                need!(2);
+                self.bool(a[1].is_subset_of(&a[0]))
+            }
+            Prim::Rrl => {
+                need!(1);
+                fix(cap::rrl(a[0].addr) as i32)
+            }
+            Prim::Ram => {
+                need!(1);
+                fix(cap::ram(a[0].addr) as i32)
+            }
+
+            // ---- the machine's state. At build time there is no machine
+            // stack to scan and no collector to scan it, so the ranges are
+            // empty and the switches do nothing. ----
             Prim::StackPointer => fix(0),
             Prim::FramePointer => fix(0),
             Prim::WaitForInterrupt => NIL,
@@ -1406,16 +1672,8 @@ impl<'a> Lisp<'a> {
             Prim::Halt => {
                 bail!("the build tried to halt the machine")
             }
-            Prim::AddrOf => {
-                need!(1);
-                fix(a[0] as i32)
-            }
-            Prim::FromAddr => {
-                need!(1);
-                n!(0) as u32
-            }
 
-            // ---- allocation regions ----
+            // ---- allocation regions, answering addresses ----
             Prim::AllocCode => {
                 need!(1);
                 fix(self.h.alloc_code(n!(0) as u32) as i32)
@@ -1429,30 +1687,32 @@ impl<'a> Lisp<'a> {
             Prim::MakeString => {
                 need!(1);
                 let n = n!(0) as u32;
-                let fillc = if a.len() > 1 { imm_payload(a[1]) as u8 } else { 32 };
+                let fillc = if a.len() > 1 { imm_payload(a[1]) as u8 } else { b' ' };
                 let p = self.h.alloc_obj(T_STRING, n);
                 for i in 0..n {
-                    self.h.m.poke8(p + i, fillc);
+                    self.h.m.poke8(p.addr + i, fillc);
                 }
                 p
             }
-            Prim::StringLength | Prim::BytesLength => {
+            Prim::StringLength => {
                 need!(1);
+                self.indexed(a[0], T_STRING, true, name)?;
                 fix(self.h.olen(a[0]) as i32)
             }
             Prim::StringRef => {
                 need!(2);
-                chr(self.h.m.peek8(a[0] + n!(1) as u32) as u32)
+                let at = self.element(a[0], a[1], T_STRING, true, name)?;
+                chr(self.h.m.peek8(at) as u32)
             }
             Prim::StringSetX => {
                 need!(3);
-                let off = n!(1) as u32;
+                let at = self.element(a[0], a[1], T_STRING, true, name)?;
                 let c = if is_char(a[2]) {
                     imm_payload(a[2]) as u8
                 } else {
                     self.num(a[2], name)? as u8
                 };
-                self.h.m.poke8(a[0] + off, c);
+                self.h.m.poke8(at, c);
                 a[2]
             }
             Prim::MakeVector => {
@@ -1467,43 +1727,39 @@ impl<'a> Lisp<'a> {
             }
             Prim::VectorLength => {
                 need!(1);
+                self.indexed(a[0], T_VECTOR, false, name)?;
                 fix(self.h.olen(a[0]) as i32)
             }
             Prim::VectorRef => {
                 need!(2);
-                let i = n!(1) as u32;
-                if i >= self.h.olen(a[0]) {
-                    bail!("vector index {i} out of range")
-                }
-                self.h.slot(a[0], i)
+                let at = self.element(a[0], a[1], T_VECTOR, false, name)?;
+                self.h.ldc(at)
             }
             Prim::VectorSetX => {
                 need!(3);
-                let i = n!(1) as u32;
-                if i >= self.h.olen(a[0]) {
-                    bail!("vector index {i} out of range")
-                }
-                self.h.set_slot(a[0], i, a[2]);
+                let at = self.element(a[0], a[1], T_VECTOR, false, name)?;
+                self.h.stc(at, a[2]);
                 a[2]
             }
             Prim::MakeBytes => {
                 need!(1);
-                let n = n!(0) as u32;
-                let p = self.h.alloc_obj(T_BYTES, n);
-                for i in 0..n {
-                    self.h.m.poke8(p + i, 0);
-                }
-                p
+                self.h.alloc_obj(T_BYTES, n!(0) as u32)
+            }
+            Prim::BytesLength => {
+                need!(1);
+                self.indexed(a[0], T_BYTES, true, name)?;
+                fix(self.h.olen(a[0]) as i32)
             }
             Prim::BytesRef => {
                 need!(2);
-                fix(self.h.m.peek8(a[0] + n!(1) as u32) as i32)
+                let at = self.element(a[0], a[1], T_BYTES, true, name)?;
+                fix(self.h.m.peek8(at) as i32)
             }
             Prim::BytesSetX => {
                 need!(3);
-                let off = n!(1) as u32;
+                let at = self.element(a[0], a[1], T_BYTES, true, name)?;
                 let v = n!(2) as u8;
-                self.h.m.poke8(a[0] + off, v);
+                self.h.m.poke8(at, v);
                 a[2]
             }
 
@@ -1575,12 +1831,15 @@ impl<'a> Lisp<'a> {
                 self.h.set_slot(a[0], SYM_FLAGS, a[1]);
                 a[1]
             }
-            Prim::AllSymbols => self.h.g(LG_SYMLIST),
+            Prim::AllSymbols => self.h.gv(LG_SYMLIST),
             Prim::Obarray => self.h.obarray(),
 
             // ---- characters ----
             Prim::CharToInt => {
                 need!(1);
+                if !is_char(a[0]) {
+                    bail!("{name}: {} is not a character", self.h.write(a[0]))
+                }
                 fix(imm_payload(a[0]) as i32)
             }
             Prim::IntToChar => {
@@ -1588,19 +1847,7 @@ impl<'a> Lisp<'a> {
                 chr(n!(0) as u32)
             }
 
-            // ---- closures ----
-            Prim::MakeClosure => {
-                need!(2);
-                // (entry nfree) -> a compiled closure with room for free vars
-                let nfree = n!(1) as u32;
-                let c = self.h.alloc_obj(T_CLOSURE, 2 + nfree);
-                self.h.set_slot(c, CLO_ENTRY, n!(0) as u32);
-                c
-            }
-            Prim::ClosureEntry => {
-                need!(1);
-                fix(self.h.slot(a[0], CLO_ENTRY) as i32)
-            }
+            // ---- calling ----
             Prim::Apply => {
                 need!(2);
                 let args = self.h.list_vec(a[1]);
@@ -1632,14 +1879,8 @@ impl<'a> Lisp<'a> {
                 NIL
             }
             Prim::Error => {
-                let mut msg = String::new();
-                for (i, x) in a.iter().enumerate() {
-                    if i > 0 {
-                        msg.push(' ');
-                    }
-                    msg.push_str(&self.h.display(*x));
-                }
-                bail!("{msg}")
+                let msg: Vec<String> = a.iter().map(|x| self.h.display(*x)).collect();
+                bail!("{}", msg.join(" "))
             }
             Prim::ReadFile => {
                 need!(1);
@@ -1677,7 +1918,7 @@ impl<'a> Lisp<'a> {
                 let m = self.is_macro(a[0]);
                 self.bool(m)
             }
-            // Uninterned, like the machine.s own: a temporary that only the
+            // Uninterned, like the machine's own: a temporary that only the
             // code mentioning it can reach.
             Prim::Gensym => {
                 let n = self.gensym_count;
@@ -1689,6 +1930,9 @@ impl<'a> Lisp<'a> {
                 return self.eval(a[0], &None);
             }
             Prim::Exit => {
+                if self.sandbox {
+                    bail!("no exit from the sandbox");
+                }
                 let c = if a.is_empty() { 0 } else { n!(0) };
                 std::process::exit(c);
             }
@@ -1747,6 +1991,7 @@ prims! {
     Lsh                "%lsh" 2;
     EqP                "%eq?" 2;
     NullP              "%null?" 1;
+    Vkind              "%vkind" 1;
     FixnumP            "%fixnum?" 1;
     ConsP              "%cons?" 1;
     SymbolP            "%symbol?" 1;
@@ -1773,12 +2018,45 @@ prims! {
     RecordSetX         "%record-set!" 3;
     LdByte             "%ld-byte" 1;
     LdHalf             "%ld-half" 1;
-    LdFixnum           "%ld-fixnum" 1;
+    LdWord             "%ld-word" 1;
+    LdCap              "%ld-cap" 1;
     StByteX            "%st-byte!" 2;
     StHalfX            "%st-half!" 2;
-    StFixnumX          "%st-fixnum!" 2;
-    LdWord             "%ld-word" 1;
     StWordX            "%st-word!" 2;
+    StCapX             "%st-cap!" 2;
+    Root               "%root" 0;
+    FromAddr           "%from-addr" 1;
+    CapLd              "%cap-ld" 2;
+    CapStX             "%cap-st!" 3;
+    CapLdWord          "%cap-ld-word" 2;
+    CapStWordX         "%cap-st-word!" 3;
+    CapLdByte          "%cap-ld-byte" 2;
+    CapStByteX         "%cap-st-byte!" 3;
+    AddrOf             "%addr-of" 1;
+    CapBase            "%cap-base" 1;
+    CapLen             "%cap-len" 1;
+    CapTop             "%cap-top" 1;
+    CapPerms           "%cap-perms" 1;
+    CapOtype           "%cap-otype" 1;
+    CapOffset          "%cap-offset" 1;
+    CapTagP            "%cap-tag?" 1;
+    CapSealedP         "%cap-sealed?" 1;
+    CapHigh            "%cap-high" 1;
+    CapSetAddr         "%cap-set-addr" 2;
+    CapInc             "%cap-inc" 2;
+    CapBounds          "%cap-bounds" 2;
+    CapBoundsExact     "%cap-bounds-exact" 2;
+    CapAndPerms        "%cap-and-perms" 2;
+    CapClearTag        "%cap-clear-tag" 1;
+    CapSealEntry       "%cap-seal-entry" 1;
+    CapSealClosure     "%cap-seal-closure" 1;
+    CapSeal            "%cap-seal" 2;
+    CapUnseal          "%cap-unseal" 2;
+    CapSetHigh         "%cap-set-high" 2;
+    CapEqP             "%cap=?" 2;
+    CapSubsetP         "%cap-subset?" 2;
+    Rrl                "%rrl" 1;
+    Ram                "%ram" 1;
     StackPointer       "%stack-pointer" 0;
     FramePointer       "%frame-pointer" 0;
     WaitForInterrupt   "%wait-for-interrupt" 0;
@@ -1800,8 +2078,6 @@ prims! {
     EnableAfterTrap    "%enable-after-trap" 0;
     Enable             "%enable" 0;
     Halt               "%halt" 1;
-    AddrOf             "%addr-of" 1;
-    FromAddr           "%from-addr" 1;
     AllocCode          "%alloc-code" 1;
     AllocPool          "%alloc-pool" 1;
     MakeString         "%make-string" 1;
@@ -1832,8 +2108,6 @@ prims! {
     Obarray            "%obarray" 0;
     CharToInt          "%char->int" 1;
     IntToChar          "%int->char" 1;
-    MakeClosure        "%make-closure" 2;
-    ClosureEntry       "%closure-entry" 1;
     Apply              "%apply" 2;
     Funcall            "%funcall" 1;
     Write              "%write" 1;
