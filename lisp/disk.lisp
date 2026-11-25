@@ -129,8 +129,9 @@
 ;;
 ;; The job does not get the driver's page. `write-raw` writes n blocks out
 ;; of whatever capability it is handed, a byte object or not, through the
-;; page it is handed: the image writer makes its own from the root, and
-;; hands it each region of memory.
+;; page it is handed: the image writer takes the disk's from the kernel
+;; block, and hands it each region of memory through the region's own
+;; capability.
 (define (exclusive job) (request (driver-port) (list 'exclusive job)))
 
 (define (write-raw page buf block n) (transfer page disk-cmd-write buf block n))

@@ -35,14 +35,13 @@ key. Only privileged code can do it, which a mover is anyway. The new
 address must also be one the object's bounds can be exact at: a block keeps
 the alignment `yamask` gave it.
 
-**Numbers are not pointers.** An address held as a fixnum, in a low global
-or in a chip's register, carries no tag, and no compactor will find it. The
-display register holds the address of a bitmap's pixels, which is why
-drivers.md can say the address of the pixels is good for ever, and the
-blitter latches the capabilities of the transfer it is making. A machine
-that moved objects would have to pin byte objects a chip has been told
-about, or move them only with the chips idle and their registers
-rewritten.
+**Numbers are not pointers.** An address held as a fixnum, in a free list,
+a collector's variable or the image writer's header, carries no tag, and no
+compactor will find it. The chips hold capabilities: the display's
+scan-out register the pixels on show, which it hands back, and the blitter
+and the disk the capabilities of the transfer they are making. A machine
+that moved objects would have to pin byte objects a chip holds, or move
+them only with the chips idle and their registers rewritten.
 
 ## What is built
 
@@ -59,10 +58,11 @@ capability. The stacks themselves are objects, as are the register contexts
 and the trap frames, and slide with the rest; a slot in one that names
 nothing, left there by an earlier call or a long-dead register, loses its
 tag. Nothing the machine needs at reset is outside memory: the reset stub
-loads `sp`, `mscratch` and `mtvec` from `lg-boot-stack`, `lg-trapsave` and
-`lg-trap-entry`, and the trap stub its stack and its nested frames from
-`lg-trap-stack` and `lg-trap-nest`, every one a low global the rewrite
-covers.
+mints the kernel block, the first object, which never moves, at its fixed
+address, and loads `sp` and `mtvec` and the boot context from it, and the
+trap stub its stack and its nested frames, every one a slot of the kernel
+block the rewrite covers. The region capabilities the kernel block holds
+name no object, and the reset stub mints them again.
 
 On the machine, the pair compactor in gc.lisp, for the image collection.
 There is no object compactor in Lisp.
@@ -76,7 +76,7 @@ so protecting them costs nothing, and the test is one address comparison.
 
 **The slide as a stub.** Only the planning lookup and the slide have to be
 immune. Written as assembly with no literals, reading only the mark bitmap,
-the offset tables and raw memory through DDC, the mover touches no object
+the offset tables and the regions' capabilities, the mover touches no object
 but its own text, which must not move under it: it would live in the low
 immobile region, or at a fixed address as the reset stub does. It must
 reload `s1`, its caller's PCC and every live register on the way out from

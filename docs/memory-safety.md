@@ -56,14 +56,18 @@ task that ends waits for its ring to drain before it lets go of it. A
 bitmap dropped while a blit into it is still running is freed by a later
 collection, after the blit has landed. The disk takes its buffer out of the
 register when a command starts and drops it when the command ends, and the
-command's caller is blocked holding the buffer throughout.
+command's caller is blocked holding the buffer throughout. The display is
+handed its bitmap as a capability in its scan-out register, shows only what
+that lets it read, and keeps it for as long as it shows it: the register
+hands the capability back to a capability load, and the collector's roots
+read it there, so a bitmap on show that nothing else holds stays alive.
 
 **Unforgeability, by tags.** A granule's tag is out of band, and only a
 capability store from a tagged register sets it. Integer instructions write
 untagged results, data stores clear the tags they touch, and a capability
 moved outside what its bounds can represent loses its tag. So a pointer
 cannot be made from its bits; the one way to make a capability from a number
-is `%from-addr`, which reads DDC, which needs SR.
+is through the root, which is in a CSR that only code with SR can read.
 
 **Encapsulation, by sealing.** Every closure is sealed. It can be called,
 with `jcl`, which unseals it into the callee's `t0`, and it cannot be loaded
@@ -86,9 +90,12 @@ capabilities to everything loaded through it, so read-only is deep. A
 string or a byte object cannot hold a capability, because it has no SC: a
 capability stored into one is stored untagged.
 
-**Privilege, by SR.** Writing a CSR, reading a privileged one, DDC among
-them, `mret`, and every load and store by number through DDC are illegal
-instructions without SR in PCC, which is RVY's ASR. The compiler gives SR only to
+**Privilege, by SR.** Writing a CSR, reading a privileged one, the root's
+and `mscratch`'s among them, and `mret` are illegal instructions without SR
+in PCC, which is RVY's ASR. A load or store by number is illegal with SR or
+without: there is no default capability, and `x0` is no authority, so code
+names memory by number only by reading the root and setting its address,
+which takes SR. The compiler gives SR only to
 code compiled in an unsafe file or containing an `unsafe` form.
 
 **And what the Lisp instructions always checked.** `car`, `cdr`, `set-car!`
@@ -97,8 +104,9 @@ header, that the index is a fixnum, and the bound; a call checks for a
 closure and the prologue the arity; fixnum arithmetic checks both operands
 and widens on overflow; the stack limit stops a frame before it is built;
 and the write barrier watches every store, raw or checked, while a
-collection is marking, but one through a stack's or a register context's
-own capability, which the collector scanned whole when marking began.
+collection is marking, but one through a stack's, a register context's or
+the kernel block's own capability, which the collector scanned whole when
+marking began.
 
 `(capabilities)` checks each of these at the prompt.
 
@@ -115,15 +123,15 @@ compiler and the processor.
 
 | what | reaches | on a bad argument |
 |---|---|---|
-| `%root`, `%from-addr` | the root, or the root at an address | any capability at all, every permission |
-| `%ld-word` `%st-word!` `%ld-half` `%st-half!` `%ld-byte` `%st-byte!` `%ld-cap` `%st-cap!`, and `peek`/`poke` over them | memory by number, through DDC | any RAM word, live heap, headers and code included |
-| `%bit-ref` `%bit-set!` | a bit by number | the same |
+| `%root` | the root | any capability at all, every permission |
+| `%ld-word` `%st-word!` `%ld-half` `%st-half!` `%ld-byte` `%st-byte!` `%ld-cap` `%st-cap!`, and `peek`/`poke` over them | memory by number, through the root | any RAM word, live heap, headers and code included |
+| `%kernel`, `kernel-ref` `kernel-set!` `all-symbols` | the kernel block and its slots: the trap stub's state, the symbol list, the region and device capabilities | every region the reset stub minted, every device |
 | `%slot` `%set-slot!` | any type of object, by index | a closure's slots, if it has been opened |
 | `open-closure` | a closure unsealed with the root | its free variables and entry |
-| `sealing-key` | a key to an otype, made from the root | to seal and unseal with that otype, as its manager does |
+| `sealing-key` | a key to an otype, made from the kernel block's otypes | to seal and unseal with that otype, as its manager does |
 | `%set-context!` `%set-stack-limit!` `%set-gc-mode!` `%ecall` `%disable` `%enable` `%cons-run` `%set-cons-run!` `%set-this-task!` `%halt` | the machine's own state | arbitrary machine state |
 | `task-stack` `task-context` `task-seal` `task-unseal` | a task's stack or saved registers, unsealed, or a seal with Exec's key | another task's frames and registers |
-| `device-page` | any device's page, made from the root | any register of any device, one a driver holds included |
+| `device-page` | any device's page, from the kernel block | any register of any device, one a driver holds included |
 | `blit-descriptor` `blit-go` `blit-seal` `blit-unseal` | a descriptor the chip reads, unsealed, or a seal with the chips' key | a descriptor written after it was linked, under the chip |
 | `code-object-at`, `refill-cons-run` in gc | a code object by its text's address, a fresh cons run | the collector's invariants |
 
@@ -159,23 +167,23 @@ collector frees a block only when no tag anywhere names it, and zeroes
 whatever in it could hold a pointer as it frees it, so a capability always
 names the block it was made for. What a capability cannot vouch for:
 
-- an address held as a number. A number is no authority, but code with the
-  root can make it a capability again with `%from-addr`, and by then the
-  block may be free or somebody else's. The collector, the image writer and
-  `peek`/`poke` work this way, inside `unsafe`.
-- the display, which is handed the screen's pixels by number and reads
-  whatever is there; it only reads, and `*screen*` holds the bitmap it is
-  showing.
+- an address held as a number. A number is no authority, but code that
+  holds a region's capability can follow it there, and by then the block
+  may be free or somebody else's. The collector and the image writer work
+  by addresses within their regions, and `peek`/`poke` by addresses through
+  the root, inside `unsafe`.
 - the collector's own scratch above object space, the mark map, the mark
   stack and the image writer's tag maps, which no allocator hands out and
-  which hold addresses, not capabilities.
+  which hold addresses, not capabilities. Each is reached through the
+  region capability the reset stub minted for it, so an index gone wrong
+  stays in its region.
 
-**Inside `unsafe`.** Code with SR has the root, and the root reaches
+**Inside `unsafe`.** Code with SR can read the root, and the root reaches
 everything: an object's header, the nil cell, a sealed closure's slots, a
 function's text, another task's stack. The write barrier still sees a raw
 store, so a pointer cannot be lost during a mark, but a raw store can still
 corrupt one. Headers are written only by the allocators and the collector,
-through DDC.
+through object space's capability.
 
 **Stale frame slots.** A frame's local slots are not cleared on entry, so a
 slot an earlier call left tagged is a root until it is written. The
@@ -185,12 +193,12 @@ cost is floating garbage, not a wrong pointer.
 ## The old proposals
 
 **1. Refuse the wild store into the heap. CLOSED** outside `unsafe`, by
-the processor: a store by number needs SR, so code that did not say
-`unsafe` has no way to name a heap word it was not handed. The barrier now
-checks every store, raw or checked, so a raw store during a mark can no
-longer lose a pointer. A store from `unsafe` code through the root into the
-heap is still possible, by design: the collector and the image writer are
-made of such stores.
+the processor: a store by number needs the root, which needs SR, so code
+that did not say `unsafe` has no way to name a heap word it was not handed.
+The barrier checks every store, raw or checked, so a raw store during a
+mark cannot lose a pointer. A store from `unsafe` code through the root
+into the heap is still possible, by design: it is `poke`. The collector and
+the image writer store through their regions' capabilities instead.
 
 **2. Poison the pool on free. CLOSED**, by retiring the pool. Its stacks,
 register contexts, trap frames and descriptor rings are objects, freed by
@@ -206,8 +214,9 @@ against the object itself rather than a guess at its block. The guard is
 gone. Building a descriptor names no memory by number, and the disk
 driver's one `unsafe` is making its page.
 
-**4. Audit `%from-addr`. RESOLVED.** It reads DDC and sets an address, so
-it faults in code without SR, and the compiler refuses its name outside
+**4. Audit `%from-addr`. RESOLVED.** It is gone: nothing makes a capability
+from a number but `%root` with its address set, which reads the root's CSR,
+so it faults in code without SR, and the compiler refuses its name outside
 `unsafe`. The list of places a pointer can be made from a number is the
 list of unsafe files and forms, and the processor enforces it.
 

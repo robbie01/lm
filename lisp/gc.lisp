@@ -1205,8 +1205,8 @@
 ;; Updating before moving is what makes this work without a forwarding word
 ;; per pair: while pass 3 runs, everything is still where the map says. The
 ;; tags say exactly where every pointer is, so pass 3 is a walk over memory:
-;; the kernel block, where the roots are; the live pairs; and object space,
-;; stacks and contexts among it, whose free blocks hold no tags.
+;; the live pairs, and object space, the kernel block, stacks and contexts
+;; among it, whose free blocks hold no tags.
 ;;
 ;; Objects do not move. This collector is written in the language it
 ;; collects, and between updating and moving it calls functions and reaches

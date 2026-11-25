@@ -1438,10 +1438,6 @@ impl<'a> Lisp<'a> {
             }
             Prim::Root => Cap::root(),
             Prim::Kernel => self.h.kernel(),
-            Prim::FromAddr => {
-                need!(1);
-                Cap::root().with_addr(a[0].addr)
-            }
 
             // ---- through a capability ----
             Prim::CapLd => {
@@ -1953,7 +1949,6 @@ prims! {
     StCapX             "%st-cap!";
     Root               "%root";
     Kernel             "%kernel";
-    FromAddr           "%from-addr";
     CapLd              "%cap-ld";
     CapStX             "%cap-st!";
     CapLdWord          "%cap-ld-word";

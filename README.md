@@ -55,7 +55,7 @@ interpreter nor the tests.
 | `src/mach.rs` `src/run.rs` | capability registers, tagged memory, CSRs and the capabilities they hold, traps, the outer loop |
 | `src/dev/` | uart, timer, display, blitter, input, block storage, the host window and the box filter it draws the display with |
 | `src/heap.rs` `src/image.rs` | object memory, and the image format with its tags |
-| `src/map.rs` | the memory map and the low-memory globals |
+| `src/map.rs` | the memory map and the kernel block's slots |
 | `src/boot.rs` | loading an image and letting it run |
 
 | the forge | |
@@ -100,7 +100,8 @@ interpreter nor the tests.
 RV32IMC with Zba, Zbb, Zbs and Zicond; RVY, the RISC-V CHERI extension, as
 RV32Y in machine mode and always in capability mode, with a capability
 encoding of LM's own; and Xlm, the Lisp instructions below. The CSRs are
-those a kernel needs and three custom ones. [docs/cheri.md](docs/cheri.md)
+those a kernel needs and five custom ones: the stack limit, the barrier's
+switch, its two maps and the root. [docs/cheri.md](docs/cheri.md)
 is the reference for all of it, and [docs/rvy.md](docs/rvy.md) says which
 RVY this is and every place LM departs from it, and why.
 
@@ -234,19 +235,30 @@ that is a bignum takes the same route.
 
 ### Authority
 
-At reset PCC, DDC and `mtvec` are the root: every permission over the
-whole address space. The reset stub, the one piece of code at a fixed
-address, makes nil, the boot stack and the trap frames out of it, points
-`mtvec` at the trap stub's entry, and leaves the root in DDC, the default
-data capability, a CSR of Xlm's, where a load or store whose base is `x0`,
-and Xlm's explicit DDC forms, address memory by number.
+At reset PCC and `mtvec` are the root: every permission over the whole
+address space. The reset stub, the one piece of code at a fixed address,
+turns the memory map into capabilities, once, from the root, which it reads
+from a read-only CSR of Xlm's: nil, the kernel block, which goes in
+`mscratch`, and in the kernel block a capability to each region, the low
+block, cons space, object space, the mark bitmap, the object-start map and
+the collector's scratch, one to every otype, and each device's page. It
+gives the write barrier the two maps, points `mtvec` at the trap stub's
+entry and enters the top level on the boot stack, holding nothing it minted
+but nil.
 
-SR is the privilege, RVY's ASR. Writing a CSR, reading a privileged one, DDC
-among them, `mret`, and every access through DDC are illegal instructions
-without SR in PCC. The compiler gives a code object's entry SR when
-its source was compiled `unsafe`, and no other. So addressing memory by
-number, the collector's and the kernel's way of working, is a permission the
-processor checks on every instruction that does it.
+From then on the machine reaches memory only through capabilities. The
+collector, the allocator, the assembler, Exec and the image writer know
+addresses, and follow one through their region's capability with its
+address set; a load or store whose base is `x0` is an illegal instruction.
+The root is read again only by `peek` and `poke`, the explorer's and the
+printer's raw views, and the escape hatch that opens a sealed closure.
+
+SR is the privilege, RVY's ASR. Writing a CSR, reading a privileged one, the
+root's and `mscratch`'s among them, and `mret` are illegal instructions
+without SR in PCC. The compiler gives a code object's entry SR when its
+source was compiled `unsafe`, and no other. So reaching the root, the
+kernel block or the machine's state is a permission the processor checks
+on every instruction that does it.
 
 ### Traps
 
@@ -260,7 +272,8 @@ RISC-V leaves causes 24 to 31 to the implementation, and Xlm's are there;
 27   division by zero
 28   cons run used up     mtval: the register npair was given, gp
 29   write barrier        a store would overwrite a pointer to an unmarked
-                          object; mtval is the granule; see the collector
+                          object; mtval: the store's register, and the
+                          granule's offset in it; see the collector
 30   stack overflow       sp moved below the stack-limit CSR (0x7c0)
 32   capability fault on the pc     mtval: the instruction, or a jump's target
 33   capability fault on a load     mtval: the address
@@ -308,9 +321,12 @@ off and may be entered with the stack nearly full. Below the limit `sp` is
 still bounded to its task's stack, so nothing beneath a stack can be
 written whatever the limit says.
 
-Traps nest. `mscratch` names the frame a trap saves into: the running task's
-context at the outermost level, and below that one of eight frames, objects
-the forge made and a vector in a low global holds. A trap inside the
+The limit is a number, an address in the stack: it is no authority, only
+where a task is stopped. The authority is `sp`.
+
+Traps nest. The kernel block's frame names the frame a trap saves into: the
+running task's context at the outermost level, and below that one of eight
+frames, objects the forge made and a vector in the kernel block holds. A trap inside the
 handler is normal, because the handler's own arithmetic may widen and its
 own pairs may use up the cons run. Nine deep halts the machine with exit
 code 9.
@@ -322,21 +338,23 @@ unchecked is in [docs/memory-safety.md](docs/memory-safety.md).
 
 ```
 0x0000_0000  the nil cell, 16 bytes
-0x0000_0100  low-memory globals, one 8-byte slot each (the lg-* names in layout.lisp)
-0x0000_0400  the free bins of object space
-0x0000_0800  the reset stub, 256 bytes, where the processor starts
+0x0000_0800  the reset stub, 1 KiB, where the processor starts
 0x0100_0000  cons space, 128 MiB, eight million pairs
-0x0900_0000  object space, 64 MiB: every object, machine code, stacks and
-             register contexts among them, swept in place; the forge
-             compacts it
-0x0D00_0000  the mark bitmap, the object-start map, the mark stack, scratch
+0x0900_0000  object space, 64 MiB: the kernel block first, then every
+             object, machine code, stacks and register contexts among them,
+             swept in place; the forge compacts it
+0x0D00_0000  the mark bitmap, the object-start map, the collector's scratch
 0xF000_0000  device pages, 4 KiB each
 ```
 
-The low page is the first 4 KiB, and an image saves it whole; nothing lies
-between it and cons space, which starts at 16 MiB so that its runs fall on
-round boundaries. Everything the machine hands out is a pair or an object,
-and the collector is the only thing that frees one.
+The low block is the first 4 KiB, nil's cell and the reset stub, and an
+image saves it whole; nothing lies between it and cons space, which starts
+at 16 MiB so that its runs fall on round boundaries. The map is the
+emulator's, the forge's and the reset stub's: the machine holds it as
+capabilities, and names nothing in it by number.
+
+Everything the machine hands out is a pair or an object, and the collector
+is the only thing that frees one.
 
 Machine code is an object like any other. A function's code is a text, a
 byte object no capability can be stored in, and what reaches it is its
@@ -347,20 +365,24 @@ function defined again and again leaves the heap as it was. Nothing in the
 machine stands at a fixed address but the reset stub, which the processor
 needs to find with nothing else set up; it lies in the low block, which an
 image saves whole. The trap stub is a text like the rest, and `mtvec` its
-entry, which the reset stub loads from `lg-trap-entry`.
+entry, which the reset stub loads from the kernel block.
 
 A stack is an object too, a `t-stack`, and so is a task's register
 context, a `t-context` of thirty-two slots. The boot stack, the trap stack,
 the boot context and the frames for nested traps are objects the forge
-makes, which low globals hold and the stubs load: `lg-boot-stack`,
-`lg-trap-stack`, `lg-trapsave` and `lg-trap-nest`.
+makes, which the kernel block holds and the stubs load.
 
-Every slot is 8 bytes: a global, a value slot of an object, a frame slot, a
-saved register. A low global that holds an address holds it as a fixnum,
-and authority to what it names comes from DDC; one that holds a value holds
-the value. Every slot below `0x800` is one load or store off `x0`. Tags exist
-for RAM only: a device page hands out no capabilities, and only the chips'
-two capability registers take one.
+The kernel block is the kernel's own state, one object, a `t-kernel`, the
+first in object space, which `mscratch` names: the trap stub's frame,
+depth and parked registers, the roots of the world (the obarray, the
+symbol list, the packages), the heap's frontiers and free bins, and the
+capabilities the reset stub mints. Its slots are the `kb-*` names in
+layout.lisp. Lisp state that is not the kernel's is in ordinary globals.
+
+Every slot is 8 bytes: a value slot of an object, a frame slot, a saved
+register. Tags exist for RAM only: of the device registers, only the chips'
+three capability registers take one, and only the display's scan-out
+register hands one back.
 
 ## Calling
 
@@ -508,10 +530,11 @@ stores one.
 handed, and the processor checks every use: a wrong argument, an index past
 the end, a store through a read-only reference is a report naming the
 value, never a corrupted word. The raw vocabulary is what reaches memory by
-number or touches the machine's state: `%root`, `%from-addr`, the loads and
-stores through DDC, `%slot`, the CSR and context operations, `open-closure`,
-and the functions that reach memory by number or make a device's page, such
-as `peek`, `poke` and `device-page`. Each such name carries a bit in
+number or touches the machine's state: `%root`, the loads and stores
+through it, `%kernel` and the kernel block's slots, `%slot`, the CSR and
+context operations, `open-closure`, and the functions that reach memory by
+number or hand out a device's page, such as `peek`, `poke` and
+`device-page`. Each such name carries a bit in
 its symbol, and the compiler refuses a call to one, or a reference to one as
 a value, unless the site is inside an `unsafe` form or the file said
 `(unsafe-file)` after its `in-package`:
@@ -558,16 +581,19 @@ Mark, then sweep in place, in slices. A collection is a cycle:
 
 The collector is precise everywhere, because the machine is: a granule holds
 a pointer if and only if its tag is set, and only a capability store sets
-one. The roots are the tagged granules of the low page, of every stack in
-use from its stack pointer to its top, and of every register context in
-use: the running task's stack, the contexts of the traps in progress, and
-every suspended task's. Marking an object is pushing every tagged granule
+one. The roots are the kernel block's values, the bitmap the display is
+showing, which its scan-out register hands back, and the tagged granules of
+every stack in use from its stack pointer to its top and of every register
+context in use: the running task's stack, the contexts of the traps in
+progress, and every suspended task's. The collector reaches the heap, its
+maps and its scratch through the capabilities the reset stub minted for
+them, and knows only addresses within them. Marking an object is pushing every tagged granule
 of its payload; the type matters only to skip strings, byte objects and
 texts, which hold none, and stacks and contexts, whose slots in use the
 roots have scanned and whose other slots hold whatever an earlier call or a
 long-dead register left there. A stack or a context is kept by what holds
-it, a task, a low global, a frame pointer into it, like any object, and
-freed with its task. Nothing is guessed, so nothing is pinned. What the
+it, a task, the kernel block, a frame pointer into it, like any object,
+and freed with its task. Nothing is guessed, so nothing is pinned. What the
 port to capabilities took away: the allocator's mask of live registers, the
 conservative scan of a suspended task's registers and the pins it left, and
 the rule that kept every word between `sp` and the closure slot a tagged
@@ -595,11 +621,14 @@ scanned with the rest: at most some floating garbage.
 The write barrier is an instruction-level check in the processor (`gcmode`,
 CSR 0x7c1). While it is on, any store of any width, checked or raw, that
 would overwrite a tagged granule in cons or object space whose object is
-unmarked traps with cause 29 before writing; the handler marks that object
-and the store re-executes. So the collector sees a snapshot: nothing
+unmarked traps with cause 29 before writing, naming the granule by the
+store's register and its offset there; the handler reads the old value
+through the store's own capability, marks its object, and the store
+re-executes. The processor reads the mark bitmap and the object-start map
+through capabilities in two CSRs. So the collector sees a snapshot: nothing
 reachable when the cycle began can be lost, because the last copy of a
-pointer cannot be overwritten unseen. A store into a stack or a context is
-let through: one in use was scanned whole when the cycle began, so what it
+pointer cannot be overwritten unseen. A store into a stack, a context or
+the kernel block is let through: one in use was scanned whole when the cycle began, so what it
 held then is marked already, and a frame pushed or a register saved since
 over a stale pointer loses nothing. Without that a context switch, which
 saves thirty-one registers, and every call that pushes a frame would trap
@@ -607,8 +636,7 @@ over whatever an earlier one left, and asking which object holds each
 granule would cost a rebuild a quarter of its time. The store's authority
 says it instead: a stack pointer, a frame pointer and a context's
 capability are based at the payload of their object, whose header, at an
-object start, says what it is, which is two loads. A store through DDC is
-always watched. Everything allocated during the cycle is black from the
+object start, says what it is, which is two loads. Everything allocated during the cycle is black from the
 start, a run of pairs by marking the run when it is handed out, an object
 when it is taken, so nothing new needs tracing and the roots are scanned
 once.
@@ -691,10 +719,10 @@ that belong to the task holding them; interrupt servers on the chips' lines.
 There is no ExecBase: the lists are records held in variables. Sending a
 message costs a pointer on a list.
 
-The context switch is one write of a CSR. The trap stub saves all 32
-registers, tags and all, into the block `mscratch` names and restores from
-there on the way out, so switching tasks is pointing `mscratch` at another
-task's block. Preemption is the timer interrupt; a task that
+The context switch is one store. The trap stub saves all 32 registers,
+tags and all, into the context the kernel block's frame names and restores
+from there on the way out, so switching tasks is pointing the frame at
+another task's context. Preemption is the timer interrupt; a task that
 blocks asks for a reschedule with an `ecall`, so the switch always happens
 inside the handler. Which task is running is the register `s2`. A task's
 stack and its context are objects, and the task holds each as a capability
@@ -748,16 +776,17 @@ Every device is a 4 KiB page of 32-bit registers at `0xF0000000` and up:
 `sys` (halt, interrupt control, entropy), `uart`, `timer`, `gfx`, `input`,
 `blit`, `disk`. Their register offsets are in the generated layout.
 
-A device page lies outside RAM, and the only way to it is by number, which
-is a privilege. Possession is ownership: `device-page`, an unsafe name, makes
-a capability bounded exactly to a device's page, with LD and SD, and SC for
-the two chips with a capability register, and a register is one load or
-store through it, so a register offset past the page is a bounds fault, not
+A device page lies outside RAM, and the only way to it is its capability,
+which the reset stub mints for every device and the kernel block holds.
+Possession is ownership: `device-page`, an unsafe name, hands out a
+capability bounded exactly to a device's page, with LD and SD, and LC and
+SC for the three chips with a capability register, and a register is one
+load or store through it, so a register offset past the page is a bounds fault, not
 a store into the next device. A driver makes its page once, when it starts,
 and keeps it in its own closures, which are sealed; no global or record holds
 it, so no other task can name it, and it lives and ends with the driver,
 with nothing to give back. `sys`, `timer` and the blitter are the kernel's,
-reached through a page hw.lisp makes for each use. The uart is reachable raw
+reached through the page each use takes from the kernel block. The uart is reachable raw
 by design, for the collector, the trap handler and a rebuild.
 
 | driver | holds | requests |

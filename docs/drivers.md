@@ -47,14 +47,14 @@ wrong tool and the safety has to come from the arguments.
 
 ## Enforcement is the processor
 
-A device page is memory above the top of RAM, and the only way to it is by
-number. Naming memory by number is a privilege: an integer load or store
-goes through DDC and needs SR, which only code compiled `unsafe` has (see
-[cheri.md](cheri.md)). `mmio-base` and the device numbers are exported with
-the rest of the memory map, so a program can compute a register's address,
-but an address is a number, and a program that says nothing unsafe can
-store only through capabilities it was handed. None of those reaches a
-device.
+A device page is memory above the top of RAM, and the only way to it is its
+capability. The reset stub mints one for every device, from the root, and
+the kernel block holds them, which only code compiled `unsafe` can reach
+(see [cheri.md](cheri.md)). `mmio-base` and the device numbers are exported
+with the rest of the memory map, so a program can compute a register's
+address, but an address is a number, and a program that says nothing
+unsafe can store only through capabilities it was handed. None of those
+reaches a device.
 
 A device's page is a capability, and holding it is owning the device:
 
@@ -103,10 +103,16 @@ into the pixels at `bm-index`, with no `unsafe` anywhere. The collector
 frees the pixels when the last reference goes, so closing a window drops it
 from the list and does nothing else, and a new bitmap starts zeroed.
 
-The chips that write memory are handed capabilities, not numbers, and
-refuse what those do not cover (below). The display chip only reads: it is
-handed the pixels' address, which is good for ever because objects never
-move, and `gfx-show` takes it from a bitmap.
+The chips that reach memory are handed capabilities, not numbers, and
+refuse what those do not cover (below). The display is handed the pixels'
+capability in its scan-out register, the third capability register, by
+`gfx-show`, and shows only what it lets the chip read: tagged, unsealed,
+with LD, and covering every row the width, height and pitch describe. A
+bitmap it may not read shows as a blank screen, and `gfx-status` says which
+check failed, as a `refuse-*` code, or 0. The chip keeps the capability for
+as long as it shows the bitmap, and an `LY` from the scan-out register hands
+it back, which is how the collector keeps the bitmap on show alive whatever
+else lets go of it.
 
 Drawing goes through a rastport: a bitmap, an origin and a clip region.
 Every rectangle is clipped to the region and the bitmap before a descriptor
@@ -268,15 +274,13 @@ no driver is running, a call is an error.
 
 ## What this does not do
 
-- Privileged code still names memory by number. The collector, the kernel
-  and the image writer can write anywhere, can make any device's page, and
-  can hand a chip a capability made from the root; the chip then moves
+- Privileged code holds whole regions. The collector, the kernel and the
+  image writer can write anywhere in theirs, can take any device's page,
+  and can hand a chip a capability to a region; the chip then moves
   whatever that capability covers. What keeps that to those few files is
-  that the root is an unsafe name. Nothing stops privileged code making a
-  page a driver holds: two holders of one device is a bug only unsafe code
-  can write.
-- The display chip reads its picture by number. It only reads, and it is
-  pointed only at a bitmap's pixels.
+  that the kernel block and the root are unsafe names. Nothing stops
+  privileged code taking a page a driver holds: two holders of one device
+  is a bug only unsafe code can write.
 - Ports have no priority, so a low-priority client's request sits in front
   of a high-priority client's. `wait-ports` starts its scan one port further
   along on each call, so a busy client cannot starve a quiet one.

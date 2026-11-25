@@ -24,8 +24,9 @@
         (%cons perm-sr "SR") (%cons perm-se "SE") (%cons perm-hd "HD")))
 
 ;; Tagged, and neither nil, a pair nor an object, as the processor tells them
-;; apart. HD alone does not make an object: the root has every permission,
-;; and its base has no header below it.
+;; apart. HD alone does not make an object: the root and object space's own
+;; capability have it, and neither is based past the start of object space,
+;; where a header could be.
 (define (raw-capability? x)
   (if (%cap-tag? x)
       (if (%null? x)

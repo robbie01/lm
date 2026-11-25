@@ -371,8 +371,8 @@ the trap handler, which sees every register exactly, and there is no live
 mask. A leaf may cons. Building a closure is still a call.
 
 **`%ld-half` and `%st-half!` are four instructions each. RESOLVED** by the
-port. They are `lhu.ddc` and `sh.ddc`, one instruction each through DDC,
-like every load and store by number.
+port. They are `lhu` and `sh` through the root's capability with its
+address set, like every load and store by number.
 
 **Compressed branches and jumps are not emitted. WONTFIX.** A fixpoint
 relaxation pass in a compiler that runs on the machine, to save 1.6% of the

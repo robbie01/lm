@@ -80,15 +80,17 @@ saturate at 0xffffffff.
 
 **HD** is a permission Xlm defines. It says the capability's base is the
 payload of a Lisp object whose header is the granule just below the base.
-Only the root mints it: the bounds instructions keep HD when the base stays
-where it was or the authority is the whole address space, and drop it
-otherwise, and `YBLD` leaves bits with HD anywhere else untagged, so
+Only an authority over the whole of object space mints it, object space's
+own capability or the root: the bounds instructions keep HD when the base
+stays where it was or the authority spans object space and the new base
+lies in it, and drop it otherwise, and `YBLD` leaves bits with HD anywhere else untagged, so
 narrowing an object to one of its slots can never pass the slot below off
 as a header. Clearing it, like clearing any permission, only takes authority
 away: a headed object with HD cleared looks like an unheaded block, which is
 safe. A pair can never acquire it, so the processor never reads a header
-that is not there. The root has HD because it has every permission; it is
-not an object, because there is no header below address 0 in object space.
+that is not there. The root and object space's capability have HD so that
+they can mint it; neither is an object, because a headed capability is an
+object only when its base lies past the start of object space.
 
 **LM**: a tagged, unsealed capability loaded through an authority that lacks
 LM has SD, SC and LM cleared, as RVY's `LY` clears W and LM. Immutability is
@@ -104,9 +106,9 @@ anyone may seal their own code (`YSEALE`) or closure object (`sealcl`), and
 nobody may open one except by entering it, or with an authority. Any other
 otype is sealed and unsealed with a key: a capability with SE whose address,
 inside its bounds, is the otype (`YSEALT` and `YUNSEALT`). A manager of
-sealed things mints one key to its own otype, the root narrowed to that one
-type and to SE (`sealing-key`), and keeps it in its own closures and nowhere
-else: Exec seals a task's stack and context in its record with otype 3, and
+sealed things mints one key to its own otype, the reset stub's capability
+to every otype narrowed to that one (`sealing-key`), and keeps it in its own
+closures and nowhere else: Exec seals a task's stack and context in its record with otype 3, and
 hw seals a blitter ring, and a descriptor anywhere another task could read
 it, with otype 4. `YUNSEALS` unseals any sealed capability that lies inside
 an unsealed authority, and with the root that is the escape hatch:
@@ -118,8 +120,10 @@ it, and once that code is a sealed closure, nothing else can reach it.
 Sealing is how private state lives inside a public record: a task record is
 anybody's to read, and its stack and context are sealed with a key only
 Exec's closures hold. The root is the escape hatch, for debugging, where the
-printer and the explorer open sealed things, and for the system's own
-floor, the trap handler, the collector and the image writer.
+printer and the explorer open sealed things and `peek` and `poke` name
+memory by number. The system's own floor, the trap handler, the collector
+and the image writer, works through the capabilities the reset stub minted
+from it, each to its own region.
 
 **Untagged capabilities are data.** Every integer instruction reads the
 address field of its operands and writes an untagged result whose metadata
@@ -195,6 +199,7 @@ hole the sweep walks like any other.
 | 11 text | `perms-bytes` | a function's machine code |
 | 12 stack | `perms-object` | a task's stack, in value slots |
 | 13 context | `perms-object` | a task's 32 saved registers, or a trap frame's 32 and a link |
+| 14 kernel | `perms-object` | the kernel block, below |
 
 `perms-pair` is LD SD LC SC LM; `perms-object` is that and HD; `perms-bytes`
 is LD SD HD, so no capability can be stored in a string, a byte object or a
@@ -204,7 +209,8 @@ with `perms-pair`, standing at its top.
 
 **Code** is an object. A function's machine code is a text, its length in
 bytes in the header, allocated and aligned as any byte object is. A code
-object's entry capability is derived from the root at the text's payload:
+object's entry capability is derived from object space's capability at the
+text's payload:
 EX, and SR when the source said `unsafe`, and nothing else, with bounds
 exactly the code, so the code's length is the capability's length. The
 text's own headed capability goes no further than the assembler that fills
@@ -222,41 +228,74 @@ can be anywhere and the forge slides it with the rest of object space.
 
 The one piece of code that is not an object is the reset stub, in the
 `reset-reserve` bytes at `reset-vector` in the low block. The trap stub is a
-text, and its entry is kept in `lg-trap-entry`.
+text, and the kernel block holds its entry.
 
 **Stacks and contexts** are objects. The collector marks one as it marks
-any object, by what holds it, a task's record, a frame pointer into it or a
-low global, and never traces it: what is live in a stack runs from its
-stack pointer to its top, which the roots scan, as they scan every context
-in use. The write barrier lets a store through one's own capability.
+any object, by what holds it, a task's record, a frame pointer into it or
+the kernel block, and never traces it: what is live in a stack runs from
+its stack pointer to its top, which the roots scan, as they scan every
+context in use. The write barrier lets a store through one's own
+capability.
+
+**The kernel block** is the kernel's own state, one object of type 14, the
+first in object space, where the forge makes it and nothing moves it.
+`mscratch` names it, so only code with SR reaches it. Its slots, named
+`kb-*` in the layout, are the frame the next trap saves into and the trap
+depth; the trap stack, hook, nest and entry; the boot stack and context;
+the top level and the task exit; the obarray, the symbol list, the
+packages, the current package and the symbol count; extra roots; the
+frontiers of cons and object space, object space's free bytes and its free
+bins; the device pages; two slots the trap stub parks registers in; and
+the capabilities the reset stub mints from the memory map. The collector
+scans the slots before the parked registers as roots, marks the block as
+the object it is, and never traces it; the write barrier lets a store
+through its own capability, as through a stack's. Lisp state that is not
+the kernel's is in ordinary globals: the collector's free pairs and holes,
+the error handler, the boot list, the startup closure.
 
 ## Authority
 
-At reset PCC, DDC and `mtvec` are the root and the general registers are
-NULL. The reset stub derives nil and the empty cons run from DDC, loads
-`sp`, `mscratch` and `mtvec` from `lg-boot-stack`, `lg-trapsave` and
-`lg-trap-entry`, and leaves the root in DDC.
+At reset PCC and `mtvec` are the root, every general register and every
+other capability CSR is NULL, and the processor starts at the reset vector.
+The reset stub turns the memory map into capabilities, once: from the root,
+which it reads from its CSR, it mints nil, the kernel block, which goes in
+`mscratch`, and into the kernel block the low block (LD), cons space
+(`perms-pair`), object space (`perms-space`: every permission but SE),
+the mark bitmap, the object-start map and the collector's scratch (LD and
+SD), a capability to every otype (SE), and each device's page. It writes
+the two maps' capabilities into the barrier's CSRs, points the kernel
+block's frame at the boot context, loads `mtvec` and `sp` from it, makes
+the empty cons run from cons space, and enters the top level with no
+register holding anything it minted but nil. A store to the system
+device's reset register starts the processor at the reset vector again,
+as from power-on, with memory as it is, which is how a machine that has
+built a fresh image hands over to it.
 
-**Integer addressing is a privilege.** A load or store whose base register
-is `x0`, an encoding RVY reserves, and Xlm's explicit DDC loads and stores,
-address memory through DDC with the integer as the address. Both need SR in
-PCC, and the permission for the access in DDC. This is CHERI's hybrid mode
-kept for the code that must name memory by number, the collector, the
-kernel and the image writer; everything else holds only capabilities.
-`(%root)` reads DDC.
+Nothing else addresses memory by number. The collector, the allocator, the
+assembler, Exec and the image writer hold the region capabilities and work
+by addresses within them: a capability's address set, and an access made
+through it. Knowing an address is arithmetic; following one takes a
+capability that covers it. A pair the compactor moves is re-derived from
+cons space's capability at its new address.
+
+**The root** is in a read-only CSR, 0xfc0, which takes SR to read. The
+reset stub, `peek` and `poke`, the explorer's and the printer's raw views,
+and `open-closure` read it, and nothing else does. `(%root)` reads it. A
+load or store whose base register is `x0`, an encoding RVY reserves, is an
+illegal instruction, with SR or without: `x0` is NULL, no authority.
 
 **SR is `unsafe`.** SR is RVY's ASR. The compiler gives a code object SR
 when its source was compiled in an `(unsafe-file)` or contains an
 `(unsafe ...)` form, and no other. Without SR in PCC these are illegal
 instructions, as RVY has them without ASR: writing any CSR; reading a
-privileged CSR, which is any whose number's bits 9 and 8 are not 0, but
-`mtidc`; `mret`; and integer addressing. `wfi`, `ecall` and `ebreak` need
+privileged CSR, which is any whose number's bits 9 and 8 are not 0, the
+root's among them, but `mtidc`; and `mret`. `wfi`, `ecall` and `ebreak` need
 nothing. So `unsafe` is enforced twice: the compiler refuses a raw name
 outside it, and the processor refuses the act to code that did not say it.
 
 **The escape hatch is the root.** Everything a program can reach it reaches
 through a capability someone handed it, and every capability is bounded,
-except the root. `%root` and the operations that work through DDC are the
+except the root. `%root` and the operations that work through it are the
 raw vocabulary. Bounded operations on a capability you hold, loading a word
 from a byte object, narrowing bounds, dropping permissions, sealing your
 own closure, are safe, because they cannot reach past what you were given.
@@ -271,8 +310,9 @@ machine mode and always in capability mode; and Xlm.
 32 capability registers. `c0` reads as NULL. PCC is read with `auipc rd,
 0`. The CSRs that hold capabilities are RVY's `mtvec`, `mscratch` and
 `mepc`, its thread identifiers `mtidc` (0x37f) and `utidc` (0x07f), and
-DDC, which Xlm keeps in the custom CSR 0x7c2. A CSR instruction reads one
-whole; `csrrw` writes one whole, and the other forms write its address as
+Xlm's: the mark bitmap (0x7c2) and the object-start map (0x7c3), which the
+write barrier reads through, and the root (0xfc0), which reads as the root
+and which nothing writes. A CSR instruction reads one whole; `csrrw` writes one whole, and the other forms write its address as
 `YADDRW` would. `mtvec` written whole takes the address it already has as
 `YADDRW` would, so a sealed one reads back untagged; `mepc` written whole at
 an odd address is untagged. A trap sets `mepc` to PCC with the faulting
@@ -286,8 +326,8 @@ bounds.
 ### Base instructions in capability mode
 
 - Loads and stores take `cs1` as their authority, checked for tag, seal,
-  permission and bounds, as RVY checks them; with `x0` as the base they go
-  through DDC. `LY` and `SY` move a capability with its tag and need 8-byte
+  permission and bounds, as RVY checks them; with `x0` as the base they are
+  illegal. `LY` and `SY` move a capability with its tag and need 8-byte
   alignment. A misaligned one that passes its authority's checks is an
   access fault, 5 for a load and 7 for a store: a tag belongs to an aligned
   granule, so no handler could emulate the access. The same holds for
@@ -413,10 +453,6 @@ f3 6  R-type, funct7 the operation:
         0x40 | from  retag rd, rs1, to   rs1 untagged of kind `from` (31 any);
                                          rd <- its address with metadata the
                                          rs2 field
-        0x7c  sb.ddc .. sy.ddc  rs2, (rs1)  stores through DDC, rd the width
-        0x7d  lb.ddc .. lhu.ddc rd, (rs1)   loads through DDC, rs2 the width,
-                                            as LOAD's funct3 numbers widths,
-                                            with 3 for a capability
 f3 7  indexed access, below
 ```
 
@@ -471,7 +507,9 @@ capability's bounds as well, a load needs LD, and a store SD, as `LY` and
 26  fixnum overflow      mtval 0; the handler decodes the instruction
 27  division by zero     mtval 0
 28  cons run used up     mtval: the register `npair` was given
-29  write barrier        mtval: the address of the granule being overwritten
+29  write barrier        mtval: the store's register in bits 4..0, and the
+                         overwritten granule's offset from that
+                         capability's base, in granules, above them
 30  stack overflow       mtval: where sp would have gone; sp is left as it was
 32  capability fault on PCC     mtval: the instruction's address, or the
                                 target of the jump or branch that would leave
@@ -488,59 +526,79 @@ layout names the causes `cause-*`.
 
 **The stack limit** (CSR 0x7c0) is checked when a `YADD`, a `YADDI` or a
 `c.addi16sp` of `sp` moves it down, with interrupts on; zero means no limit.
-`sp` is also a capability bounded to its task's whole stack, so nothing
-below the stack can be written whatever the limit says; past it the fault
-is a capability fault through `sp`, which the handler also reports as a
-stack overflow.
+It is a number, an address in the running task's stack: it is no authority,
+only the point below which a task with interrupts on is stopped, so that
+the reserve under it is left for code that runs with them off. `sp` is the
+authority, a capability bounded to its task's whole stack, so nothing below
+the stack can be written whatever the limit says; past it the fault is a
+capability fault through `sp`, which the handler also reports as a stack
+overflow.
 
 **The write barrier** (`gcmode`, CSR 0x7c1, bit 0): while it is on, any
-store of any width, through a capability or through DDC, that would
-overwrite a tagged granule in cons or object space whose capability points
-at an unmarked heap object traps with cause 29, before writing, unless the
-store is into a stack or a context: its authority is based at the payload
-of an object whose header, at an object start, says stack or context, and
-the granule lies in that payload. Every stack pointer, frame pointer and
-context capability is so based, and a store through DDC never is. A tagged
-capability keeps alive the block its base lies in, whatever its length: one
-without HD based in cons space, the pair at its base rounded down to 16; one
-based in object space, headed or not, the object whose header is the
-nearest set bit of the object-start map (`OBJ_STARTS`, one bit per 8 bytes
-of object space, set at every allocated block's header) at or below the
-granule before its base. So a capability narrowed to a cdr or to a slot
-keeps its pair or its vector. Its mark bit is the bit of that granule in
-the bitmap at `GC_BITMAP`, one bit per 8 bytes from `CONS_BASE`. The
-handler marks it and the store re-executes. Nothing can overwrite the last
-copy of a pointer unseen.
+store of any width that would overwrite a tagged granule in cons or object
+space whose capability points at an unmarked heap object traps with cause
+29, before writing, unless the store is into a stack, a context or the
+kernel block: its authority is based at the payload of an object whose
+header, at an object start, says stack, context or kernel, and the granule
+lies in that payload. Every stack pointer, frame pointer and context
+capability is so based. A tagged capability keeps alive the block its base
+lies in, whatever its length: one without HD based in cons space, the pair
+at its base rounded down to 16; one based in object space, past its start
+and before its end, headed or not, the object whose header is the nearest
+set bit of the object-start map at or below the granule before its base.
+So a capability narrowed to a cdr or to a slot keeps its pair or its
+vector. Its mark bit is the bit of that granule in the mark bitmap, one bit
+per 8 bytes from `CONS_BASE`.
+
+The processor reads both maps through the capabilities in their CSRs,
+`gcmarks` (0x7c2) and `gcstarts` (0x7c3): the mark bitmap, bit i of the
+word at index i/32 from the capability's base, and the object-start map,
+one bit per 8 bytes of object space from `OBJ_BASE`, set at every allocated
+block's header. A word the capability does not let it read reads as zero.
+The reset stub writes them, from the regions it mints; the layout of a map
+is the machine's, where it lies is the capability's.
+
+`mtval` names the granule the way Xlm's other faults name a value, by
+register: bits 4..0 are the store's base register, and bits 31..5 the
+granule's offset from that capability's base, rounded down to a granule,
+in granules. The handler reads the overwritten capability through the
+store's own capability, from the register in the trap frame, when that may
+load the granule whole, and through the region it lies in otherwise, marks
+its object, and the store re-executes. Nothing can overwrite the last copy
+of a pointer unseen.
 
 ## Memory
 
 ```
 0x0000_0000  the nil cell, 16 bytes
-0x0000_0100  low-memory globals, one 8-byte slot each
-0x0000_0400  the free bins of object space, one 8-byte slot each
 0x0000_0800  the reset stub, `reset-reserve` bytes at `reset-vector`
 0x0100_0000  cons space, 128 MiB, eight million pairs
-0x0900_0000  object space, 64 MiB, machine code, stacks and contexts among the objects
-0x0D00_0000  the mark bitmap, the object-start map, the mark stack, scratch
-0xF000_0000  device pages, 4 KiB each, 32-bit registers and two capability registers
+0x0900_0000  object space, 64 MiB: the kernel block first, then every object,
+             machine code, stacks and contexts among them
+0x0D00_0000  the mark bitmap, the object-start map, the collector's scratch
+0xF000_0000  device pages, 4 KiB each, 32-bit registers and three capability registers
 ```
 
-The low page ends at `low-end`, 4 KiB; nothing lies between it and cons
-space.
-
-A low global that held an address holds it as a fixnum; authority to what
-it names comes from DDC. One that holds a value holds the value, and starts
-as nil. Their offsets come from `src/map.rs` through the generated layout.
-Every slot below 0x800 is one load or store off `x0`.
+The low block ends at `low-end`, 4 KiB, and holds nil's cell and the reset
+stub: the one cell and the one piece of code with a fixed address, the
+first because nil is a capability to it that `tp` holds, the second because
+the processor starts there. Nothing lies between it and cons space. This
+map is the emulator's and the forge's, which build the image at these
+addresses, and the reset stub's, which mints it; after reset the machine
+holds it as capabilities and names nothing in it by number.
 
 Tags exist for RAM only. A device page is a region of 32-bit registers, and
 an 8-byte access there is an access fault, as a RISC-V platform refuses an
-access width a region does not support: `LY` from one is a load fault. Two
-registers take a capability: the blitter's list register and the disk's
-buffer register, each 8 bytes at the start of its page. An `SY` to either
+access width a region does not support. Three registers take a capability:
+the blitter's list register, the disk's buffer register and the display's
+scan-out register, each 8 bytes at the start of its page. An `SY` to one
 writes the capability, tag and all, into the chip; an `SY` to any other
-register is a store fault, and a word store to one of the two writes a
-number, which the chip refuses. DMA goes through capabilities: a blitter
+register is a store fault, and a word store to one of the three writes a
+number, which the chip refuses. The scan-out register alone hands back
+what it holds: an `LY` from it loads the bitmap's capability as `LY` would
+through the page, because the display keeps its bitmap for as long as it
+shows it, and the collector's roots read it there; an `LY` from any other
+register is a load fault. DMA goes through capabilities: a blitter
 descriptor's source, destination and link are capability slots, which the
 chip loads as `LY` would through the descriptor's capability, and each chip
 refuses a transfer its capability does not allow, saying which check
@@ -550,12 +608,14 @@ failed (see drivers.md).
 
 **Contexts.** A task's register save area is a context object of 32
 capability slots, 256 bytes: slot 0 the pc (`mepc`), slots 1..31
-`x1..x31`. `mscratch` names the one the trap stub saves into, and switching
-tasks is pointing `mscratch` at another task's. A trap inside the handler
-saves into a frame of its own, the one for its depth in the vector of eight
-at `lg-trap-nest`, each a context with a slot after the registers for a link
-to the frame it interrupted. The handler runs on the trap stack at
-`lg-trap-stack`.
+`x1..x31`. The kernel block's frame names the one the trap stub saves
+into, and switching tasks is pointing the frame at another task's. A trap
+inside the handler saves into a frame of its own, the one for its depth in
+the kernel block's trap nest, a vector of eight, each a context with a slot
+after the registers for a link to the frame it interrupted. The handler
+runs on the kernel block's trap stack. The stub swaps `mscratch` into `t0`
+to have a register to work with, parks `t1` and `t2` in the kernel block
+while it finds the frame, and saves every register there.
 
 **The cons run** is `gp`: a capability with `perms-pair` bounded to the
 running task's current run of cons space, its address the next free pair.
@@ -585,22 +645,24 @@ The checked vocabulary is unchanged in meaning. The raw vocabulary:
 
 | name | | |
 |---|---|---|
-| `(%root)` | the root (DDC) | unsafe |
-| `(%from-addr n)` | the root with its address set to n | unsafe |
-| `(%ld-word a)` `(%ld-half a)` `(%ld-byte a)` `(%ld-cap a)` | integer address, through DDC | unsafe |
+| `(%root)` | the root, from its CSR | unsafe |
+| `(%ld-word a)` `(%ld-half a)` `(%ld-byte a)` `(%ld-cap a)` | memory by number, through the root | unsafe |
 | `(%st-word! a v)` `(%st-half! a v)` `(%st-byte! a v)` `(%st-cap! a v)` | likewise | unsafe |
+| `(%kernel)` `kernel-ref` `kernel-set!` `all-symbols` | the kernel block, from `mscratch`, and its slots | unsafe |
 | `(%cap-ld c off)` `(%cap-st! c off v)` | a capability at byte offset off within c | safe |
 | `(%cap-ld-word c off)` `(%cap-st-word! c off v)` `(%cap-ld-byte c off)` `(%cap-st-byte! c off v)` | data within c | safe |
+| `(%cap-ld-at c a)` `(%cap-st-at! c a v)`, and `-word` and `-byte` forms | the same at address a, which c must cover | safe |
+| `(%bit-ref c i)` `(%bit-set! c i)` | bit i of the bit array c stands at | safe |
 | `(%addr-of x)` | the address; an immediate's payload | safe |
 | `%cap-base` `%cap-len` `%cap-top` `%cap-perms` `%cap-otype` `%cap-offset` `%cap-tag?` `%cap-sealed?` `%cap-high` | reading a capability | safe |
 | `%cap-set-addr` `%cap-inc` `%cap-bounds` `%cap-bounds-exact` `%cap-and-perms` `%cap-clear-tag` `%cap-seal-entry` `%cap-seal-closure` | narrowing or sealing one | safe |
 | `(%cap-seal c key)` `(%cap-unseal c key)` | with a key to the otype | safe |
 | `(%cap-unseal-within c outer)` | c unsealed if it lies within outer | safe |
 | `(%cap-set-high c n)` `(%cap=? a b)` `(%cap-subset? a b)` `(%rrl n)` `(%ram n)` | | safe |
-| `%slot` `%set-slot!` `%bit-ref` `%bit-set!` | any-type indexed access, bits by number | unsafe |
+| `%slot` `%set-slot!` | any-type indexed access | unsafe |
 | `%cons-run` `%set-cons-run!` | read and write `gp` | unsafe |
 | `open-closure` | a closure unsealed with the root | unsafe |
-| `(sealing-key ot)` | a key to otype ot, made from the root | unsafe |
+| `(sealing-key ot)` | a key to otype ot, made from the kernel block's otypes | unsafe |
 | the machine-state operations | contexts, the stack limit, `gcmode`, interrupts, `ecall`, halt | unsafe |
 
 `%cap-perms` answers `YPERMR`'s bit field, reserved bits and all, and
@@ -609,3 +671,6 @@ The checked vocabulary is unchanged in meaning. The raw vocabulary:
 and permissions lie within `a`'s. `(%rrl n)` is `n` rounded up to the
 alignment `YAMASK` gives. A word loaded by number is a fixnum, so there is
 no `%ld-fixnum`, and `peek` and `poke` need no signed and unsigned family.
+`peek` and `poke` are the gun in the safe: memory by number through the
+root, which nothing gets in the way of, and which only code that says
+`unsafe` can reach for.

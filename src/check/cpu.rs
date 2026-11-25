@@ -815,10 +815,10 @@ pub fn run_all() -> bool {
         for w in [lw(A1, ZERO, 0x100), sw(A0, ZERO, 0x100), ly(A1, ZERO, 0x108), sy(ROOT, ZERO, 0x108)] {
             ok("x0 is no authority, even with SR", go(&[w]).took(C_ILLEGAL, w));
         }
-        // Xlm's old DDC loads and stores are gone, so their encodings are
-        // illegal.
-        let ddc = |f7: u32, rs2: u32, rd: u32| (f7 << 25) | (rs2 << 20) | (A2 << 15) | (6 << 12) | (rd << 7) | 0x0b;
-        for w in [ddc(0x7d, 2, A1), ddc(0x7c, A0, 2)] {
+        // Nor does any Xlm instruction take a number for an address: custom-0's
+        // R-type funct7 0x7c and 0x7d are unassigned, and illegal.
+        let xr = |f7: u32, rs2: u32, rd: u32| (f7 << 25) | (rs2 << 20) | (A2 << 15) | (6 << 12) | (rd << 7) | 0x0b;
+        for w in [xr(0x7d, 2, A1), xr(0x7c, A0, 2)] {
             ok("custom-0 0x7c and 0x7d are illegal", go(&[w]).took(C_ILLEGAL, w));
         }
         // The root is a CSR that takes SR to read and that nothing writes.

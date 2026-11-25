@@ -47,7 +47,7 @@ declaration on the definition that says open-code this.
 fixnum, so the widening, the bounce through `lg-raw-word` and the signed and
 unsigned families are gone with it: `peek` is `%ld-word`, `poke` is
 `%st-word!` that refuses anything but a fixnum, and every one of them is a
-single instruction through DDC, which the processor refuses to code without
+load or store through the root, which the processor refuses to code without
 SR. What is left is two sets named for their authority, not their checks:
 the loads and stores by number, which are unsafe, and `%cap-ld-word` and
 its kin, which load and store within a capability already held and are
@@ -178,12 +178,13 @@ another one does.
 `stxbi` are the byte forms of indexed access with an immediate index. They were
 held as the slots for a tagged half-word load for the collector's
 run-skipping test; since the port that test reads a whole word of the mark
-map, and a half-word by number is one instruction anyway, `lhu.ddc`.
+map, and a half-word by number is an `lhu` through the root.
 
 **The `lg-scratch` cells. RESOLVED.** They are `lg-task-exit` and
 `lg-trap-entry`. `scratch3` had two unrelated jobs, the forge's trap entry and `peek`'s staging word; they became two cells, and
-the staging word went with the port, a word being a fixnum. Every low
-global is an 8-byte slot now, numbered in `src/map.rs`.
+the staging word went with the port, a word being a fixnum. Both are slots
+of the kernel block now, numbered in `src/map.rs`, and the low globals are
+gone.
 
 **The tests live in the demo file. RESOLVED.** `num-check` counts; `(check)`
 runs every suite and halts the machine with the verdict as its exit code;

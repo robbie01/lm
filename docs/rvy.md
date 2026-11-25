@@ -99,8 +99,6 @@ funct3 6  R-type, funct7:
           0x20 jcl     0x21 vkind  0x22 lhdr (rs2 the type)
           0x23 sealcl  0x24 npair
           0x40 | from  retag       rs2 the metadata given
-          0x7c  sb.ddc sh.ddc sw.ddc sy.ddc     rd the width
-          0x7d  lb.ddc lh.ddc lw.ddc ly.ddc lbu.ddc lhu.ddc   rs2 the width
 funct3 7  indexed access           R-type: funct7 the form (store, byte,
                                    immediate index) above the object's type
 ```
@@ -108,8 +106,21 @@ funct3 7  indexed access           R-type: funct7 the form (store, byte,
 Xlm's causes are 24, a wrong kind of operand; 25, an index outside the
 object; 26, fixnum overflow; 27, division by zero; and 28, a cons run with
 no pair left. RISC-V leaves 24 to 31 to the implementation. Xlm's CSRs are
-0x7c0, the stack limit, 0x7c1, `gcmode`, and 0x7c2, DDC, in the machine
-mode's custom range, clear of RVY's debug CSRs at 0x7b1 to 0x7bf.
+0x7c0, the stack limit, 0x7c1, `gcmode`, and 0x7c2 and 0x7c3, capabilities
+to the collector's mark bitmap and object-start map, which the write
+barrier reads through, in the machine mode's custom read-write range, clear
+of RVY's debug CSRs at 0x7b1 to 0x7bf; and 0xfc0, the root, in its custom
+read-only range. Every one takes SR, as every machine-level CSR does.
+
+**The root CSR.** RVY gives the root to PCC and `mtvec` at reset and leaves
+where it goes after that to software. LM keeps it in a read-only CSR, so
+that nothing need hold it in a register or in memory: the reset stub reads
+it to mint the memory map into capabilities, once each time the machine
+starts, and after that only `peek`, `poke`, the debugging views and the
+escape hatch that opens a sealed capability read it, all compiled `unsafe`.
+*Alternative:* the reset stub keeping the root sealed in memory with a key
+only the trap handler holds, at the cost of an unseal at each use; or the
+root dropped after boot, and `peek` and `poke` bounded to the regions.
 
 The services a Lisp machine leans on and RVY does not give are Xlm's:
 `npair` carves a pair from the cons run and traps with cause 28 when the run
@@ -132,9 +143,10 @@ sixteen bytes per closure, executable closures), or unsealed and read-only
 seals need Zyseal's S and U, which RV32LYA cannot yet encode.
 
 **HD's rule on the bounds instructions and `YBLD`.** The bounds
-instructions keep HD only at their authority's base or from an authority
-over the whole space, and `YBLD` leaves bits with HD anywhere else
-untagged. *Why:* `lhdr`, `vkind`, `lvar`, indexed access and `sealcl` trust
+instructions keep HD only at their authority's base or, from an authority
+that spans the whole of object space, at a base in it, and `YBLD` leaves
+bits with HD anywhere else untagged: the root and object space's own
+capability mint headed objects, and nothing else does. *Why:* `lhdr`, `vkind`, `lvar`, indexed access and `sealcl` trust
 that the granule below a headed capability's base is a header. *Alternative:*
 no HD, and every typed access consulting the object-start map at its base:
 one more memory access each.
@@ -143,23 +155,20 @@ one more memory access each.
 may seal, are kept; any other otype is cleared, as RVY's `YBLD` clears every
 type that is not ambient. The closure otype is LM's.
 
-**Integer addressing through DDC.** A load or store whose base is `x0`,
-which RVY reserves (§2.7), and Xlm's DDC loads and stores, address memory
-by number through DDC, a custom CSR, and need SR, as reading or writing
-DDC does. *Why:* the collector, the kernel and the image writer address
-memory by number, and every low global is one load or store off `x0`.
-*Alternative:* the root in a pinned register while unsafe code runs, and
-`%ld-word a` as `yaddrw` and `lw`: one more instruction a raw access, or
-one register given up. Zyhybrid's `ddc` is no alternative, because it needs
-no ASR to read.
-
 **The write barrier.** While `gcmode` is on, a store that would overwrite a
-pointer to an unmarked object traps with cause 29 before writing. *Why:* the
-collector marks while everything else runs, and nothing reachable when
-marking began can be lost. *Alternative:* the same check reported as a store
-access fault, cause 7, which the handler tells from a real one by `gcmode`
-and the mark bit, at no run-time cost; or a barrier in software, several
-instructions every pointer store.
+pointer to an unmarked object traps with cause 29 before writing, with
+`mtval` naming the overwritten granule as Xlm's other faults name a value,
+by register: the store's base register in bits 4..0, and the granule's
+offset from that capability's base, in granules, above them. The mark bits
+are read through the capability in CSR 0x7c2, and the object starts through
+the one in 0x7c3. *Why:* the collector marks while everything else runs,
+and nothing reachable when marking began can be lost; the handler reads
+the old value through the store's own capability, and needs no authority
+of its own. *Alternative:* the same check reported as a store access fault,
+cause 7, with the address in `mtval`, which the handler tells from a real
+one by `gcmode` and the mark bit and reads through the region it lies in,
+at no run-time cost; or a barrier in software, several instructions every
+pointer store.
 
 **The stack limit.** A `YADD`, `YADDI` or `c.addi16sp` that moves `sp`
 below the limit CSR with interrupts on traps with cause 30. *Why:* a stack
@@ -176,11 +185,18 @@ extension. *Why:* `mepc` and `ra` still say who jumped, which the report
 and the backtrace need. *Alternative:* the fault at the target, and the
 handler finding the jump from the link register.
 
-**Device pages refuse an eight-byte access.** `LY` from a device page is a
-load access fault, and `SY` to it a store access fault except at the two
-capability registers. This is a platform's choice of supported access widths
+**Device pages refuse an eight-byte access.** `SY` to a device page is a
+store access fault except at the three capability registers, the blitter's
+list register, the disk's buffer register and the display's scan-out
+register, and `LY` from one is a load access fault except at the scan-out
+register, which hands back the capability it holds as `LY` would load it
+through the page. This is a platform's choice of supported access widths
 for a region, which RISC-V lets a PMA make; RVY's "tag strip" and "tag store
 fault" PMAs are about regions that take such an access.
+
+**A load or store based on `x0` is illegal.** RVY reserves the encoding
+(§2.7). LM gives it no meaning, with SR or without: memory is reached
+through a capability, and `x0` is NULL.
 
 **Stores keep their tag only through SC.** RVY's `SY` stores the tag only
 through C, and LM's C is LC and SC: `SY`, `sref` and indexed stores store a

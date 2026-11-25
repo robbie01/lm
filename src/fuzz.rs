@@ -20,7 +20,7 @@ use crate::mach::{Machine, CSR_GCMARKS, CSR_GCSTARTS, MSTATUS_MIE, MSTATUS_MPIE}
 use crate::map::*;
 
 /// Where the fuzz code goes: the reset vector, so the trap vector can point
-/// into it as well. Up to four kilobytes there run past the low page into
+/// into it as well. Up to four kilobytes there run past the low block into
 /// memory that is not cons space yet.
 const CODE_AT: u32 = RESET_VECTOR;
 const CODE_MAX: usize = 4096;
@@ -343,7 +343,7 @@ const TOKENS: &[&str] = &[
     "car", "cdr", "cons", "list", "append", "reverse", "length", "map", "apply", "%funcall",
     "%car", "%cdr", "%cons", "%set-car!", "%set-cdr!", "%+", "%-", "%*", "%/", "%mod",
     "%lsh", "%ash", "%logand", "unsafe", "%root", "%ld-word", "%st-word!", "%ld-cap", "%st-cap!",
-    "%ld-byte", "%st-byte!", "%addr-of", "%from-addr", "%cap-ld", "%cap-st!", "%cap-ld-byte",
+    "%ld-byte", "%st-byte!", "%addr-of", "%cap-ld", "%cap-st!", "%cap-ld-byte",
     "%cap-bounds", "%cap-and-perms", "%cap-seal", "%cap-unseal", "%cap-set-high", "%cap-len",
     "%alloc-obj", "%slot", "%set-slot!",
     "%obj-len", "%make-string", "%string-ref", "%string-set!", "%make-vector", "%vector-ref",

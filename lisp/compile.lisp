@@ -922,9 +922,6 @@
     (%funcall op (cx-asm c) $t2 $a0 $a1)
     (emit-bool-from-flag c $t2 $a0)))
 
-;; A load or a store through the capability in a0 moved by the byte offset
-;; in a1. The access is checked against the capability's own bounds and
-;; permissions, so it cannot reach past what the caller was given.
 ;; A load or a store by number: the root, which a CSR holds, at the address.
 (define (by-number op)
   (lambda (a d rs)
@@ -939,6 +936,9 @@
     (%funcall op a (cadr rs) $t2 0)
     (emit-move a d (cadr rs))))
 
+;; A load or a store through a capability moved by a byte offset. The
+;; access is checked against the capability's own bounds and permissions,
+;; so it cannot reach past what the caller was given.
 (define (cap-load op)
   (lambda (a d rs)
     (i-yadd a $t2 (%car rs) (cadr rs))
@@ -1246,11 +1246,6 @@
   ;; them, and the processor refuses them to code without SR.
   (definline '%root 0
     (lambda (c) (i-csrrs (cx-asm c) $a0 csr-root $zero)))
-  (definline '%from-addr 1
-    (lambda (c)
-      (let ((a (cx-asm c)))
-        (i-csrrs a $t2 csr-root $zero)
-        (i-yaddrw a $a0 $t2 $a0))))
   (defop '%ld-word 1 (by-number i-lw))
   (defop '%ld-half 1 (by-number i-lhu))
   (defop '%ld-byte 1 (by-number i-lbu))
@@ -2585,11 +2580,11 @@
 ;; out the root or the kernel block and what it holds, or reads or sets the
 ;; machine's own state, all of which the processor refuses to code without SR, and
 ;; `open-closure` and `sealing-key`, the escape hatch and the keys made
-;; from the root's otypes. The operations on a capability the caller
+;; from the otypes the kernel block holds. The operations on a capability the caller
 ;; already holds are not here, and neither is `%addr-of`, whose answer
 ;; cannot be followed without one of these.
 (unsafe-names
- '(%root %from-addr %kernel kernel-ref kernel-set! all-symbols
+ '(%root %kernel kernel-ref kernel-set! all-symbols
    %ld-word %st-word! %ld-half %st-half! %ld-byte %st-byte! %ld-cap %st-cap!
    %slot %set-slot!
    %context %set-context! %stack-limit %set-stack-limit! %set-gc-mode!
