@@ -192,7 +192,7 @@ at these numbers.
 
 **`bm-plot` and `bm-point` wait for the blitter per pixel. RESOLVED**, as
 not a risk. The fast path is documented beside them: `blit-sync` once, then
-store through `bm-at` or `win-row`, as the glyph drawers and life do. The
+store into the pixels at `bm-index` or `win-row`, as the glyph drawers and life do. The
 Mandelbrot demo plots a pixel at a time because it is a demo.
 
 **`alloc-object` fills vectors and records inside the critical section.

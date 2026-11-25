@@ -589,6 +589,29 @@
 ;; The first pixel of a bitmap, read without waiting for the blitter.
 (define (first-pixel b) (bytes-ref (bm-pixels b) 0))
 
+;; A blit of w by h with rows w apart, from `src` to `dst`, filled in by hand
+;; through a descriptor of this task's ring and waited for. Answers the done
+;; word the chip wrote back.
+(define (blit-probe op dst src w h)
+  (let ((d (unsafe (blit-descriptor))))
+    (%cap-st! d bl-dst dst)
+    (%cap-st! d bl-src src)
+    (%cap-st-word! d bl-w w)
+    (%cap-st-word! d bl-h h)
+    (%cap-st-word! d bl-smod w)
+    (%cap-st-word! d bl-dmod w)
+    (%cap-st-word! d bl-val 3)
+    (unsafe (blit-go d op))
+    (blit-sync)
+    (%cap-ld-word d bl-status)))
+
+(define (all-bytes? b from to v)
+  (let ((same t))
+    (while (%< from to)
+      (if (%= (bytes-ref b from) v) nil (set! same nil))
+      (set! from (%+ from 1)))
+    same))
+
 (define (blitting)
   (let ((a (alloc-bitmap 256 256))
         (b (alloc-bitmap 256 256)))
@@ -641,7 +664,33 @@
         (dolist (b bs)
           (if (%= (first-pixel b) v) nil (set! ok nil))
           (set! v (%- v 1)))
-        (num-check 'twenty-through-a-ring-of-eight ok t))))
+        (num-check 'twenty-through-a-ring-of-eight ok t)))
+    ;; The chip is handed capabilities and refuses a transfer they do not
+    ;; cover: nothing moves, the done word says which capability refused it
+    ;; and why, and the chip's status says that something was refused.
+    (let ((v (make-bytes 64)) (src (make-bytes 64)))
+      (bytes-set! v 20 7)
+      (blit-clear-refused!)
+      (num-check 'a-short-destination-is-refused
+                 (blit-probe op-fill (%cap-bounds-exact v 16) src 8 4)
+                 (logior blit-refused-dst capex-length))
+      (num-check 'and-the-chip-says-so (blit-refused?) t)
+      (num-check 'and-nothing-moved (list (all-bytes? v 0 16 0) (bytes-ref v 20)) (list t 7))
+      (num-check 'a-number-is-no-destination
+                 (blit-probe op-fill (%addr-of v) src 8 4)
+                 (logior blit-refused-dst capex-tag))
+      (num-check 'a-read-only-destination-is-refused
+                 (blit-probe op-fill (%cap-and-perms v perm-ld) src 8 4)
+                 (logior blit-refused-dst capex-store))
+      (num-check 'a-short-source-is-refused
+                 (blit-probe op-copy v (%cap-bounds-exact src 8) 8 4)
+                 (logior blit-refused-src capex-length))
+      (num-check 'and-still-nothing-moved (list (all-bytes? v 0 16 0) (bytes-ref v 20)) (list t 7))
+      (blit-clear-refused!)
+      (num-check 'the-status-clears (blit-refused?) nil)
+      (num-check 'what-they-cover-lands (blit-probe op-fill v src 8 4) blit-done)
+      (num-check 'all-of-it (all-bytes? v 0 32 3) t)
+      (num-check 'and-nothing-was-refused (blit-refused?) nil)))
   (princ "blitting: done (nothing above = all correct)")
   (newline))
 
@@ -726,6 +775,17 @@
             (num-check 'write-through-the-driver st 0)
             (num-check 'read-through-the-driver (disk:read-blocks 40 2 in) 0)
             (num-check 'the-same-bytes-came-back (bytes-same? out in) t)
+            ;; The controller is handed the buffer's capability and refuses a
+            ;; transfer it does not cover, and moves nothing.
+            (let ((small (make-bytes 600)))
+              (bytes-set! small 0 7)
+              (num-check 'a-read-past-its-buffer-is-refused
+                         (disk:read-blocks 40 2 small) disk-refused)
+              (num-check 'and-nothing-was-read (bytes-ref small 0) 7)
+              (num-check 'a-write-from-a-narrowed-buffer-too
+                         (disk:write-blocks 40 1 (%cap-bounds-exact out 256)) disk-refused)
+              (num-check 'and-the-disk-is-unchanged
+                         (list (disk:read-blocks 40 2 in) (bytes-same? out in)) (list 0 t)))
             ;; And the machine runs while a transfer does: the driver sleeps
             ;; on the controller, and another task counts in the meantime.
             (let ((big (make-bytes (* 512 256)))
@@ -872,7 +932,7 @@
     (num-check 'narrowed (list (%cap-base narrow) (%cap-len narrow)) (list (%addr-of b) 4))
     (num-check 'a-device-is-its-page
                (list (%cap-len page) (%cap-perms page))
-               (list hw::device-page-bytes (logior perm-ld perm-sd)))
+               (list hw::device-page-bytes (logior perm-ld perm-sd perm-sc)))
     (num-check 'inside-the-bounds-reads (%cap-ld-word b 4) 0)
     ;; A closure is sealed: calling it is the only way in, unless the escape
     ;; hatch opens it.
@@ -903,6 +963,15 @@
     (num-check 'a-store-past-them-too (refused? (lambda () (%cap-st-byte! b 8 1))) t)
     (num-check 'narrowed-is-refused-beyond (refused? (lambda () (%cap-ld-word narrow 4))) t)
     (num-check 'past-a-device-page-is-refused (refused? (lambda () (%cap-ld-word page hw::device-page-bytes))) t)
+    (num-check 'a-device-hands-out-no-capability (refused? (lambda () (%cap-ld page 0))) t)
+    (num-check 'and-only-a-capability-register-takes-one
+               (refused? (lambda () (%cap-st! page hw::sys-ramsize v)))
+               t)
+    ;; A chip is handed capabilities, not numbers.
+    (num-check 'a-chip-refuses-a-number
+               (blit-probe op-fill (%addr-of b) b 8 1)
+               (logior blit-refused-dst capex-tag))
+    (blit-clear-refused!)
     (num-check 'the-compiler-will-not-open-a-closure
                (refused? (lambda () (eval '(lambda (g) (%slot g 1)))))
                t)

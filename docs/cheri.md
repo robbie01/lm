@@ -177,7 +177,7 @@ leaves the root there.
 is `x0`, and the explicit DDC loads and stores, address memory through DDC
 with the integer as the address. Both need SR in PCC, and the permission
 for the access in DDC. This is CHERI's hybrid mode kept for the code that
-must name memory by number, the collector, the kernel and the chips;
+must name memory by number, the collector, the kernel and the image writer;
 everything else holds only capabilities. `(%root)` reads DDC.
 
 **SR is `unsafe`.** The compiler gives a code object SR when its source was
@@ -407,7 +407,7 @@ unseen.
 0x0200_0000  cons space, 128 MiB, eight million pairs
 0x0A00_0000  object space, 64 MiB
 0x0E00_0000  the mark bitmap, the mark stack, scratch
-0xF000_0000  device pages, 4 KiB each, 32-bit registers
+0xF000_0000  device pages, 4 KiB each, 32-bit registers and two capability registers
 ```
 
 A low global that held an address holds it as a fixnum; authority to what
@@ -415,9 +415,16 @@ it names comes from DDC. One that holds a value holds the value, and starts
 as nil. Their offsets come from `src/map.rs` through the generated layout.
 Every slot below 0x800 is one load or store off `x0`.
 
-Tags exist for RAM only. A device page holds no capabilities. DMA (the
-blitter's descriptors, the disk's requests) addresses memory by number,
-which only privileged code can write into a descriptor.
+Tags exist for RAM only. A device page hands out no capabilities: `lc` from
+one is a load fault. Two registers take one: the blitter's list register
+and the disk's buffer register, each 8 bytes at the start of its page. An
+`sc` to either writes the capability, tag and all, into the chip; an `sc`
+to any other register is a store fault, and a word store to one of the two
+writes a number, which the chip refuses. DMA goes through capabilities: a
+blitter descriptor's source, destination and link are capability slots,
+which the chip loads as `lc` would through the descriptor's capability, and
+each chip refuses a transfer its capability does not allow, as the
+processor would refuse the access (see drivers.md).
 
 ## Contexts and the cons run
 
