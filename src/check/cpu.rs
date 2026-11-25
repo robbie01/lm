@@ -1478,6 +1478,23 @@ pub fn run_all() -> bool {
         ok("a bitmap it may not read is refused", show(pixels.and_perms(P_SD)).x(A3) == REFUSE_LOAD);
     }
     {
+        // The system device's reset register starts the processor again as
+        // from power-on: PCC the root at the reset vector, every register and
+        // every other capability CSR NULL, memory as it was.
+        let sys = MMIO_BASE + (DEV_SYS << 12);
+        let mut code = vec![addi(A2, ZERO, 7)];
+        capr(&mut code, A0, sys);
+        code.extend([addi(A1, ZERO, 1), sw(A1, A0, crate::dev::SYS_RESET as i32), addi(A3, ZERO, 99)]);
+        let o = go_with(&code, |m| {
+            let mut at = vec![auipc(A4, 0), csrrs(A5, CSR_MSCRATCH, ZERO)];
+            halt_through_root(&mut at, ZERO);
+            emit(m, RESET_VECTOR, &at);
+            m.mscratch = Cap::ROOT;
+        });
+        ok("a reset starts at the reset vector with the root", o.clean() && o.c(A4) == Cap::ROOT.with_addr(RESET_VECTOR));
+        ok("...with the registers and mscratch NULL", o.x(A2) == 0 && o.x(A3) == 0 && o.c(A5) == Cap::NULL);
+    }
+    {
         // Only a capability register takes a capability, and the blitter's
         // hands none back.
         use crate::dev::blit::*;
