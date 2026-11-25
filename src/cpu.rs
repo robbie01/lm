@@ -1285,16 +1285,20 @@ fn op_cheri_two(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         0x16 => wcap(m, d, Cap { addr: a.addr, meta: b.addr, tag: false }),
         0x1d => {
             // cbuildcap: cs2's bits, tagged again if cs1 could have made
-            // them.
+            // them. Bits that are not the encoding of their own bounds no
+            // instruction makes.
             if !a.tag {
                 return capfault(m, s, CAPEX_TAG, pc, fuel);
             }
             if a.is_sealed() {
                 return capfault(m, s, CAPEX_SEAL, pc, fuel);
             }
+            if !b.canonical() {
+                return capfault(m, t, CAPEX_REPRESENTABLE, pc, fuel);
+            }
             let (bb, bt) = b.bounds();
             let (ab, at) = a.bounds();
-            if bt < bb as u64 || bb < ab || bt > at {
+            if bb < ab || bt > at {
                 return capfault(m, s, CAPEX_LENGTH, pc, fuel);
             }
             if b.perms() & !a.perms() != 0 || (b.has(P_HD) && !a.heads_at(bb)) {

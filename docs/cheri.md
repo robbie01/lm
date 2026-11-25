@@ -41,17 +41,18 @@ bit 0, and `candperm` takes a mask in the same positions; in the metadata
 they sit 23 bits higher. The layout names them `perm-ld` to `perm-hd`.
 
 **Bounds** are CHERI Concentrate with mantissa width MW = 10 for a 32-bit
-address. With IE clear the exponent is 0 and B and T are the low bits of
-the base and the top, so every length below 256 is exact at any base. With
-IE set the exponent E is `{T[2:0], B[2:0]}`, those six bits read as zero in
-the mantissas, and base and top are multiples of 2^(E+3). T[9:8] are not
-stored: they are B's, plus a carry when T's low bits are below B's, plus
-one with IE. E is at most 24, for which T = 0x100 is a top of 2^32. The
-representable region, the corrections, and the instructions that round
-(`crrl`, `cram`) are as ISAv9 defines them for this MW. The allocators ask
-`crrl` and `cram` what a length rounds to, and pad and align objects,
-machine code, stacks and contexts among them, and cons runs to bounds that
-are exact.
+address. With IE clear the exponent is 0 and B and T are the low bits of the
+base and the top, so every length below 256 is exact at any base. With IE
+set the exponent E is `{T[2:0], B[2:0]}`, those six bits read as zero in the
+mantissas, and base and top are multiples of 2^(E+3). T[9:8] are not stored:
+they are B's, plus a carry when T's low bits are below B's, plus one with
+IE. E is at most 24, for which T = 0x100 is a top of 2^32; a larger exponent
+is malformed, and its bounds decode as empty, base and top 0, as RVY decodes
+malformed bounds. The representable region, the corrections, and the
+instructions that round (`crrl`, `cram`) are as ISAv9 defines them for this
+MW. The allocators ask `crrl` and `cram` what a length rounds to, and pad
+and align objects, machine code, stacks and contexts among them, and cons
+runs to bounds that are exact.
 
 The root is every permission over `[0, 2^32)`. `cgetlen` and `cgettop` of
 it saturate at 0xffffffff.
@@ -306,14 +307,17 @@ funct3 2  csetboundsimm cd, cs1, uimm12
 
 `csetbounds` and its forms need `cs1` tagged and unsealed and the region
 inside its bounds, else code 0x02, 0x03 or 0x01 on `cs1`. `csealentry` needs
-EX (0x11). `csealclo` needs a headed capability whose header type is
-closure (0x04). `cseal` without SE in the authority is 0x17 and `cunseal`
-0x1b; an otype outside 1..15, or one that does not match, is 0x04 on the
-authority. `cbuildcap` refuses bounds outside its authority (0x01),
-permissions its authority lacks, or HD at a base other than its authority's
-when the authority is not the whole address space (0x08), and an otype past
-the sentry (0x04 on `cs2`); it keeps a sentry sealed. `crrl` and `cram` read their length
-from the address of `cs1`.
+EX (0x11). `csealclo` needs a headed capability whose header type is closure
+(0x04). `cseal` without SE in the authority is 0x17 and `cunseal` 0x1b; an
+otype outside 1..15, or one that does not match, is 0x04 on the authority.
+`cbuildcap` refuses bits that are not exactly what `csetbounds` would encode
+for the bounds they decode to, a malformed exponent among them (0x0a on
+`cs2`, RVY's integrity check), so that capabilities with the same bounds and
+permissions are the same bits and `eq?`; it refuses bounds outside its
+authority (0x01), permissions its authority lacks, or HD at a base other
+than its authority's when the authority is not the whole address space
+(0x08), and an otype past the sentry (0x04 on `cs2`); it keeps a sentry
+sealed. `crrl` and `cram` read their length from the address of `cs1`.
 
 ### Xlm: the Lisp instructions
 

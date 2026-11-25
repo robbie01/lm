@@ -30,7 +30,8 @@
 //! of those two answers. A top computed as more than one step of 2^31 past
 //! the base has wrapped at 2^32 and is folded back, except near the largest
 //! exponent, where the region covers the whole space. E is at most 24, for
-//! which T = 0x100 is a top of 2^32.
+//! which T = 0x100 is a top of 2^32; a larger one is malformed, and its
+//! bounds are empty.
 //!
 //! Every value in the machine is one of these: a pointer is a tagged
 //! capability, a number an untagged one with metadata 0. The processor, the
@@ -82,13 +83,14 @@ pub struct Cap {
     pub tag: bool,
 }
 
-/// The exponent and the full ten-bit B and T of a metadata word.
+/// The exponent and the full ten-bit B and T of a metadata word. The
+/// exponent is as stored, up to 63; one above `MAX_E` is malformed.
 #[inline(always)]
 fn fields(meta: u32) -> (u32, u32, u32) {
     let b = meta & 0x3ff;
     let t = (meta >> 10) & 0xff;
     let (e, b, t, lmsb) = if meta & IE_BIT != 0 {
-        let e = (((t & 7) << 3) | (b & 7)).min(MAX_E);
+        let e = ((t & 7) << 3) | (b & 7);
         (e, b & !7, t & !7, 1)
     } else {
         (0, b, t, 0)
@@ -98,10 +100,14 @@ fn fields(meta: u32) -> (u32, u32, u32) {
     (e, b, t)
 }
 
-/// Base and top of the bounds `meta` gives at address `addr`.
+/// Base and top of the bounds `meta` gives at address `addr`. Bounds with
+/// a malformed exponent are empty, base and top 0, as RVY decodes them.
 #[inline(always)]
 pub fn decode(meta: u32, addr: u32) -> (u32, u64) {
     let (e, b, t) = fields(meta);
+    if e > MAX_E {
+        return (0, 0);
+    }
     let a = addr as u64;
     let a3 = ((a >> (e + MW - 3)) & 7) as u32;
     let r3 = ((b >> 7).wrapping_sub(1)) & 7;
@@ -340,6 +346,17 @@ impl Cap {
         Cap { addr: bits as u32, meta: (bits >> 32) as u32, tag }
     }
 
+    /// Whether the bounds field is exactly the one `encode` makes for the
+    /// bounds it decodes to. Every capability `csetbounds` makes is one;
+    /// metadata written by hand need not be, with a malformed exponent or
+    /// mantissas that put the top past the end of the space or below the
+    /// base, and `cbuildcap` refuses it, so that a capability with given
+    /// bounds and permissions has one spelling.
+    pub fn canonical(&self) -> bool {
+        let (b, t) = self.bounds();
+        t >= b as u64 && t <= 1 << 32 && encode(b, t) == (self.meta & BOUNDS_MASK, true)
+    }
+
     /// Whether every permission and every byte of `self` is in `other`.
     pub fn is_subset_of(&self, other: &Cap) -> bool {
         let (b, t) = self.bounds();
@@ -455,6 +472,40 @@ mod tests {
                 assert_eq!(e.perms(), P_ALL);
             }
         }
+    }
+
+    #[test]
+    fn malformed_exponents_decode_as_empty() {
+        for e in MAX_E + 1..64 {
+            let meta = (Cap::ROOT.meta & !BOUNDS_MASK) | IE_BIT | ((e >> 3) << 10) | (e & 7);
+            for a in [0u32, 0x1234_5678, u32::MAX] {
+                assert_eq!(decode(meta, a), (0, 0), "E = {e} at {a:#x}");
+            }
+            assert!(!Cap { addr: 0, meta, tag: false }.canonical(), "E = {e}");
+        }
+    }
+
+    #[test]
+    fn what_set_bounds_makes_is_canonical() {
+        let mut g = Rng(6);
+        for _ in 0..200_000 {
+            let base = g.next();
+            let len = match g.next() % 3 {
+                0 => g.next() % 4096,
+                1 => g.next() >> (g.next() % 32),
+                _ => g.next(),
+            };
+            if let Some(c) = Cap::ROOT.with_addr(base).with_bounds(len) {
+                assert!(c.canonical(), "{base:#x}+{len:#x}: {:#x}", c.meta);
+                let (b, t) = c.bounds();
+                let mid = c.with_addr((b as u64 + (t - b as u64) / 2) as u32);
+                assert!(mid.canonical(), "{base:#x}+{len:#x} moved");
+            }
+        }
+        assert!(Cap::ROOT.canonical() && Cap::NIL.canonical() && Cap::NULL.canonical());
+        // Bits no bounds encode to: the largest exponent with a base
+        // mantissa that puts the top past the end of the space.
+        assert!(!Cap { addr: 0, meta: IE_BIT | (3 << 10) | 8, tag: false }.canonical());
     }
 
     #[test]

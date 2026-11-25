@@ -559,6 +559,12 @@ pub fn run_all() -> bool {
         let slot = obj.with_addr(OBJ + 16).with_bounds_exact(16).unwrap();
         let forged = Cap { meta: slot.meta | (P_HD << PERM_SHIFT), ..slot }.without_tag();
         ok("cbuildcap refuses HD at a slot", build(forged).took(C_CAP, (A1 << 5) | CAPEX_SOFT_PERM));
+        // cbuildcap refuses bits that are not the encoding of their bounds:
+        // the root's with an exponent of 25, which reads as no bounds.
+        let mut code = vec![];
+        li32(&mut code, A5, Cap::ROOT.meta + 1);
+        code.extend([csethigh(A2, ZERO, A5), cbuildcap(A3, ROOT, A2)]);
+        ok("cbuildcap refuses a malformed exponent", go(&code).took(C_CAP, (A2 << 5) | CAPEX_REPRESENTABLE));
     }
     {
         // Two capabilities to the same bytes with different permissions are

@@ -66,7 +66,8 @@ pub const CAPEX_TYPE: u32 = 0x04;
 /// for bits asking for a permission its authority lacks, or for HD at a base
 /// where its authority could not have kept it.
 pub const CAPEX_SOFT_PERM: u32 = 0x08;
-/// `csetboundsexact` of bounds that would round.
+/// `csetboundsexact` of bounds that would round, and `cbuildcap` of bits
+/// that are not the encoding of their own bounds.
 pub const CAPEX_REPRESENTABLE: u32 = 0x0a;
 /// The missing permission: EX, LD, SD, LC, SC.
 pub const CAPEX_EXECUTE: u32 = 0x11;
