@@ -2,15 +2,17 @@
 //!
 //! A Lisp value is a capability (`src/cap.rs`), 64 bits and a tag:
 //!
-//!     untagged, metadata 0     a fixnum: the address field, 32 bits signed
-//!     untagged, metadata k     an immediate of kind k: a character, the
-//!                              unbound marker, eof, void, the default marker
-//!     tagged, no HD            a pair: 16 bytes in cons space, car at 0 and
-//!                              cdr at 8
-//!     tagged, HD               an object: the header is the granule below
-//!                              the base, and the bounds are the payload
-//!     tagged, HD, otype 2      a closure, sealed
-//!     tagged, otherwise        a raw capability: code, a stack, a pool block
+//! ```text
+//! untagged, metadata 0     a fixnum: the address field, 32 bits signed
+//! untagged, metadata k     an immediate of kind k: a character, the
+//!                          unbound marker, eof, void, the default marker
+//! tagged, no HD            a pair: 16 bytes in cons space, car at 0 and
+//!                          cdr at 8
+//! tagged, HD               an object: the header is the granule below
+//!                          the base, and the bounds are the payload
+//! tagged, HD, otype 2      a closure, sealed
+//! tagged, otherwise        a raw capability: code, a stack, a pool block
+//! ```
 //!
 //! nil is a read-only capability to the 16-byte cell at address 0, whose car
 //! and cdr hold nil, so `car` and `cdr` of nil need no test.
