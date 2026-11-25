@@ -970,9 +970,13 @@ refused, that a closure is sealed and only calling it or the escape hatch
 opens it, that the compiler refuses `%slot` outside `unsafe` and the
 processor refuses it on a sealed closure, that a pointer cannot be made from
 its bits, that a capability store keeps the tag and a word store clears
-it, and that a function defined a hundred times over leaves the code and
-the objects in use as they were once the collector has run, while an entry
-still held keeps its text.
+it, that `x0` is no authority even to code with SR, that the root and the
+kernel block take SR to read, that the write barrier names what a store
+would overwrite by its register and offset, and that a function defined a
+hundred times over leaves the code and the objects in use as they were
+once the collector has run, while an entry still held keeps its text.
+`(devices)` checks that the display refuses a number for a bitmap and
+keeps the bitmap it shows alive when nothing else holds it.
 
 Instrumentation, all off by default:
 
