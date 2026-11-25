@@ -657,11 +657,18 @@ pub fn run_all() -> bool {
         let mut c4 = vec![];
         capr(&mut c4, A1, 0x5000);
         c4.push(lc(A0, A1, 4));
-        ok("lc needs eight-byte alignment", go(&c4).took(C_LALIGN, 0x5004));
+        // A capability split across two granules has no tag to take, so no
+        // handler could emulate the access: it is an access fault.
+        ok("a misaligned lc is a load access fault", go(&c4).took(C_LFAULT, 0x5004));
         let mut c5 = vec![];
         capr(&mut c5, A1, 0x5000);
         c5.push(sc(ROOT, A1, 2));
-        ok("sc needs eight-byte alignment", go(&c5).took(C_SALIGN, 0x5002));
+        ok("a misaligned sc is a store access fault", go(&c5).took(C_SFAULT, 0x5002));
+        // The capability checks come first.
+        let mut c6 = vec![];
+        capr(&mut c6, A1, 0x5000);
+        c6.extend([csetboundsimm(A1, A1, 16), lc(A0, A1, 12)]);
+        ok("a misaligned lc past the bounds is a length fault", go(&c6).took(C_CAP, (A1 << 5) | CAPEX_LENGTH));
     }
     {
         // Through an authority without SC a tagged store faults; without LC
@@ -886,6 +893,8 @@ pub fn run_all() -> bool {
         });
         ok("car of an object", o.took(C_TYPE, A1));
         ok("lref past the pair", go_with(&[lref(A0, A1, 16)], setup).took(C_CAP, (A1 << 5) | CAPEX_LENGTH));
+        ok("a misaligned lref is a load access fault", go_with(&[lref(A0, A1, 4)], setup).took(C_LFAULT, PAIR + 4));
+        ok("a misaligned sref is a store access fault", go_with(&[sref(A1, A1, 4)], setup).took(C_SFAULT, PAIR + 4));
         // A pair read through a capability without LM is read only, and so
         // is everything it leads to.
         let ro = |m: &mut Machine| {
@@ -996,6 +1005,13 @@ pub fn run_all() -> bool {
             setup(m);
             m.store_cap(OBJ, Cap::ROOT.with_addr(target + 1).seal(OT_SENTRY));
         };
+        let askew = move |m: &mut Machine| {
+            setup(m);
+            let k = m.reg(T2).with_addr(OBJ + 4);
+            m.set_reg(T2, k);
+        };
+        let o = go_with(&[csealclo(T0, T2), jcl(RA, T0)], askew);
+        ok("jcl of a misaligned closure is a load access fault", o.took(C_LFAULT, OBJ + 4));
         let o = go_with(&[csealclo(T0, T2), jcl(RA, T0)], odd);
         ok("jcl refuses an entry that is an odd sentry", o.took(C_CAP, (T0 << 5) | CAPEX_SEAL));
         // jcl loads the entry through the closure, so the closure needs LD

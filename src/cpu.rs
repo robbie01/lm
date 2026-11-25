@@ -837,9 +837,6 @@ fn mem_slow(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         }
     };
     let sz = SIZE[d.f as usize];
-    if d.f == 3 && d.a & 7 != 0 {
-        return m.fault(if d.store { C_SALIGN } else { C_LALIGN }, d.a, pc, fuel);
-    }
     let perms: &[(u32, u32)] = match (d.store, d.f == 3 && m.reg(d.data).tag) {
         (false, _) => &[(P_LD, CAPEX_LOAD)],
         (true, false) => &[(P_SD, CAPEX_STORE)],
@@ -849,6 +846,9 @@ fn mem_slow(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         Ok(ram) => ram,
         Err((cause, tval)) => return m.fault(cause, tval, pc, fuel),
     };
+    if d.f == 3 && d.a & 7 != 0 {
+        return m.fault(if d.store { C_SFAULT } else { C_LFAULT }, d.a, pc, fuel);
+    }
     // A device hands out no capabilities, and only a capability register
     // takes one.
     if !ram && d.f == 3 && !(d.store && dev::takes_cap(d.a)) {
@@ -1538,17 +1538,14 @@ fn ref_slow(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
                 return m.fault(C_TYPE, s, pc, fuel);
             }
             let a = c.addr.wrapping_add(if store { imm_s(w) } else { imm_i(w) });
-            if a & 7 != 0 {
-                return m.fault(if store { C_SALIGN } else { C_LALIGN }, a, pc, fuel);
-            }
             let perms: &[(u32, u32)] = if store {
                 &[(P_SD, CAPEX_STORE), (P_SC, CAPEX_STORE_CAP)]
             } else {
                 &[(P_LD, CAPEX_LOAD), (P_LC, CAPEX_LOAD_CAP)]
             };
             match check(m, c, s, perms, a, 8, store) {
-                Ok(true) => {}
-                Ok(false) => return m.fault(if store { C_SFAULT } else { C_LFAULT }, a, pc, fuel),
+                Ok(true) if a & 7 == 0 => {}
+                Ok(_) => return m.fault(if store { C_SFAULT } else { C_LFAULT }, a, pc, fuel),
                 Err((cause, tval)) => return m.fault(cause, tval, pc, fuel),
             }
             if store {
@@ -1573,12 +1570,9 @@ fn ref_slow(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
                 return m.fault(C_TYPE, s, pc, fuel);
             }
             let a = c.addr.wrapping_add(imm_i(w));
-            if a & 7 != 0 {
-                return m.fault(C_LALIGN, a, pc, fuel);
-            }
             match check(m, c, s, &[(P_LD, CAPEX_LOAD), (P_LC, CAPEX_LOAD_CAP)], a, 8, false) {
-                Ok(true) => {}
-                Ok(false) => return m.fault(C_LFAULT, a, pc, fuel),
+                Ok(true) if a & 7 == 0 => {}
+                Ok(_) => return m.fault(C_LFAULT, a, pc, fuel),
                 Err((cause, tval)) => return m.fault(cause, tval, pc, fuel),
             }
             let v = unsafe { m.rd_cap(a) };
@@ -1645,7 +1639,7 @@ fn op_jcl(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     }
     let a = r(m, s);
     if a & 7 != 0 || !in_win(a, m.wb[k], m.wl[k], 8) {
-        return capfault(m, s, CAPEX_LENGTH, pc, fuel);
+        return if m.reg(s).covers(a, 8) { m.fault(C_LFAULT, a, pc, fuel) } else { capfault(m, s, CAPEX_LENGTH, pc, fuel) };
     }
     let e = unsafe { m.rd_cap(a) };
     if !e.tag || !e.enterable(0) || !e.has(P_EX) {

@@ -249,9 +249,13 @@ jump, code 0x01 on PCC.
 - Loads and stores take `cs1` as their authority, checked for tag, seal,
   permission and bounds; with `x0` as the base they go through DDC. `lc`
   (load capability) takes the encoding of RV64 `ld` (opcode 0x03, funct3 3),
-  `sc` that of `sd` (0x23, funct3 3). Both need 8-byte alignment. `lc`
-  through an authority without LC clears the loaded tag; through one
-  without LM it clears SD, SC and LM as above.
+  `sc` that of `sd` (0x23, funct3 3). Both need 8-byte alignment. A
+  misaligned one that passes its authority's checks is an access fault, 5
+  for a load and 7 for a store, not a misaligned one: a tag belongs to an
+  aligned granule, so no handler could emulate the access. The same holds
+  for `lref`, `sref`, `lvar` and `jcl`'s load of slot 0. `lc` through an
+  authority without LC clears the loaded tag; through one without LM it
+  clears SD, SC and LM as above.
 - Compressed: `c.lc` and `c.sc` take the `c.flw`/`c.fsw` slots (quadrant 0,
   funct3 3 and 7), `c.lcsp`/`c.scsp` the `c.flwsp`/`c.fswsp` slots
   (quadrant 2, funct3 3 and 7). Their offsets are encoded as RV64C's `c.ld`,
