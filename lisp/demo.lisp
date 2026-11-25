@@ -860,6 +860,11 @@
                (%addr-of (%cap-ld gfx hw::gfx-base)) a)
     (num-check 'and-keeps-it
                (unsafe (gc::object-start-at (gc::start-map) (- a 8))) (- a 8))
+    ;; A number is no bitmap: the chip shows nothing and says why.
+    (%cap-st-word! gfx hw::gfx-base (%addr-of (bm-pixels (screen))))
+    (num-check 'the-display-refuses-a-number (%cap-ld-word gfx hw::gfx-status) refuse-tag)
+    (%cap-st! gfx hw::gfx-base (bm-pixels (screen)))
+    (num-check 'and-shows-what-it-may-read (%cap-ld-word gfx hw::gfx-status) 0)
     (%cap-st! gfx hw::gfx-base was))
   (princ "devices: done (nothing above = all correct)")
   (newline))
@@ -1080,6 +1085,17 @@
                        (logand (%cap-perms e) (logior perm-ex perm-ld perm-sd)))
                  (list t perm-ex)))))
 
+;; Machine code as a closure: what `emit` assembles, then a return, with SR
+;; when `privileged`, as code compiled `unsafe` has it.
+(define (raw-code privileged emit)
+  (unsafe
+   (let ((a (make-assembler)))
+     (set-asm-privileged! a privileged)
+     (%funcall emit a)
+     (i-ret a)
+     (place a)
+     (%cap-seal-closure (make-closure (code-object a 'raw-code) 0)))))
+
 (define (capabilities)
   (narrowed-survive)
   (code-is-collected)
@@ -1186,6 +1202,30 @@
     (num-check 'nor-will-the-processor
                (refused? (lambda () (unsafe (%slot f clo-code))))
                t)
+    ;; Memory is reached through capabilities only. x0 is no authority, even
+    ;; to code with SR; the root and the kernel block are in CSRs that only
+    ;; code with SR can read.
+    (num-check 'a-number-is-no-address-even-unsafe
+               (refused? (raw-code t (lambda (a) (i-lw a $a0 $zero 256))))
+               t)
+    (num-check 'the-root-takes-sr
+               (refused? (raw-code nil (lambda (a) (i-csrrs a $a0 csr-root $zero))))
+               t)
+    (let ((r (%funcall (raw-code t (lambda (a) (i-csrrs a $a0 csr-root $zero))))))
+      (num-check 'and-is-the-root
+                 (list (%cap-tag? r) (%cap-base r) (logand (%cap-perms r) perms-all))
+                 (list t 0 perms-all)))
+    (num-check 'the-kernel-block-takes-sr
+               (refused? (raw-code nil (lambda (a) (i-csrrs a $a0 csr-mscratch $zero))))
+               t)
+    ;; The write barrier names what a store would overwrite by the store's
+    ;; register and the granule's offset from that capability's base, and
+    ;; the handler reads it through the store's own capability.
+    (let ((ctx (make-vector ctx-slots 0)) (q (cons 'x 'y)))
+      (vector-set! ctx reg-a0 q)
+      (num-check 'the-barrier-names-a-register-and-an-offset
+                 (unsafe (list (gc::overwritten reg-a0 ctx) (gc::overwritten (logior reg-a0 32) ctx)))
+                 (list 'x 'y)))
     ;; A quoted constant is read-only all the way down, and the symbols in it
     ;; are the symbols themselves.
     (let ((k '(a (1 2) "s" #(3))))

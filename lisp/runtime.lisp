@@ -56,8 +56,8 @@
     c))
 
 ;; A sealed closure opened through the escape hatch: the root holds every
-;; capability, so it unseals any sealed one. For the printer, the explorer
-;; and the kernel, which start a context in a closure by hand.
+;; capability, so it unseals any sealed one. For the printer and the
+;; explorer, which show what a closure holds.
 (define (open-closure f)
   (%cap-unseal-within f (%root)))
 
