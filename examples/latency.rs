@@ -180,7 +180,8 @@ fn main() {
             std::process::exit(1);
         }
     };
-    m.pc = loaded.entry;
+    // The reset state, as `lm` boots: PCC the root, at the image's entry.
+    m.set_pcc(lm::cap::Cap::ROOT.with_addr(loaded.entry));
     m.uart.feed(setup.as_bytes());
     m.uart.mute = true;
     let seen = Arc::new(Mutex::new(Seen::default()));

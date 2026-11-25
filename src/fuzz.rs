@@ -76,7 +76,7 @@ pub fn image(data: &[u8]) {
     let mut m = Machine::new();
     let mut cur = std::io::Cursor::new(data);
     if let Ok(l) = crate::image::load_from(&mut m, &mut cur) {
-        m.pc = l.entry;
+        m.set_pcc(Cap::ROOT.with_addr(l.entry));
         m.uart.mute = true;
         let _ = crate::run::run(&mut m, EXEC_BUDGET);
     }
@@ -213,8 +213,15 @@ fn gen_exec(r: &mut Rng) -> Vec<u8> {
     v
 }
 
+/// A snapshot's region table entry: base, length, the block of the bytes and
+/// the block of the tags, as `image` reads them.
+const SNAP_REGION_BYTES: usize = 16;
+const SNAP_MAX_REGIONS: usize = (512 - 12) / SNAP_REGION_BYTES;
+
 /// Random image files: a mutated copy of a real one when there is one, or a
-/// header with random pages, or a snapshot with a random region table.
+/// header with random pages and their tags, or a snapshot with a random
+/// region table. Random tag bits make random capabilities out of whatever
+/// the bytes hold, which the machine has to survive running.
 fn gen_image(r: &mut Rng, seed: &[u8]) -> Vec<u8> {
     match r.below(3) {
         0 if !seed.is_empty() => {
@@ -231,7 +238,8 @@ fn gen_image(r: &mut Rng, seed: &[u8]) -> Vec<u8> {
         1 => {
             let mut v = Vec::new();
             v.extend_from_slice(crate::image::MAGIC);
-            v.extend_from_slice(&(if r.chance(90) { 1u32 } else { r.word() }).to_le_bytes());
+            let version = if r.chance(90) { crate::image::VERSION } else { r.word() };
+            v.extend_from_slice(&version.to_le_bytes());
             v.extend_from_slice(&gen_word(r).to_le_bytes());
             let n = r.below(40) as u32;
             v.extend_from_slice(&(if r.chance(90) { n } else { r.word() }).to_le_bytes());
@@ -240,9 +248,10 @@ fn gen_image(r: &mut Rng, seed: &[u8]) -> Vec<u8> {
             }
             let pages = r.below(n as usize + 2);
             for _ in 0..pages {
-                for _ in 0..1024 {
+                for _ in 0..crate::image::PAGE / 4 {
                     v.extend_from_slice(&gen_word(r).to_le_bytes());
                 }
+                gen_tags(r, &mut v, crate::image::PAGE_TAG_BYTES);
             }
             v.truncate(r.below(v.len() + 1).max(20));
             v
@@ -251,23 +260,41 @@ fn gen_image(r: &mut Rng, seed: &[u8]) -> Vec<u8> {
             let mut v = vec![0u8; 512];
             v[0..4].copy_from_slice(&crate::image::SNAP_MAGIC.to_le_bytes());
             v[4..8].copy_from_slice(&gen_word(r).to_le_bytes());
-            let n = if r.chance(90) { r.below(41) as u32 } else { r.word() };
+            let n = if r.chance(90) { r.below(SNAP_MAX_REGIONS + 2) as u32 } else { r.word() };
             v[8..12].copy_from_slice(&n.to_le_bytes());
-            for i in 0..40 {
+            for i in 0..SNAP_MAX_REGIONS {
                 let base = gen_word(r);
                 let len = if r.chance(50) { r.below(8192) as u32 } else { r.word() };
                 let blk = r.below(64) as u32;
-                v[12 + i * 12..16 + i * 12].copy_from_slice(&base.to_le_bytes());
-                v[16 + i * 12..20 + i * 12].copy_from_slice(&len.to_le_bytes());
-                v[20 + i * 12..24 + i * 12].copy_from_slice(&blk.to_le_bytes());
+                let tagblk = r.below(64) as u32;
+                let e = 12 + i * SNAP_REGION_BYTES;
+                for (k, w) in [base, len, blk, tagblk].iter().enumerate() {
+                    v[e + 4 * k..e + 4 * k + 4].copy_from_slice(&w.to_le_bytes());
+                }
             }
             for _ in 0..r.below(16) {
-                for _ in 0..128 {
-                    v.extend_from_slice(&gen_word(r).to_le_bytes());
+                if r.chance(50) {
+                    for _ in 0..128 {
+                        v.extend_from_slice(&gen_word(r).to_le_bytes());
+                    }
+                } else {
+                    gen_tags(r, &mut v, 512);
                 }
             }
             v
         }
+    }
+}
+
+/// `n` bytes of tag bits: none, all, or random, as a page's tags might be.
+fn gen_tags(r: &mut Rng, v: &mut Vec<u8>, n: usize) {
+    let fill = r.below(3);
+    for _ in 0..n {
+        v.push(match fill {
+            0 => 0,
+            1 => 0xff,
+            _ => r.word() as u8,
+        });
     }
 }
 
@@ -306,13 +333,15 @@ fn mutate(r: &mut Rng, v: &mut Vec<u8>) {
 /// Pieces of Lisp that mean something to the reader and the evaluator.
 const TOKENS: &[&str] = &[
     "(", ")", "(", ")", "'", "`", ",", ",@", "\"", "#\\a", "#\\newline", "#x1f", "#b101", ".", ";",
-    "nil", "t", "0", "1", "-1", "1073741823", "1073741824", "99999999999999999999",
+    "nil", "t", "0", "1", "-1", "2147483647", "-2147483648", "2147483648", "99999999999999999999",
     "define", "lambda", "if", "let", "let*", "set!", "begin", "while", "quote", "defmacro",
     "&optional", "&rest", "cond", "and", "or", "case", "do", "dolist",
     "car", "cdr", "cons", "list", "append", "reverse", "length", "map", "apply", "%funcall",
     "%car", "%cdr", "%cons", "%set-car!", "%set-cdr!", "%+", "%-", "%*", "%/", "%mod",
-    "%lsh", "%ash", "%logand", "%ld-word", "%st-word!", "%ld-fixnum", "%st-fixnum!",
-    "%ld-byte", "%st-byte!", "%addr-of", "%from-addr", "%alloc-obj", "%slot", "%set-slot!",
+    "%lsh", "%ash", "%logand", "unsafe", "%root", "%ld-word", "%st-word!", "%ld-cap", "%st-cap!",
+    "%ld-byte", "%st-byte!", "%addr-of", "%from-addr", "%cap-ld", "%cap-st!", "%cap-ld-byte",
+    "%cap-bounds", "%cap-and-perms", "%cap-seal", "%cap-unseal", "%cap-set-high", "%cap-len",
+    "%alloc-obj", "%slot", "%set-slot!",
     "%obj-len", "%make-string", "%string-ref", "%string-set!", "%make-vector", "%vector-ref",
     "%vector-set!", "%make-bytes", "%bytes-ref", "%bytes-set!", "%intern", "%symbol-name",
     "%symbol-value", "%set-symbol-value!", "%bit-ref", "%bit-set!", "%popcount", "%alloc-code",

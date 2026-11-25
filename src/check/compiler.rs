@@ -9,7 +9,7 @@
 use crate::cap::Cap;
 use crate::forge::hostlisp::Lisp;
 use crate::forge::{boot_host, write_layout};
-use crate::heap::NIL;
+use crate::heap::{NIL, PERMS_PAIR};
 use crate::mach::{Machine, Stop, C_ECALL, C_RANGE, C_TYPE};
 use crate::map::*;
 use crate::run;
@@ -228,7 +228,8 @@ fn cases() -> Vec<Case> {
         // none; a hole that misses leaves the whole thing.
         Case("(length (hw:rect-subtract (hw:rect 0 0 100 100) (hw:rect 40 40 20 20)))", "4"),
         Case("(hw:rect-subtract (hw:rect 0 0 10 10) (hw:rect 0 0 10 10))", "nil"),
-        Case("(hw:rect-subtract (hw:rect 0 0 10 10) (hw:rect 50 50 1 1))", "(#[rect 0 0 10 10])"),
+        // A record inside something else prints as its type alone.
+        Case("(hw:rect-subtract (hw:rect 0 0 10 10) (hw:rect 50 50 1 1))", "(#[rect ...])"),
         // Subtracting a rectangle removes exactly its overlapping area and no
         // more.
         Case(
@@ -260,7 +261,7 @@ fn cases() -> Vec<Case> {
         // The name lives in the code object, which is also what every frame
         // holds in s1, so this is the same word a backtrace reads.
         Case("(begin (define (named-fn x) x) named-fn)", "#<function named-fn>"),
-        Case("(lambda (x) x)", "#<function (lambda . %ctest-entry)>"),
+        Case("(lambda (x) x)", "#<function lambda in %ctest-entry>"),
         // ---- quoted structure ----
         Case("'(a b c)", "(a b c)"),
         Case("'foo", "foo"),
@@ -393,13 +394,14 @@ fn cases() -> Vec<Case> {
             "(55 (1 2 3 4 5 6 7 8 9 10 11))",
         ),
         // A call through apply or funcall in tail position is a tail call: the
-        // stack pointer after a thousand of them equals the pointer after one.
+        // stack pointer after a thousand of them is the same capability as the
+        // pointer after one.
         Case(
-            "(define (down n) (if (%= n 0) (%stack-pointer) (apply down (list (%- n 1))))) (let ((sp (down 1))) (%= sp (down 1000)))",
+            "(define (down n) (if (%= n 0) (%stack-pointer) (apply down (list (%- n 1))))) (let ((sp (down 1))) (%cap=? sp (down 1000)))",
             "t",
         ),
         Case(
-            "(define (down n) (if (%= n 0) (%stack-pointer) (funcall 'down (%- n 1)))) (let ((sp (down 1))) (%= sp (down 1000)))",
+            "(define (down n) (if (%= n 0) (%stack-pointer) (funcall 'down (%- n 1)))) (let ((sp (down 1))) (%cap=? sp (down 1000)))",
             "t",
         ),
         // An improper list is caught rather than walked off the end.
@@ -428,8 +430,10 @@ fn cases() -> Vec<Case> {
         Case("(let ((s (make-bytes 4))) (%cap-st-byte! s 2 7) (%bytes-ref s 2))", "7"),
         // Narrowing one, and what the narrowed one can no longer reach.
         Case("(%cap-len (%cap-bounds (make-string 10) 4))", "4"),
+        // (%cap-subset? a b) asks what `ctestsubset` asks: whether b lies
+        // within a.
         Case(
-            "(let ((s (make-string 8))) (list (%cap-subset? (%cap-bounds s 4) s)              (%cap-subset? s (%cap-bounds s 4))))",
+            "(let ((s (make-string 8))) (list (%cap-subset? s (%cap-bounds s 4))              (%cap-subset? (%cap-bounds s 4) s)))",
             "(t nil)",
         ),
         Case(
@@ -466,7 +470,9 @@ pub fn run_one(l: &mut Lisp, src: &str) -> String {
     }
 
     // Lay down the trap stub and the trampoline, give the registers what a
-    // task's would hold, and run. The cons run is the rest of cons space.
+    // task's would hold, and run. The stack and the cons run carry the
+    // permissions of a pair, as a task's do, so that every pair cut from the
+    // run is one. The cons run is the rest of cons space.
     let trap = l.h.alloc_code(64);
     let tramp = l.h.alloc_code(64);
     let run_start = l.h.g(LG_CONS_PTR);
@@ -476,11 +482,13 @@ pub fn run_one(l: &mut Lisp, src: &str) -> String {
         .with_addr(STACK_BASE)
         .with_bounds_exact(STACK_TOP - STACK_BASE)
         .expect("the test stack has exact bounds")
+        .and_perms(PERMS_PAIR)
         .with_addr(STACK_TOP);
     let cons_run = root
         .with_addr(run_start)
         .with_bounds(run_end - run_start)
-        .expect("the cons run can be bounded");
+        .expect("the cons run can be bounded")
+        .and_perms(PERMS_PAIR);
     let m: &mut Machine = l.h.m;
     trap_stub(m, trap);
     trampoline(m, tramp);
