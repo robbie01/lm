@@ -48,7 +48,7 @@
 ;; are x1..x31, eight bytes each; `reg-<name>` for each comes from the
 ;; generated layout. A slot holds what the register held, tag and all, so an
 ;; integer reads back as a fixnum and a pointer as the value it was.
-(define (ctx-off n) (%* 8 n))
+(define (ctx-off n) (%* value-bytes n))
 (define (ctx-ref ctx n) (%cap-ld ctx (ctx-off n)))
 (define (ctx-set! ctx n v) (%cap-st! ctx (ctx-off n) v))
 
@@ -134,7 +134,7 @@
   (if (%= cause cause-capability)
       (if (%= tval (%logior (%lsh reg-gp capex-reg-shift) capex-length))
           (let ((w (insn-at epc)))
-            (if (%= (insn-op w) opc-cheri)
+            (if (%= (insn-op w) op-cheri)
                 (if (%= (insn-f3 w) 2) (%= (insn-rs1 w) reg-gp) nil)
                 nil))
           nil)
@@ -184,17 +184,6 @@
 ;; them.
 (define (insn-imm-i w) (%ash w -20))
 (define (insn-imm-s w) (%logior (%lsh (%ash w -25) 5) (%logand (%lsh w -7) 31)))
-
-;; The major opcodes the handler tells apart.
-(define opc-load   #x03)
-(define opc-ref    #x0b)               ; custom-0: references
-(define opc-store  #x23)
-(define opc-index  #x2b)               ; custom-1: indexed access
-(define opc-cheri  #x5b)
-(define opc-jalr   #x67)
-(define opc-jal    #x6f)
-(define opc-system #x73)
-(define opc-fixnum #x7b)               ; custom-3: fixnums
 
 ;; The value a fault names by its register. Register 0 is x0, which reads as
 ;; NULL, the integer 0; its slot in the context holds the pc.
@@ -291,37 +280,19 @@
   (if (compressed? w)
       (compressed-op-name w)
       (let ((op (insn-op w)))
-        (cond ((%= op opc-ref) (ref-op-name w))
-              ((%= op opc-index) (index-op-name w))
-              ((%= op opc-fixnum) (fixnum-op-name w))
-              ((%= op opc-cheri) (cheri-op-name w))
-              ((%= op opc-load) "load")
-              ((%= op opc-store) "store")
-              ((if (%= op opc-jalr) t (%= op opc-jal)) "jump")
-              ((%= op opc-system) "machine instruction")
+        (cond ((%= op op-ref) (ref-op-name w))
+              ((%= op op-index) (index-op-name w))
+              ((%= op op-fixnum) (fixnum-op-name w))
+              ((%= op op-cheri) (cheri-op-name w))
+              ((%= op op-load) "load")
+              ((%= op op-store) "store")
+              ((if (%= op op-jalr) t (%= op op-jal)) "jump")
+              ((%= op op-sys) "machine instruction")
               (else "instruction")))))
 
 ;; ------------------------- naming the value
-;; Tags make every value say what it is, so anything a register held can be
-;; printed, except a capability that is neither a pair nor an object: a
-;; stack, a run, code, a device. The printer would read one as a pair, so it
-;; is described instead.
-(define (pair-value? v) (if (%cons? v) (%= (%cap-len v) 16) nil))
-
-(define (plain-value? v)
-  (if (%cap-tag? v)
-      (if (%null? v) t (if (%object? v) t (pair-value? v)))
-      t))
-
-(define (emit-value v)
-  (if (plain-value? v)
-      (write v)
-      (begin
-        (emit-str "the capability to ")
-        (emit-str (number->string (%cap-len v)))
-        (emit-str " bytes at ")
-        (emit-str (number->hex (%cap-base v))))))
-
+;; Tags make every value say what it is, so whatever a register held is
+;; printed as the printer prints it, a raw capability included.
 (define (emit-a-or-an sym)
   (if (%symbol? sym)
       (begin
@@ -331,7 +302,7 @@
                       "an "
                       "a "))
         (emit-str (%symbol-name sym)))
-      (emit-value sym)))
+      (write sym)))
 
 (define (type-name ty)
   (cond ((%= ty t-vector) "a vector")
@@ -356,25 +327,25 @@
      ((%= f 2)
       (if (%symbol? v)
           (begin (emit-str "unbound variable: ") (emit-str (%symbol-name v)))
-          (begin (emit-str "variable: expected a symbol, got ") (emit-value v))))
+          (begin (emit-str "variable: expected a symbol, got ") (write v))))
      ((%= f 3)
       (emit-str "call: ")
       ;; A name nothing was ever stored in holds the unbound marker.
       (if (%eq? v (%unbound))
           (emit-str "undefined function")
-          (begin (emit-str "expected a function, got ") (emit-value v))))
+          (begin (emit-str "expected a function, got ") (write v))))
      ((%= f 5)
       (emit-str (length-op-name (insn-imm-i w)))
       (emit-str ": expected ")
       (emit-str (type-name (insn-imm-i w)))
       (emit-str ", got ")
-      (emit-value v))
+      (write v))
      (else
       (emit-str (pair-op-name w))
       (cond ((%null? v) (emit-str ": nil has no cell"))
-            ((pair-value? v)
+            ((%cons? v)
              (emit-str (if (%= f 4) ": the pair is read-only" ": the pair cannot be read")))
-            (else (emit-str ": expected a pair, got ") (emit-value v)))))))
+            (else (emit-str ": expected a pair, got ") (write v)))))))
 
 ;; Both operands are still in the registers the instruction named, so the
 ;; report can say what was indexed as well as what with. The immediate form
@@ -392,14 +363,14 @@
     (emit-str (index-op-name w))
     (cond
      ((%= cause cause-range)
-      (emit-str ": index ") (emit-value idx)
+      (emit-str ": index ") (write idx)
       (emit-str " is outside ") (emit-str wanted)
       (emit-str " of ") (emit-str (number->string (%obj-len obj))))
      ((if imm t (%= tval (insn-rs1 w)))
       (emit-str ": expected ") (emit-str wanted)
-      (emit-str ", got ") (emit-value obj))
+      (emit-str ", got ") (write obj))
      (else
-      (emit-str ": index is not a number, it is ") (emit-value idx)))))
+      (emit-str ": index is not a number, it is ") (write idx)))))
 
 ;; `try-widen` has already had its chance, so a bignum reaching here means
 ;; this operator has no bignum form, not that the operand was the wrong kind
@@ -411,9 +382,9 @@
    ((%= cause cause-overflow) (emit-str ": the result does not fit in a fixnum"))
    ((%= (insn-f3 w) 7)
     (emit-str (if (%= (retag-from w) 1) ": expected a character, got " ": expected a number, got "))
-    (emit-value v))
-   ((%bignum? v) (emit-str ": no bignum form, given ") (emit-value v))
-   (else (emit-str ": expected a number, got ") (emit-value v))))
+    (write v))
+   ((%bignum? v) (emit-str ": no bignum form, given ") (write v))
+   (else (emit-str ": expected a number, got ") (write v))))
 
 ;; Causes 24 to 27. A wrong type or an index out of range names the register
 ;; that held the offending value, and the instruction at the pc says what the
@@ -423,9 +394,9 @@
     (lambda ()
       (let* ((w (insn-at epc))
              (op (insn-op w)))
-        (cond ((%= op opc-index) (emit-index-fault w cause tval ctx))
-              ((%= op opc-fixnum) (emit-arith-fault w cause (fault-value ctx tval)))
-              ((if (%= op opc-ref) (%= cause cause-wrong-type) nil)
+        (cond ((%= op op-index) (emit-index-fault w cause tval ctx))
+              ((%= op op-fixnum) (emit-arith-fault w cause (fault-value ctx tval)))
+              ((if (%= op op-ref) (%= cause cause-wrong-type) nil)
                (emit-ref-fault w (fault-value ctx tval)))
               (else (emit-str (op-name w)) (emit-str ": ") (emit-str (cause-name cause))))))))
 
@@ -440,6 +411,11 @@
                              (%lsh tval (%- 0 capex-reg-shift))
                              (%logand tval (%- (%lsh 1 capex-reg-shift) 1))
                              ctx))))
+
+;; Two codes the layout has no names for: a permission the authority lacks,
+;; which `cbuildcap` raises, and sealing with an authority that lacks SE.
+(define capex-perm #x08)
+(define capex-seal-perm #x17)
 
 ;; Whether the capability stores data at all.
 (define (stores-data? c) (%= perm-sd (%logand (%cap-perms c) perm-sd)))
@@ -467,24 +443,28 @@
            ((%= code capex-sysreg) (emit-str "privileged operation in code compiled without unsafe"))
            ((%= reg capex-reg-pcc) (emit-pc-fault code))
            ((%= reg capex-reg-ddc) (emit-str "integer addressing refused by the default data capability"))
-           ((%= code capex-tag) (emit-value v) (emit-str " is not a pointer"))
-           ((%= code capex-seal) (emit-value v) (emit-sealed v))
+           ((%= code capex-tag) (write v) (emit-str " is not a pointer"))
+           ((%= code capex-seal) (write v) (emit-sealed v))
            ((if (%= code capex-store) t (%= code capex-store-cap))
             (cond ((%null? v) (emit-str "nil has no cell"))
                   ((if (%= code capex-store-cap) (stores-data? v) nil)
-                   (emit-value v) (emit-str " cannot hold pointers"))
-                  (else (emit-value v) (emit-str " is read-only"))))
-           ((%= code capex-length) (emit-str "outside the bounds of ") (emit-value v))
-           ((%= code capex-execute) (emit-value v) (emit-str " is not code"))
+                   (write v) (emit-str " cannot hold pointers"))
+                  (else (write v) (emit-str " is read-only"))))
+           ((%= code capex-length) (emit-str "outside the bounds of ") (write v))
+           ((%= code capex-execute) (write v) (emit-str " is not code"))
            ((if (%= code capex-load) t (%= code capex-load-cap))
-            (emit-value v) (emit-str " cannot be read"))
+            (write v) (emit-str " cannot be read"))
            ((%= code capex-representable)
-            (emit-value v) (emit-str " cannot be narrowed to those bounds exactly"))
+            (write v) (emit-str " cannot be narrowed to those bounds exactly"))
            ((if (%= code capex-unseal) t (%= code capex-type))
-            (emit-value v) (emit-str " is not unsealed by that key"))
+            (write v) (emit-str " is not unsealed by that key"))
+           ((%= code capex-perm)
+            (write v) (emit-str " does not grant the permissions asked of it"))
+           ((%= code capex-seal-perm)
+            (write v) (emit-str " has no authority to seal"))
            (else
             (emit-str "capability fault ") (emit-str (number->hex code))
-            (emit-str " on ") (emit-value v)))))))
+            (emit-str " on ") (write v)))))))
 
 ;; ---------------------------------------------------------------- widening
 ;; Overflow and mixed-mode arithmetic both arrive as traps, and neither is an
@@ -534,7 +514,7 @@
 ;; scribbling on the pc.
 (define (try-widen epc ctx)
   (let ((w (insn-at epc)))
-    (if (if (%= (insn-op w) opc-fixnum) (%> (insn-rd w) 0) nil)
+    (if (if (%= (insn-op w) op-fixnum) (%> (insn-rd w) 0) nil)
         (let ((v (widened w ctx)))
           (if v
               (begin (ctx-set! ctx (insn-rd w) v) (step-past ctx 4) t)
@@ -574,7 +554,7 @@
             (emit-str "\nexpected ")
             (emit-a-or-an (ctx-ref ctx reg-t3))
             (emit-str ", got ")
-            (emit-value (ctx-ref ctx reg-a0))
+            (write (ctx-ref ctx reg-a0))
             (emit-str ", at ")
             (emit-str (number->hex epc))
             (emit-str "\n"))
@@ -584,19 +564,16 @@
            ;; where, and the restart.
            ((%= code ecall-error) nil)
            (else (emit-str "\nunknown ecall\n")))
-          ;; The arity check is in the callee's prologue, before it has
-          ;; loaded its own code object, so s0 and s1 still describe the
-          ;; caller. Starting the walk at the return address makes the first
-          ;; line name the call site.
-          (if (%= code ecall-arity)
-              (backtrace-from-context (%addr-of (ctx-ref ctx reg-ra)) ctx)
-              (backtrace-from-context epc ctx))))))))
+          (backtrace-from-context epc ctx)))))))
 
 ;; ---------------------------------------------------------------- backtrace
-;; Every prologue saves its return address at s0-8, its caller's frame at
-;; s0-16 and its caller's code object, which carries the name, at s0-32. So a
-;; backtrace needs no side table: the slots that make a frame make the trace.
-;; The frame pointer is a capability to the stack, and NULL at the bottom.
+;; Every prologue saves its return address, its caller's frame and its own
+;; closure in the slots the compiler names `ra-slot`, `link-slot` and
+;; `clo-slot` below s0. So a backtrace needs no side table: the slots that
+;; make a frame make the trace. Each line is named by its pc, a capability
+;; bounded to the code it is in, whose block names the code object that
+;; owns it. The frame pointer is a capability to the stack, and NULL at the
+;; bottom.
 (define backtrace-limit 24)
 
 ;; The closure a call was about to enter.
@@ -621,23 +598,47 @@
               nil))
       nil))
 
-(define (print-backtrace s0 code pc)
+;; The code object whose code a pc, a return address or an entry is in, or
+;; nil.
+(define (code-of c) (if (%cap-tag? c) (code-object-at (%cap-base c)) nil))
+
+;; Whether the function whose code object is `code` built the frame `f`.
+(define (frame-built-by? f code)
+  (let ((clo (%cap-ld f compiler::clo-slot)))
+    (if (if code (%object? clo) nil)
+        (if (%= (%obj-type clo) t-closure)
+            (%= (%cap-base (%cap-ld clo (%* value-bytes clo-code))) (%cap-base code))
+            nil)
+        nil)))
+
+(define (emit-frame-line pc)
+  (emit-str "  ")
+  (emit-code-label (code-of pc))
+  (emit-str " at ")
+  (emit-str (number->hex (%addr-of pc)))
+  (emit-str "\n"))
+
+;; A leaf has no frame, and neither has a function stopped in its prologue:
+;; s0 is still its caller's frame, and ra is where it returns to in the
+;; caller. So the first line is the function at the pc, then each frame.
+(define (print-backtrace pc ra s0)
   (emit-str "backtrace:\n")
-  (let ((f s0) (c code) (p pc) (i 0))
+  (let ((f s0) (p pc) (i 0))
+    (if (if (frame-readable? f) (frame-built-by? f (code-of pc)) nil)
+        nil
+        (begin (emit-frame-line pc) (set! p ra)))
     (while (if (%< i backtrace-limit) (frame-readable? f) nil)
-      (emit-str "  ")
-      (emit-code-label c)
-      (emit-str " at ")
-      (emit-str (number->hex p))
-      (emit-str "\n")
-      (set! p (%addr-of (%cap-ld f -8)))
-      (set! c (%cap-ld f -32))
-      (set! f (%cap-ld f -16))
+      (emit-frame-line p)
+      (set! p (%cap-ld f compiler::ra-slot))
+      (set! f (%cap-ld f compiler::link-slot))
       (set! i (%+ i 1)))
     (if (frame-readable? f) (emit-str "  ...\n") nil)))
 
+;; The saved pc is the capability PCC was, so its bounds are the code's.
 (define (backtrace-from-context epc ctx)
-  (print-backtrace (ctx-ref ctx reg-s0) (ctx-ref ctx reg-s1) epc))
+  (print-backtrace (%cap-set-addr (ctx-ref ctx reg-pc) epc)
+                   (ctx-ref ctx reg-ra)
+                   (ctx-ref ctx reg-s0)))
 
 ;; One line for the fault, made by `what`, and the trace below it.
 (define (fault-report epc ctx what)
@@ -737,16 +738,16 @@
 
 ;; What `jcl` does to a closure, done by hand for a context that is to start
 ;; in one: the closure opened through the escape hatch goes in t0, and its
-;; slot 0, the entry, in the pc. The closure is entered with one argument, if one is given: the report of
-;; the fault that brought it here. Nothing the abandoned code left in a
-;; register survives except the task in s2 and its cons run in gp, and the
-;; NULL left in s0 is the bottom of the new stack.
+;; entry in the pc. The closure takes one argument if one is given, the
+;; report of the fault that brought it here. Nothing the abandoned code left
+;; in a register survives except the task in s2 and its cons run in gp, and
+;; the NULL left in s0 is the bottom of the new stack.
 (define (enter-closure ctx f sp . arg)
   (let ((open (open-closure f)) (r 1))
     (while (%< r 32)
       (if (if (%= r reg-gp) t (%= r reg-s2)) nil (ctx-set! ctx r 0))
       (set! r (%+ r 1)))
-    (ctx-set! ctx reg-pc (%cap-ld open (%* 8 clo-entry)))       ; pc = its entry
+    (ctx-set! ctx reg-pc (%cap-ld open (%* value-bytes clo-entry))) ; pc = its entry
     (ctx-set! ctx reg-t0 open)                                 ; t0 = the closure
     (if (%cons? arg)
         (begin (ctx-set! ctx reg-a0 (%car arg))                ; a0 = the argument
@@ -989,3 +990,6 @@
   (repl (lambda () (%halt exit-ok)))
   (%halt exit-ok)
   0)
+
+;; These hand out capabilities made from the root, or open a closure.
+(unsafe-names (quote (data-region stack-capability enter-closure)))

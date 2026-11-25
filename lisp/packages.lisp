@@ -174,12 +174,12 @@
 
 (in-package gc)
 (export '(
-  alloc-code forget-package forget-unused-packages
-  cons-chunk gc collect extra-roots collect-for-image
+  alloc-code forget-unused-packages
+  gc collect extra-roots collect-for-image
   invalidate-runs note-run! take-owed-run
-  scan-context drop-context-run empty-cons-run install-allocator obj-take
-  refill-cons-run register-code code-registry-bytes gc-scratch room
-  barrier busy? step pace
+  scan-context drop-context-run empty-cons-run install-allocator
+  refill-cons-run register-code code-registry-bytes code-object-at gc-scratch room
+  barrier busy? step
 ))
 
 (in-package hw)
@@ -229,7 +229,7 @@
   ;; CSRs, and the opcodes a trap handler decodes
   csr-cycle csr-cycleh csr-gcmode csr-mcause csr-mepc csr-mie csr-mip
   csr-mscratch csr-mstatus csr-mtval csr-mtvec csr-stklim
-  op-cheri op-fixnum op-index op-ref
+  op-load op-store op-jal op-jalr op-sys op-cheri op-fixnum op-index op-ref
   ;; RV32IMC
   i-add i-addi i-addi-w i-and i-andi i-auipc i-beq i-beqz i-bge i-bgeu i-bgt
   i-ble i-blt i-bltu i-bne i-bnez i-branch i-call-reg i-csrrc i-csrrci
@@ -273,10 +273,10 @@
   *abort-cleanup-fn* *repl-restart* *resume-fn* *return-addr-fn* *stack-top-fn*
   *task-abort-fn*
   bye compile-time-eval error-trap eval expand-macro handle-trap
-  kickstart macro-form? print-backtrace
+  kickstart macro-form?
   rebuild rebuild-end genesis *fresh-image* record-initialiser register-macro repl
   resume-kickstart print-report
-  ctx-ref ctx-set! enter-closure data-region stack-capability
+  ctx-set! enter-closure data-region stack-capability
   system-name top-level-form
 ))
 
