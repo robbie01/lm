@@ -68,8 +68,12 @@ is `%from-addr`, which reads DDC, which needs SR.
 with `jcl`, which unseals it into the callee's `t0`, and it cannot be loaded
 from, stored into, narrowed or moved; its free variables are the closure's
 own code's. A return address is a sentry: it can be jumped to, at its own
-address, and nothing else. Opening a sealed capability by other means takes
-an SE authority, and the only one is the root.
+address, and nothing else. A task's stack and saved registers are sealed in
+its record with an otype of the kernel's, so anyone can name a task and
+only the task and the kernel can read its frames. Opening a sealed
+capability by other means takes an SE authority, and the only one is the
+root. This is what a driver's device page rests on: the driver keeps it in
+its closures and its frames, and nothing else holds it.
 
 **Immutability, by permission.** nil is the read-only cell at address 0, so
 `(set-car! nil 1)` is refused by the capability, not by a test. A capability
@@ -111,8 +115,9 @@ compiler and the processor.
 | `%slot` `%set-slot!` | any type of object, by index | a closure's slots, if it has been opened |
 | `open-closure` | a closure unsealed with the root | its free variables and entry |
 | `%set-context!` `%set-stack-limit!` `%set-gc-mode!` `%ecall` `%disable` `%enable` `%cons-run` `%set-cons-run!` `%set-this-task!` `%halt` | the machine's own state | arbitrary machine state |
+| `task-stack` `task-context` | a task's stack or saved registers, unsealed | another task's frames and registers |
 | `alloc-pool` `free-pool` | pool memory, by number | a freed block reused under a holder; never traced |
-| `dev-page` `dev-ld` `dev-st!` | any register of a device the task may use | a register it should not have written |
+| `device-page` | any device's page, made from the root | any register of any device, one a driver holds included |
 | `blit-descriptor` `blit-go` | a descriptor: pool memory that holds capabilities | a descriptor written after it was linked, under the chip |
 | `alloc-code`, `register-code`, `refill-cons-run` in gc | code space, the collector's tables | the collector's invariants |
 
@@ -122,7 +127,9 @@ no authority; the operations on a capability already held, `%cap-ld`,
 are safe, because they cannot reach past it; `%ld-fixnum` and `%st-fixnum!`
 are gone, a word being a fixnum. `disk-go` and the disk driver's transfers
 left it when the controller came to take a capability: a transfer reaches
-only what the buffer it is handed covers.
+only what the buffer it is handed covers. A register access left it when a
+driver came to hold its device's page: a load or store through a page
+already held cannot reach past it, and making the page is the unsafe act.
 
 Where it is said: the collector, the kernel, the chips, the trap handler,
 the image writer, the core runtime, the bignums and the compiler are unsafe
@@ -132,8 +139,9 @@ closures, the console's raw line and its wait, the assembler copying code
 into code space, and the suites that exercise raw memory on purpose. The UI
 stack, wb, ui, platinum, eyes and the fonts, has none: glyphs and plots
 store into a bitmap's pixels through their byte object, which is the design
-working. Neither has the disk driver: it hands the controller the byte
-object it was given.
+working. Each driver has one, where it makes its device's page as it
+starts; past that, the disk driver hands the controller the byte object it
+was given.
 
 ## What remains unchecked
 
@@ -185,8 +193,8 @@ register hold capabilities, written with capability stores, and both chips
 refuse a transfer their capability does not cover and report it, which is
 what the old debugging guard checked for, now for every transfer and
 against the object itself rather than a guess at its block. The guard is
-gone. Building a descriptor names no memory by number, and the disk driver
-has no `unsafe` left.
+gone. Building a descriptor names no memory by number, and the disk
+driver's one `unsafe` is making its page.
 
 **4. Audit `%from-addr`. RESOLVED.** It reads DDC and sets an address, so
 it faults in code without SR, and the compiler refuses its name outside
@@ -220,7 +228,7 @@ whose object is bounded.
 
 There is no MMU and no supervisor, by design, and this does not add one.
 Every task keeps its reach into every symbol, every package and every
-device it owns. CHERI is what lets one address space be safe without
-either: the friction is at the point of writing the code, in the name it has
-to say, and in the processor refusing the acts that nothing ordinary ever
-needs.
+device whose page it holds. CHERI is what lets one address space be safe
+without either: the friction is at the point of writing the code, in the
+name it has to say, and in the processor refusing the acts that nothing
+ordinary ever needs.

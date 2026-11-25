@@ -180,8 +180,8 @@ and background in one pass of six stores a row, with no fill blit. Eight
 screenfuls: 226 million instructions before, 72 million after.
 
 **Console output is a request per line and a check per character.
-WONTFIX**, measured. `can-ask?` is 159 cycles a call, most of it the two
-device-ownership lookups in `running?` and the two CSR operations of
+WONTFIX**, measured. `can-ask?` is 159 cycles a call, most of it the driver
+lookup in `running?` and the two CSR operations of
 `interrupts-on?`; the character path is 198 cycles and the check is two
 thirds of it; a line's request is 13,200 cycles, not 9,700; a character
 costs 375 instructions all in, a 2,000-character print 0.75 million. The

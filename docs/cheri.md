@@ -29,7 +29,7 @@ Metadata:
 29  LC   load capabilities         25  SR   system registers: CSRs, SCRs, DDC
 28  SC   store capabilities        24  SE   seal and unseal (authority over otypes)
                                    23  HD   headed: a Lisp object with a header
-22..19  otype   0 unsealed, 1 sentry, 2 closure; 3..15 unused
+22..19  otype   0 unsealed, 1 sentry, 2 closure, 3 a task's stack or context; 4..15 unused
 18      IE      internal exponent
 17..10  T[7:0]  top mantissa
 9..0    B[9:0]  base mantissa
@@ -80,7 +80,8 @@ object (`csealclo`), and nobody may open one except by entering it, or with
 an authority. `cseal` and `cunseal` with an explicit authority, for any
 otype from 1 to 15, need a capability with SE whose address, inside its
 bounds, is the otype; the root is one, which is how the escape hatch opens a
-closure.
+closure. Exec seals a task's stack and context in its record with otype 3,
+and only Exec unseals them.
 
 **Untagged capabilities are data.** Every integer instruction reads the
 address field of its operands and writes an untagged result whose metadata

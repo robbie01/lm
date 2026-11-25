@@ -468,8 +468,8 @@ the end, a store through a read-only reference is a report naming the
 value, never a corrupted word. The raw vocabulary is what reaches memory by
 number or touches the machine's state: `%root`, `%from-addr`, the loads and
 stores through DDC, `%slot`, the CSR and context operations, `open-closure`,
-and the functions that hand out raw memory or reach a device, such as
-`peek`, `poke`, `alloc-pool` and `dev-page`. Each such name carries a bit in
+and the functions that hand out raw memory or make a device's page, such as
+`peek`, `poke`, `alloc-pool` and `device-page`. Each such name carries a bit in
 its symbol, and the compiler refuses a call to one, or a reference to one as
 a value, unless the site is inside an `unsafe` form or the file said
 `(unsafe-file)` after its `in-package`:
@@ -637,7 +637,9 @@ at another task's block. Preemption is the timer interrupt; a task that
 blocks asks for a reschedule with an `ecall`, so the switch always happens
 inside the handler. Which task is running is the register `s2`. A task's
 stack and its context block come from the pool, and the task holds each as a
-capability bounded exactly to it.
+capability bounded exactly to it, sealed with an otype of the kernel's: a
+task record is anybody's to read, and its frames and saved registers are
+nobody's but the kernel's.
 
 **Signals.** Four bits are fixed: `sigf-vblank` (5), `sigf-blit` (7),
 `sigf-mutex` (8) and `sigf-timer` (9), the same bit in every task, so waking
@@ -683,16 +685,18 @@ Every device is a 4 KiB page of 32-bit registers at `0xF0000000` and up:
 `blit`, `disk`. Their register offsets are in the generated layout.
 
 A device page lies outside RAM, and the only way to it is by number, which
-is a privilege. A device is a value with an owner: `dev-page` makes a
-capability bounded exactly to the device's page, with LD, SD and SC and
-nothing else, and only for the task that holds the device; `dev-ld` and `dev-st!`
-go through it, so a register offset past the page is a bounds fault, not a
-store into the next device. The capability is made for each use and never
-stored. A task that ends gives back what it held. `sys` and `timer` are the
-kernel's. The uart is reachable raw by design, for the collector, the trap
-handler and a rebuild.
+is a privilege. Possession is ownership: `device-page`, an unsafe name, makes
+a capability bounded exactly to a device's page, with LD and SD, and SC for
+the two chips with a capability register, and a register is one load or
+store through it, so a register offset past the page is a bounds fault, not
+a store into the next device. A driver makes its page once, when it starts,
+and keeps it in its own closures, which are sealed; no global or record holds
+it, so no other task can name it, and it lives and ends with the driver,
+with nothing to give back. `sys`, `timer` and the blitter are the kernel's,
+reached through a page hw.lisp makes for each use. The uart is reachable raw
+by design, for the collector, the trap handler and a rebuild.
 
-| driver | owns | requests |
+| driver | holds | requests |
 |---|---|---|
 | `disk.driver` | the controller | `(read block n bytes)` `(write block n bytes)` `(flush)` `(size)` `(exclusive job)` |
 | `input.driver` | keyboard and mouse | `(subscribe port)` `(unsubscribe port)` `(inject ...)`; every subscriber gets every event |

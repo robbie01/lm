@@ -67,10 +67,9 @@ hold: printing a number allocates on either path, and for a string
 `emit-str` and `display` are the same code. `emit-str` is the printer's own
 primitive; the 31 uses in demo.lisp are harmless.
 
-**`!` is not one rule. WONTFIX.** The rule as written puts `signal`,
-`notify`, `claim-device` and `release-device` on the `!` side, which would
-rename the kernel's central verbs for a convention with no mechanical
-consequence. The rule as used: `!` marks a mutator of a Lisp object; an
+**`!` is not one rule. WONTFIX.** The rule as written puts `signal` and
+`notify` on the `!` side, which would rename the kernel's central verbs for
+a convention with no mechanical consequence. The rule as used: `!` marks a mutator of a Lisp object; an
 action on the machine is a verb. `gfx-colour!` and `disk-interrupts!` are
 the exceptions and can stay exceptions.
 
@@ -94,17 +93,17 @@ day. *Trigger:* a prompt in a window wanting retry.
 ## The kernel
 
 **A task owns four lists. WONTFIX.** The order in `remove-task` is
-load-bearing and written down there: mutexes and devices go back before
-the cleanups run, because a cleanup may want the very thing; ports are
-failed after the removed mark, because `put-message` races the same mark;
-children are recursive. One uniform list loses the order. `on-task-end` is
+load-bearing and written down there: mutexes go back before the cleanups
+run, because a cleanup may want the very thing; ports are failed after the
+removed mark, because `put-message` races the same mark; children are
+recursive. One uniform list loses the order. `on-task-end` is
 already the generic protocol, and every driver uses it for its interrupt
 server.
 
 **Every driver is the same skeleton written four times. WONTFIX.** The four
-`start`s differ in exactly the details that matter: the disk enables its
-chip before claiming it, the display installs the blit sleeper, the
-console resets its reader, and each order has a resume-correctness comment
+`start`s differ in exactly the details that matter: the disk sets its
+completion port before turning its chip's interrupt on, the display
+installs the blit sleeper, the console resets its reader, and each order has a resume-correctness comment
 attached. The record that unified them would carry seven hooks, three with
 one user each, and be longer than the thirty lines it removed from each.
 
