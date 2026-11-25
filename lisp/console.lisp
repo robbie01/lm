@@ -16,9 +16,9 @@
 ;;;   (read port)       send what is typed to this port from now on, a string
 ;;;                     per burst: one key, or a whole pasted page
 ;;;
-;;; The raw functions do not ask the driver and are not refused by it. The
-;;; driver's claim on `*serial*` says who is reading the line; it is not a
-;;; lock.
+;;; The raw functions do not ask the driver and are not refused by it, and the
+;;; driver uses them too: it holds no page, and owns the line only in that it
+;;; is the one reader.
 
 (in-package console)
 
@@ -73,11 +73,7 @@
             (set! i (%+ i 1)))
           s))))
 
-;; Running exactly when it holds the line; see `disk:running?`.
-(define (running?)
-  (if *driver*
-      (%eq? (device-owner *serial*) (server-task *driver*))
-      nil))
+(define (running?) (server-running? *driver*))
 
 (define (start)
   (if (running?)
@@ -92,7 +88,6 @@
         ;; After a resume the old reader belonged to the Exec before this one.
         (set! *reader* nil)
         (set! *unread* nil)
-        (claim-device-for *serial* task)
         (serial-interrupts! t)
         (server-poll! s (lambda () (poll)))
         (add-int-server int-uart int)

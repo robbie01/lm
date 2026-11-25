@@ -187,9 +187,8 @@
 (export '(
   bm-pixels bitmap? make-bitmap alloc-bitmap
   blit-busy? blit-drain blit-sync blit-wait-descriptor blit-wait-ring
-  make-device device? device-owner device-name device-usable? dev-page dev-ld dev-st!
-  claim-device claim-device-for release-device release-devices-of release-all-devices
-  *disk* disk-go disk-status disk-busy? disk-blocks disk-interrupts!
+  device-page device-page-bytes
+  disk-go disk-status disk-busy? disk-blocks disk-interrupts!
   *blit-ring* *gc-blit-ring* *blit-rings* blit-ring-bytes *in-interrupt*
   blit-descriptor gc-blit-descriptor blit-go
   *screen* alloc-pool bm-blit-rect bm-fill-rect
@@ -208,13 +207,12 @@
   rgb
   int-ack int-disable int-enable int-pending int-raise millis timer-hz
   peek peek8 plot poke poke8
-  *input* input-take input-inject input-interrupts!
-  input-mouse-x input-mouse-y input-buttons input-mods
+  input-take input-inject input-interrupts! input-buttons input-mods
   pool-free-bytes pool-tag pool-used random screen-height
   screen-width
   timer-never timer-set-in
-  *gfx* gfx-show gfx-colour! gfx-vblank-irq! gfx-present!
-  *serial* serial-interrupts!
+  gfx-show gfx-colour! gfx-vblank-irq! gfx-present!
+  serial-interrupts!
   blit-irq-each! blit-done? blit-refused? blit-clear-refused! set-blit-sleep! interrupts-on?
 ))
 
@@ -301,7 +299,7 @@
   make-message message-body set-message-body! delete-message
   put-message get-message wait-port reply-message port-ready? wait-ports notify
   sleep wait-timeout now-ms
-  request send make-server server-port server-task
+  request send make-server server-port server-task server-running?
   spawn task-children task-parent remove-children
   reply-port
   node-name node-pri find-name find-task list-nodes

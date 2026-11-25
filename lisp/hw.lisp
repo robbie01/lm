@@ -6,91 +6,34 @@
 ;;; what those do not cover. Naming memory by number is a privilege: a load
 ;;; or store through an integer address goes through DDC and needs SR, which
 ;;; only code compiled unsafe has, and this file is that code for the chips.
-;;; A device is a value, a register is an offset into its page (generated
-;;; into layout.lisp from the Rust side), and `dev-page` is the only way to
-;;; the registers: for the task that holds the device it makes a capability
-;;; bounded exactly to the page, so a register offset that leaves the page is
-;;; a bounds fault and never a store into the next device.
+;;; A register is an offset into its device's page (generated into
+;;; layout.lisp from the Rust side), and the only way to the registers is a
+;;; capability bounded exactly to the page, so a register offset that leaves
+;;; the page is a bounds fault and never a store into the next device.
 
 (in-package hw)
 (unsafe-file)
 
 (define device-page-bytes 4096)
 
-(define (dev-addr dev reg) (%+ mmio-base (%+ (%* dev device-page-bytes) reg)))
-
 ;; ---------------------------------------------------------------- devices
-;; A device's owner is one of three things:
-;;
-;;   kernel   Exec's: `sys`, `timer` and the blitter. Never claimed and not
-;;            checked against the running task, because Exec runs inside
-;;            whichever task called it or inside the trap handler. Reached
-;;            only through the functions in this file.
-;;   nil      A driver's device that no driver has claimed. Usable by whoever
-;;            holds it, which is how the machine works before its drivers are
-;;            up and during a rebuild.
-;;   a task   Claimed. `dev-page` from any other task is an error.
-;;
-;; The record holds the page's address as a number, which is no authority:
-;; only privileged code can follow it.
-(defrecord (device dv) name base owner)
-
-(define (make-device name dev owner)
-  (let ((d (dv-alloc)))
-    (set-dv-name! d name)
-    (set-dv-base! d (dev-addr dev 0))
-    (set-dv-owner! d owner)
-    d))
-
-(define (device-owner d) (dv-owner d))
-(define (device-name d) (dv-name d))
-
-(define (device-usable? d)
-  (let ((o (dv-owner d)))
-    (if (%null? o) t (if (%eq? o 'kernel) t (%eq? o (%this-task))))))
-
-;; The capability a device's registers are reached through: the root narrowed
-;; to the page, to loading and storing data, and to storing capabilities,
-;; which only the chips' capability registers take. It is made afresh for
-;; each use and never stored, so no capability to a device lies anywhere a
-;; program could come across one; making it is a few instructions and
-;; allocates nothing, so the trap handler and interrupt servers use it too.
-(define (dev-page d)
-  (if (device-usable? d)
-      (%cap-and-perms (%cap-bounds-exact (%from-addr (dv-base d)) device-page-bytes)
-                      (%logior perm-ld (%logior perm-sd perm-sc)))
-      (error "dev-page:" (dv-name d) "belongs to another task")))
-
-(define (dev-ld d reg) (%cap-ld-word (dev-page d) reg))
-(define (dev-st! d reg v) (%cap-st-word! (dev-page d) reg v))
-
-;; The devices some task holds right now, so that a task that dies gives back
-;; exactly what it held.
-(define *claimed* nil)
-
-(define (claim-device d) (claim-device-for d (%this-task)))
-
-;; On another task's behalf: a driver's device is claimed for it before it
-;; first runs, so nobody can reach the driver's port while the device is still
-;; anybody's. The error is raised outside the critical section, because an
-;; error abandons the stack and would abandon the section with it.
-(define (claim-device-for d task)
-  (let ((ok (without-interrupts
-              (if (%null? (dv-owner d))
-                  (begin
-                    (set-dv-owner! d task)
-                    (set! *claimed* (%cons d *claimed*))
-                    t)
-                  nil))))
-    (if ok d (error "claim-device:" (dv-name d) "is already owned"))))
-
-(define (release-device d)
-  (if (%eq? (dv-owner d) (%this-task))
-      (without-interrupts
-        (set-dv-owner! d nil)
-        (set! *claimed* (remove-eq d *claimed*)))
-      (error "release-device:" (dv-name d) "is not this task's"))
-  nil)
+;; A device's page: the root narrowed to it, to loading and storing data,
+;; and, for the two chips with a capability register, to storing
+;; capabilities. Holding it is owning the device. Nothing records who holds
+;; one, and nothing needs to: the name is unsafe, so taking a page is a
+;; privilege, and a driver takes its page once, when it starts, and keeps it
+;; in its own closures, which are sealed. No global, record field or message
+;; holds it, so no other task can name it, and it lives exactly as long as
+;; the driver. Exec's own devices, `sys`, the timer and the blitter, are
+;; reached through a page the functions below make for each use: a few
+;; instructions and no allocation, so the trap handler and interrupt servers
+;; use them too.
+(define (device-page dev)
+  (%cap-and-perms (%cap-bounds-exact (%from-addr (%+ mmio-base (%* dev device-page-bytes)))
+                                     device-page-bytes)
+                  (if (if (%= dev dev-blit) t (%= dev dev-disk))
+                      (%logior perm-ld (%logior perm-sd perm-sc))
+                      (%logior perm-ld perm-sd))))
 
 ;; ---------------------------------------------------------------- words
 ;; A machine word is a fixnum. `peek` reads the word at an address as a
@@ -107,40 +50,37 @@
 (define (poke8 a v) (%st-byte! a v))
 
 ;; ---------------------------------------------------------------- system
-(define *sys* (make-device "sys" dev-sys 'kernel))
-
 ;; Thirty-one bits and never negative.
-(define (random) (%logand (dev-ld *sys* sys-random) most-positive-fixnum))
+(define (random)
+  (%logand (%cap-ld-word (device-page dev-sys) sys-random) most-positive-fixnum))
 
 ;; Read-modify-write of the enable register, atomic: a task turning a line
 ;; back on races the interrupt server that masks it.
 (define (int-enable line)
-  (let ((p (dev-page *sys*)))
+  (let ((p (device-page dev-sys)))
     (without-interrupts
       (%cap-st-word! p sys-intena (%logior (%cap-ld-word p sys-intena) (%lsh 1 line))))))
 (define (int-disable line)
-  (let ((p (dev-page *sys*)))
+  (let ((p (device-page dev-sys)))
     (without-interrupts
       (%cap-st-word! p sys-intena
                      (%logand (%cap-ld-word p sys-intena) (%lognot (%lsh 1 line)))))))
-(define (int-ack line) (dev-st! *sys* sys-intreq (%lsh 1 line)))
-(define (int-raise line) (dev-st! *sys* sys-intset (%lsh 1 line)))
+(define (int-ack line) (%cap-st-word! (device-page dev-sys) sys-intreq (%lsh 1 line)))
+(define (int-raise line) (%cap-st-word! (device-page dev-sys) sys-intset (%lsh 1 line)))
 ;; The lowest pending and enabled line, or -1, which the chip spells as a
 ;; word of all ones. Runs inside the trap handler and must not allocate.
-(define (int-pending) (dev-ld *sys* sys-intnum))
+(define (int-pending) (%cap-ld-word (device-page dev-sys) sys-intnum))
 
 ;; ---------------------------------------------------------------- timer
-(define *timer* (make-device "timer" dev-timer 'kernel))
-
 ;; The timebase is the retired instruction count, so the same program
 ;; produces the same schedule on every run.
 ;; The host's clock, in milliseconds since boot, read as a fixnum: for pacing
 ;; something to the host, not for deadlines, which exec keeps on the machine's
 ;; own ticks (`now-ms`). No allocation and no critical section.
-(define (millis) (dev-ld *timer* tmr-wall))
+(define (millis) (%cap-ld-word (device-page dev-timer) tmr-wall))
 
 ;; Cycles per second of the machine's clock.
-(define (timer-hz) (dev-ld *timer* tmr-freq))
+(define (timer-hz) (%cap-ld-word (device-page dev-timer) tmr-freq))
 
 ;; Fire n ticks from now, n a fixnum no smaller than zero. The compare is 64
 ;; bits: the high half is written first so a wrap cannot leave a compare in
@@ -149,7 +89,7 @@
 ;; wrapping sum with n is not. Wrapping fixnum operations throughout, because
 ;; this runs from the timer interrupt every quantum and must not allocate.
 (define (timer-set-in n)
-  (let ((p (dev-page *timer*)))
+  (let ((p (device-page dev-timer)))
     (without-interrupts
       (let* ((lo (%cap-ld-word p tmr-lo))
              (sum (%+ lo n))
@@ -158,35 +98,15 @@
         (%cap-st-word! p tmr-cmplo sum)))))
 
 (define (timer-never)
-  (let ((p (dev-page *timer*)))
+  (let ((p (device-page dev-timer)))
     (without-interrupts
       (%cap-st-word! p tmr-cmphi -1)
       (%cap-st-word! p tmr-cmplo -1))))
 
-;; ---------------------------------------------------------------- releasing
-;; A driver that dies must not take its peripheral with it.
-(define (release-devices-of task)
-  (without-interrupts
-    (let ((keep nil))
-      (dolist (d *claimed*)
-        (if (%eq? (dv-owner d) task)
-            (set-dv-owner! d nil)
-            (set! keep (%cons d keep))))
-      (set! *claimed* keep)))
-  nil)
-
-;; After a resume every task that owned a device is gone.
-(define (release-all-devices)
-  (without-interrupts
-    (dolist (d *claimed*) (set-dv-owner! d nil))
-    (set! *claimed* nil))
-  nil)
-
 ;; ---------------------------------------------------------------- display
 ;; The display chip: where the picture comes from, how big it is, the
-;; palette, and whether it raises the vertical blank. gfx.driver owns it (see
-;; gfx.lisp); until the driver has claimed it, whoever holds it may use it.
-(define *gfx* (make-device "gfx" dev-gfx nil))
+;; palette, and whether it raises the vertical blank. gfx.driver holds its
+;; page (see gfx.lisp), and these take it.
 
 ;; The size the machine comes up in.
 (define screen-width 1024)
@@ -225,31 +145,28 @@
 ;; Point the chip at a bitmap, 8-bit indexed, with the picture and the frame
 ;; clock on: writing the control register without the interrupt bit would
 ;; stop the vertical blank.
-(define (gfx-show b)
-  (let ((p (dev-page *gfx*)))
-    (%cap-st-word! p gfx-base (%addr-of (bm-pixels b)))
-    (%cap-st-word! p gfx-width (bm-w b))
-    (%cap-st-word! p gfx-height (bm-h b))
-    (%cap-st-word! p gfx-pitch (bm-w b))
-    (%cap-st-word! p gfx-mode 8)
-    (%cap-st-word! p gfx-ctrl (%logior gfx-on gfx-vbirq)))
+(define (gfx-show p b)
+  (%cap-st-word! p gfx-base (%addr-of (bm-pixels b)))
+  (%cap-st-word! p gfx-width (bm-w b))
+  (%cap-st-word! p gfx-height (bm-h b))
+  (%cap-st-word! p gfx-pitch (bm-w b))
+  (%cap-st-word! p gfx-mode 8)
+  (%cap-st-word! p gfx-ctrl (%logior gfx-on gfx-vbirq))
   b)
 
-(define (gfx-vblank-irq! on)
-  (let ((p (dev-page *gfx*)))
-    (%cap-st-word! p gfx-ctrl
-                   (if on
-                       (%logior (%cap-ld-word p gfx-ctrl) gfx-vbirq)
-                       (%logand (%cap-ld-word p gfx-ctrl) (%lognot gfx-vbirq))))))
+(define (gfx-vblank-irq! p on)
+  (%cap-st-word! p gfx-ctrl
+                 (if on
+                     (%logior (%cap-ld-word p gfx-ctrl) gfx-vbirq)
+                     (%logand (%cap-ld-word p gfx-ctrl) (%lognot gfx-vbirq)))))
 
 ;; An index register and a data register: two writes that mean one thing.
-(define (gfx-colour! i c)
-  (let ((p (dev-page *gfx*)))
-    (without-interrupts
-      (%cap-st-word! p gfx-palidx i)
-      (%cap-st-word! p gfx-paldat c))))
+(define (gfx-colour! p i c)
+  (without-interrupts
+    (%cap-st-word! p gfx-palidx i)
+    (%cap-st-word! p gfx-paldat c)))
 
-(define (gfx-present!) (dev-st! *gfx* gfx-sync 1))
+(define (gfx-present! p) (%cap-st-word! p gfx-sync 1))
 
 (define (rgb r g b)
   (%logior (%lsh (%logand r 255) 16)
@@ -279,12 +196,11 @@
 
 ;; ---------------------------------------------------------------- blitter
 ;; Every task blits, dozens of times a frame, so the blitter belongs to the
-;; kernel like `sys` and the timer: never claimed, reached only through the
-;; functions below. It has three registers, all of them used here: the list
-;; register, which takes a capability to a descriptor and starts the chain
-;; there, the status and the control. The only way onto the chain is
-;; `blit-go`.
-(define *blit* (make-device "blit" dev-blit 'kernel))
+;; kernel like `sys` and the timer: no task holds its page, and it is reached
+;; only through the functions below. It has three registers, all of them used
+;; here: the list register, which takes a capability to a descriptor and
+;; starts the chain there, the status and the control. The only way onto the
+;; chain is `blit-go`.
 
 ;; ---------------------------------------------------------------- descriptors
 ;; A blit is a descriptor in memory: the capabilities of the source and the
@@ -381,13 +297,16 @@
 ;; picture.
 
 (define (blit-busy?)
-  (%= blit-status-busy (%logand (dev-ld *blit* blit-status-reg) blit-status-busy)))
+  (%= blit-status-busy
+      (%logand (%cap-ld-word (device-page dev-blit) blit-status-reg) blit-status-busy)))
 
 ;; Whether the chip has refused a descriptor, a link or a transfer since the
 ;; bit was last cleared.
 (define (blit-refused?)
-  (%= blit-status-refused (%logand (dev-ld *blit* blit-status-reg) blit-status-refused)))
-(define (blit-clear-refused!) (dev-st! *blit* blit-status-reg blit-status-refused))
+  (%= blit-status-refused
+      (%logand (%cap-ld-word (device-page dev-blit) blit-status-reg) blit-status-refused)))
+(define (blit-clear-refused!)
+  (%cap-st-word! (device-page dev-blit) blit-status-reg blit-status-refused))
 
 ;; Reading the status register is what lets a finished transfer be noticed,
 ;; so this spin also drives completion. Preemptible.
@@ -412,7 +331,7 @@
 
 ;; Ask the chip for an interrupt after every descriptor, not only at the end
 ;; of the chain, while anybody is asleep waiting for one.
-(define (blit-irq-each! on) (dev-st! *blit* blit-ctrl-reg (if on 2 0)))
+(define (blit-irq-each! on) (%cap-st-word! (device-page dev-blit) blit-ctrl-reg (if on 2 0)))
 
 ;; A short spin first: most blits are small and done before a sleep could be
 ;; arranged.
@@ -463,7 +382,7 @@
       (if (if linked (blit-busy?) nil)
           nil
           (if (%= blit-pending (%cap-ld-word d bl-status))
-              (%cap-st! (dev-page *blit*) blit-list-reg d)
+              (%cap-st! (device-page dev-blit) blit-list-reg d)
               nil))))
   nil)
 
@@ -750,40 +669,35 @@
 ;; with the kind in bits 31..28. A key has ascii in 27..20 and the raw key
 ;; code in 19..12; a pointer event has y in 27..16, x in 15..4 and the button
 ;; in 3..0; the wheel has its step in 11..0. Reading the event register takes
-;; one off the queue. input.driver owns this (see input.lisp); until it has
-;; claimed the device, whoever holds it may use it.
-(define *input* (make-device "input" dev-input nil))
+;; one off the queue. input.driver holds its page (see input.lisp), and these
+;; take it.
 
 ;; The next event's word, or nil when the queue is empty. Read once, because
 ;; reading takes the event.
-(define (input-take)
-  (let ((w (dev-ld *input* inp-event)))
+(define (input-take p)
+  (let ((w (%cap-ld-word p inp-event)))
     (if (%= w 0) nil w)))
 
 ;; The same word the other way, into the loopback register: an event as
 ;; though the keyboard had sent it.
-(define (input-inject kind ascii code payload)
-  (dev-st! *input* inp-inject
-           (%logior (%logior (%lsh kind 28) (%lsh ascii 20))
-                    (%logior (%lsh code 12) payload)))
+(define (input-inject p kind ascii code payload)
+  (%cap-st-word! p inp-inject
+                 (%logior (%logior (%lsh kind 28) (%lsh ascii 20))
+                          (%logior (%lsh code 12) payload)))
   nil)
 
-(define (input-interrupts! on) (dev-st! *input* inp-ctrl (if on 1 0)))
-(define (input-mouse-x) (dev-ld *input* inp-mousex))
-(define (input-mouse-y) (dev-ld *input* inp-mousey))
-(define (input-buttons) (dev-ld *input* inp-buttons))
-(define (input-mods) (dev-ld *input* inp-mods))
+(define (input-interrupts! p on) (%cap-st-word! p inp-ctrl (if on 1 0)))
+(define (input-buttons p) (%cap-ld-word p inp-buttons))
+(define (input-mods p) (%cap-ld-word p inp-mods))
 
 ;; ---------------------------------------------------------------- serial
 ;; The serial line. Its registers are reached raw from runtime.lisp by
 ;; whatever has to report when nothing else can be trusted, and that path is
-;; unchecked on purpose. This record is for the other path: console.driver
-;; claims it, which says which task is reading the line.
-(define *serial* (make-device "serial" dev-uart nil))
+;; unchecked on purpose; console.driver writes and reads through it too.
 
 ;; Whether the chip raises its line when a byte arrives. Raw, like the rest of
 ;; the line's registers: it is turned on by whoever starts console.driver and
-;; off when the driver ends, which need not be the task that holds the line.
+;; off when the driver ends.
 (define (serial-interrupts! on) (%st-word! uart-ctrl (if on 1 0)))
 
 ;; ---------------------------------------------------------------- storage
@@ -792,9 +706,8 @@
 ;; transfer takes, and then it reads the result: 0 ok, 1 no disk attached,
 ;; `disk-refused` when the buffer does not allow the transfer, 3 the host's
 ;; I/O failed. With bit 0 of the control register set, the controller raises
-;; `int-disk` when it finishes. disk.driver owns it (see disk.lisp); until the
-;; driver has claimed it, whoever holds it may use it.
-(define *disk* (make-device "disk" dev-disk nil))
+;; `int-disk` when it finishes. disk.driver holds its page (see disk.lisp),
+;; and these take it.
 
 ;; The command goes last: the controller latches the other three when it
 ;; arrives, so they can be rewritten for the next command while this one runs.
@@ -802,21 +715,20 @@
 ;; capability store, and the controller moves only what it covers: a read
 ;; into it needs SD, a write out of it LD, and every byte of the n blocks
 ;; inside its bounds. A flush takes no buffer.
-(define (disk-go cmd buf block n)
-  (let ((p (dev-page *disk*)))
-    (without-interrupts
-      (%cap-st! p dsk-buf buf)
-      (%cap-st-word! p dsk-block block)
-      (%cap-st-word! p dsk-count n)
-      (%cap-st-word! p dsk-cmd cmd)))
+(define (disk-go p cmd buf block n)
+  (without-interrupts
+    (%cap-st! p dsk-buf buf)
+    (%cap-st-word! p dsk-block block)
+    (%cap-st-word! p dsk-count n)
+    (%cap-st-word! p dsk-cmd cmd))
   nil)
 
 ;; One load and no allocation: a status is a small number, read in a loop
 ;; with interrupts off.
-(define (disk-status) (dev-ld *disk* dsk-status))
-(define (disk-busy?) (%= (disk-status) disk-busy))
-(define (disk-blocks) (dev-ld *disk* dsk-blocks))
-(define (disk-interrupts! on) (dev-st! *disk* dsk-ctrl (if on 1 0)))
+(define (disk-status p) (%cap-ld-word p dsk-status))
+(define (disk-busy? p) (%= (disk-status p) disk-busy))
+(define (disk-blocks p) (%cap-ld-word p dsk-blocks))
+(define (disk-interrupts! p on) (%cap-st-word! p dsk-ctrl (if on 1 0)))
 
 ;; ---------------------------------------------------------------- pool
 ;; Raw memory that nothing moves: task contexts, stacks and descriptor rings.
@@ -931,9 +843,9 @@
       (set! p (pool-next p)))
     n))
 
-;; What reaches memory by number, hands it out or frees it, or reaches a
-;; device: needs an `unsafe` around the call. A descriptor is pool memory
-;; that can hold capabilities, so handing one out and linking one are among
-;; them.
+;; What reaches memory by number, hands it out or frees it, or makes a
+;; device's page: needs an `unsafe` around the call. A descriptor is pool
+;; memory that can hold capabilities, so handing one out and linking one are
+;; among them.
 (unsafe-names (quote (peek poke peek8 poke8 alloc-pool free-pool
-                      dev-page dev-ld dev-st! blit-descriptor blit-go)))
+                      device-page blit-descriptor blit-go)))

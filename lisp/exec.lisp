@@ -128,6 +128,12 @@
 ;; The stack and the 256-byte register context are pool memory, and the task
 ;; holds each as a capability bounded to it. The trap stub saves the
 ;; registers into the context as thirty-two capabilities, tags and all.
+;;
+;; Both are sealed in the record, with an otype of the kernel's. A task
+;; record is anybody's to read, and a task's stack and saved registers hold
+;; whatever it was working with, a driver's device page among them; sealed,
+;; their bounds can be read and nothing through them. Only the kernel opens
+;; them, with the root.
 (defrecord (task tc) (include node)
   state sigalloc sigwait sigrecvd
   stack                          ; the whole stack, standing at its top
@@ -145,6 +151,13 @@
   mx-next                        ; and who is behind it in that mutex's queue
   run-owed                       ; bytes of cons run handed to it, unpaid; see gc.lisp
   gen)                           ; which Exec it belongs to: see `task-alive?`
+
+;; The otype they are sealed with.
+(define otype-task 3)
+(define (task-seal c) (%cap-seal c (%cap-set-addr (%root) otype-task)))
+(define (task-unseal c) (%cap-unseal c (%cap-set-addr (%root) otype-task)))
+(define (task-stack task) (task-unseal (tc-stack task)))
+(define (task-context task) (task-unseal (tc-context task)))
 
 (define ts-added 1)
 (define ts-run 2)
@@ -304,7 +317,7 @@
                 (set-tc-switches! next (%+ (tc-switches next) 1))
                 (swap-binds-in! (tc-binds next))
                 (set! *switch-count* (%+ *switch-count* 1))
-                (%set-context! (tc-context next))
+                (%set-context! (task-context next))
                 (%set-stack-limit! (task-stack-limit next))
                 ;; Only now, with the context switched away, is a dead task's
                 ;; stack safe to give back.
@@ -514,15 +527,16 @@
          (size (if (%cons? opts) (%car opts) default-stack))
          (task (tc-alloc))
          (ctx (pool-region ctx-bytes))
-         (stack (pool-region size)))
+         (stack (pool-region size))
+         (top (%cap-set-addr (%cdr stack) (%cap-top (%cdr stack)))))
     (set-node-name! task name)
     (set-node-pri! task pri)
     (set-tc-base! task pri)
     (set-tc-gen! task *exec-generation*)
     (zero-task-counters! task)
     (set-tc-state! task ts-added)
-    (set-tc-stack! task (%cap-set-addr (%cdr stack) (%cap-top (%cdr stack))))
-    (set-tc-context! task (%cdr ctx))
+    (set-tc-stack! task (task-seal top))
+    (set-tc-context! task (task-seal (%cdr ctx)))
     (set-tc-blocks! task (list (%car ctx) (%car stack)))
     (set-tc-fn! task fn)
     (set-tc-binds! task binds)
@@ -531,12 +545,12 @@
     ;; The context is built to look as though the task had just been
     ;; interrupted on the first instruction of its function, on a whole
     ;; stack, returning to the exit stub when it is done.
-    (enter-closure (tc-context task) fn (tc-stack task))
+    (enter-closure (%cdr ctx) fn top)
     ;; s2 says which task is running, so the context carries it the way it
     ;; carries the stack pointer.
-    (ctx-set! (tc-context task) reg-s2 task)
+    (ctx-set! (%cdr ctx) reg-s2 task)
     ;; Its first cons faults into a refill: the run it starts with is empty.
-    (ctx-set! (tc-context task) reg-gp (empty-cons-run))
+    (ctx-set! (%cdr ctx) reg-gp (empty-cons-run))
     task))
 
 ;; Onto the ready list: from here it runs when the scheduler says so.
@@ -592,8 +606,8 @@
         nil))
   nil)
 
-;; Something to do when a task ends, however it ends. What a driver holds
-;; that is not a device, its interrupt server, is given back this way.
+;; Something to do when a task ends, however it ends. What a driver has put
+;; outside itself, its interrupt server, is given back this way.
 (define (on-task-end task fn)
   (without-interrupts (set-tc-cleanups! task (%cons fn (tc-cleanups task))))
   nil)
@@ -621,7 +635,6 @@
   ;; What it held goes to whoever is waiting, marked abandoned, before its
   ;; cleanups run: a cleanup may want the very thing it held.
   (abandon-mutexes task)
-  (release-devices-of task)
   (run-cleanups task)
   (without-interrupts
     ;; one that was made and never started was never counted
@@ -872,6 +885,12 @@
 
 (define (server-port s) (sv-port s))
 (define (server-task s) (sv-task s))
+
+;; Whether a server, or nil, is one of this Exec's and has not ended. A
+;; driver kept in a variable is running exactly when this says so, which
+;; covers one that ended and one saved in an image whose Exec a resume has
+;; replaced.
+(define (server-running? s) (if s (task-alive? (sv-task s)) nil))
 
 ;; Work that arrives as an edge rather than a message: a device's interrupt
 ;; server notifies the server's own port, and `fn` runs each time the server
@@ -1444,8 +1463,9 @@
     (zero-task-counters! boot)
     (set-tc-quantum! boot *quantum*)
     (set-tc-state! boot ts-run)
-    (set-tc-context! boot (data-region (%ld-word lg-trapsave) ctx-bytes))
-    (set-tc-stack! boot (stack-capability (%ld-word lg-stackbot) (%ld-word lg-stacktop)))
+    (set-tc-context! boot (task-seal (data-region (%ld-word lg-trapsave) ctx-bytes)))
+    (set-tc-stack! boot
+                   (task-seal (stack-capability (%ld-word lg-stackbot) (%ld-word lg-stacktop))))
     (set-tc-sigalloc! boot sig-reserved)
     ;; Task zero takes whatever was bound before there were tasks.
     (set-tc-binds! boot *boot-binds*)
@@ -1458,7 +1478,7 @@
   ;; What sys.lisp had to leave blank: a task restarts on its own stack, and a
   ;; task that faults with no prompt behind it ends rather than halting the
   ;; machine.
-  (set! *stack-top-fn* (lambda () (tc-stack (this-task))))
+  (set! *stack-top-fn* (lambda () (task-stack (this-task))))
   (set! *return-addr-fn* (lambda () *task-exit-stub*))
   (vblank-start)
   (idle-start)
@@ -1518,8 +1538,7 @@
 ;; out marked. Its next cons faults into a refill. A pair it was in the middle
 ;; of making is in one of its saved registers, which the collector scans.
 (define (drop-task-run task)
-  (let ((ctx (tc-context task)))
-    (if ctx (drop-context-run ctx) nil)))
+  (if (tc-context task) (drop-context-run (task-context task)) nil))
 
 (define (invalidate-runs)
   (if *ready-list*
@@ -1545,8 +1564,7 @@
 ;; A suspended task's saved registers, and its stack from the saved sp to
 ;; the top.
 (define (scan-task task)
-  (let ((ctx (tc-context task)))
-    (if ctx (scan-context ctx) nil)))
+  (if (tc-context task) (scan-context (task-context task)) nil))
 
 (define (scan-list-of l fn)
   (let ((p (list-first l)))
@@ -1562,3 +1580,6 @@
       nil))
 
 (define (task-count) *task-count*)
+
+;; What opens a task's stack or its saved registers.
+(unsafe-names (quote (task-unseal task-stack task-context)))

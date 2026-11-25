@@ -18,8 +18,10 @@
 ;;;
 ;;; A transfer names a byte object, and the controller is handed the object's
 ;;; capability itself: it moves only what the capability covers, and refuses
-;;; a transfer of more blocks than the object holds. So nothing here names
-;;; memory by number and nothing here is unsafe.
+;;; a transfer of more blocks than the object holds. The driver holds the
+;;; controller's page, taken once when it starts and kept in its closures,
+;;; and that is the one unsafe form here: nothing else names memory by
+;;; number or makes a device's page.
 
 (in-package disk)
 
@@ -35,34 +37,34 @@
 (define *sleeps* 0)
 
 ;; ---------------------------------------------------------------- transfers
-;; Start one and watch the status until it is over: the only way with
-;; interrupts off, inside an exclusive job, or when there is no driver.
-(define (transfer cmd buf block n)
-  (disk-go cmd buf block n)
-  (while (disk-busy?) nil)
-  (disk-status))
+;; Each takes the controller's page. Start one and watch the status until it
+;; is over: the only way with interrupts off, as inside an exclusive job.
+(define (transfer page cmd buf block n)
+  (disk-go page cmd buf block n)
+  (while (disk-busy? page) nil)
+  (disk-status page))
 
 ;; The driver's way: start it and sleep until the controller says it is done.
 ;; A loop, because the signal is an edge and one can be left over from a
 ;; transfer that was watched rather than slept through.
-(define (transfer-sleeping cmd buf block n)
-  (disk-go cmd buf block n)
-  (while (disk-busy?)
+(define (transfer-sleeping page cmd buf block n)
+  (disk-go page cmd buf block n)
+  (while (disk-busy? page)
     (set! *sleeps* (%+ *sleeps* 1))
     (wait (port-signal *disk-done*)))
-  (disk-status))
+  (disk-status page))
 
 ;; Whether the blocks fit is the controller's to say.
 (define (check-buffer bytes)
   (if (bytes? bytes) nil (error "disk: not a byte object:" bytes)))
 
 ;; ---------------------------------------------------------------- the driver
-(define (serve body)
+(define (serve page body)
   (let ((op (%car body)))
-    (cond ((%eq? op 'read) (serve-bytes disk-cmd-read body))
-          ((%eq? op 'write) (serve-bytes disk-cmd-write body))
-          ((%eq? op 'flush) (transfer-sleeping disk-cmd-flush 0 0 0))
-          ((%eq? op 'size) (disk-blocks))
+    (cond ((%eq? op 'read) (serve-bytes page disk-cmd-read body))
+          ((%eq? op 'write) (serve-bytes page disk-cmd-write body))
+          ((%eq? op 'flush) (transfer-sleeping page disk-cmd-flush 0 0 0))
+          ((%eq? op 'size) (disk-blocks page))
           ;; Interrupts off for the whole job, and every transfer in it
           ;; watched rather than slept through: nothing else runs to wake it.
           ((%eq? op 'exclusive) (without-interrupts (%funcall (cadr body))))
@@ -71,83 +73,64 @@
 ;; The object the request is holding goes to the controller. It cannot be
 ;; collected while the transfer runs, because the caller is blocked with the
 ;; request in hand.
-(define (serve-bytes cmd body)
+(define (serve-bytes page cmd body)
   (let ((block (cadr body)) (n (caddr body)) (bytes (cadddr body)))
     (check-buffer bytes)
-    (transfer-sleeping cmd bytes block n)))
+    (transfer-sleeping page cmd bytes block n)))
 
-;; A driver is running exactly when it holds the disk. That covers a driver
-;; that ended, whose device came back when it did, and a resumed image, whose
-;; driver belonged to an Exec that no longer exists.
-(define (running?)
-  (if *driver*
-      (%eq? (device-owner *disk*) (server-task *driver*))
-      nil))
+(define (running?) (server-running? *driver*))
 
+;; The page goes into the handler before the task exists, so the driver
+;; holds the controller from its first instruction, and nothing but the
+;; driver's own closures ever holds it.
 (define (start)
   (if (running?)
       *driver*
-      (let* ((s (make-server "disk.driver" 10 (lambda (body) (serve body))))
+      (let* ((page (unsafe (device-page dev-disk)))
+             (s (make-server "disk.driver" 10 (lambda (body) (serve page body))))
              (task (server-task s))
              (done (make-port-for task nil 0))
              (int (make-interrupt "disk" 0 (lambda (d) (notify done)) nil)))
         ;; A resident outlives whoever started Exec.
         (detach-task task)
-        ;; Completion raises a line, set while the device is still anybody's;
-        ;; then the device is the driver's, before anybody can be handed the
-        ;; port to ask.
-        (disk-interrupts! t)
-        (claim-device-for *disk* task)
+        (set! *disk-done* done)
+        (disk-interrupts! page t)
         (add-int-server int-disk int)
         (on-task-end task (lambda () (remove-int-server int-disk int)))
-        (set! *disk-done* done)
         (set! *driver* s)
         s)))
 
 (add-resident "disk.driver" (lambda () (start)))
 
 ;; ---------------------------------------------------------------- clients
-;; Every call goes to the driver while one holds the disk. While none does,
-;; before Exec is up, during a rebuild, or after a driver has ended and before
-;; another starts, the device is anybody's and the call does the transfer
-;; itself.
+;; Every call is a request to the driver; with no driver running there is no
+;; way to the disk.
 (define (driver-port)
-  (if *driver* (server-port *driver*) (error "disk: there is no driver")))
+  (if (running?) (server-port *driver*) (error "disk: there is no driver")))
 
 (define (read-blocks block n bytes)
   (check-buffer bytes)
-  (if (device-usable? *disk*)
-      (transfer disk-cmd-read bytes block n)
-      (request (driver-port) (list 'read block n bytes))))
+  (request (driver-port) (list 'read block n bytes)))
 
 (define (write-blocks block n bytes)
   (check-buffer bytes)
-  (if (device-usable? *disk*)
-      (transfer disk-cmd-write bytes block n)
-      (request (driver-port) (list 'write block n bytes))))
+  (request (driver-port) (list 'write block n bytes)))
 
-(define (flush)
-  (if (device-usable? *disk*)
-      (transfer disk-cmd-flush 0 0 0)
-      (request (driver-port) (list 'flush))))
+(define (flush) (request (driver-port) (list 'flush)))
 
-(define (size)
-  (if (device-usable? *disk*) (disk-blocks) (request (driver-port) (list 'size))))
+(define (size) (request (driver-port) (list 'size)))
 
-;; Run `job` with the disk and nothing else: in the task that holds the disk,
-;; with interrupts off, so that no task and no interrupt server runs until it
-;; returns. Saving an image needs this: collect, then write every region,
-;; with nothing allocating or changing a byte in between. Answers the job's
-;; value. The job must not wait for anything, because nothing will run to
-;; wake it.
+;; Run `job` with the disk and nothing else: in the driver's task, with
+;; interrupts off, so that no task and no interrupt server runs until it
+;; returns and no transfer of the driver's is in flight. Saving an image
+;; needs this: collect, then write every region, with nothing allocating or
+;; changing a byte in between. Answers the job's value. The job must not
+;; wait for anything, because nothing will run to wake it.
 ;;
-;; Inside the job, `write-raw` writes n blocks out of whatever capability it
-;; is handed, a byte object or not: the image writer hands it each region of
-;; memory. The job runs in the driver's task, so the device lets it through;
-;; the same call from any other task is refused.
-(define (exclusive job)
-  (if (device-usable? *disk*)
-      (without-interrupts (%funcall job))
-      (request (driver-port) (list 'exclusive job))))
+;; The job does not get the driver's page. `write-raw` writes n blocks out
+;; of whatever capability it is handed, a byte object or not, through the
+;; page it is handed: the image writer makes its own from the root, and
+;; hands it each region of memory.
+(define (exclusive job) (request (driver-port) (list 'exclusive job)))
 
-(define (write-raw buf block n) (transfer disk-cmd-write buf block n))
+(define (write-raw page buf block n) (transfer page disk-cmd-write buf block n))

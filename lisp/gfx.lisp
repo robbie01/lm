@@ -16,7 +16,8 @@
 ;;;   (present)          put the frame in front of the viewer now
 ;;;
 ;;; The screen bitmap is `*screen*`, which anybody may draw into with the
-;;; blitter; that is what compositing is.
+;;; blitter; that is what compositing is. The chip's page is the driver's
+;;; alone, kept in its closures.
 
 (in-package gfx)
 
@@ -27,28 +28,28 @@
 (define *sleeps* 0)
 
 ;; ---------------------------------------------------------------- the driver
-(define (serve body)
+(define (serve page body)
   (let ((op (%car body)))
-    (cond ((%eq? op 'screen) (show-screen (alloc-bitmap (cadr body) (caddr body))))
-          ((%eq? op 'show) (show-screen *screen*))
+    (cond ((%eq? op 'screen) (show-screen page (alloc-bitmap (cadr body) (caddr body))))
+          ((%eq? op 'show) (show-screen page *screen*))
           ((%eq? op 'colours)
-           (dolist (p (cadr body)) (gfx-colour! (%car p) (%cdr p)))
+           (dolist (p (cadr body)) (gfx-colour! page (%car p) (%cdr p)))
            t)
-          ((%eq? op 'present) (gfx-present!) t)
+          ((%eq? op 'present) (gfx-present! page) t)
           (else (error "gfx.driver: no such request:" op)))))
 
-(define (show-screen b)
+(define (show-screen page b)
   (if (%null? b)
       nil
       (begin
         (set! *screen* b)
-        (gfx-show b)
-        (default-palette)
+        (gfx-show page b)
+        (default-palette page)
         (set! *screen-rp* (make-bitmap-rastport b))
         b)))
 
 ;; Sixteen readable colours, then a grey ramp over the rest.
-(define (default-palette)
+(define (default-palette page)
   (let ((i 0)
         (first (list (rgb 0 0 0) (rgb 255 255 255) (rgb 200 40 40) (rgb 40 200 60)
                      (rgb 60 100 230) (rgb 230 200 40) (rgb 220 120 30)
@@ -56,31 +57,27 @@
                      (rgb 120 90 50) (rgb 90 90 110) (rgb 150 150 170)
                      (rgb 60 70 90) (rgb 30 40 55) (rgb 20 24 34))))
     (dolist (c first)
-      (gfx-colour! i c)
+      (gfx-colour! page i c)
       (set! i (%+ i 1)))
     (while (%< i 256)
       (let ((v (%+ 16 (%lsh (%* (%- i 16) 239) -8))))
-        (gfx-colour! i (rgb v v v)))
+        (gfx-colour! page i (rgb v v v)))
       (set! i (%+ i 1)))))
 
-;; Running exactly when it holds the device; see `disk:running?`.
-(define (running?)
-  (if *driver*
-      (%eq? (device-owner *gfx*) (server-task *driver*))
-      nil))
+(define (running?) (server-running? *driver*))
 
+;; The page goes into the handler before the task exists; see `disk:start`.
 (define (start)
   (if (running?)
       *driver*
-      (let* ((s (make-server "gfx.driver" 15 (lambda (body) (serve body))))
+      (let* ((page (unsafe (device-page dev-gfx)))
+             (s (make-server "gfx.driver" 15 (lambda (body) (serve page body))))
              (task (server-task s))
              (int (make-interrupt "blit" 0 (lambda (d) (blit-server d)) nil)))
         (detach-task task)
-        ;; The frame clock first, while the device is still anybody's: Exec's
-        ;; vblank server is already installed and waits on a chip that has
-        ;; been told to raise it.
-        (gfx-vblank-irq! t)
-        (claim-device-for *gfx* task)
+        ;; Exec's vblank server is already installed and waits on a chip that
+        ;; has to be told to raise it.
+        (gfx-vblank-irq! page t)
         ;; After a resume the list names tasks of the Exec before this one.
         (set! *blit-waiters* nil)
         (add-int-server int-blit int)
@@ -137,14 +134,11 @@
     (reverse keep)))
 
 ;; ---------------------------------------------------------------- clients
-;; Every call goes to the driver while one holds the display, and is done on
-;; the spot while none does: before Exec is up, during a rebuild, or between
-;; a driver ending and the next one starting.
+;; Every call is a request to the driver.
 (define (driver-port)
-  (if *driver* (server-port *driver*) (error "gfx: there is no driver")))
+  (if (running?) (server-port *driver*) (error "gfx: there is no driver")))
 
-(define (ask body)
-  (if (device-usable? *gfx*) (serve body) (request (driver-port) body)))
+(define (ask body) (request (driver-port) body))
 
 (define (open-screen w h) (ask (list 'screen w h)))
 (define (attach-screen) (ask (list 'show)))

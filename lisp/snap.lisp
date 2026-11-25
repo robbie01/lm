@@ -76,11 +76,12 @@
 ;; the section could call the collector. So the regions are written out by
 ;; hand, from scratch memory.
 ;;
-;; The section runs in the disk driver's task: a transfer inside a section
-;; with interrupts off can only be watched, and only the task holding the
-;; controller may do that. `disk:exclusive` runs the job there, and this
-;; task sleeps until it answers with the blocks written, or minus the first
-;; status that was not ok.
+;; The section runs in the disk driver's task, so that no transfer of the
+;; driver's is in flight under it, and a transfer inside a section with
+;; interrupts off can only be watched. `disk:exclusive` runs the job there,
+;; and this task sleeps until it answers with the blocks written, or minus
+;; the first status that was not ok. The job writes through a page of the
+;; controller's of its own, made from the root.
 (define (save-image-with top)
   (let* ((saved-top (%ld-cap lg-toplevel))
          (result
@@ -101,7 +102,7 @@
               ;; A resumed image re-enters through `top` rather than through
               ;; the boot list: every global it would have set is already set.
               (%st-cap! lg-toplevel top)
-              (let ((r (write-regions)))
+              (let ((r (write-regions (device-page dev-disk))))
                 (%st-cap! lg-toplevel saved-top)
                 (set! *saved-tasks* nil)
                 r)))))
@@ -116,8 +117,9 @@
 ;; which is built in the collector's scratch memory. The header goes out
 ;; last, so that a run that is interrupted leaves a file with no valid header
 ;; rather than a wrong one. Answers the blocks written, or minus the first
-;; status that was not ok. Allocates nothing.
-(define (write-regions)
+;; status that was not ok. Allocates nothing, and writes through `page`, the
+;; controller's.
+(define (write-regions page)
   (put-region snap-header 0 0 low-end)
   (put-region snap-header 1 pool-base (%- (%ld-word lg-poolptr) pool-base))
   (put-region snap-header 2 code-base (%- (%ld-word lg-code-ptr) code-base))
@@ -131,14 +133,14 @@
              (m (tag-map base (%+ base len) snap-tag-map)))
         (poke (region-field snap-header i 2) k)
         (poke (region-field snap-header i 3) (%+ k n))
-        (set! bad (first-bad bad (disk:write-raw (blocks-at base n) k n)))
-        (set! bad (first-bad bad (disk:write-raw (blocks-at snap-tag-map m) (%+ k n) m)))
+        (set! bad (first-bad bad (disk:write-raw page (blocks-at base n) k n)))
+        (set! bad (first-bad bad (disk:write-raw page (blocks-at snap-tag-map m) (%+ k n) m)))
         (set! k (%+ k (%+ n m))))
       (set! i (%+ i 1)))
     (poke snap-header snap-magic)
     (poke (%+ snap-header 4) (%ld-word lg-imgentry))
     (poke (%+ snap-header 8) snap-regions)
-    (set! bad (first-bad bad (disk:write-raw (blocks-at snap-header 1) 0 1)))
+    (set! bad (first-bad bad (disk:write-raw page (blocks-at snap-header 1) 0 1)))
     (if (%= bad 0) k (%- 0 bad))))
 
 (define (report-save result)
@@ -153,13 +155,12 @@
 
 ;; Everything the boot list would set up is already in the image. Exec is
 ;; rebuilt, because the task that saved is not the task that resumes, and
-;; every device claim is stale: the drivers start again in `exec-init` and
-;; claim theirs afresh. The tasks that were saved never run again, so their
-;; stacks and contexts go back to the pool first.
+;; the drivers start again in `exec-init`, each taking its page afresh. The
+;; tasks that were saved never run again, so their stacks and contexts go
+;; back to the pool first.
 (define (resume-kickstart)
   (%st-cap! lg-traphook (%symbol-value 'handle-trap))
   (%st-cap! lg-errhandler (%symbol-value 'error-trap))
-  (release-all-devices)
   (reap-saved-tasks *saved-tasks*)
   (set! *saved-tasks* nil)
   (exec-init)
@@ -212,7 +213,7 @@
   (forget-unused-packages)
   (%st-cap! lg-package (find-package "user"))
   (collect-for-image)
-  (let ((r (write-regions)))
+  (let ((r (write-regions (device-page dev-disk))))
     (if (%< r 0)
         (begin
           (uart-string "fresh image: the disk answered ")

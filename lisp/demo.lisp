@@ -716,37 +716,96 @@
   (newline))
 
 ;; ---------------------------------------------------------------- devices
-;; `(devices)` checks device ownership. A device is a value: holding it is
-;; the permission, a claimed one refuses every task but its owner, and a task
-;; that ends gives back what it held.
-(define *dev-probe* nil)
+;; `(devices)` checks that possession is ownership. A device is reached only
+;; through a capability to its page, which only code that says `unsafe` can
+;; make. A driver makes its own when it starts and keeps it in its closures,
+;; which are sealed, so nothing a program can name leads to one, and a task
+;; without it cannot touch the device.
+
+;; Whether `c` is a capability to a device's page.
+(define (device-cap? c)
+  (if (%cap-tag? c)
+      (let ((b (%cap-base c)))
+        (if (>= b mmio-base) (< b (+ mmio-base (* 16 device-page-bytes))) nil))
+      nil))
+
+;; Whether a program that says nothing unsafe can load through `c`: tagged,
+;; unsealed, with LD and LC, and not code.
+(define (loadable? c)
+  (if (%cap-tag? c)
+      (if (%cap-sealed? c)
+          nil
+          (let ((ps (%cap-perms c)))
+            (if (= (logand ps (logior perm-ld perm-lc)) (logior perm-ld perm-lc))
+                (if (= (logand ps perm-ex) 0) (= (logand (%cap-base c) 7) 0) nil)
+                nil)))
+      nil))
+
+;; The first device capability reachable from `roots` by loading through
+;; capabilities the way such a program can, or nil.
+(define (loads-reach roots)
+  (let ((seen (make-table 65536)) (todo roots) (found nil))
+    (while (if found nil (pair? todo))
+      (let ((c (car todo)))
+        (set! todo (cdr todo))
+        (cond ((device-cap? c) (set! found c))
+              ((if (loadable? c) (not (table-has? seen c)) nil)
+               (table-set! seen c t)
+               (let ((at (%cap-set-addr c (%cap-base c))) (n (%cap-len c)) (off 0))
+                 (while (<= (+ off 8) n)
+                   (let ((v (%cap-ld at off)))
+                     (if (%cap-tag? v) (set! todo (cons v todo)) nil))
+                   (set! off (+ off 8)))))
+              (else nil))))
+    found))
+
+;; The first device capability in a closure, or in the closures it holds,
+;; opening each with the root: what the closure's own code can reach.
+(define (opened-reach f)
+  (unsafe
+   (let ((o (open-closure f)) (i clo-free) (found nil))
+     (while (if found nil (< (* i value-bytes) (%cap-len o)))
+       (let ((v (%slot o i)))
+         (cond ((device-cap? v) (set! found v))
+               ((if (%cap-tag? v) (= (%cap-otype v) otype-closure) nil)
+                (set! found (opened-reach v)))
+               (else nil)))
+       (set! i (+ i 1)))
+     found)))
 
 (define (devices)
-  (let ((d (make-device "probe" dev-disk nil))
-        (me (this-task))
-        (sig (exec::alloc-signal (this-task))))
-    (num-check 'unclaimed-is-usable (device-usable? d) t)
-    (claim-device d)
-    (num-check 'claimed-by-this-task (%eq? (device-owner d) me) t)
-    (num-check 'usable-by-its-owner (device-usable? d) t)
-    ;; another task asks, and is refused
-    (set! *dev-probe* 'unset)
-    (spawn "probe" 0 (lambda ()
-                       (set! *dev-probe* (device-usable? d))
-                       (signal me sig)))
-    (wait sig)
-    (num-check 'refused-to-other-tasks *dev-probe* nil)
-    (release-device d)
-    (num-check 'released-on-request (device-owner d) nil)
-    ;; a task that claims it and then ends gives it back
-    (spawn "claimer" 0 (lambda () (claim-device d) (signal me sig)))
-    (wait sig)
-    (while (find-task "claimer") (reschedule))
-    (num-check 'released-when-its-owner-died (device-owner d) nil)
-    ;; and the kernel's own devices are the kernel's
-    (num-check 'sys-is-kernel (device-owner hw::*sys*) 'hw::kernel)
-    (num-check 'timer-is-kernel (device-owner hw::*timer*) 'hw::kernel)
-    (exec::free-signal me sig))
+  (let ((sys (unsafe (device-page dev-sys)))
+        (disk (unsafe (device-page dev-disk)))
+        (task (server-task disk:*driver*)))
+    ;; A page is the device and no more, and only the chips with a
+    ;; capability register get SC.
+    (num-check 'a-page-is-the-device
+               (list (%cap-len sys) (%cap-perms sys) (%cap-perms disk))
+               (list device-page-bytes (logior perm-ld perm-sd)
+                     (logior perm-ld perm-sd perm-sc)))
+    (num-check 'reading-a-register-through-it (> (%cap-ld-word sys hw::sys-ramsize) 0) t)
+    ;; Making one is unsafe, and a number is no authority.
+    (num-check 'the-compiler-will-not-make-a-page
+               (refused? (lambda () (eval '(device-page dev-disk)))) t)
+    (num-check 'an-address-is-not-a-device
+               (refused? (lambda () (disk-status (+ mmio-base (* dev-disk device-page-bytes)))))
+               t)
+    ;; The driver holds its page in its closures and nowhere else, and a
+    ;; task's stack and saved registers are sealed in its record.
+    (num-check 'the-driver-holds-its-page
+               (let ((p (opened-reach (exec::tc-fn task))))
+                 (if p (list (%cap-base p) (%cap-len p)) nil))
+               (list (%cap-base disk) device-page-bytes))
+    (num-check 'a-tasks-registers-are-sealed
+               (list (%cap-sealed? (exec::tc-context task)) (%cap-sealed? (exec::tc-stack task)))
+               (list t t))
+    (num-check 'and-cannot-be-read
+               (refused? (lambda () (%cap-ld (exec::tc-context task) 0))) t)
+    (num-check 'the-walk-finds-a-page-left-lying-about
+               (device-cap? (loads-reach (list (list 1 (vector 2 sys))))) t)
+    (num-check 'nothing-a-program-can-name-leads-to-one
+               (loads-reach (list (unsafe (%ld-cap lg-symlist)) (this-task)))
+               nil))
   (princ "devices: done (nothing above = all correct)")
   (newline))
 
@@ -779,9 +838,6 @@
 
 (define (drivers)
   (num-check 'disk-driver-running (disk:running?) t)
-  (num-check 'disk-held-by-its-driver
-             (%eq? (device-owner *disk*) (server-task disk:*driver*)) t)
-  (num-check 'disk-refused-to-everybody-else (device-usable? *disk*) nil)
   ;; Through the driver: out, back, and the same bytes.
   (let ((out (make-bytes 1024)) (in (make-bytes 1024)) (i 0))
     (while (%< i 1024)
@@ -822,9 +878,6 @@
   ;; The keyboard and mouse. The driver is the one reader, and every
   ;; subscriber gets every event.
   (num-check 'input-driver-running (input:running?) t)
-  (num-check 'input-held-by-its-driver
-             (%eq? (device-owner *input*) (server-task input:*driver*)) t)
-  (num-check 'input-refused-to-everybody-else (device-usable? *input*) nil)
   (let ((a (input:listen)) (b (input:listen)))
     ;; A key with no ascii, so that a workbench, if one is up, lets it go by.
     (input:inject 1 0 200 0)
@@ -839,9 +892,6 @@
   ;; and a task whose blit is still running sleeps until the blitter wakes
   ;; it.
   (num-check 'gfx-driver-running (gfx:running?) t)
-  (num-check 'gfx-held-by-its-driver
-             (%eq? (device-owner *gfx*) (server-task gfx:*driver*)) t)
-  (num-check 'gfx-refused-to-everybody-else (device-usable? *gfx*) nil)
   (num-check 'wait-vblank-is-the-kernels (wait-vblank) sigf-vblank)
   (let ((big (alloc-bitmap 1024 768)) (sleeps gfx:*sleeps*))
     (bm-fill-rect big 0 0 1024 768 9)
@@ -878,12 +928,12 @@
     (num-check 'and-a-dead-server-answers-at-once
                (failure? (raw-request (server-port s) 'again)) t)
     (exec::free-signal me sig))
-  ;; A driver that ends gives its device back, and the next one takes it.
+  ;; A driver that ends takes its page with it, and the next one makes its
+  ;; own.
   (let ((old disk:*driver*))
     (remove-task (server-task old))
-    (num-check 'a-dead-driver-gives-the-disk-back (device-owner *disk*) nil)
-    (num-check 'and-is-not-running (disk:running?) nil)
-    (num-check 'with-no-driver-a-call-goes-direct (number? (disk:size)) t)
+    (num-check 'a-dead-driver-is-not-running (disk:running?) nil)
+    (num-check 'and-with-no-driver-there-is-no-disk (refused? (lambda () (disk:size))) t)
     (disk:start)
     (num-check 'a-new-driver-takes-it (disk:running?) t)
     (num-check 'in-a-new-task
@@ -957,7 +1007,8 @@
          (narrow (%cap-bounds-exact b 4))
          (f (let ((n 5)) (lambda () n)))
          (opened (unsafe (open-closure f)))
-         (page (unsafe (dev-page hw::*sys*))))
+         (page (unsafe (device-page dev-sys)))
+         (blit (unsafe (device-page dev-blit))))
     ;; nil is the read-only cell at address 0, and not the number 0.
     (num-check 'nil-is-not-zero (eq? nil 0) nil)
     (num-check 'nil-is-the-cell-at-zero
@@ -992,7 +1043,7 @@
     (num-check 'narrowed (list (%cap-base narrow) (%cap-len narrow)) (list (%addr-of b) 4))
     (num-check 'a-device-is-its-page
                (list (%cap-len page) (%cap-perms page))
-               (list hw::device-page-bytes (logior perm-ld perm-sd perm-sc)))
+               (list device-page-bytes (logior perm-ld perm-sd)))
     (num-check 'inside-the-bounds-reads (%cap-ld-word b 4) 0)
     ;; A closure is sealed: calling it is the only way in, unless the escape
     ;; hatch opens it.
@@ -1022,10 +1073,14 @@
     (num-check 'past-the-bounds-is-refused (refused? (lambda () (%cap-ld-word b 8))) t)
     (num-check 'a-store-past-them-too (refused? (lambda () (%cap-st-byte! b 8 1))) t)
     (num-check 'narrowed-is-refused-beyond (refused? (lambda () (%cap-ld-word narrow 4))) t)
-    (num-check 'past-a-device-page-is-refused (refused? (lambda () (%cap-ld-word page hw::device-page-bytes))) t)
+    (num-check 'past-a-device-page-is-refused
+               (refused? (lambda () (%cap-ld-word page device-page-bytes))) t)
     (num-check 'a-device-hands-out-no-capability (refused? (lambda () (%cap-ld page 0))) t)
-    (num-check 'and-only-a-capability-register-takes-one
+    (num-check 'a-page-without-sc-takes-none
                (refused? (lambda () (%cap-st! page hw::sys-ramsize v)))
+               t)
+    (num-check 'and-only-a-capability-register-takes-one
+               (refused? (lambda () (%cap-st! blit blit-status-reg v)))
                t)
     ;; A chip is handed capabilities, not numbers.
     (num-check 'a-chip-refuses-a-number

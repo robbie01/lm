@@ -22,7 +22,7 @@
 ;;;
 ;;; Where the pointer is right now is not a message. The driver keeps it in
 ;;; three variables, updated with each event it takes, and anybody may read
-;;; them.
+;;; them. The chip's page is the driver's alone, kept in its closures.
 
 (in-package input)
 
@@ -44,21 +44,21 @@
 ;; server masks the line and wakes the driver, and the driver turns the line
 ;; back on once it has emptied the queue; anything that arrived in between
 ;; raises it again at once.
-(define (poll)
-  (let ((e (input-take)))
+(define (poll page)
+  (let ((e (input-take page)))
     (while e
-      (publish (decode e))
-      (set! e (input-take))))
+      (publish (decode page e))
+      (set! e (input-take page))))
   (int-enable int-input)
   nil)
 
 ;; The chip's event word, laid out as the input section of hw.lisp says.
-(define (decode w)
+(define (decode page w)
   (let ((kind (%lsh w -28)))
     (cond ((%= kind ev-keydown)
-           (list 'key 'down (key-ascii-bits w) (key-code-bits w) (input-mods)))
+           (list 'key 'down (key-ascii-bits w) (key-code-bits w) (input-mods page)))
           ((%= kind ev-keyup)
-           (list 'key 'up (key-ascii-bits w) (key-code-bits w) (input-mods)))
+           (list 'key 'up (key-ascii-bits w) (key-code-bits w) (input-mods page)))
           ((%= kind ev-wheel)
            (list 'wheel (wheel-delta (%logand w 4095)) *mouse-x* *mouse-y*))
           ((if (%>= kind ev-mousemove) (%<= kind ev-buttonup) nil)
@@ -69,7 +69,7 @@
                  (b (%logand w 15)))
              (set! *mouse-x* x)
              (set! *mouse-y* y)
-             (set! *mouse-buttons* (input-buttons))
+             (set! *mouse-buttons* (input-buttons page))
              (cond ((%= kind ev-mousemove) (list 'mouse 'moved x y))
                    ((%= kind ev-buttondown) (list 'button 'down b x y))
                    (else (list 'button 'up b x y)))))
@@ -95,7 +95,7 @@
     (dolist (p ps) (if (port-open? p) (set! keep (%cons p keep)) nil))
     (reverse keep)))
 
-(define (serve body)
+(define (serve page body)
   (let ((op (%car body)))
     (cond ((%eq? op 'subscribe)
            (set! *subscribers* (%cons (cadr body) (remove-eq (cadr body) *subscribers*)))
@@ -104,20 +104,18 @@
            (set! *subscribers* (remove-eq (cadr body) *subscribers*))
            t)
           ((%eq? op 'inject)
-           (input-inject (cadr body) (caddr body) (cadddr body) (nth 4 body))
+           (input-inject page (cadr body) (caddr body) (cadddr body) (nth 4 body))
            t)
           (else (error "input.driver: no such request:" op)))))
 
-;; Running exactly when it holds the device; see `disk:running?`.
-(define (running?)
-  (if *driver*
-      (%eq? (device-owner *input*) (server-task *driver*))
-      nil))
+(define (running?) (server-running? *driver*))
 
+;; The page goes into the closures before the task exists; see `disk:start`.
 (define (start)
   (if (running?)
       *driver*
-      (let* ((s (make-server "input.driver" 20 (lambda (body) (serve body))))
+      (let* ((page (unsafe (device-page dev-input)))
+             (s (make-server "input.driver" 20 (lambda (body) (serve page body))))
              (task (server-task s))
              (port (server-port s))
              (int (make-interrupt "input" 0
@@ -127,9 +125,8 @@
         ;; After a resume the old list names the ports of tasks that belonged
         ;; to the Exec before this one.
         (set! *subscribers* nil)
-        (input-interrupts! t)
-        (claim-device-for *input* task)
-        (server-poll! s (lambda () (poll)))
+        (input-interrupts! page t)
+        (server-poll! s (lambda () (poll page)))
         (add-int-server int-input int)
         (on-task-end task (lambda () (remove-int-server int-input int)))
         (set! *driver* s)
@@ -139,7 +136,7 @@
 
 ;; ---------------------------------------------------------------- clients
 (define (driver-port)
-  (if *driver* (server-port *driver*) (error "input: there is no driver")))
+  (if (running?) (server-port *driver*) (error "input: there is no driver")))
 
 ;; A port that every event arrives on from now on, as a message whose body is
 ;; the event.
@@ -164,8 +161,7 @@
 (define (inject kind ascii code payload)
   (request (driver-port) (list 'inject kind ascii code payload)))
 
-;; Where the pointer is, as of the last event the driver took, or straight
-;; from the chip while no driver holds it.
-(define (mouse-x) (if (device-usable? *input*) (input-mouse-x) *mouse-x*))
-(define (mouse-y) (if (device-usable? *input*) (input-mouse-y) *mouse-y*))
-(define (mouse-buttons) (if (device-usable? *input*) (input-buttons) *mouse-buttons*))
+;; Where the pointer is, as of the last event the driver took.
+(define (mouse-x) *mouse-x*)
+(define (mouse-y) *mouse-y*)
+(define (mouse-buttons) *mouse-buttons*)
