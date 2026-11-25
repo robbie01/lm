@@ -151,12 +151,11 @@
 
 (in-package gc)
 (export '(
-  alloc-code forget-package forget-unused-packages frame-ok?
+  alloc-code forget-package forget-unused-packages
   cons-chunk gc collect extra-roots collect-for-image
-  invalidate-runs note-run! take-owed-run slot
-  scan-conservative scan-frames in-stub? install-allocator obj-take
-  refill-cons register-code room stub-args-off stub-frame-size
-  stub-mask-off stub-raw-off
+  invalidate-runs note-run! take-owed-run
+  scan-context drop-context-run empty-cons-run install-allocator obj-take
+  refill-cons-run register-code code-registry-bytes gc-scratch room
   barrier busy? step pace
 ))
 
