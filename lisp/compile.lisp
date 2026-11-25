@@ -476,9 +476,8 @@
 ;; which registers are live.
 ;;
 ;; The pair is built in t2 when the destination is also an operand.
-(define (emit-cons c car-reg cdr-reg dst)
-  (let* ((a (cx-asm c))
-         (p (if (if (%= dst car-reg) t (%= dst cdr-reg)) $t2 dst)))
+(define (emit-cons a car-reg cdr-reg dst)
+  (let ((p (if (if (%= dst car-reg) t (%= dst cdr-reg)) $t2 dst)))
     (i-csetboundsimm a p $gp (%* 2 value-bytes))
     (i-cincoffsetimm a $gp $gp (%* 2 value-bytes))
     (i-sc a car-reg p 0)
@@ -534,47 +533,52 @@
         ((predicate-kind op) t)
         (else nil)))
 
-;; Jump to `label` unless the value in a0 passes. nil is the value in tp, so
-;; the null test is one comparison of identity; every object's kind is at
-;; least kind-object.
-(define (emit-predicate-jump-false c op label)
+;; The tests below jump to `label` when the test comes out the way `holds`
+;; says: when it holds, or, with `holds` nil, when it fails.
+
+;; Whether the value in r passes. nil is the value in tp, so the null test is
+;; one comparison of identity; every object's kind is at least kind-object.
+(define (emit-predicate-jump c op label r holds)
   (let ((a (cx-asm c)))
     (cond
-     ((%eq? op '%null?) (i-bnex a $a0 $tp label))
+     ((%eq? op '%null?) (if holds (i-beqx a r $tp label) (i-bnex a r $tp label)))
      ((%eq? op '%object?)
-      (i-vkind a $t2 $a0)
+      (i-vkind a $t2 r)
       (i-li a $t3 kind-object)
-      (i-blt a $t2 $t3 label))
+      (if holds (i-bge a $t2 $t3 label) (i-blt a $t2 $t3 label)))
      (else
       (let ((k (predicate-kind op)))
-        (i-vkind a $t2 $a0)
+        (i-vkind a $t2 r)
         (if (%= k 0)
-            (i-bnez a $t2 label)
+            (emit-flag-jump a $t2 label (not holds))
             (begin
               (i-li a $t3 k)
-              (i-bne a $t2 $t3 label))))))))
+              (if holds (i-beq a $t2 $t3 label) (i-bne a $t2 $t3 label)))))))))
+
+(define (emit-flag-jump a flag label set)
+  (if set (i-bnez a flag label) (i-beqz a flag label)))
 
 (define (predicate-emitter op)
-  (lambda (c) (emit-bool c $a0 (lambda (no) (emit-predicate-jump-false c op no)))))
+  (lambda (c) (emit-bool c $a0 (lambda (no) (emit-predicate-jump c op no $a0 nil)))))
 
-;; Jump to `label` unless the comparison of a0 with a1 holds. The numeric
-;; ones go through `flt` and `feq`, which check their operands and widen for
-;; bignums, then branch on the flag. `%eq?` is identity, exact in tag,
-;; metadata and address, and branches directly.
-(define (emit-compare-jump-false c op label)
+;; Whether the comparison of x with y holds. The numeric ones go through
+;; `flt` and `feq`, which check their operands and widen for bignums, then
+;; branch on the flag. `%eq?` is identity, exact in tag, metadata and
+;; address, and branches directly.
+(define (emit-compare-jump c op label x y holds)
   (let ((a (cx-asm c)))
     (cond
-     ((%eq? op '%<) (i-flt a $t2 $a0 $a1) (i-beqz a $t2 label))
-     ((%eq? op '%>) (i-flt a $t2 $a1 $a0) (i-beqz a $t2 label))
-     ((%eq? op '%<=) (i-flt a $t2 $a1 $a0) (i-bnez a $t2 label))
-     ((%eq? op '%>=) (i-flt a $t2 $a0 $a1) (i-bnez a $t2 label))
-     ((%eq? op '%=) (i-feq a $t2 $a0 $a1) (i-beqz a $t2 label))
-     (else (i-bnex a $a0 $a1 label)))))
+     ((%eq? op '%<) (i-flt a $t2 x y) (emit-flag-jump a $t2 label holds))
+     ((%eq? op '%>) (i-flt a $t2 y x) (emit-flag-jump a $t2 label holds))
+     ((%eq? op '%<=) (i-flt a $t2 y x) (emit-flag-jump a $t2 label (not holds)))
+     ((%eq? op '%>=) (i-flt a $t2 x y) (emit-flag-jump a $t2 label (not holds)))
+     ((%eq? op '%=) (i-feq a $t2 x y) (emit-flag-jump a $t2 label holds))
+     (else (if holds (i-beqx a x y label) (i-bnex a x y label))))))
 
 (define (comparison? op) (memq op '(%< %> %<= %>= %= %eq?)))
 
 (define (comparison-emitter op)
-  (lambda (c) (emit-bool c $a0 (lambda (no) (emit-compare-jump-false c op no)))))
+  (lambda (c) (emit-bool c $a0 (lambda (no) (emit-compare-jump c op no $a0 $a1 nil)))))
 
 ;; ---------------------------------------------------------------- prologue
 (define (emit-prologue c nreq variadic)
@@ -781,11 +785,90 @@
   (let ((ci (compile-info! name)))
     (%set-cdr! ci (%cons (%cons nargs target) (%cdr ci)))))
 
-;; Emitters for the intrinsics that are one instruction, from a0, or from a0
-;; and a1, into a0; and the same answering t or nil from the flag the
-;; instruction leaves.
-(define (one-op op) (lambda (c) (%funcall op (cx-asm c) $a0 $a0)))
-(define (two-op op) (lambda (c) (%funcall op (cx-asm c) $a0 $a0 $a1)))
+;; ---------------------------------------------------------------- operators in place
+;; Most intrinsics are one instruction that can read its operands from any
+;; register and write its result to any register. Those are defined with
+;; `defop`, whose emitter is handed the assembler, the register for the
+;; result or nil when nothing wants it, and the registers holding the
+;; arguments. In a leaf an operand that is a local is read where it lives,
+;; and an assignment to a local can be the instruction's own destination,
+;; so (set! i (%+ i n)) is one `fadd` on the registers. Elsewhere the
+;; arguments are in a0, a1 and a2 and the result goes to a0, as for any
+;; other intrinsic.
+;;
+;; Each emitter reads every operand before it writes the result, since the
+;; result may be an operand's register.
+;;
+;; A store defined with `defstore` takes a value of 0 from x0, and so does a
+;; comparison in a test position. Nothing else does: a trap that names the
+;; value it refused reads the operand's register out of the saved context,
+;; where slot zero is the pc. A store's value is never read there, a store
+;; that trips the write barrier runs again, and widening reads x0 as 0.
+(define *in-place-ops* nil)   ; (name emitter zero-at)
+
+(define (defop name arity fn) (defop-1 name arity fn nil))
+(define (defstore name arity fn) (defop-1 name arity fn (%- arity 1)))
+
+(define (defop-1 name arity fn zero-at)
+  (set! *in-place-ops* (%cons (list name fn zero-at) *in-place-ops*))
+  (definline name arity
+    (lambda (c) (%funcall fn (cx-asm c) $a0 (list $a0 $a1 $a2)))))
+
+(define (value-reg d) (if d d $a0))
+
+;; A copy of s into d, if anything wants it and it is not there already.
+(define (emit-move a d s)
+  (if d (if (%= d s) nil (i-mv a d s)) nil))
+
+(define (op1 op) (lambda (a d rs) (%funcall op a (value-reg d) (%car rs))))
+(define (op2 op) (lambda (a d rs) (%funcall op a (value-reg d) (%car rs) (cadr rs))))
+
+;; An indexed load or store of an object of type ty: object, index and, for
+;; a store, the value. A store's value is the value stored.
+(define (indexed-load op ty)
+  (lambda (a d rs) (%funcall op a (value-reg d) (%car rs) (cadr rs) ty)))
+(define (indexed-store op ty)
+  (lambda (a d rs)
+    (%funcall op a (caddr rs) (%car rs) (cadr rs) ty)
+    (emit-move a d (caddr rs))))
+
+;; A store of the second operand through the first.
+(define (store-through op)
+  (lambda (a d rs)
+    (%funcall op a (cadr rs) (%car rs))
+    (emit-move a d (cadr rs))))
+
+;; An operator whose operands can be read where they are, compiled with its
+;; result in dst, or nowhere when dst is nil: answers whether form was one.
+;; An operator with its second argument written down is one too. An indexed
+;; access with its index written down is not, and is left to its own case.
+(define (emit-operation c form dst)
+  (let* ((h (%car form)) (args (%cdr form)) (n (length args)))
+    (if (if (%symbol? h) (cx-lookup c h) t)
+        nil
+        (let ((ca (const-arg-entry h args)))
+          (cond
+           (ca (emit-const-arg c ca args dst) t)
+           ((indexed-imm-entry h args) nil)
+           (else
+            (let ((op (assq (intrinsic-name h n) *in-place-ops*)))
+              (if (if op (%= n (%car (inline-entry h n))) nil)
+                  (begin
+                    (%funcall (cadr op) (cx-asm c) dst
+                              (compile-operands c args t (caddr op)))
+                    t)
+                  nil))))))))
+
+;; The same from where compile-expr's check of a raw name has not run.
+(define (compile-operation c form dst)
+  (if (%cons? form)
+      (if (emit-operation c form dst)
+          (begin (check-head c (%car form)) t)
+          nil)
+      nil))
+
+;; Emitters for the intrinsics that are one instruction answering t or nil
+;; from the flag it leaves, from a0, or from a0 and a1.
 
 (define (one-test op)
   (lambda (c)
@@ -817,8 +900,9 @@
 ;; A second operand that is written down needs no register and no instruction
 ;; to load it, and a shift by a written-down amount needs no run-time choice
 ;; of direction. Entries are (name fits? emitter); the emitter is handed the
-;; context and the constant, with the first argument in a0. A name that
-;; aliases one of these, such as `+` for `%+o`, is found through its alias.
+;; assembler, the register for the result, the register holding the first
+;; argument, and the constant. A name that aliases one of these, such as `+`
+;; for `%+o`, is found through its alias.
 (define *const-arg* nil)
 
 ;; The immediate is the constant itself, twelve signed bits, and a
@@ -836,34 +920,32 @@
             nil)
         nil)))
 
-(define (emit-const-arg c e args tail)
-  (compile-expr c (%car args) nil)
-  (%funcall (caddr e) c (cadr args))
-  (if tail (emit-return c) nil))
+;; The first argument is read where it is when it is a leaf's local.
+(define (emit-const-arg c e args dst)
+  (%funcall (caddr e) (cx-asm c) (value-reg dst)
+            (compile-operand c (%car args)) (cadr args)))
 
 ;; `faddi` wraps and `faddio` traps on overflow, which the handler widens.
-(define (emit-add-const c k) (i-faddi (cx-asm c) $a0 $a0 k))
-(define (emit-sub-const c k) (i-faddi (cx-asm c) $a0 $a0 (%- 0 k)))
-(define (emit-add-const-o c k) (i-faddio (cx-asm c) $a0 $a0 k))
-(define (emit-sub-const-o c k) (i-faddio (cx-asm c) $a0 $a0 (%- 0 k)))
-(define (emit-and-const c k) (i-fandi (cx-asm c) $a0 $a0 k))
-(define (emit-or-const c k) (i-fori (cx-asm c) $a0 $a0 k))
+(define (emit-add-const a d s k) (i-faddi a d s k))
+(define (emit-sub-const a d s k) (i-faddi a d s (%- 0 k)))
+(define (emit-add-const-o a d s k) (i-faddio a d s k))
+(define (emit-sub-const-o a d s k) (i-faddio a d s (%- 0 k)))
+(define (emit-and-const a d s k) (i-fandi a d s k))
+(define (emit-or-const a d s k) (i-fori a d s k))
 
-(define (emit-shift-const c k arith)
-  (let ((a (cx-asm c)))
-    (if (%= k 0)
-        nil
-        (if (%> k 0)
-            (i-fshi a $a0 $a0 0 k)
-            (i-fshi a $a0 $a0 (if arith 2 1) (%- 0 k))))))
+(define (emit-shift-const a d s k arith)
+  (cond
+   ((%= k 0) (emit-move a d s))
+   ((%> k 0) (i-fshi a d s 0 k))
+   (else (i-fshi a d s (if arith 2 1) (%- 0 k)))))
 
-(define (emit-lsh-const c k) (emit-shift-const c k nil))
-(define (emit-ash-const c k) (emit-shift-const c k t))
+(define (emit-lsh-const a d s k) (emit-shift-const a d s k nil))
+(define (emit-ash-const a d s k) (emit-shift-const a d s k t))
 
 ;; A load at a written-down offset within a capability is the load's own
 ;; offset field.
 (define (cap-load-const op)
-  (lambda (c k) (%funcall op (cx-asm c) $a0 $a0 k)))
+  (lambda (a d s k) (%funcall op a d s k)))
 
 (define (setup-const-arg)
   (set! *const-arg*
@@ -914,6 +996,7 @@
 (define (setup-intrinsics)
   (dolist (s *inline-syms*) (%set-symbol-function! s nil))
   (set! *inline-syms* nil)
+  (set! *in-place-ops* nil)
   (set! *indexed-imm*
         (list (list '%slot 0 nil) (list '%set-slot! 0 t)
               (list '%record-ref t-record nil) (list '%record-set! t-record t)
@@ -922,29 +1005,27 @@
 
   ;; ---- pairs ----
   ;; One custom-0 instruction each, with the base checked on the way past.
-  (definline '%car 1 (lambda (c) (i-car (cx-asm c) $a0 $a0)))
-  (definline '%cdr 1 (lambda (c) (i-cdr (cx-asm c) $a0 $a0)))
-  (definline '%set-car! 2
-    (lambda (c) (i-set-car (cx-asm c) $a1 $a0) (i-mv (cx-asm c) $a0 $a1)))
-  (definline '%set-cdr! 2
-    (lambda (c) (i-set-cdr (cx-asm c) $a1 $a0) (i-mv (cx-asm c) $a0 $a1)))
-  (definline '%cons 2 (lambda (c) (emit-cons c $a0 $a1 $a0)))
+  (defop '%car 1 (op1 i-car))
+  (defop '%cdr 1 (op1 i-cdr))
+  (defstore '%set-car! 2 (store-through i-set-car))
+  (defstore '%set-cdr! 2 (store-through i-set-cdr))
+  (defop '%cons 2 (lambda (a d rs) (emit-cons a (%car rs) (cadr rs) (value-reg d))))
 
   ;; ---- fixnum arithmetic ----
   ;; One checked instruction each. The operands are checked to be fixnums,
   ;; and the trap handler widens an operation with a bignum in it.
-  (definline '%+ 2 (two-op i-fadd))
-  (definline '%- 2 (two-op i-fsub))
-  (definline '%* 2 (two-op i-fmul))
+  (defop '%+ 2 (op2 i-fadd))
+  (defop '%- 2 (op2 i-fsub))
+  (defop '%* 2 (op2 i-fmul))
   ;; The same three, trapping rather than wrapping when the answer does not
   ;; fit in 32 bits. `+`, `-` and `*` are made of these: the trap handler
   ;; widens the operation into a bignum and resumes, so an integer that fits
   ;; costs one instruction.
-  (definline '%+o 2 (two-op i-faddo))
-  (definline '%-o 2 (two-op i-fsubo))
-  (definline '%*o 2 (two-op i-fmulo))
-  (definline '%/ 2 (two-op i-fdiv))
-  (definline '%rem 2 (two-op i-frem))
+  (defop '%+o 2 (op2 i-faddo))
+  (defop '%-o 2 (op2 i-fsubo))
+  (defop '%*o 2 (op2 i-fmulo))
+  (defop '%/ 2 (op2 i-fdiv))
+  (defop '%rem 2 (op2 i-frem))
   ;; Euclidean: the sign of the result follows the divisor.
   (definline '%mod 2
     (lambda (c)
@@ -958,9 +1039,9 @@
         (i-mv a $a0 $t2))))
 
   ;; ---- bitwise ----
-  (definline '%logand 2 (two-op i-fand))
-  (definline '%logior 2 (two-op i-for))
-  (definline '%logxor 2 (two-op i-fxor))
+  (defop '%logand 2 (op2 i-fand))
+  (defop '%logior 2 (op2 i-for))
+  (defop '%logxor 2 (op2 i-fxor))
   (definline '%lognot 1
     (lambda (c)
       (let ((a (cx-asm c)))
@@ -1026,48 +1107,34 @@
     (lambda (c)
       (i-stx (cx-asm c) $a2 $a0 $a1 0)
       (i-mv (cx-asm c) $a0 $a2)))
-  (definline '%record-ref 2
-    (lambda (c) (i-ldx (cx-asm c) $a0 $a0 $a1 t-record)))
-  (definline '%record-set! 3
-    (lambda (c)
-      (i-stx (cx-asm c) $a2 $a0 $a1 t-record)
-      (i-mv (cx-asm c) $a0 $a2)))
+  (defop '%record-ref 2 (indexed-load i-ldx t-record))
+  (defstore '%record-set! 3 (indexed-store i-stx t-record))
 
   ;; These name the type they require, so (vector-ref "abc" 0) traps.
-  (definline '%vector-ref 2
-    (lambda (c) (i-ldx (cx-asm c) $a0 $a0 $a1 t-vector)))
-  (definline '%vector-set! 3
-    (lambda (c)
-      (i-stx (cx-asm c) $a2 $a0 $a1 t-vector)
-      (i-mv (cx-asm c) $a0 $a2)))
-  (definline '%vector-length 1 (lambda (c) (i-lhdr (cx-asm c) $a0 $a0 t-vector)))
-  (definline '%string-length 1 (lambda (c) (i-lhdr (cx-asm c) $a0 $a0 t-string)))
-  (definline '%bytes-length 1 (lambda (c) (i-lhdr (cx-asm c) $a0 $a0 t-bytes)))
+  (defop '%vector-ref 2 (indexed-load i-ldx t-vector))
+  (defstore '%vector-set! 3 (indexed-store i-stx t-vector))
+  (defop '%vector-length 1 (lambda (a d rs) (i-lhdr a (value-reg d) (%car rs) t-vector)))
+  (defop '%string-length 1 (lambda (a d rs) (i-lhdr a (value-reg d) (%car rs) t-string)))
+  (defop '%bytes-length 1 (lambda (a d rs) (i-lhdr a (value-reg d) (%car rs) t-bytes)))
   ;; A string holds the codes of its characters, a byte each; a character is
   ;; its code retagged, and `retag` checks the kind it was given on the way.
-  (definline '%string-ref 2
-    (lambda (c)
-      (let ((a (cx-asm c)))
-        (i-ldxb a $a0 $a0 $a1 t-string)
-        (i-retag a $a0 $a0 kind-fixnum kind-char))))
-  (definline '%string-set! 3
-    (lambda (c)
-      (let ((a (cx-asm c)))
-        (i-retag a $t3 $a2 kind-char kind-fixnum)
-        (i-stxb a $t3 $a0 $a1 t-string)
-        (i-mv a $a0 $a2))))
-  (definline '%bytes-ref 2
-    (lambda (c) (i-ldxb (cx-asm c) $a0 $a0 $a1 t-bytes)))
-  (definline '%bytes-set! 3
-    (lambda (c)
-      (i-stxb (cx-asm c) $a2 $a0 $a1 t-bytes)
-      (i-mv (cx-asm c) $a0 $a2)))
+  (defop '%string-ref 2
+    (lambda (a d rs)
+      (i-ldxb a (value-reg d) (%car rs) (cadr rs) t-string)
+      (i-retag a (value-reg d) (value-reg d) kind-fixnum kind-char)))
+  (defop '%string-set! 3
+    (lambda (a d rs)
+      (i-retag a $t3 (caddr rs) kind-char kind-fixnum)
+      (i-stxb a $t3 (%car rs) (cadr rs) t-string)
+      (emit-move a d (caddr rs))))
+  (defop '%bytes-ref 2 (indexed-load i-ldxb t-bytes))
+  (defstore '%bytes-set! 3 (indexed-store i-stxb t-bytes))
 
   ;; ---- characters ----
-  (definline '%char->int 1
-    (lambda (c) (i-retag (cx-asm c) $a0 $a0 kind-char kind-fixnum)))
-  (definline '%int->char 1
-    (lambda (c) (i-retag (cx-asm c) $a0 $a0 kind-fixnum kind-char)))
+  (defop '%char->int 1
+    (lambda (a d rs) (i-retag a (value-reg d) (%car rs) kind-char kind-fixnum)))
+  (defop '%int->char 1
+    (lambda (a d rs) (i-retag a (value-reg d) (%car rs) kind-fixnum kind-char)))
 
   ;; ---- raw memory ----
   ;; Memory named by an integer address, through DDC: the root. A word
@@ -1081,18 +1148,14 @@
       (let ((a (cx-asm c)))
         (i-cspecialrw a $t2 scr-ddc $zero)
         (i-csetaddr a $a0 $t2 $a0))))
-  (definline '%ld-word 1 (one-op i-lw-ddc))
-  (definline '%ld-half 1 (one-op i-lhu-ddc))
-  (definline '%ld-byte 1 (one-op i-lbu-ddc))
-  (definline '%ld-cap 1 (one-op i-lc-ddc))
-  (definline '%st-word! 2
-    (lambda (c) (i-sw-ddc (cx-asm c) $a1 $a0) (i-mv (cx-asm c) $a0 $a1)))
-  (definline '%st-half! 2
-    (lambda (c) (i-sh-ddc (cx-asm c) $a1 $a0) (i-mv (cx-asm c) $a0 $a1)))
-  (definline '%st-byte! 2
-    (lambda (c) (i-sb-ddc (cx-asm c) $a1 $a0) (i-mv (cx-asm c) $a0 $a1)))
-  (definline '%st-cap! 2
-    (lambda (c) (i-sc-ddc (cx-asm c) $a1 $a0) (i-mv (cx-asm c) $a0 $a1)))
+  (defop '%ld-word 1 (op1 i-lw-ddc))
+  (defop '%ld-half 1 (op1 i-lhu-ddc))
+  (defop '%ld-byte 1 (op1 i-lbu-ddc))
+  (defop '%ld-cap 1 (op1 i-lc-ddc))
+  (defstore '%st-word! 2 (store-through i-sw-ddc))
+  (defstore '%st-half! 2 (store-through i-sh-ddc))
+  (defstore '%st-byte! 2 (store-through i-sb-ddc))
+  (defstore '%st-cap! 2 (store-through i-sc-ddc))
 
   ;; ---- capabilities ----
   ;; The operations on a capability the caller already holds. A load or a
@@ -1107,31 +1170,31 @@
   (definline '%cap-st-byte! 3 (cap-store i-sb))
   ;; The address of anything, as a fixnum: a pointer's, or an immediate's
   ;; payload. Following it again takes the root.
-  (definline '%addr-of 1 (one-op i-cgetaddr))
-  (definline '%cap-base 1 (one-op i-cgetbase))
-  (definline '%cap-len 1 (one-op i-cgetlen))
-  (definline '%cap-top 1 (one-op i-cgettop))
-  (definline '%cap-perms 1 (one-op i-cgetperm))
-  (definline '%cap-otype 1 (one-op i-cgettype))
-  (definline '%cap-offset 1 (one-op i-cgetoffset))
-  (definline '%cap-high 1 (one-op i-cgethigh))
+  (defop '%addr-of 1 (op1 i-cgetaddr))
+  (defop '%cap-base 1 (op1 i-cgetbase))
+  (defop '%cap-len 1 (op1 i-cgetlen))
+  (defop '%cap-top 1 (op1 i-cgettop))
+  (defop '%cap-perms 1 (op1 i-cgetperm))
+  (defop '%cap-otype 1 (op1 i-cgettype))
+  (defop '%cap-offset 1 (op1 i-cgetoffset))
+  (defop '%cap-high 1 (op1 i-cgethigh))
   (definline '%cap-tag? 1 (one-test i-cgettag))
   (definline '%cap-sealed? 1 (one-test i-cgetsealed))
-  (definline '%cap-set-addr 2 (two-op i-csetaddr))
-  (definline '%cap-inc 2 (two-op i-cincoffset))
-  (definline '%cap-bounds 2 (two-op i-csetbounds))
-  (definline '%cap-bounds-exact 2 (two-op i-csetboundsexact))
-  (definline '%cap-and-perms 2 (two-op i-candperm))
-  (definline '%cap-clear-tag 1 (one-op i-ccleartag))
-  (definline '%cap-seal-entry 1 (one-op i-csealentry))
+  (defop '%cap-set-addr 2 (op2 i-csetaddr))
+  (defop '%cap-inc 2 (op2 i-cincoffset))
+  (defop '%cap-bounds 2 (op2 i-csetbounds))
+  (defop '%cap-bounds-exact 2 (op2 i-csetboundsexact))
+  (defop '%cap-and-perms 2 (op2 i-candperm))
+  (defop '%cap-clear-tag 1 (op1 i-ccleartag))
+  (defop '%cap-seal-entry 1 (op1 i-csealentry))
   ;; A closure object sealed as a closure, which only `jcl` opens again:
   ;; anyone may seal their own closure, and nobody may open one.
-  (definline '%cap-seal-closure 1 (one-op i-csealclo))
+  (defop '%cap-seal-closure 1 (op1 i-csealclo))
   ;; With an authority that has SE and whose address is the otype.
-  (definline '%cap-seal 2 (two-op i-cseal))
-  (definline '%cap-unseal 2 (two-op i-cunseal))
+  (defop '%cap-seal 2 (op2 i-cseal))
+  (defop '%cap-unseal 2 (op2 i-cunseal))
   ;; Untagged, with the metadata given: how an immediate is made from parts.
-  (definline '%cap-set-high 2 (two-op i-csethigh))
+  (defop '%cap-set-high 2 (op2 i-csethigh))
   (definline '%cap=? 2 (two-test i-cseqx))
   ;; (%cap-subset? a b): whether b's bounds and permissions lie within a's,
   ;; both tagged or both not. `ctestsubset` asks it of its second operand
@@ -1142,8 +1205,8 @@
       (emit-bool-from-flag c $t2 $a0)))
   ;; The length and the alignment mask the processor would round a request
   ;; for n bytes to, so an allocator can pad an object to bounds it can have.
-  (definline '%rrl 1 (one-op i-crrl))
-  (definline '%ram 1 (one-op i-cram))
+  (defop '%rrl 1 (op1 i-crrl))
+  (defop '%ram 1 (op1 i-cram))
 
   ;; ---- min and max ----
   ;; The comparison is `flt`, which checks its operands and widens through
@@ -1165,7 +1228,7 @@
         (label a done))))
 
   ;; ---- bits ----
-  (definline '%popcount 1 (one-op i-cpop))
+  (defop '%popcount 1 (op1 i-cpop))
 
   ;; A bit array at an integer address, indexed by bit number: the
   ;; collector's mark map. The map is addressed a word at a time, which puts
@@ -1340,27 +1403,34 @@
 ;; ---------------------------------------------------------------- branches
 ;; A test feeding an `if` or a `while` never builds a value: it becomes the
 ;; branch. Jump to `label` when the test is false.
-(define (emit-test-jump-false c form label)
+(define (emit-test-jump-false c form label) (emit-test-jump c form label nil))
+
+;; Or when it is true, as `holds` says, which is how a loop goes round.
+(define (emit-test-jump c form to holds)
   (let* ((a (cx-asm c))
          (op (if (%cons? form) (%car form) nil))
          (n (if (%cons? form) (length (%cdr form)) 0)))
     (cond
      ((if (%= n 1) (predicate? op) nil)
-      (compile-expr c (cadr form) nil)
-      (emit-predicate-jump-false c op label))
+      (emit-predicate-jump c op to (compile-operand c (cadr form)) holds))
      ((if (%= n 2) (comparison? op) nil)
-      (compile-args c (%cdr form) 2)
-      (emit-compare-jump-false c op label))
+      (let ((rs (compile-operands c (%cdr form) t t)))
+        (emit-compare-jump c op to (%car rs) (cadr rs) holds)))
      ;; An `if` in a test position is `and`, `or` or `not` spelled out, and
      ;; is walked rather than built: each arm's test becomes its own branch.
      ;; `and` expands to (if a b nil), `or` to (if a a b) through a binding,
      ;; and the kernel's hand-nested (if (if a b nil) c nil) is the same shape.
      ((%eq? op 'if)
-      (emit-if-test-jump-false c form label))
+      (if holds
+          (let ((no (gensym-label "tno")))
+            (emit-if-test-jump-false c form no)
+            (i-j a to)
+            (label a no))
+          (emit-if-test-jump-false c form to)))
      ;; Anything but nil is true.
      (else
-      (compile-expr c form nil)
-      (i-beqx a $a0 $tp label)))))
+      (let ((r (compile-operand c form)))
+        (if holds (i-bnex a r $tp to) (i-beqx a r $tp to)))))))
 
 ;; The `if` case of the above: jump to `fail` when (if test then else) is
 ;; false, without building its value.
@@ -1400,22 +1470,63 @@
 ;; ---------------------------------------------------------------- arguments
 ;; Simple arguments go straight to their register. Anything that can run code
 ;; is evaluated first and parked on the stack, so evaluation order is left to
-;; right.
+;; right. The last one that can run code is not parked: nothing evaluated
+;; after it can disturb its register.
 (define (simple-arg? form)
   (if (%cons? form) (%eq? (%car form) 'quote) t))
 
 ;; Leaves argument i in register a{i}.
 (define (compile-args c args n)
-  (let ((a (cx-asm c)) (plan nil) (pushed 0) (i 0))
-    ;; pass one: evaluate and park the complicated ones
+  (compile-operands c args nil nil)
+  n)
+
+;; The register a leaf keeps a local in, when form names one, or nil. An
+;; operator can read the local there rather than a copy.
+(define (in-place-reg c form)
+  (if (if (cx-leaf c) (%symbol? form) nil)
+      (let ((p (cx-lookup c form)))
+        (if p (if (%eq? (cadr p) 'local) (local-reg (caddr p)) nil) nil))
+      nil))
+
+;; One operand: the register it is already in, or a0.
+(define (compile-operand c form)
+  (let ((home (in-place-reg c form)))
+    (if home home (begin (compile-expr c form nil) $a0))))
+
+;; Argument i in register a{i}, or, when `in-place` says the operator can
+;; read any register, a leaf's local where it is. Argument `zero-at`, if it
+;; is a written-down 0, is read from x0, which reads as the fixnum 0; t
+;; allows that of every argument. Answers the registers.
+(define (compile-operands c args in-place zero-at)
+  (let ((a (cx-asm c)) (plan nil) (pushed 0) (i 0) (last -1) (regs nil)
+        (a0-free nil))
     (dolist (x args)
-      (if (simple-arg? x)
-          (set! plan (%cons (%cons 'simple x) plan))
-          (begin
-            (compile-expr c x nil)
-            (emit-push c $a0)
-            (set! plan (%cons (%cons 'stack pushed) plan))
-            (set! pushed (%+ pushed 1)))))
+      (if (simple-arg? x) nil (set! last i))
+      (set! i (%+ i 1)))
+    ;; When the operator takes its operands in any register, the last value
+    ;; computed can stay in a0, and a simple first argument goes where it
+    ;; would have gone instead.
+    (if (if in-place (%> last 0) nil)
+        (set! a0-free (simple-arg? (%car args)))
+        nil)
+    ;; pass one: evaluate and park the complicated ones but the last
+    (set! i 0)
+    (dolist (x args)
+      (cond
+       ((simple-arg? x) (set! plan (%cons (%cons 'simple x) plan)))
+       ((%= i last)
+        (compile-expr c x nil)
+        (if (if (%= i 0) t a0-free)
+            (set! plan (%cons (%cons 'done $a0) plan))
+            (begin
+              (i-mv a (%+ $a0 i) $a0)
+              (set! plan (%cons (%cons 'done (%+ $a0 i)) plan)))))
+       (else
+        (compile-expr c x nil)
+        (emit-push c $a0)
+        (set! plan (%cons (%cons 'stack pushed) plan))
+        (set! pushed (%+ pushed 1))))
+      (set! i (%+ i 1)))
     (set! plan (reverse plan))
     ;; pass two: the parked values, while sp still points at them
     (set! i 0)
@@ -1428,11 +1539,23 @@
     ;; pass three: the simple ones, which cannot disturb anything
     (set! i 0)
     (dolist (p plan)
-      (if (%eq? (%car p) 'simple)
-          (compile-simple-into c (%cdr p) (%+ $a0 i))
-          nil)
+      (let ((r (%+ $a0 (if (if a0-free (%= i 0) nil) last i))) (kind (%car p)))
+        (cond
+         ((%eq? kind 'simple)
+          (let ((home (if in-place (operand-home c (%cdr p) (zero-ok? zero-at i)) nil)))
+            (if home (set! r home) (compile-simple-into c (%cdr p) r))))
+         ((%eq? kind 'done) (set! r (%cdr p)))
+         (else nil))
+        (set! regs (%cons r regs)))
       (set! i (%+ i 1)))
-    n))
+    (reverse regs)))
+
+(define (zero-ok? zero-at i) (if (%eq? zero-at t) t (%eq? zero-at i)))
+
+;; Where a simple operand can be read without a register of its own: x0 for
+;; a written-down 0 where that is allowed, a leaf's local where it lives.
+(define (operand-home c form zero-ok)
+  (if (if zero-ok (%eq? form 0) nil) $zero (in-place-reg c form)))
 
 (define (compile-simple-into c form reg)
   (cond
@@ -1702,12 +1825,7 @@
 
      (else
       (let ((h (%car form)))
-        ;; Whatever the head turns out to be, an open-coded operation, an
-        ;; operator with a constant, an indexed access or a call, a raw name
-        ;; is refused here unless the site is allowed to say it.
-        (if (if (%symbol? h) (if (cx-lookup c h) nil (symbol-unsafe? h)) nil)
-            (check-unsafe c h)
-            nil)
+        (check-head c h)
         (cond
          ((%eq? h 'quote)
           (emit-const c (cadr form) $a0)
@@ -1734,11 +1852,9 @@
          ;; (%apply f list) is the same call with its arguments in a list.
          ((%eq? h '%apply) (compile-apply c (%cdr form) tail))
 
-         ;; ---- an operator whose second argument is written down ----
-         ((if (%symbol? h)
-              (if (cx-lookup c h) nil (const-arg-entry h (%cdr form)))
-              nil)
-          (emit-const-arg c (const-arg-entry h (%cdr form)) (%cdr form) tail))
+         ;; ---- an operator that reads its operands where they are, or
+         ;; ---- whose second argument is written down ----
+         ((emit-operation c form $a0) (if tail (emit-return c) nil))
 
          ;; ---- indexed access with the index written down ----
          ((if (%symbol? h)
@@ -1762,6 +1878,47 @@
             (if tail (emit-return c) nil)))
 
          (else (compile-call c form tail))))))))
+
+;; Whatever the head of a form turns out to be, an open-coded operation, an
+;; operator with a constant, an indexed access or a call, a raw name is
+;; refused unless the site is allowed to say it.
+(define (check-head c h)
+  (if (if (%symbol? h) (if (cx-lookup c h) nil (symbol-unsafe? h)) nil)
+      (check-unsafe c h)
+      nil))
+
+;; A form whose value nothing wants. An assignment leaves nothing in a0, a
+;; store leaves no copy of what it stored, and an `if` with an arm that is
+;; nil branches round the other.
+(define (compile-effect c form)
+  (let ((h (if (%cons? form) (%car form) nil)))
+    (cond
+     ((%eq? h 'set!) (compile-assign c form nil nil))
+     ((%eq? h 'if) (compile-if-effect c form))
+     ((compile-operation c form nil) nil)
+     (else (compile-expr c form nil)))))
+
+(define (compile-if-effect c form)
+  (let* ((a (cx-asm c))
+         (test (cadr form))
+         (then (caddr form))
+         (else-form (if (%cons? (cdddr form)) (cadddr form) nil))
+         (l-else (gensym-label "else"))
+         (l-end (gensym-label "endif")))
+    (cond
+     ((%null? else-form)
+      (emit-test-jump-false c test l-end)
+      (compile-effect c then))
+     ((%null? then)
+      (emit-test-jump c test l-end t)
+      (compile-effect c else-form))
+     (else
+      (emit-test-jump-false c test l-else)
+      (compile-effect c then)
+      (i-j a l-end)
+      (label a l-else)
+      (compile-effect c else-form)))
+    (label a l-end)))
 
 (define (emit-return c)
   (emit-epilogue c)
@@ -1788,7 +1945,7 @@
       (begin (i-mv (cx-asm c) $a0 $tp) (if tail (emit-return c) nil))
       (begin
         (while (%cons? (%cdr forms))
-          (compile-expr c (%car forms) nil)
+          (compile-effect c (%car forms))
           (set! forms (%cdr forms)))
         (compile-expr c (%car forms) tail))))
 
@@ -1800,9 +1957,15 @@
          (saved-n (cx-nlocals c))
          (slots nil))
     (dolist (b binds)
-      (compile-expr c (cadr b) nil)
-      (let ((slot (cx-alloc-local c)))
-        (store-local c slot $a0)
+      ;; In a leaf an operator can write the register the binding is about
+      ;; to have. Nothing in scope lives there: the slot is past every live one.
+      (let* ((n (cx-nlocals c))
+             (home (if (cx-leaf c) (if (%< n leaf-locals) (local-reg n) nil) nil))
+             (slot (if (if home (compile-operation c (cadr b) home) nil)
+                       (cx-alloc-local c)
+                       (begin
+                         (compile-expr c (cadr b) nil)
+                         (let ((s (cx-alloc-local c))) (store-local c s $a0) s)))))
         (set! slots (%cons (%cons (%car b) slot) slots))))
     (dolist (s (reverse slots))
       (cx-bind c (%car s) (box-or-plain c (%car s) (%cdr s))))
@@ -1822,25 +1985,36 @@
 ;; Replace the slot's value with a pair holding it in its car.
 (define (emit-make-box c slot)
   (load-local c slot $a2)
-  (emit-cons c $a2 $tp $a2)
+  (emit-cons (cx-asm c) $a2 $tp $a2)
   (store-local c slot $a2))
 
+;; The test is at the bottom, so a turn of the loop is the body and one
+;; branch back while the test holds.
 (define (compile-while c form tail)
   (let* ((a (cx-asm c))
          (top (gensym-label "while"))
-         (done (gensym-label "wend")))
+         (test (gensym-label "wtest")))
+    (i-j a test)
     (label a top)
-    (emit-test-jump-false c (cadr form) done)
-    (dolist (x (cddr form)) (compile-expr c x nil))
-    (i-j a top)
-    (label a done)
+    (dolist (x (cddr form)) (compile-effect c x))
+    (label a test)
+    (emit-test-jump c (cadr form) top t)
     (i-mv a $a0 $tp)
     (if tail (emit-return c) nil)))
 
-(define (compile-set c form tail)
-  (let ((name (cadr form)))
-    (compile-expr c (caddr form) nil)
-    (emit-store c (location-of c name) $a0)
+(define (compile-set c form tail) (compile-assign c form t tail))
+
+;; An assignment to a leaf's local from an operator that can write any
+;; register is that operator writing the local's register; a0 gets a copy
+;; only if the value is wanted.
+(define (compile-assign c form want tail)
+  (let* ((name (cadr form))
+         (home (in-place-reg c name)))
+    (if (if home (compile-operation c (caddr form) home) nil)
+        (if want (i-mv (cx-asm c) $a0 home) nil)
+        (begin
+          (compile-expr c (caddr form) nil)
+          (emit-store c (location-of c name) $a0)))
     (if tail (emit-return c) nil)))
 
 ;; An internal define makes a new local in the current frame.
@@ -2069,7 +2243,7 @@
     (i-cincoffset a $t6 $s0 $t6)
     (i-lc a $a3 $t6 (local-off spill))
     (label a got)
-    (emit-cons c $a3 $a2 $a2)
+    (emit-cons a $a3 $a2 $a2)
     (i-addi a $t3 $t3 -1)
     (i-j a loop)
     (label a done)

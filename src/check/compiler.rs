@@ -294,6 +294,36 @@ fn cases() -> Vec<Case> {
         Case("(let ((x 1)) (set! x 9) x)", "9"),
         Case("(let ((x 0)) (while (%< x 5) (set! x (%+ x 1))) x)", "5"),
         Case("(let ((a 1)) (let ((a 2)) a))", "2"),
+        // Leaves: operators on the locals' own registers, a store of 0 from
+        // x0, a cons built in the local it is assigned to, a loop tested at
+        // the bottom through `and`, an `if` for effect, and a parallel let
+        // whose operator writes the new local's register.
+        Case(
+            "(define (lp1 v n) (let ((i 0) (s 0)) (while (%< i n) (%vector-set! v i i) \
+             (set! s (%+ s (%vector-ref v i))) (%vector-set! v i 0) (set! i (%+ i 1))) \
+             (%cons s (%vector-ref v 9)))) (lp1 (make-vector 10 7) 10)",
+            "(45 . 0)",
+        ),
+        Case(
+            "(define (lp2 l) (let ((n 0)) (while (and (pair? l) (%< n 3)) \
+             (set! n (%+ n 1)) (set! l (%cdr l))) n)) (list (lp2 '(1 2 3 4 5)) (lp2 '(1)) (lp2 nil))",
+            "(3 1 0)",
+        ),
+        Case(
+            "(define (lp3 n) (let ((acc nil) (i 0)) (while (%< i n) (set! acc (%cons i acc)) \
+             (set! i (%+ i 1))) acc)) (lp3 4)",
+            "(3 2 1 0)",
+        ),
+        Case(
+            "(define (lp4) (let ((i 0) (k 0)) (while (%< i 6) \
+             (if (%= 0 (%logand i 1)) nil (set! k (%+ k i))) (if (%< i 3) (set! k (%+ k 100))) \
+             (set! i (%+ i 1))) k)) (lp4)",
+            "309",
+        ),
+        Case(
+            "(define (lp5 a) (let ((a (%+ a 1)) (b a)) (let ((c (%* a b))) (%cons a (%cons b c))))) (lp5 5)",
+            "(6 5 . 30)",
+        ),
         Case("(let ((a 1)) (let ((b 2)) (%+ a b)))", "3"),
         // ---- macros all the way down ----
         Case("(cond ((%< 2 1) 'a) ((%< 1 2) 'b) (else 'c))", "b"),

@@ -52,6 +52,10 @@
 (define (ctx-ref ctx n) (%cap-ld ctx (ctx-off n)))
 (define (ctx-set! ctx n v) (%cap-st! ctx (ctx-off n) v))
 
+;; What an instruction read from register n: x0 reads as 0, whatever slot 0
+;; holds.
+(define (ctx-operand ctx n) (if (%= n 0) 0 (ctx-ref ctx n)))
+
 ;; Moving the saved pc past the instruction is what makes a trap resume after
 ;; it rather than run it again.
 (define (step-past ctx n)
@@ -495,8 +499,8 @@
 ;; registers.
 (define (widened w ctx)
   (let* ((f (insn-f3 w))
-         (x (ctx-ref ctx (insn-rs1 w)))
-         (y (if (%= f 5) (ctx-ref ctx (insn-rs2 w)) (insn-imm-i w))))
+         (x (ctx-operand ctx (insn-rs1 w)))
+         (y (if (%= f 5) (ctx-operand ctx (insn-rs2 w)) (insn-imm-i w))))
     (if (if (widenable? x) (widenable? y) nil)
         (cond ((%< f 2) (generic-add x y))
               ((%= f 5) (widened-op (insn-f7 w) x y))
