@@ -39,8 +39,9 @@ enum Cmd {
     ///
     /// The sources are typed at the machine's console twice: once to make the
     /// running machine the new system, once to compile a fresh image with it.
-    /// The machine writes that image out. Nothing the old image held comes
-    /// with it, and the bootstrap interpreter is not involved.
+    /// The machine writes that image out, and the forge slides its object and
+    /// code space down. Nothing the old image held comes with it, and the
+    /// bootstrap interpreter is not involved.
     Rebuild {
         /// The image to build with
         #[arg(short, long, default_value = "kick.img")]
@@ -50,7 +51,8 @@ enum Cmd {
         #[arg(short, long, default_value = "next.img")]
         out: String,
 
-        /// Report what is being fed in and how long it took
+        /// Name every form of the second pass as it is compiled, and report
+        /// how long the machine ran
         #[arg(short, long)]
         verbose: bool,
 

@@ -4,15 +4,15 @@
 //! It brings up a machine, loads the Lisp sources into that machine's heap
 //! with the bootstrap interpreter, and then hands control to the Lisp
 //! compiler, itself one of those sources, to compile the whole system into
-//! native RISC-V in the same heap. What falls out is the
-//! kickstart image.
+//! native RISC-V in the same heap. What falls out is the kickstart image.
 
 pub mod compact;
 pub mod hostlisp;
 pub mod read;
 
-use crate::heap::*;
+use crate::cap::Cap;
 use crate::forge::hostlisp::{LErr, Lisp};
+use crate::heap::*;
 use crate::mach::Machine;
 use crate::map::*;
 
@@ -37,22 +37,11 @@ use crate::map::*;
 pub fn rebuild(from: &str, out: &str, verbose: bool, check: bool) -> i32 {
     write_layout();
     let mut sources = String::new();
-    let mut sources1 = String::new();
-    let mut bytes = 0usize;
-    let gcverbose = std::env::var_os("LM_GCVERBOSE").is_some();
     for f in SYSTEM {
         match std::fs::read_to_string(f) {
             Ok(t) => {
-                bytes += t.len();
                 sources.push_str(&t);
                 sources.push('\n');
-                sources1.push_str(&t);
-                sources1.push('\n');
-                // The first pass redefines the collector's globals, so the
-                // verbose flag is set again right after gc.lisp is compiled.
-                if gcverbose && f.ends_with("gc.lisp") {
-                    sources1.push_str("(set! gc::*verbose* t)\n");
-                }
             }
             Err(e) => {
                 eprintln!("lm: cannot read {f}: {e}");
@@ -61,16 +50,9 @@ pub fn rebuild(from: &str, out: &str, verbose: bool, check: bool) -> i32 {
         }
     }
     let mut script = String::new();
-    // LM_GCVERBOSE=1: the collector reports every cycle of the rebuild.
-    if std::env::var_os("LM_GCVERBOSE").is_some() {
-        script.push_str("(set! gc::*verbose* t)\n");
-    }
     script.push_str("(sys:rebuild)\n");
-    script.push_str(&sources1);
+    script.push_str(&sources);
     script.push_str("\nsys:rebuild-end\n");
-    if gcverbose {
-        script.push_str("(set! gc::*verbose* t)\n");
-    }
     // With --verbose, the second pass names every form as it takes it: when
     // a rebuild goes wrong, that is where it went wrong.
     if verbose {
@@ -88,11 +70,10 @@ pub fn rebuild(from: &str, out: &str, verbose: bool, check: bool) -> i32 {
         script.push_str("(snap:save-fresh)\n");
     }
     if verbose {
-        println!("rebuild: {} sources, {} bytes, on {from}", SYSTEM.len(), bytes);
+        println!("rebuild: {} sources, {} bytes, on {from}", SYSTEM.len(), sources.len());
     }
     // The new image is written to the disk the machine is given, so the disk
-    // is the output file.
-    // --check writes nothing, so it must not clear away what is there.
+    // is the output file. --check writes nothing, and leaves what is there.
     if !check {
         let _ = std::fs::remove_file(out);
     }
@@ -138,7 +119,7 @@ pub fn rebuild(from: &str, out: &str, verbose: bool, check: bool) -> i32 {
     // object or a function, so it carries every hole it ever made. Nothing is
     // running now, and a fresh image resumes nothing, so the forge can close
     // them in both.
-    if crate::forge::compact::compact_image(out, out, verbose, true) != 0 {
+    if compact::compact_image(out, out, verbose, true) != 0 {
         return 1;
     }
     match std::fs::metadata(out) {
@@ -589,7 +570,7 @@ pub fn boot_host(l: &mut Lisp) -> Result<(), LErr> {
         let text = match std::fs::read_to_string(format!("lisp/{f}")) {
             Ok(t) => t,
             Err(e) => {
-                return Err(crate::forge::hostlisp::LErr::new(format!(
+                return Err(LErr::new(format!(
                     "cannot read lisp/{f}: {e}"
                 )))
             }
@@ -655,7 +636,7 @@ pub fn host_repl(files: &[String]) -> i32 {
 /// where it is standing, because compiling a file leaves the reader in
 /// whatever package that file ended in. It stands in `lm`, which is where
 /// the bootstrap reader put everything hostio.lisp defines.
-fn drive(l: &mut Lisp, src: &str) -> crate::forge::hostlisp::Res {
+fn drive(l: &mut Lisp, src: &str) -> hostlisp::Res {
     l.eval_lisp(&format!("(in-package lm) {src}"))
 }
 
@@ -726,9 +707,9 @@ pub fn build(out: &str, verbose: bool) -> i32 {
         Ok(v) => {
             // (reset trap); the trap stub's address is kept where the
             // collection before saving and the code compactor find it.
-            let trap = crate::heap::unfix(l.h.cadr(v)) as u32;
+            let trap = unfix(l.h.cadr(v)) as u32;
             l.h.set_g(LG_TRAPENTRY, trap);
-            crate::heap::unfix(l.h.car(v)) as u32
+            unfix(l.h.car(v)) as u32
         }
         Err(e) => {
             eprint!("wiring the kickstart: {e}");
@@ -738,7 +719,7 @@ pub fn build(out: &str, verbose: bool) -> i32 {
 
     note(&l, "boot code built");
     match drive(&mut l, "(undefined-globals)") {
-        Ok(v) if v != crate::heap::NIL => {
+        Ok(v) if v != NIL => {
             let names = l.h.list_vec(v);
             let mut bad = Vec::new();
             for s in names {
@@ -747,8 +728,8 @@ pub fn build(out: &str, verbose: bool) -> i32 {
                 if n != "*unbound*" {
                     // Qualified, because the interesting question about a name
                     // nothing defines is usually which package it landed in.
-                    let pkg = l.h.slot(s, crate::heap::SYM_PACKAGE);
-                    if pkg == crate::heap::NIL {
+                    let pkg = l.h.slot(s, SYM_PACKAGE);
+                    if pkg == NIL {
                         bad.push(n);
                     } else {
                         bad.push(format!("{}:{}", l.h.package_name(pkg), n));
@@ -769,7 +750,7 @@ pub fn build(out: &str, verbose: bool) -> i32 {
     // nothing. Dropping them here is the last thing done to the heap, and it
     // leaves the reader standing somewhere that still exists.
     match l.eval_lisp("(in-package user) (gc:forget-unused-packages)") {
-        Ok(v) if v != crate::heap::NIL => {
+        Ok(v) if v != NIL => {
             let names: Vec<String> = l.h.list_vec(v).iter().map(|s| l.h.str_of(*s)).collect();
             if verbose {
                 eprintln!("dropped {} empty packages: {}", names.len(), names.join(" "));
@@ -787,14 +768,16 @@ pub fn build(out: &str, verbose: bool) -> i32 {
     // trees, assembler buffers, analysis lists) is garbage once the code is
     // placed, and nothing can see it except the interpreter, which is about
     // to be thrown away.
-    collect_before_saving(&mut l, verbose);
+    if !collect_before_saving(&mut l, verbose) {
+        return 1;
+    }
 
     blank_run_scratch(&mut l);
 
     // Objects are never moved by the machine, for reasons `gc.lisp` explains
     // at length; nothing stops the forge doing it here, on a heap that has
     // stopped, and it is most of the file.
-    match crate::forge::compact::compact_objects(&mut l.h, verbose) {
+    match compact::compact_objects(&mut l.h, verbose) {
         Ok(_) => {}
         Err(e) => {
             eprintln!("lm: compacting object space: {e}");
@@ -831,10 +814,10 @@ pub fn build(out: &str, verbose: bool) -> i32 {
 /// unsealed in `t0`, no arguments, a return sentry in `ra`, and PCC the
 /// closure's entry. `sp` is the boot stack, `gp` the empty cons run, so the
 /// first pair faults into a refill, `tp` and `s2` nil, there being no task,
-/// and the trap vector and the trap frame are the image's own. The function returns into a stub
-/// of three instructions that halts the machine.
+/// and the trap vector and the trap frame are the image's own. The function
+/// returns into a stub of three instructions that halts the machine.
 fn call_on_machine(l: &mut Lisp, name: &str, trap: u32) -> Option<V> {
-    use crate::cap::{Cap, OT_SENTRY, P_EX, P_SR};
+    use crate::cap::{OT_SENTRY, P_EX, P_SR};
     use crate::mach::Stop;
     use crate::rvenc::*;
     let sym = l.h.intern_path(name);
@@ -908,23 +891,25 @@ fn blank_run_scratch(l: &mut Lisp) {
             continue;
         }
         for a in (lo & !7..hi).step_by(8) {
-            l.h.stc(a, crate::cap::Cap::NULL);
+            l.h.stc(a, Cap::NULL);
         }
     }
 }
 
-/// Run the machine's own collector over everything the build made, and
-/// answer how many bytes of dead object space it blanked.
-fn collect_before_saving(l: &mut Lisp, verbose: bool) -> u32 {
+/// Run the machine's own collector over everything the build made. An
+/// image written without it would carry everything the compiler consed.
+fn collect_before_saving(l: &mut Lisp, verbose: bool) -> bool {
     let trap = l.h.g(LG_TRAPENTRY);
     match call_on_machine(l, "gc:collect-for-image", trap) {
         Some(v) => {
-            let n = unfix(v) as u32;
             if verbose {
-                eprintln!("collected: {n} bytes of dead object space blanked");
+                eprintln!("collected: {} bytes of dead object space blanked", unfix(v));
             }
-            n
+            true
         }
-        None => 0,
+        None => {
+            eprintln!("lm: the collection before saving did not run; no image written");
+            false
+        }
     }
 }

@@ -819,7 +819,7 @@ lmdev readers         name resolution: use lists, pkg:name, pkg::name
 lmdev display         the window's box filter on this host's GPU, pixel for pixel
                       against its definition
 lmdev check [IMG]     boot an image headless and run the machine's own suites
-lmdev bench           measure the interpreter
+lmdev bench           how many instructions a second the processor runs
 lmdev inspect [IMG]   what is in an image, that code holds no heap addresses,
                       and that no capability names what is not there
 lmdev reach [IMG]     what each package's symbols can reach
