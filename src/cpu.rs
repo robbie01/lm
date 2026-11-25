@@ -2028,9 +2028,10 @@ pub fn watch_backtrace(m: &Machine) -> String {
 }
 
 /// The code object whose machine code holds `pc`, found by walking object
-/// space: a code object's entry capability is bounded to its code.
+/// space: a code object's entry capability is bounded to its code. The
+/// answer is the object's own capability, headed and bounded to its payload.
 pub fn code_containing(m: &Machine, pc: u32) -> Option<Cap> {
-    use crate::heap::{block_size, CODE_ENTRY, T_CODE};
+    use crate::heap::{block_size, bounds_bytes, cap_to, CODE_ENTRY, PERMS_OBJECT, T_CODE};
     let end = m.peek32(crate::map::LG_OBJ_PTR);
     let mut p = crate::map::OBJ_BASE;
     while p < end {
@@ -2038,7 +2039,7 @@ pub fn code_containing(m: &Machine, pc: u32) -> Option<Cap> {
         if hdr & 0xff == T_CODE {
             let entry = m.load_cap(p + 8 + 8 * CODE_ENTRY);
             if entry.tag && pc >= entry.base() && (pc as u64) < entry.top() {
-                return Some(Cap::ROOT.with_addr(p + 8));
+                return Some(cap_to(p + 8, bounds_bytes(hdr), PERMS_OBJECT));
             }
         }
         let size = block_size(hdr);
@@ -2050,9 +2051,11 @@ pub fn code_containing(m: &Machine, pc: u32) -> Option<Cap> {
     None
 }
 
-/// The name of a code object, read through its name slot: a string, or a
-/// symbol whose name is one.
+/// The name of a code object, read through its name slot: a string, a
+/// symbol whose name is one, or for a lambda the pair `(lambda . home)`,
+/// which reads as the printer writes it, "lambda in home".
 pub fn name_of(m: &Machine, code: Cap) -> String {
+    let slot = |c: Cap, i: u32| m.load_cap(c.base().wrapping_add(8 * i));
     let string = |c: Cap| -> Option<String> {
         let hd = header(m, c)?;
         if hd & 0xff != T_STRING {
@@ -2061,15 +2064,24 @@ pub fn name_of(m: &Machine, code: Cap) -> String {
         let b = c.base();
         Some((0..(hd >> 8).min(48)).map(|i| m.peek8(b + i) as char).collect())
     };
-    let slot = |c: Cap, i: u32| m.load_cap(c.base().wrapping_add(8 * i));
+    let atom = |c: Cap| -> Option<String> {
+        if header(m, c).map(|hd| hd & 0xff) == Some(T_SYMBOL) {
+            string(slot(c, crate::heap::SYM_NAME))
+        } else {
+            string(c)
+        }
+    };
     if header(m, code).map(|hd| hd & 0xff) != Some(crate::heap::T_CODE) {
         return String::from("?");
     }
     let name = slot(code, crate::heap::CODE_NAME);
-    if header(m, name).map(|hd| hd & 0xff) == Some(T_SYMBOL) {
-        return string(slot(name, crate::heap::SYM_NAME)).unwrap_or_else(|| String::from("?sym"));
+    if crate::heap::is_cons(name) {
+        return match atom(slot(name, 1)) {
+            Some(home) => format!("lambda in {home}"),
+            None => String::from("lambda"),
+        };
     }
-    string(name).unwrap_or_else(|| String::from("?"))
+    atom(name).unwrap_or_else(|| String::from("?"))
 }
 
 // ===================================================================== table
