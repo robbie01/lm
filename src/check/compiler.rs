@@ -628,8 +628,8 @@ pub fn run_all(verbose: bool) -> bool {
         l.h.g(LG_CODE_PTR) - CODE_BASE
     );
     // The image installs the allocator from `kickstart`, which does not run
-    // here. Without this the first test to make a vector would call through
-    // an empty hook.
+    // here. Without this the first test to make a vector would find nothing
+    // in `*object-allocator*` to call.
     let r = run_one(&mut l, "(gc:install-allocator)");
     if r != "nil" {
         println!("installing the allocator: {r}");
