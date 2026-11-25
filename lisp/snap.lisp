@@ -237,8 +237,7 @@
          ;; table's empty slots are marked by a value held in a global, and
          ;; the image's marker is not this machine's.
          (entries (table->alist image))
-         (unbound (%unbound))
-         (macro-bit sym-macro))
+         (unbound (%unbound)))
     (%st-cap! lg-roots nil)
     (keep-image-symbols image seen)
     ;; No trap may come while the cells change, and a collection still
@@ -247,7 +246,7 @@
     ;; cycle is finished here, after the last allocation, and none can start
     ;; again before the allocator is the image's.
     (if (busy?) (collect) nil)
-    (become-image all entries unbound macro-bit)
+    (become-image all entries unbound)
     ;; The image's own globals, as the forge sets them for an image it builds.
     (%st-cap! lg-toplevel (%symbol-value 'kickstart))
     (%st-cap! lg-traphook (%symbol-value 'handle-trap))
@@ -290,14 +289,15 @@
     (%st-cap! lg-symlist (reverse kept))))
 
 ;; Every symbol is emptied, and then takes what the image gives it: its
-;; value, and a function only if that is a macro's expander. The compiler's
+;; value, a function only if that is a macro's expander, and the flags that
+;; say it is a macro or a constant. The compiler's
 ;; notes on the rest, every property list and every export are made again by
 ;; the boot list.
 ;;
 ;; This runs while the cells it would reach anything through are changing
 ;; underneath it, so it reaches nothing: everything it needs arrives as an
 ;; argument, and everything it does is open coded. It allocates nothing.
-(define (become-image all entries unbound macro-bit)
+(define (become-image all entries unbound)
   (let ((l all))
     (while (%cons? l)
       (let ((s (%car l)))
@@ -312,7 +312,5 @@
             (e (%cdr (%car l))))
         (%set-symbol-value! s (%vector-ref e 0))
         (%set-symbol-function! s (%vector-ref e 1))
-        (if (%vector-ref e 2)
-            (%set-symbol-flags! s (%logior (%symbol-flags s) macro-bit))
-            nil))
+        (%set-symbol-flags! s (%logior (%symbol-flags s) (%vector-ref e 2))))
       (set! l (%cdr l)))))

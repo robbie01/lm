@@ -162,9 +162,6 @@
 (defmacro defparameter (name val)
   `(define ,name ,val))
 
-(defmacro defconstant (name val)
-  `(define ,name ,val))
-
 ;; ---------------------------------------------------------------- mutation
 ;; `incf` and `decf` promote, like `+` and `-`.
 (defmacro incf (place . delta)

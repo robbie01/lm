@@ -407,7 +407,9 @@ fifty other operators compile to their instructions when called with the
 right number of arguments. A comparison in a test position becomes the
 branch, and a `while` tests at the bottom, so a turn of a loop is its body
 and one branch back. Redefining one of these does not affect code already compiled
-against it.
+against it. A name given by `defconstant`, which every name in the generated
+layout is, compiles to its value, as an `li` or an instruction's immediate, so
+defining it again with another value, or assigning to it, is an error.
 
 ## The language
 
