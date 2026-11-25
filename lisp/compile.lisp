@@ -1886,13 +1886,38 @@
       (check-unsafe c h)
       nil))
 
-;; A form whose value nothing wants. An assignment leaves nothing in a0, and
-;; a store leaves no copy of what it stored.
+;; A form whose value nothing wants. An assignment leaves nothing in a0, a
+;; store leaves no copy of what it stored, and an `if` with an arm that is
+;; nil branches round the other.
 (define (compile-effect c form)
-  (cond
-   ((if (%cons? form) (%eq? (%car form) 'set!) nil) (compile-assign c form nil nil))
-   ((compile-operation c form nil) nil)
-   (else (compile-expr c form nil))))
+  (let ((h (if (%cons? form) (%car form) nil)))
+    (cond
+     ((%eq? h 'set!) (compile-assign c form nil nil))
+     ((%eq? h 'if) (compile-if-effect c form))
+     ((compile-operation c form nil) nil)
+     (else (compile-expr c form nil)))))
+
+(define (compile-if-effect c form)
+  (let* ((a (cx-asm c))
+         (test (cadr form))
+         (then (caddr form))
+         (else-form (if (%cons? (cdddr form)) (cadddr form) nil))
+         (l-else (gensym-label "else"))
+         (l-end (gensym-label "endif")))
+    (cond
+     ((%null? else-form)
+      (emit-test-jump-false c test l-end)
+      (compile-effect c then))
+     ((%null? then)
+      (emit-test-jump c test l-end t)
+      (compile-effect c else-form))
+     (else
+      (emit-test-jump-false c test l-else)
+      (compile-effect c then)
+      (i-j a l-end)
+      (label a l-else)
+      (compile-effect c else-form)))
+    (label a l-end)))
 
 (define (emit-return c)
   (emit-epilogue c)
