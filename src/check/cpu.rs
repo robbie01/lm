@@ -784,6 +784,12 @@ pub fn run_all() -> bool {
         ok("a return through it", o.x(A0) == 11);
         let o = go(&[jal(RA, 8), jal(ZERO, 8), jalr(ZERO, RA, 4)]);
         ok("a sentry is entered only at its address", o.took(C_CAP, (RA << 5) | CAPEX_SEAL));
+        // A sentry at an odd address has no address a jump can name, so it
+        // stays sealed; the jump would otherwise land on BASE + 16.
+        for (name, j) in [("jalr", jalr(ZERO, A1, 0)), ("cjalr", cjalr(ZERO, A1))] {
+            let o = go(&[auipc(A1, 0), cincoffsetimm(A1, A1, 17), csealentry(A1, A1), j]);
+            ok(&format!("{name} leaves an odd sentry sealed"), o.took(C_CAP, (A1 << 5) | CAPEX_SEAL));
+        }
         let o = go(&[jal(RA, 8), jal(ZERO, 8), cgettype(A0, RA), lw(A1, RA, 0)]);
         ok("nor read through", o.took(C_CAP, (RA << 5) | CAPEX_SEAL));
         // A jump to a capability without EX.
@@ -986,6 +992,12 @@ pub fn run_all() -> bool {
             m.set_reg(T0, k.seal(OT_CLOSURE));
         };
         ok("jcl needs an executable entry", go_with(&[jcl(RA, T0)], bad).took(C_CAP, (T0 << 5) | CAPEX_EXECUTE));
+        let odd = move |m: &mut Machine| {
+            setup(m);
+            m.store_cap(OBJ, Cap::ROOT.with_addr(target + 1).seal(OT_SENTRY));
+        };
+        let o = go_with(&[csealclo(T0, T2), jcl(RA, T0)], odd);
+        ok("jcl refuses an entry that is an odd sentry", o.took(C_CAP, (T0 << 5) | CAPEX_SEAL));
         // jcl loads the entry through the closure, so the closure needs LD
         // and LC as a capability load would.
         for (name, p, code) in [("LD", P_LD, CAPEX_LOAD), ("LC", P_LC, CAPEX_LOAD_CAP)] {

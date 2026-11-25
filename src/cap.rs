@@ -232,6 +232,19 @@ impl Cap {
     pub fn is_sealed(&self) -> bool {
         self.meta & OTYPE_MASK != 0
     }
+    /// Whether a jump through this capability with offset `off` may go
+    /// where it says, as far as its seal goes: an unsealed capability
+    /// anywhere, and a sentry only at its own address, with no offset and
+    /// at an even address, since a jump clears bit 0 of its target.
+    #[inline]
+    pub fn enterable(&self, off: u32) -> bool {
+        match self.otype() {
+            OT_UNSEALED => true,
+            OT_SENTRY => off == 0 && self.addr & 1 == 0,
+            _ => false,
+        }
+    }
+
     /// Whether `[a, a + n)` lies inside the bounds.
     #[inline]
     pub fn covers(&self, a: u32, n: u32) -> bool {

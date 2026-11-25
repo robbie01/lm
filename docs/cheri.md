@@ -262,7 +262,11 @@ jump, code 0x01 on PCC.
 - `jal`, `jalr`, `c.j`, `c.jal`, `c.jr`, `c.jalr`, `cjalr`: the target is
   formed from PCC (`jal`) or `cs1` (`jalr`), which must be tagged with EX,
   and may be a sentry, which is then unsealed and may only be entered at its
-  own address; the link is a sentry for the next instruction.
+  own address: with no offset, and at an even address, since a jump clears
+  bit 0 of its target. A jump through a sentry at an odd address faults
+  0x03 on `cs1`, as RVY's `jalr` leaves one sealed. `csealentry` does not
+  look at the address, so it makes such a sentry as readily as any other,
+  and nothing can enter it. The link is a sentry for the next instruction.
 - `auipc` is `auipcc`: PCC with its address moved.
 
 ### CHERI instructions, custom-2, opcode 0x5b
@@ -347,8 +351,9 @@ f3 7  bnex  rs1, rs2, off   B-type: branch if not
 `car` and `cdr` are offsets 0 and 8 of `lref`. A null test is `beqx rs, tp`.
 `jcl` of a closure without LD or LC faults 0x12 or 0x14 on rs1, as loading
 its slot 0 with `lc` would: the closure is the right kind, missing a
-permission. It faults 0x02 or 0x11 on rs1 when slot 0 is untagged or not
-executable, and 0x01 when the entry is outside its own bounds.
+permission. It faults 0x02, 0x03 or 0x11 on rs1 when slot 0 is untagged,
+sealed other than as a sentry a jump may enter, or not executable, and 0x01
+when the entry is outside its own bounds.
 
 Kinds, as `vkind` returns them, named `kind-*` in the layout:
 

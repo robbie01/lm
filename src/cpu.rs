@@ -487,8 +487,9 @@ fn jump_out(m: &mut Machine, t: u32, pc: u32, fuel: u32) -> Stop {
 /// A jump through a capability: `jalr`, `c.jr`, `c.jalr` and `cjalr`. The
 /// target is `cs1` plus the offset, and `cs1` must be tagged and
 /// executable, unsealed or a sentry, which is unsealed by the jump and may
-/// only be entered at its own address. PCC becomes `cs1` at the target; the
-/// link is a sentry for the next instruction. A macro, so that its `next!`
+/// only be entered at its own address: with no offset, and at an even
+/// address, since a jump clears bit 0 of its target. PCC becomes `cs1` at
+/// the target; the link is a sentry for the next instruction. A macro, so that its `next!`
 /// tail-calls from the handler it is expanded in.
 macro_rules! jump {
     ($m:expr, $w:expr, $pc:expr, $fuel:expr, $s:expr, $off:expr, $d:expr) => {{
@@ -499,7 +500,7 @@ macro_rules! jump {
         let t = r(m, s).wrapping_add(off) & !1;
         let (b, l) = (m.wb[k], m.wl[k]);
         if hh & (READY | TAG | M_EX | M_OT_HI) != READY | TAG | M_EX
-            || (hh & M_SENTRY != 0 && off != 0)
+            || (hh & M_SENTRY != 0 && (off | r(m, s) & 1) != 0)
             || !in_win(t, b, l, 2)
         {
             return jump_slow(m, w, pc, fuel);
@@ -536,7 +537,7 @@ fn jump_slow(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let t = c.addr.wrapping_add(off) & !1;
     let code = if !c.tag {
         CAPEX_TAG
-    } else if c.otype() > OT_SENTRY || (c.otype() == OT_SENTRY && off != 0) {
+    } else if !c.enterable(off) {
         CAPEX_SEAL
     } else if !c.has(P_EX) {
         CAPEX_EXECUTE
@@ -1647,8 +1648,15 @@ fn op_jcl(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         return capfault(m, s, CAPEX_LENGTH, pc, fuel);
     }
     let e = unsafe { m.rd_cap(a) };
-    if !e.tag || e.otype() > OT_SENTRY || !e.has(P_EX) {
-        return capfault(m, s, if e.tag { CAPEX_EXECUTE } else { CAPEX_TAG }, pc, fuel);
+    if !e.tag || !e.enterable(0) || !e.has(P_EX) {
+        let code = if !e.tag {
+            CAPEX_TAG
+        } else if !e.enterable(0) {
+            CAPEX_SEAL
+        } else {
+            CAPEX_EXECUTE
+        };
+        return capfault(m, s, code, pc, fuel);
     }
     let (b, l) = m.window(e);
     let t = e.addr & !1;
