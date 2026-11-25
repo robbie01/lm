@@ -21,20 +21,12 @@
 ;; `ctx-bytes` and the `reg-*` names come from the generated layout.
 (define (ctx-off n) (%* 8 n))
 
-;; The special capability registers the stubs reach with `cspecialrw`.
-(define scr-ddc 1)
-(define scr-mtcc 28)
-(define scr-mscratchc 30)
-(define scr-mepcc 31)
-
-;; Permission masks in the positions `candperm` takes them: LD 256, SD 128,
-;; LC 64, SC 32, LM 16. nil may load and nothing else, which keeps it the
-;; same capability whatever it is loaded through: a load through an
-;; authority without LM clears SD, SC and LM, and nil has none of them. A
-;; stack or a frame loads and stores values: the same mask as `data-perms` in
-;; sys.lisp, which is not loaded when this runs.
-(define nil-perms 320)                 ; LD LC
-(define frame-perms 496)               ; LD SD LC SC LM
+;; The special capability registers the stubs reach with `cspecialrw` are
+;; the layout's `scr-*`. nil has `perms-nil`: it may load and nothing else,
+;; which keeps it the same capability whatever it is loaded through, because
+;; a load through an authority without LM clears SD, SC and LM and nil has
+;; none of them. A stack, a frame and a run of cons space load and store
+;; values, which is `perms-pair`, as `data-region` in sys.lisp gives them.
 
 (define trap-save 0)      ; filled in below, in the pool
 (define trap-stack 0)
@@ -50,13 +42,13 @@
 (define trap-nest 0)
 
 ;; cd <- the root, in `root`, narrowed to the `len` bytes at `base` with the
-;; frame permissions, standing at `base`. t1 is the scratch register.
+;; permissions of a pair, standing at `base`. t1 is the scratch register.
 (define (emit-region a cd root base len)
   (i-li a $t1 base)
   (i-csetaddr a cd root $t1)
   (i-li a $t1 len)
   (i-csetboundsexact a cd cd $t1)
-  (i-li a $t1 frame-perms)
+  (i-li a $t1 perms-pair)
   (i-candperm a cd cd $t1))
 
 ;; cd <- the root, in `root`, standing at the integer address `addr`.
@@ -76,7 +68,7 @@
     (i-csetaddr a $tp $t0 $zero)
     (i-li a $t1 16)
     (i-csetboundsexact a $tp $tp $t1)
-    (i-li a $t1 nil-perms)
+    (i-li a $t1 perms-nil)
     (i-candperm a $tp $tp $t1)
     (i-sc a $tp $zero 0)
     (i-sc a $tp $zero 8)
@@ -88,8 +80,9 @@
     (i-cspecialrw a $zero scr-mscratchc $t2)
     (emit-at a $t2 $t0 (asm-origin *trap-asm*))
     (i-cspecialrw a $zero scr-mtcc $t2)
-    ;; The current cons run, which the inline allocator narrows pairs out of.
-    (i-lc a $gp $zero lg-cons-run)
+    ;; An empty cons run, the one `empty-cons-run` in gc.lisp makes: the first
+    ;; pair faults, and the trap handler hands out a real run.
+    (emit-region a $gp $t0 cons-base 0)
     ;; No task yet, and no caller: a NULL frame pointer is the bottom of the
     ;; stack.
     (i-mv a $s2 $tp)
@@ -157,7 +150,7 @@
     (i-csetaddr a $t0 $t0 $t1)
     (i-li a $t1 trap-nest-stride)
     (i-csetboundsexact a $t0 $t0 $t1)
-    (i-li a $t1 frame-perms)
+    (i-li a $t1 perms-pair)
     (i-candperm a $t0 $t0 $t1)
     (i-lc a $t1 $zero lg-traptmp2)
     (i-sc a $t1 $t0 ctx-bytes)             ; the link, just past the registers
@@ -176,7 +169,7 @@
     (i-cspecialrw a $t1 scr-mscratchc $t0)
     (i-sc a $t1 $t0 (ctx-off reg-t0))
     (i-cspecialrw a $t1 scr-mepcc $zero)
-    (i-sc a $t1 $t0 (ctx-off reg-zero))
+    (i-sc a $t1 $t0 (ctx-off reg-pc))
 
     ;; A stack of its own, so a fault caused by a broken stack pointer can
     ;; still be reported, but only at the outermost level: a nested trap is
@@ -195,10 +188,10 @@
     (i-csrrs a $a1 csr-mepc $zero)
     (i-csrrs a $a2 csr-mtval $zero)
     (i-cspecialrw a $a3 scr-mscratchc $zero)
-    ;; The handler's frames end here. Its caller's frame pointer is in the
-    ;; saved context, and the collector finds the interrupted code's frames
-    ;; through that (`scan-trap-frames` in gc.lisp) rather than by walking
-    ;; from one stack into another.
+    ;; The handler's frames end here. The interrupted code's frame pointer
+    ;; and stack pointer are in the saved context, and the collector scans
+    ;; its stack from that (`each-trap-context` in gc.lisp) rather than by
+    ;; walking from one stack into another.
     (i-mv a $s0 $zero)
     (i-lc a $t0 $zero lg-traphook)
     (i-li a $t1 4)
@@ -219,7 +212,7 @@
     (i-cspecialrw a $zero scr-mscratchc $t2)
     (label a nolink)
 
-    (i-lc a $ra $t0 (ctx-off reg-zero))
+    (i-lc a $ra $t0 (ctx-off reg-pc))
     (i-cspecialrw a $zero scr-mepcc $ra)
     ;; gp goes back with everything else: it is this task's cons run, and a
     ;; run is per task because the inline allocator narrows a pair out of gp

@@ -37,14 +37,8 @@
 (define csr-cycle    #xc00)
 (define csr-cycleh   #xc80)
 
-;; ---------------------------------------------------------------- scr numbers
-;; The special capability registers, reached with cspecialrw.
-(define scr-pcc       0)      ; read only
-(define scr-ddc       1)
-(define scr-mtcc      28)     ; the trap vector
-(define scr-mtdc      29)
-(define scr-mscratchc 30)     ; the frame the trap stub saves into
-(define scr-mepcc     31)     ; where mret returns to
+;; The special capability registers, reached with cspecialrw, are numbered by
+;; the generated layout's `scr-*`.
 
 ;; ---------------------------------------------------------------- the buffer
 ;; buf is the output buffer and len the bytes of it used. labels is an alist

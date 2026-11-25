@@ -23,21 +23,25 @@
         ((%= type t-float) value-bytes)
         (else (%* value-bytes len))))
 
-;; What a holder of an object may do with it: load and store, and for the
-;; slotted types load and store capabilities too. HD says the header sits in
-;; the granule below the base; only an allocator mints it.
-(define value-object-perms
-  (%logior (%logior perm-ld perm-sd)
-           (%logior (%logior perm-lc perm-sc) (%logior perm-lm perm-hd))))
-(define byte-object-perms (%logior perm-ld (%logior perm-sd perm-hd)))
+;; What a holder of an object may do with it is `perms-object`: load and
+;; store, values and capabilities alike; or for a string or byte vector
+;; `perms-bytes`, data only. Both carry HD, which says the header sits in the
+;; granule below the base; only an allocator mints it.
 
 ;; The closure is answered unsealed, so that its maker can fill in the free
-;; variables; sealing it is the maker's last act. Its entry is the code's.
+;; variables; sealing it with `%cap-seal-closure` is the maker's last act. Its
+;; entry is the code's.
 (define (make-closure code nfree)
   (let ((c (alloc-object t-closure (%+ clo-free nfree))))
     (%set-slot! c clo-entry (%slot code code-entry))
     (%set-slot! c clo-code code)
     c))
+
+;; A sealed closure opened through the escape hatch: the root, at the closure
+;; otype, is authority to unseal it. For the printer, the explorer and the
+;; kernel, which start a context in a closure by hand.
+(define (open-closure f)
+  (%cap-unseal f (%cap-set-addr (%root) otype-closure)))
 
 ;; A fresh vector already holds nil in every slot.
 (define (make-vector-n n fill)
@@ -72,10 +76,11 @@
 ;; to be collected: its header still says free, and the address held here is
 ;; a number, not a capability, so nothing would keep it. Whatever the block
 ;; held before may still carry tags. So the whole of taking the block,
-;; writing its header and filling the slots the collector would trace is one
-;; critical section. The payload of a string or byte vector is never traced,
-;; so it is zeroed afterwards with interrupts on: a screen bitmap is most of
-;; a megabyte.
+;; writing its header, filling the slots the collector would trace and
+;; minting the capability that keeps it is one critical section. The payload
+;; of a string or byte vector is never traced, so it is zeroed afterwards
+;; with interrupts on, while the capability keeps it: a screen bitmap is most
+;; of a megabyte.
 ;;
 ;; The capability's bounds are the payload, rounded as the processor needs
 ;; to represent them: `%rrl` gives the length and `%ram` the alignment the
@@ -91,20 +96,23 @@
          (align (%ram payload))
          (size (%+ value-bytes (%logand (%+ span (%- value-bytes 1)) (%- 0 value-bytes))))
          (paced (%funcall *pacer* size))
-         (p (without-interrupts
-              (let ((p (%funcall *object-allocator* size align)))
-                (if (%= p 0)
-                    (begin
-                      (%funcall *collector*)
-                      (set! p (%funcall *object-allocator* size align))
-                      (if (%= p 0) (out-of-memory "object space") nil))
-                    nil)
-                (%st-cap! p (%logior (%lsh len 8) type))
-                (if bytes nil (fill-granules (%+ p value-bytes) (%+ p size) (fresh-slot type)))
-                p))))
-    (if bytes (fill-granules (%+ p value-bytes) (%+ p size) 0) nil)
-    (%cap-and-perms (%cap-bounds-exact (%from-addr (%+ p value-bytes)) span)
-                    (if bytes byte-object-perms value-object-perms))))
+         (obj (without-interrupts
+                (let ((p (%funcall *object-allocator* size align)))
+                  (if (%= p 0)
+                      (begin
+                        (%funcall *collector*)
+                        (set! p (%funcall *object-allocator* size align))
+                        (if (%= p 0) (out-of-memory "object space") nil))
+                      nil)
+                  (%st-cap! p (%logior (%lsh len 8) type))
+                  (if bytes nil (fill-granules (%+ p value-bytes) (%+ p size) (fresh-slot type)))
+                  (%cap-and-perms (%cap-bounds-exact (%from-addr (%+ p value-bytes)) span)
+                                  (if bytes perms-bytes perms-object))))))
+    (if bytes
+        (let ((b (%cap-base obj)))
+          (fill-granules b (%+ b (%- size value-bytes)) 0))
+        nil)
+    obj))
 
 ;; What a fresh slot holds until it is given something: nil, so that a
 ;; record's fields start empty, or zero in the limbs of a number.

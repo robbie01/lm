@@ -67,11 +67,10 @@
 ;; ---------------------------------------------------------------- geometry
 (define gc-heap-lo cons-base)
 (define gc-heap-hi obj-limit)
-;; One mark bit per eight bytes of heap, in scratch memory above fast-base:
+;; One mark bit per eight bytes of heap, in scratch memory at `gc-bitmap`:
 ;; bit i of the word at index i/32. The write barrier reads this map, so its
-;; address is the machine's (`GC_BITMAP` in map.rs): a pair's bit is the bit
-;; of its first granule, an object's the bit of its header.
-(define gc-bitmap fast-base)
+;; address is the machine's and comes from the generated layout: a pair's bit
+;; is the bit of its first granule, an object's the bit of its header.
 (define gc-bitmap-size (%lsh (%- gc-heap-hi gc-heap-lo) -6))
 ;; The mark stack holds the address of each block pushed: a pair's, or an
 ;; object's header. Cons space lies below object space, so the address says
@@ -89,11 +88,8 @@
 ;; The rest of scratch memory, where the image writer builds its tag maps.
 (define gc-scratch (%+ gc-cons-prefix (%lsh gc-cons-words 2)))
 
-;; What a pair may be used for: data and capabilities, loaded and stored. A
-;; run carries these and every pair cut from it inherits them; HD it never
-;; has.
-(define pair-perms
-  (%logior (%logior perm-ld perm-sd) (%logior (%logior perm-lc perm-sc) perm-lm)))
+;; A run carries `perms-pair`, data and capabilities loaded and stored, and
+;; every pair cut from it inherits them; HD it never has.
 
 ;; A free block in object space carries t-free in its header with its size in
 ;; granules where a live object keeps its length, and the address of the next
@@ -383,7 +379,7 @@
 ;; bytes, so the first pair cut from it faults and asks for a real one; it
 ;; is not sixteen bytes long, so it is not a pair either.
 (define (empty-cons-run)
-  (%cap-and-perms (%cap-bounds-exact (%from-addr cons-base) 0) pair-perms))
+  (%cap-and-perms (%cap-bounds-exact (%from-addr cons-base) 0) perms-pair))
 
 ;; The run a saved context holds is given up: the task's next pair faults and
 ;; asks for a fresh one. A pair it was in the middle of making is in a
@@ -887,7 +883,7 @@
     (set! *cons-given* (%+ *cons-given* len))
     (note-run! len)
     (if (%= *phase* phase-marking) (mark-pairs b (%+ b len)) (clear-range b (%+ b len)))
-    (%cap-and-perms (%cap-bounds-exact (%from-addr b) len) pair-perms)))
+    (%cap-and-perms (%cap-bounds-exact (%from-addr b) len) perms-pair)))
 
 ;; A hole the sweep left, else fresh ground up to the next chunk boundary.
 ;; Answers nil when there is neither. A piece of fresh ground too small to be

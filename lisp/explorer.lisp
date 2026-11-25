@@ -168,7 +168,7 @@
 ;; rows hold what is in its slots.
 (define (closure-parts c)
   (unsafe
-  (let* ((o (%cap-unseal c (%from-addr otype-closure)))
+  (let* ((o (open-closure c))
          (acc (list (part "entry" (%slot o clo-entry))
                     (part "code" (%slot o clo-code))))
          (i clo-free)

@@ -828,7 +828,7 @@
          (b (make-bytes 8))
          (narrow (%cap-bounds-exact b 4))
          (f (let ((n 5)) (lambda () n)))
-         (opened (unsafe (%cap-unseal f (%from-addr otype-closure))))
+         (opened (unsafe (open-closure f)))
          (page (unsafe (dev-page hw::*sys*))))
     ;; nil is the read-only cell at address 0, and not the number 0.
     (num-check 'nil-is-not-zero (eq? nil 0) nil)

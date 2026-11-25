@@ -96,7 +96,7 @@
 ;; name.
 (define (print-function x)
   (unsafe
-  (let ((c (if (%cap-sealed? x) (%cap-unseal x (%from-addr otype-closure)) x)))
+  (let ((c (if (%cap-sealed? x) (open-closure x) x)))
     (emit-str "#<function ")
     (emit-code-label (%slot c clo-code))
     (emit-ch #\>))))

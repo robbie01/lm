@@ -41,25 +41,38 @@
 (in-package lm)
 (export '(
   alloc-object *object-allocator* *collector* *pacer*
-  ;; the memory map and object layout, generated from the Rust side
-  clo-code clo-entry clo-free code-base code-lits code-name cons-base cons-limit dev-blit dev-disk dev-gfx dev-input dev-sys dev-timer dev-uart fast-base imm-unbound int-input int-soft int-vblank lg-bootlist lg-code-end lg-code-free lg-code-free-n lg-code-ptr lg-code-reg lg-code-reg-n lg-cons-free lg-cons-free-n lg-cons-ptr lg-cons-run lg-cons-run-end lg-errhandler lg-gccount lg-gchook lg-imgentry lg-obarray lg-obj-end lg-obj-free-n lg-obj-ptr lg-package lg-packages lg-pool-free lg-poolend lg-poolptr lg-refill lg-roots lg-boot-arg lg-raw-word lg-task-exit lg-trap-entry lg-stackbot lg-stacktop lg-startup lg-stub-hi lg-stub-lo lg-symcount lg-symlist lg-toplevel lg-trapdepth lg-traphook lg-trapsave lg-traptmp lg-traptmp2 mmio-base obj-base obj-bins obj-bin-count obj-limit pkg-name pkg-slots pkg-tag pkg-use pool-base pool-limit sym-exported sym-flags sym-function sym-macro sym-name sym-package sym-plist sym-slots sym-unsafe sym-value t-bignum t-bytes t-closure t-code t-float t-free t-record t-string t-symbol t-vector
-  value-bytes imm-eof imm-void imm-default otype-sentry otype-closure
-  perm-ld perm-sd perm-lc perm-sc perm-lm perm-ex perm-sr perm-se perm-hd
-  ctx-words ctx-bytes
-  reg-zero reg-ra reg-sp reg-gp reg-tp reg-t0 reg-t1 reg-t2
-  reg-s0 reg-s1 reg-a0 reg-a1 reg-a2 reg-a3 reg-a4 reg-a5
-  reg-a6 reg-a7 reg-s2 reg-s3 reg-s4 reg-s5 reg-s6 reg-s7
-  reg-s8 reg-s9 reg-s10 reg-s11 reg-t3 reg-t4 reg-t5 reg-t6
-  bl-src bl-dst bl-w bl-h bl-smod bl-dmod bl-val bl-op bl-status bl-next bl-x0 bl-y0 bl-x1 bl-y1
-  blit-list-reg blit-status-reg blit-list-size
-  disk-busy disk-cmd-read disk-cmd-write disk-cmd-flush int-disk int-blit blit-ctrl-reg int-uart
-  op-copy op-fill op-xor op-and op-or op-mask op-line op-add
+  ;; the generated layout: the names another package reads
+  code-base cons-base cons-limit obj-base obj-limit pool-base pool-limit gc-bitmap mmio-base
+  lg-bootlist lg-code-end lg-code-free lg-code-free-n lg-code-ptr lg-code-reg lg-code-reg-n
+  lg-cons-free lg-cons-free-n lg-cons-ptr lg-errhandler lg-gccount lg-imgentry lg-obarray
+  lg-obj-end lg-obj-free-n lg-obj-ptr lg-package lg-packages lg-pool-free lg-poolend lg-poolptr
+  lg-roots lg-stackbot lg-stacktop lg-startup lg-symlist lg-task-exit lg-toplevel lg-trapdepth
+  lg-traphook lg-trapsave lg-traptmp lg-traptmp2
+  value-bytes kind-fixnum kind-char kind-unbound kind-pair kind-object
+  perm-ld perm-sd perm-lc perm-sc perm-lm perm-ex perm-sr perm-se perm-hd perms-pair perms-nil
+  otype-sentry otype-closure
+  obj-bins obj-bin-count t-free t-symbol t-string t-vector t-bytes t-closure t-record t-float
+  t-port t-bignum t-code code-entry code-name code-lits clo-entry clo-code clo-free
+  sym-name sym-value sym-function sym-plist sym-flags sym-package sym-macro pkg-tag
+  ctx-bytes reg-pc reg-ra reg-sp reg-gp reg-tp reg-t0 reg-t1 reg-t3 reg-s0 reg-s1 reg-s2
+  reg-a0 reg-a7
+  scr-ddc scr-mtcc scr-mscratchc scr-mepcc
   ecall-arity ecall-oom ecall-error ecall-reschedule ecall-record
   cause-misaligned-fetch cause-fetch-fault cause-illegal cause-breakpoint
   cause-misaligned-load cause-load-fault cause-misaligned-store cause-store-fault
-  cause-ecall cause-wrong-type cause-range cause-overflow cause-divzero cause-stack cause-barrier
+  cause-ecall cause-wrong-type cause-range cause-overflow cause-divzero cause-capability
+  cause-barrier cause-stack
+  capex-reg-shift capex-reg-pcc capex-reg-ddc capex-length capex-tag capex-seal capex-type
+  capex-representable capex-execute capex-load capex-store capex-load-cap capex-store-cap
+  capex-sysreg capex-unseal
   irq-software irq-timer irq-external
-  exit-ok exit-error exit-oom exit-gc-stack exit-gc-corrupt exit-trap-spiral exit-check-passed
+  exit-ok exit-error exit-gc-stack exit-gc-corrupt exit-trap-spiral
+  dev-sys dev-uart dev-timer dev-gfx dev-input dev-blit dev-disk
+  int-uart int-vblank int-input int-blit int-disk int-soft
+  disk-busy disk-cmd-read disk-cmd-write disk-cmd-flush
+  blit-list-reg blit-status-reg blit-ctrl-reg blit-list-size
+  bl-src bl-dst bl-w bl-h bl-smod bl-dmod bl-val bl-op bl-x0 bl-y0 bl-x1 bl-y1 bl-status bl-next
+  op-copy op-fill op-line
   ;; the primitives
   %* %+ %- %/ %< %<= %= %> %>= %addr-of %alloc-code %alloc-pool %apply %ash
   %bit-ref %bit-set! %min %max %popcount
@@ -74,19 +87,19 @@
   %macroexpand-1 %make-bytes %make-string %make-vector %mod %newline %null?
   %obj-len %obj-type %object? %ld-word %st-word! %ld-cap %st-cap! %read-file
   %enable-after-trap %record? %record-ref %record-set!
-  %reload-cons-run %rem %restore-interrupts %set-car! %set-cdr!
+  %cons-run %set-cons-run! %rem %restore-interrupts %set-car! %set-cdr!
   %set-context!
   %set-slot! %set-symbol-flags! %set-symbol-function!
   %set-symbol-plist! %set-symbol-value! %slot %st-half! %st-byte!
   %stack-pointer %string-length %string-ref %string-set! %string?
   %symbol-flags %symbol-function %symbol-name %symbol-plist %symbol-value
-  %symbol? %sync-cons-run %vector-length %vector-ref %vector-set!
+  %symbol? %vector-length %vector-ref %vector-set!
   %vector? %wait-for-interrupt %write
   ;; capabilities
   %root %cap-ld %cap-st! %cap-ld-word %cap-st-word! %cap-ld-byte %cap-st-byte!
   %cap-base %cap-len %cap-top %cap-perms %cap-otype %cap-offset %cap-tag? %cap-sealed? %cap-high
   %cap-set-addr %cap-inc %cap-bounds %cap-bounds-exact %cap-and-perms %cap-clear-tag %cap-seal-entry
-  %cap-seal %cap-unseal %cap-set-high %cap=? %cap-subset? %rrl %ram
+  %cap-seal-closure %cap-seal %cap-unseal %cap-set-high %cap=? %cap-subset? %rrl %ram
   ;; the language and the library
   &optional &rest * *gensym-count* *in*
   *out* %unbound *await* + - / /= 1+ 1- < <= = > >= abs add2 alist->table
@@ -114,7 +127,7 @@
   integer->char intern intern-in intern-string intern-visible iota lambda
   last last-pair length let let* letrec list list* list->string
   list->vector list-copy list-index list-ref list? logand logior lognot
-  logxor loop lsh make-bytes make-bytes-n make-closure make-list
+  logxor loop lsh make-bytes make-bytes-n make-closure open-closure make-list
   make-package make-record make-stream make-string make-string-n make-symbol make-table
   make-vector make-vector-n map map2 mapcar max max2 member memq merge2 min
   min2 mod modulo mul2 neg negative? newline not nth nthcdr null? num-eq
@@ -211,10 +224,9 @@
   make-assembler asm-buf asm-len asm-labels asm-fixups asm-origin asm-nlits
   asm-privileged set-asm-len! set-asm-origin! set-asm-privileged!
   label gensym-label literal literal-offset place place-at code-object
-  ;; CSRs, SCRs, and the opcodes a trap handler decodes
+  ;; CSRs, and the opcodes a trap handler decodes
   csr-cycle csr-cycleh csr-gcmode csr-mcause csr-mepc csr-mie csr-mip
   csr-mscratch csr-mstatus csr-mtval csr-mtvec csr-stklim
-  scr-ddc scr-mepcc scr-mscratchc scr-mtcc scr-mtdc scr-pcc
   op-cheri op-fixnum op-index op-ref
   ;; RV32IMC
   i-add i-addi i-addi-w i-and i-andi i-auipc i-beq i-beqz i-bge i-bgeu i-bgt

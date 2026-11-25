@@ -557,6 +557,10 @@
           (if variadic
               nil
               (begin (set-cx-self-label! c ok) (set-cx-self-arity! c nreq)))
+          ;; The local slots are not cleared. Until a binding writes one it
+          ;; holds whatever an earlier, deeper frame left there, which the
+          ;; collector takes for a value: at most some floating garbage, and
+          ;; clearing would cost a store per slot on every call.
           (i-mv a $t3 $sp)
           ;; The one instruction that knows the frame size, which size-frame
           ;; rewrites once the body is done, so it keeps its width.
@@ -1087,11 +1091,12 @@
   ;; Untagged, with the metadata given: how an immediate is made from parts.
   (definline '%cap-set-high 2 (two-op i-csethigh))
   (definline '%cap=? 2 (two-test i-cseqx))
-  ;; Whether a's bounds and permissions lie within b's, both tagged or both
-  ;; not. `ctestsubset` asks it of its second operand against its first.
+  ;; (%cap-subset? a b): whether b's bounds and permissions lie within a's,
+  ;; both tagged or both not. `ctestsubset` asks it of its second operand
+  ;; against its first.
   (definline '%cap-subset? 2
     (lambda (c)
-      (i-ctestsubset (cx-asm c) $t2 $a1 $a0)
+      (i-ctestsubset (cx-asm c) $t2 $a0 $a1)
       (emit-bool-from-flag c $t2 $a0)))
   ;; The length and the alignment mask the processor would round a request
   ;; for n bytes to, so an allocator can pad an object to bounds it can have.
@@ -1185,37 +1190,26 @@
       (i-mv (cx-asm c) $a0 $a1)))
 
   ;; ---- machine ----
-  ;; Which task is running: s2, dedicated for the life of the machine like the
-  ;; cons run, and switched with the rest of the registers. It is nil before
+  ;; Which task is running: s2, dedicated for the life of the machine like gp,
+  ;; and switched with the rest of the registers. It is nil before
   ;; there is an Exec.
   (definline '%this-task 0 (lambda (c) (i-mv (cx-asm c) $a0 $s2)))
   (definline '%set-this-task! 1
     (lambda (c) (i-mv (cx-asm c) $s2 $a0)))
 
-  ;; The addresses the stack pointer and the frame pointer hold, as fixnums:
-  ;; where a stack walk starts.
+  ;; The stack pointer and the frame pointer, as the capabilities they are:
+  ;; where a stack walk starts, bounded to the stack it walks.
   (definline '%stack-pointer 0
-    (lambda (c) (i-cgetaddr (cx-asm c) $a0 $sp)))
+    (lambda (c) (i-mv (cx-asm c) $a0 $sp)))
   (definline '%frame-pointer 0
-    (lambda (c) (i-cgetaddr (cx-asm c) $a0 $s0)))
+    (lambda (c) (i-mv (cx-asm c) $a0 $s0)))
 
-  ;; Write the cons run to its low global, for anything that looks at the
-  ;; heap from outside, such as saving an image. The run is a capability, so
-  ;; its bounds say where it ends. lg-cons-ptr is left alone: it is the
-  ;; high-water mark, and gp is only how far the current run has got.
-  (definline '%sync-cons-run 0
-    (lambda (c)
-      (let ((a (cx-asm c)))
-        (i-sc a $gp $zero lg-cons-run)
-        (i-mv a $a0 $tp))))
-
-  ;; Reload the run from its low global. The compactor needs this: after
-  ;; everything has moved, gp describes a region of the old heap.
-  (definline '%reload-cons-run 0
-    (lambda (c)
-      (let ((a (cx-asm c)))
-        (i-lc a $gp $zero lg-cons-run)
-        (i-mv a $a0 $tp))))
+  ;; The cons run is gp, bounded to the run and addressing its next free
+  ;; pair; see gc.lisp. Reading it and replacing it are one move each.
+  (definline '%cons-run 0
+    (lambda (c) (i-mv (cx-asm c) $a0 $gp)))
+  (definline '%set-cons-run! 1
+    (lambda (c) (i-mv (cx-asm c) $gp $a0)))
 
   ;; A synchronous trap with a reason in a7. This is how a task asks to be
   ;; rescheduled: the switch happens inside the trap handler, where the whole
@@ -2234,9 +2228,10 @@
 
 ;; The raw vocabulary: what names memory by number through DDC, hands out
 ;; the root, or reads or sets the machine's own state, all of which the
-;; processor refuses to code without SR. The operations on a capability the
-;; caller already holds are not here, and neither is `%addr-of`, whose
-;; answer cannot be followed without one of these.
+;; processor refuses to code without SR, and `open-closure`, the escape hatch
+;; built from them. The operations on a capability the caller already holds
+;; are not here, and neither is `%addr-of`, whose answer cannot be followed
+;; without one of these.
 (unsafe-names
  '(%root %from-addr
    %ld-word %st-word! %ld-half %st-half! %ld-byte %st-byte! %ld-cap %st-cap!
@@ -2245,7 +2240,7 @@
    %set-this-task!
    %ecall %halt %disable %enable %restore-interrupts %enable-after-trap
    %enable-interrupt-lines %wait-for-interrupt
-   %sync-cons-run %reload-cons-run))
+   %cons-run %set-cons-run! open-closure))
 
 ;; From here on a record's accessors are open-coded as the record is
 ;; declared. The shapes declared before this line get done now.

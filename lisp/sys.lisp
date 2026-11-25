@@ -31,15 +31,13 @@
 
 ;; ---------------------------------------------------------------- authority
 ;; The kernel makes its stacks and register contexts out of the root, and
-;; gives each capability only what it is for. Permissions are in the
-;; positions `candperm` takes them: LD 256, SD 128, LC 64, SC 32, LM 16, EX 8,
-;; SR 4, SE 2, HD 1.
-(define data-perms 496)                ; LD SD LC SC LM
+;; gives each capability only what it is for.
 
 ;; `len` bytes of memory at `base`, as a capability to load and store values
-;; in them and nothing else. The caller has made sure the bounds are exact.
+;; in them and nothing else, which is what a pair permits. The caller has
+;; made sure the bounds are exact.
 (define (data-region base len)
-  (%cap-and-perms (%cap-bounds-exact (%from-addr base) len) data-perms))
+  (%cap-and-perms (%cap-bounds-exact (%from-addr base) len) perms-pair))
 
 ;; A stack runs down from its top, so its capability stands there.
 (define (stack-capability lo hi) (%cap-set-addr (data-region lo (%- hi lo)) hi))
@@ -57,7 +55,7 @@
 ;; Moving the saved pc past the instruction is what makes a trap resume after
 ;; it rather than run it again.
 (define (step-past ctx n)
-  (ctx-set! ctx reg-zero (%cap-inc (ctx-ref ctx reg-zero) n)))
+  (ctx-set! ctx reg-pc (%cap-inc (ctx-ref ctx reg-pc) n)))
 
 ;; ---------------------------------------------------------------- traps
 ;; Everything that goes wrong arrives here, along with every interrupt. The
@@ -134,7 +132,7 @@
 ;; handler made would come out of the run that has just run out.
 (define (cons-refill? cause epc tval)
   (if (%= cause cause-capability)
-      (if (%= tval (%logior (%lsh reg-gp 5) cf-length))
+      (if (%= tval (%logior (%lsh reg-gp capex-reg-shift) capex-length))
           (let ((w (insn-at epc)))
             (if (%= (insn-op w) opc-cheri)
                 (if (%= (insn-f3 w) 2) (%= (insn-rs1 w) reg-gp) nil)
@@ -148,8 +146,7 @@
 ;; live one, so that nothing is left holding the run that ran out.
 (define (refill-run ctx)
   (let ((run (refill-cons-run)))
-    (%st-cap! lg-cons-run run)
-    (%reload-cons-run)
+    (%set-cons-run! run)
     (ctx-set! ctx reg-gp run)
     nil))
 
@@ -160,8 +157,7 @@
 ;; task switch points MScratchC at the next task's frame and leaves this one
 ;; to be resumed later, with this run.
 (define (keep-cons-run ctx)
-  (%sync-cons-run)
-  (ctx-set! ctx reg-gp (%ld-cap lg-cons-run))
+  (ctx-set! ctx reg-gp (%cons-run))
   nil)
 
 ;; ------------------------- the instruction that trapped
@@ -199,22 +195,6 @@
 (define opc-jal    #x6f)
 (define opc-system #x73)
 (define opc-fixnum #x7b)               ; custom-3: fixnums
-
-;; ISAv9's capability fault codes, the low five bits of mtval for cause 28.
-;; The bits above them are the register that held the capability: 32 is PCC
-;; and 33 is DDC.
-(define cf-length #x01)
-(define cf-tag #x02)
-(define cf-seal #x03)
-(define cf-type #x04)
-(define cf-representable #x0a)
-(define cf-execute #x11)
-(define cf-load #x12)
-(define cf-store #x13)
-(define cf-load-cap #x14)
-(define cf-store-cap #x15)
-(define cf-sr #x18)
-(define cf-unseal #x19)
 
 ;; The value a fault names by its register. Register 0 is x0, which reads as
 ;; NULL, the integer 0; its slot in the context holds the pc.
@@ -450,28 +430,33 @@
               (else (emit-str (op-name w)) (emit-str ": ") (emit-str (cause-name cause))))))))
 
 ;; ------------------------- capability faults
-;; Cause 28 says which register held the capability and what it refused.
+;; Cause 28 says which register held the capability and what it refused: the
+;; ISAv9 fault code, one of `capex-*`, in the low bits of mtval, and above
+;; them the register, with PCC and DDC numbered past the general registers.
 (define (capability-trap epc tval ctx)
   (fault-report epc ctx
     (lambda ()
-      (emit-capability-fault (insn-at epc) (%lsh tval -5) (%logand tval 31) ctx))))
+      (emit-capability-fault (insn-at epc)
+                             (%lsh tval (%- 0 capex-reg-shift))
+                             (%logand tval (%- (%lsh 1 capex-reg-shift) 1))
+                             ctx))))
 
-;; SD, bit 7 of the permissions: whether the capability stores data at all.
-(define (stores-data? c) (%= 128 (%logand (%cap-perms c) 128)))
+;; Whether the capability stores data at all.
+(define (stores-data? c) (%= perm-sd (%logand (%cap-perms c) perm-sd)))
 
 (define (emit-sealed v)
-  (cond ((%= (%cap-otype v) 2) (emit-str " is a sealed function: only calling it opens it"))
-        ((%= (%cap-otype v) 1) (emit-str " is a sealed entry: only jumping to it opens it"))
+  (cond ((%= (%cap-otype v) otype-closure) (emit-str " is a sealed function: only calling it opens it"))
+        ((%= (%cap-otype v) otype-sentry) (emit-str " is a sealed entry: only jumping to it opens it"))
         (else (emit-str " is sealed"))))
 
 (define (emit-pc-fault code)
-  (emit-str (cond ((%= code cf-length) "the pc has run off the end of its code")
-                  ((%= code cf-execute) "the pc is not in code")
+  (emit-str (cond ((%= code capex-length) "the pc has run off the end of its code")
+                  ((%= code capex-execute) "the pc is not in code")
                   (else "the pc's capability refuses it"))))
 
 (define (emit-capability-fault w reg code ctx)
   (let ((v (fault-value ctx reg)))
-    (if (if (%= reg reg-sp) (%= code cf-length) nil)
+    (if (if (%= reg reg-sp) (%= code capex-length) nil)
         ;; `sp` is bounded to its task's stack, so writing below the bottom
         ;; is a bounds fault even where the stack limit has not caught it.
         (emit-str "stack overflow: below the bottom of the stack")
@@ -479,23 +464,23 @@
           (emit-str (op-name w))
           (emit-str ": ")
           (cond
-           ((%= code cf-sr) (emit-str "privileged operation in code compiled without unsafe"))
-           ((%= reg 32) (emit-pc-fault code))
-           ((%= reg 33) (emit-str "integer addressing refused by the default data capability"))
-           ((%= code cf-tag) (emit-value v) (emit-str " is not a pointer"))
-           ((%= code cf-seal) (emit-value v) (emit-sealed v))
-           ((if (%= code cf-store) t (%= code cf-store-cap))
+           ((%= code capex-sysreg) (emit-str "privileged operation in code compiled without unsafe"))
+           ((%= reg capex-reg-pcc) (emit-pc-fault code))
+           ((%= reg capex-reg-ddc) (emit-str "integer addressing refused by the default data capability"))
+           ((%= code capex-tag) (emit-value v) (emit-str " is not a pointer"))
+           ((%= code capex-seal) (emit-value v) (emit-sealed v))
+           ((if (%= code capex-store) t (%= code capex-store-cap))
             (cond ((%null? v) (emit-str "nil has no cell"))
-                  ((if (%= code cf-store-cap) (stores-data? v) nil)
+                  ((if (%= code capex-store-cap) (stores-data? v) nil)
                    (emit-value v) (emit-str " cannot hold pointers"))
                   (else (emit-value v) (emit-str " is read-only"))))
-           ((%= code cf-length) (emit-str "outside the bounds of ") (emit-value v))
-           ((%= code cf-execute) (emit-value v) (emit-str " is not code"))
-           ((if (%= code cf-load) t (%= code cf-load-cap))
+           ((%= code capex-length) (emit-str "outside the bounds of ") (emit-value v))
+           ((%= code capex-execute) (emit-value v) (emit-str " is not code"))
+           ((if (%= code capex-load) t (%= code capex-load-cap))
             (emit-value v) (emit-str " cannot be read"))
-           ((%= code cf-representable)
+           ((%= code capex-representable)
             (emit-value v) (emit-str " cannot be narrowed to those bounds exactly"))
-           ((if (%= code cf-unseal) t (%= code cf-type))
+           ((if (%= code capex-unseal) t (%= code capex-type))
             (emit-value v) (emit-str " is not unsealed by that key"))
            (else
             (emit-str "capability fault ") (emit-str (number->hex code))
@@ -618,13 +603,22 @@
 (define (emit-callee f)
   (if (%closure? f) (emit-code-label (%slot f clo-code)) (emit-str "a non-function")))
 
-;; A frame whose slots below it can be read without faulting: the trace is
-;; printed from inside the trap handler, where a fault would stop the machine.
+;; A frame link the trace may follow: a stack capability, unsealed, that
+;; loads values, aligned to a slot, with the four fixed slots below it inside
+;; its bounds. NULL, the link at the bottom of every stack, is not one, and
+;; neither is anything else a broken frame could hold. The trace is printed
+;; from inside the trap handler, where a fault would stop the machine.
+(define frame-link-perms (%logior perm-ld perm-lc))
+
 (define (frame-readable? f)
   (if (%cap-tag? f)
       (if (%cap-sealed? f)
           nil
-          (if (%>= (%- (%addr-of f) 32) (%cap-base f)) (%<= (%addr-of f) (%cap-top f)) nil))
+          (if (%= frame-link-perms (%logand (%cap-perms f) frame-link-perms))
+              (if (%= 0 (%logand (%addr-of f) 7))
+                  (if (%>= (%- (%addr-of f) 32) (%cap-base f)) (%<= (%addr-of f) (%cap-top f)) nil)
+                  nil)
+              nil))
       nil))
 
 (define (print-backtrace s0 code pc)
@@ -742,14 +736,8 @@
   (if *return-addr-fn* (%funcall *return-addr-fn*) 0))
 
 ;; What `jcl` does to a closure, done by hand for a context that is to start
-;; in one. A closure is sealed, so the escape hatch makes the same capability
-;; unsealed out of the root: the bounds and permissions of the closure, and
-;; none of its seal. Its slot 0 is the entry.
-(define (open-closure f)
-  (%cap-and-perms (%cap-bounds-exact (%from-addr (%addr-of f)) (%cap-len f))
-                  (%cap-perms f)))
-
-;; The closure is entered with one argument, if one is given: the report of
+;; in one: the closure opened through the escape hatch goes in t0, and its
+;; slot 0, the entry, in the pc. The closure is entered with one argument, if one is given: the report of
 ;; the fault that brought it here. Nothing the abandoned code left in a
 ;; register survives except the task in s2 and its cons run in gp, and the
 ;; NULL left in s0 is the bottom of the new stack.
@@ -758,7 +746,7 @@
     (while (%< r 32)
       (if (if (%= r reg-gp) t (%= r reg-s2)) nil (ctx-set! ctx r 0))
       (set! r (%+ r 1)))
-    (ctx-set! ctx reg-zero (%cap-ld open (%* 8 clo-entry)))     ; pc = its entry
+    (ctx-set! ctx reg-pc (%cap-ld open (%* 8 clo-entry)))       ; pc = its entry
     (ctx-set! ctx reg-t0 open)                                 ; t0 = the closure
     (if (%cons? arg)
         (begin (ctx-set! ctx reg-a0 (%car arg))                ; a0 = the argument
@@ -799,7 +787,7 @@
 ;; as the body of a function of no arguments, and called.
 (define (eval-thunk form)
   (let* ((r (compile-function nil (list form) 'repl nil))
-         (clo (make-closure (%cdr r) 0)))
+         (clo (%cap-seal-closure (make-closure (%cdr r) 0))))
     (%funcall clo)))
 
 ;; A top level form is normally run. During a rebuild it is also compiled

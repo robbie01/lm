@@ -490,10 +490,6 @@
          (base (%logand (%+ block (%lognot mask)) mask)))
     (%cons block (data-region base len))))
 
-;; A task's first cons comes out of no run at all: a capability to nothing,
-;; which faults into a refill the first time the allocator narrows it.
-(define (empty-run) (%cap-bounds-exact (%from-addr cons-base) 0))
-
 ;; A fresh record's slots hold nil, and nil is not the fixnum zero, so
 ;; anything counted or masked is set before it is read.
 (define (zero-task-counters! task)
@@ -534,7 +530,8 @@
     ;; s2 says which task is running, so the context carries it the way it
     ;; carries the stack pointer.
     (ctx-set! (tc-context task) reg-s2 task)
-    (ctx-set! (tc-context task) reg-gp (empty-run))
+    ;; Its first cons faults into a refill: the run it starts with is empty.
+    (ctx-set! (tc-context task) reg-gp (empty-cons-run))
     task))
 
 ;; Onto the ready list: from here it runs when the scheduler says so.
@@ -696,8 +693,8 @@
 (define *task-exit-stub* 0)
 
 ;; The stub reads `task-finished` out of a low global, which takes integer
-;; addressing, so it is code with SR: EX 8 and SR 4.
-(define kernel-code-perms 12)
+;; addressing, so it is code with SR.
+(define kernel-code-perms (%logior perm-ex perm-sr))
 
 (define (task-finished)
   (let ((task (this-task)))
@@ -1501,21 +1498,11 @@
 
 ;; A cycle has begun: the run a suspended task was holding is not its own any
 ;; more, because whatever it makes from now on has to come from a run handed
-;; out marked. The cell gp stands at is kept: the task may have been
-;; preempted after narrowing a pair out of it and before filling it in, and
-;; would finish its pair there. So the run shrinks to that one cell, which
-;; the collector sees as a pair like any other and marks, and the next cons
-;; after it faults into a refill. A run with less than a cell left is left as
-;; it is: its next cons faults anyway, and the cell past its end belongs to
-;; whoever got the next run.
+;; out marked. Its next cons faults into a refill. A pair it was in the middle
+;; of making is in one of its saved registers, which the collector scans.
 (define (drop-task-run task)
   (let ((ctx (tc-context task)))
-    (if ctx
-        (let ((gp (ctx-ref ctx reg-gp)))
-          (if (if (%cap-tag? gp) (%<= (%+ (%addr-of gp) 16) (%cap-top gp)) nil)
-              (ctx-set! ctx reg-gp (%cap-bounds-exact gp 16))
-              nil))
-        nil)))
+    (if ctx (drop-context-run ctx) nil)))
 
 (define (invalidate-runs)
   (if *ready-list*

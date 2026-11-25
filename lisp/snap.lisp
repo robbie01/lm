@@ -180,7 +180,7 @@
     ;; only ever jumps through a closure.
     (let ((c (alloc-object t-closure clo-free)))
       (%set-slot! c clo-entry (%cap-set-addr (%root) (%ld-word lg-imgentry)))
-      (%funcall (%cap-seal c (%cap-set-addr (%root) otype-closure))))))
+      (%funcall (%cap-seal-closure c)))))
 
 ;; Where the reset lands. The symbols still hold the builder's definitions,
 ;; so the handover itself happens in `fresh-become`, which is the builder's,
