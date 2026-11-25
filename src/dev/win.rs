@@ -17,7 +17,7 @@ use crate::dev::gfx::Present;
 use crate::dev::input::*;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex, MutexGuard};
+use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -61,6 +61,7 @@ where
         }
         // A machine still running stops at its next frame.
         shared.lock().closed = true;
+        shared.arrived.notify_all();
         drop(app);
         match worker.join() {
             Ok(code) => code,
@@ -120,14 +121,26 @@ impl Present for HostWindow {
         self.shared.lock().size
     }
 
-    fn pump(&mut self, ev: &mut Input) {
+    fn pump(&mut self, ev: &mut Input) -> bool {
         let mut s = self.shared.lock();
         for w in s.events.drain(..) {
             ev.push(w);
         }
+        s.urgent = false;
         (ev.mx, ev.my) = s.pointer;
         ev.buttons = s.buttons;
         ev.mods = s.mods;
+        !s.closed
+    }
+
+    fn wait(&mut self, d: std::time::Duration) -> bool {
+        let s = self.shared.lock();
+        let (s, _) = self
+            .shared
+            .arrived
+            .wait_timeout_while(s, d, |s| !s.urgent && !s.closed)
+            .unwrap_or_else(|e| e.into_inner());
+        s.urgent || s.closed
     }
 }
 
@@ -150,15 +163,19 @@ impl Drop for Stopped {
     }
 }
 
-/// What the two threads share, under one lock.
+/// What the two threads share, under one lock, and the machine's thread
+/// asleep until a key, a button or the wheel arrives.
 #[derive(Default)]
-struct Shared(Mutex<State>);
+struct Shared {
+    state: Mutex<State>,
+    arrived: Condvar,
+}
 
 impl Shared {
     fn lock(&self) -> MutexGuard<'_, State> {
         // Nothing done under the lock leaves the state half changed, so a
         // thread that panicked holding it has not spoilt it.
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -172,6 +189,9 @@ struct State {
     /// Events the machine has yet to take, packed as the input chip queues
     /// them.
     events: VecDeque<u32>,
+    /// Something other than a pointer move is waiting, which wakes an idle
+    /// machine to take it. Moves wait for the next frame, gathered into one.
+    urgent: bool,
     /// Where the pointer is in the frame, and the buttons and modifiers held.
     pointer: (u32, u32),
     buttons: u32,
@@ -198,6 +218,7 @@ impl State {
                 self.events.push_back(w);
             }
         }
+        self.urgent |= !moved(w);
     }
 }
 
@@ -557,6 +578,9 @@ impl ApplicationHandler<Wake> for App {
             WindowEvent::MouseWheel { delta, .. } => self.wheel(delta),
             _ => {}
         }
+        // An idle machine waiting for a key, a button or the wheel looks
+        // again.
+        self.shared.arrived.notify_all();
     }
 }
 

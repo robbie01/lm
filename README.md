@@ -103,7 +103,8 @@ branch site. The core runs at 300 to 500 MIPS on a current host.
 The timebase is the retired-instruction count, not host time, so a run is
 deterministic: the same image produces the same schedule every time, down to
 the instruction a task is preempted on. A windowed machine sleeps through its
-idle time on the host without moving its own clock.
+idle time on the host without moving its own clock, unless a key, a button
+or the wheel wakes it.
 
 ### Values
 
@@ -540,9 +541,12 @@ Details of the model are in [docs/drivers.md](docs/drivers.md).
 
 **The host window** is winit and wgpu. The window keeps the main thread and
 the machine runs on a thread of its own: at a vertical blank the machine
-hands over the frame and takes the input that has arrived, and the window
-draws at the display's pace, so dragging or resizing it does not stop the
-machine. The display is drawn as large as the window allows without
+takes the input that has arrived, the first time it stops to wait after one
+it hands over the frame, which then holds what the compositor drew in answer
+to the blank, and a key, a button or the wheel wakes an idle machine at
+once. A frame no different from the last is not handed over, so an idle
+desktop costs the host next to nothing. The window draws at the display's
+pace, so dragging or resizing it does not stop the machine. The display is drawn as large as the window allows without
 changing its shape, with a box filter: a window pixel is the average of the
 display's pixels over its square, each counting for the area it covers, and
 averaged as light. At a whole-number scale that copies the display's pixels;
