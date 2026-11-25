@@ -205,7 +205,7 @@
 (defconstant op-jalr  #x67)
 (defconstant op-jal   #x6f)
 (defconstant op-sys   #x73)
-;; RVY-A, the old custom-3: every capability instruction RVY defines.
+;; RVY-A, opcode #x7b: every capability instruction RVY defines.
 (defconstant op-rvy   #x7b)
 ;; custom-0: Xlm, the Lisp instructions, each a capability operation and a
 ;; check of the kind of value an operand holds.

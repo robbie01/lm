@@ -372,14 +372,14 @@ mask. A leaf may cons. Building a closure is still a call.
 
 **`%ld-half` and `%st-half!` are four instructions each. RESOLVED** by the
 port. They are `lhu.ddc` and `sh.ddc`, one instruction each through DDC,
-like every load and store by number. custom-2 is now CHERI's.
+like every load and store by number.
 
 **Compressed branches and jumps are not emitted. WONTFIX.** A fixpoint
 relaxation pass in a compiler that runs on the machine, to save 1.6% of the
 image, and the compiler's condition results land in `t2`, which the
 compressed branches cannot name. The weakest item in the file.
 
-**`c.lc` and `c.sc` rarely apply. WONTFIX**, with the reason changed by the
+**`c.ly` and `c.sy` rarely apply. WONTFIX**, with the reason changed by the
 port. Frame slots are below `s0`, where the compressed capability loads and
 stores, which take only positive multiples of 8, cannot reach them. The
 collector no longer reads the frame layout, since a stack is scanned granule
@@ -405,11 +405,11 @@ index. The half-word item above no longer needs their slots.
 
 ## Held ISA ideas
 
-**An allocation instruction. WONTFIX**, held. The item's own objection is
-decisive: it puts an allocation policy into the instruction set, and that
-policy has already changed once. The port made it moot for pairs:
-`csetboundsimm` on the run capability in `gp` is the bump's limit check and
-the new pair's bounds in one instruction, with no policy in it.
+**An allocation instruction. RESOLVED** as Xlm's `npair`, with no policy
+in it: it carves the next pair out of the run capability in `gp`, which is
+the bump's limit check and the new pair's bounds in one instruction, and
+traps with cause 28 when the run is used up. Where the next run comes from
+stays the trap handler's.
 
 **A "what type is this" instruction. RESOLVED** by the port. A tag can no
 longer be read from a pointer's low bits, so the port added `vkind`, which

@@ -16,7 +16,7 @@
 //! within a function is relative to itself, and anything else reaches code
 //! through a capability, a code object's entry or a return address, which is
 //! rewritten like any other. The one capability to code that is not in
-//! memory is MTCC, and the reset stub loads that from `lg-trap-entry` every
+//! memory is `mtvec`, and the reset stub loads that from `lg-trap-entry` every
 //! time the machine starts.
 //!
 //! Liveness is not recomputed. `collect-for-image` has already run a full

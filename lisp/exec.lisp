@@ -545,7 +545,7 @@
     ;; s2 says which task is running, so the context carries it the way it
     ;; carries the stack pointer.
     (ctx-set! ctx reg-s2 task)
-    ;; Its first cons faults into a refill: the run it starts with is empty.
+    ;; Its first cons traps into a refill: the run it starts with is empty.
     (ctx-set! ctx reg-gp (empty-cons-run))
     task))
 
@@ -1536,7 +1536,7 @@
 
 ;; A cycle has begun: the run a suspended task was holding is not its own any
 ;; more, because whatever it makes from now on has to come from a run handed
-;; out marked. Its next cons faults into a refill. A pair it was in the middle
+;; out marked. Its next cons traps into a refill. A pair it was in the middle
 ;; of making is in one of its saved registers, which the collector scans.
 (define (drop-task-run task)
   (if (tc-context task) (drop-context-run (task-context task)) nil))

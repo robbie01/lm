@@ -27,13 +27,13 @@ pointer the collector needs to see.
 checked against its bounds, its permissions, its tag and its seal, in the
 same comparison that the fast path of the core already makes. The capability
 to an object is bounded to exactly its payload, so the header is out of
-reach and an access one byte past the end is a length fault. A pair is its
+reach and an access one byte past the end is a capability fault. A pair is its
 sixteen bytes, a bitmap's pixels their byte object, a device its 4 KiB
 page, a task's stack its stack and a cons run its run. Indexed access checks
 the index against the length in the header and the address against the
 bounds, so a header that lied could not reach past the object either.
-Narrowing is the only direction: `csetbounds` refuses a region outside the
-capability it starts from.
+Narrowing is the only direction: bounds outside the capability they start
+from leave the result untagged, and its first use traps.
 
 **And by the chips.** The two chips that move memory are handed
 capabilities, not numbers, and check them as the processor would. A
@@ -73,20 +73,22 @@ address, and nothing else. A task's stack and saved registers are sealed in
 its record with an otype of the kernel's, so anyone can name a task and
 only the task and the kernel can read its frames. A task's descriptor ring,
 and a descriptor anywhere but in the hands of the code filling it, is
-sealed with an otype of the chips' the same way. Opening a sealed
-capability by other means takes an SE authority, and the only one is the
-root. This is what a driver's device page rests on: the driver keeps it in
+sealed with an otype of the chips' the same way. Each seals with a key to
+its own otype, which it mints once and keeps in its own closures, so
+opening a sealed capability by other means takes the root, the escape
+hatch. This is what a driver's device page rests on: the driver keeps it in
 its closures and its frames, and nothing else holds it.
 
 **Immutability, by permission.** nil is the read-only cell at address 0, so
 `(set-car! nil 1)` is refused by the capability, not by a test. A capability
 with SD dropped refuses stores, and one with LM dropped hands out read-only
 capabilities to everything loaded through it, so read-only is deep. A
-string or a byte object cannot hold a capability, because it has no SC.
+string or a byte object cannot hold a capability, because it has no SC: a
+capability stored into one is stored untagged.
 
-**Privilege, by SR.** Writing a CSR, reading a machine-level one, touching
-a special capability register, `mret`, `wfi`, and every load and store by
-number through DDC fault without SR in PCC. The compiler gives SR only to
+**Privilege, by SR.** Writing a CSR, reading a privileged one, DDC among
+them, `mret`, and every load and store by number through DDC are illegal
+instructions without SR in PCC, which is RVY's ASR. The compiler gives SR only to
 code compiled in an unsafe file or containing an `unsafe` form.
 
 **And what the Lisp instructions always checked.** `car`, `cdr`, `set-car!`
@@ -118,10 +120,11 @@ compiler and the processor.
 | `%bit-ref` `%bit-set!` | a bit by number | the same |
 | `%slot` `%set-slot!` | any type of object, by index | a closure's slots, if it has been opened |
 | `open-closure` | a closure unsealed with the root | its free variables and entry |
+| `sealing-key` | a key to an otype, made from the root | to seal and unseal with that otype, as its manager does |
 | `%set-context!` `%set-stack-limit!` `%set-gc-mode!` `%ecall` `%disable` `%enable` `%cons-run` `%set-cons-run!` `%set-this-task!` `%halt` | the machine's own state | arbitrary machine state |
-| `task-stack` `task-context` | a task's stack or saved registers, unsealed | another task's frames and registers |
+| `task-stack` `task-context` `task-seal` `task-unseal` | a task's stack or saved registers, unsealed, or a seal with Exec's key | another task's frames and registers |
 | `device-page` | any device's page, made from the root | any register of any device, one a driver holds included |
-| `blit-descriptor` `blit-go` | a descriptor the chip reads, unsealed | a descriptor written after it was linked, under the chip |
+| `blit-descriptor` `blit-go` `blit-seal` `blit-unseal` | a descriptor the chip reads, unsealed, or a seal with the chips' key | a descriptor written after it was linked, under the chip |
 | `code-object-at`, `refill-cons-run` in gc | a code object by its text's address, a fresh cons run | the collector's invariants |
 
 What left the list with the port: `%addr-of` is safe, because a number is

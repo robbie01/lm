@@ -14,8 +14,8 @@
 //! 9..0    B[9:0]  base mantissa
 //! ```
 //!
-//! Bounds are CHERI Concentrate with a mantissa of MW = 10 bits, as ISAv9
-//! defines it. With IE clear the exponent is 0 and B and T are the low bits
+//! Bounds are CHERI Concentrate with a mantissa of MW = 10 bits, the
+//! encoding CHERI ISAv9 defines. With IE clear the exponent is 0 and B and T are the low bits
 //! of the base and the top, so every length below 256 is exact. With IE set
 //! the exponent E is `{T[2:0], B[2:0]}`, those six bits read as zero in the
 //! mantissas, and base and top are multiples of 2^(E+3). The two top bits of
@@ -236,7 +236,7 @@ impl Cap {
     pub const NULL: Cap = Cap { addr: 0, meta: 0, tag: false };
 
     /// Every permission over the whole address space: what PCC, DDC and
-    /// MTCC hold at reset.
+    /// `mtvec` hold at reset.
     pub const ROOT: Cap = Cap { addr: 0, meta: (P_ALL << PERM_SHIFT) | IE_BIT | (3 << 10), tag: true };
 
     /// nil: the 16-byte cell at 0, readable as a pair of nils and nothing
@@ -498,10 +498,10 @@ impl Cap {
     }
 
     /// Whether the bounds field is exactly the one `encode` makes for the
-    /// bounds it decodes to. Every capability `csetbounds` makes is one;
+    /// bounds it decodes to. Every capability `YBNDS*` makes is one;
     /// metadata written by hand need not be, with a malformed exponent or
     /// mantissas that put the top past the end of the space or below the
-    /// base, and `cbuildcap` refuses it, so that a capability with given
+    /// base, and `YBLD` leaves it untagged, so that a capability with given
     /// bounds and permissions has one spelling.
     pub fn canonical(&self) -> bool {
         let (b, t) = self.bounds();

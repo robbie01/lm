@@ -127,7 +127,7 @@ descriptors after it, held by the task's binding of `*blit-ring*`, and the
 collector has one of its own.
 
 The chip checks what it is handed, as the processor would. It loads each
-slot the way `lc` does through the descriptor's own capability, which must
+slot the way `LY` does through the descriptor's own capability, which must
 cover the descriptor with LD and SD. A source needs LD and a destination SD,
 and LD as well for an operation that reads it; every byte the rectangle
 touches, rows and stride included, must lie inside the capability's bounds,

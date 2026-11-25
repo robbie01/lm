@@ -130,7 +130,7 @@ globals! {
     LG_TRAPSTACK  = 8,  "trap-stack";   // the trap handler's, likewise
     LG_TOPLEVEL   = 9,  "toplevel";     // closure the kickstart enters
     LG_TRAPNEST   = 10, "trap-nest";    // a vector of frames for nested traps
-    LG_TRAPSAVE   = 11, "trapsave";     // the boot context, which MScratchC
+    LG_TRAPSAVE   = 11, "trapsave";     // the boot context, which `mscratch`
                                         // names at reset
     LG_ROOTS      = 12, "roots";        // vector of extra gc roots
     LG_ERRHANDLER = 13, "errhandler";   // closure called on a lisp error
@@ -142,7 +142,7 @@ globals! {
     LG_CONS_RUN   = 19, "cons-run";     // the running task's cons run
     LG_STARTUP    = 20, "startup";      // closure run before the repl
     LG_TASKEXIT   = 21, "task-exit";    // the closure a task returns into
-    LG_TRAPENTRY  = 22, "trap-entry";   // the trap stub's entry, for MTCC
+    LG_TRAPENTRY  = 22, "trap-entry";   // the trap stub's entry, for `mtvec`
     LG_SYMCOUNT   = 23, "symcount";     // symbols interned so far: the next
                                         // symbol's identity, and its hash
     LG_PACKAGES   = 24, "packages";     // every package, as a list

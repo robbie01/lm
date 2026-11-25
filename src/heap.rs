@@ -42,7 +42,7 @@ pub const VALUE_BYTES: u32 = 8;
 /// An object's header is one granule, just below its payload.
 pub const HEADER_BYTES: u32 = 8;
 
-// ---- permissions, in `cgetperm` positions ----
+// ---- permissions, in the format's positions ----
 /// A pair can be read and written, and holds capabilities.
 pub const PERMS_PAIR: u32 = P_LD | P_SD | P_LC | P_SC | P_LM;
 /// An object of a value type: a pair's permissions and HD.

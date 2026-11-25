@@ -468,12 +468,12 @@
 ;; ---------------------------------------------------------------- runs
 ;; A task's cons run is its `gp`: a capability bounded to the run, its
 ;; address the next free pair. The run with nothing in it is bounded to no
-;; bytes, so the first pair cut from it faults and asks for a real one; it
+;; bytes, so the first pair cut from it traps and asks for a real one; it
 ;; is not sixteen bytes long, so it is not a pair either.
 (define (empty-cons-run)
   (%cap-and-perms (%cap-bounds-exact (%from-addr cons-base) 0) perms-pair))
 
-;; The run a saved context holds is given up: the task's next pair faults and
+;; The run a saved context holds is given up: the task's next pair traps and
 ;; asks for a fresh one. A pair it was in the middle of making is in a
 ;; register as a pair capability, and is kept like any other.
 (define (drop-context-run ctx)
@@ -1021,8 +1021,8 @@
                 (%st-word! lg-cons-ptr top)
                 (hand-out-run p top)))))))
 
-;; The trap handler calls this when a task's run is used up: a length fault
-;; on `gp`. It answers the task's next run, which the handler writes into the
+;; The trap handler calls this when a task's run is used up: `npair`
+;; trapping on `gp`. It answers the task's next run, which the handler writes into the
 ;; saved `gp` and the live one before it retries the instruction. The
 ;; collector's share of work comes first, paid for the run just used up, or
 ;; given up when a cycle began, whatever its size: a task's first run is paid

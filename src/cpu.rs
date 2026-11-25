@@ -275,7 +275,7 @@ fn clc_imm(w: u32) -> u32 {
 fn lwsp_imm(w: u32) -> u32 {
     (bit(w, 12) << 5) | ((w >> 2) & 0x1c) | ((w << 4) & 0xc0)
 }
-/// c.lcsp, as c.ldsp: uimm[5]=w[12], uimm[4:3]=w[6:5], uimm[8:6]=w[4:2]
+/// c.lysp, as c.ldsp: uimm[5]=w[12], uimm[4:3]=w[6:5], uimm[8:6]=w[4:2]
 #[inline(always)]
 fn lcsp_imm(w: u32) -> u32 {
     (bit(w, 12) << 5) | ((w >> 2) & 0x18) | ((w << 4) & 0x1c0)
@@ -285,7 +285,7 @@ fn lcsp_imm(w: u32) -> u32 {
 fn swsp_imm(w: u32) -> u32 {
     ((w >> 7) & 0x3c) | ((w >> 1) & 0xc0)
 }
-/// c.scsp, as c.sdsp: uimm[5:3]=w[12:10], uimm[8:6]=w[9:7]
+/// c.sysp, as c.sdsp: uimm[5:3]=w[12:10], uimm[8:6]=w[9:7]
 #[inline(always)]
 fn scsp_imm(w: u32) -> u32 {
     ((w >> 7) & 0x38) | ((w >> 1) & 0x1c0)

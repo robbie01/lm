@@ -1586,7 +1586,7 @@ impl<'a> Lisp<'a> {
                 need!(2);
                 Cap { addr: a[0].addr, meta: a[1].addr, tag: false }
             }
-            // As `ctestsubset` reads its operands: whether the second lies
+            // As `YSS` reads its operands: whether the second lies
             // within the first.
             Prim::Rrl => {
                 need!(1);

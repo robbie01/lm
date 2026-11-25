@@ -117,7 +117,7 @@ pub struct Loaded {
 /// ```
 ///
 /// A region's tags are one bit per granule, packed as an image page's are.
-/// The machine cannot address a tag, so it writes them as `cgettag` finds
+/// The machine cannot address a tag, so it writes them as `YTAGR` finds
 /// them.
 pub const SNAP_MAGIC: u32 = 0x3253_4D4C; // "LMS2", little-endian
 /// The magic of the snapshots written before memory had tags.

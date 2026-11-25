@@ -175,7 +175,7 @@ another one does.
 **Unused instructions. WONTFIX**, as keep. `fori` is emitted by
 `emit-or-const`, so the item was wrong about it. `fltu`, `ldxbi` and
 `stxbi` are tested encodings that cost nothing at run time; `ldxbi` and
-`stxbi` are the byte forms of custom-1 with an immediate index. They were
+`stxbi` are the byte forms of indexed access with an immediate index. They were
 held as the slots for a tagged half-word load for the collector's
 run-skipping test; since the port that test reads a whole word of the mark
 map, and a half-word by number is one instruction anyway, `lhu.ddc`.

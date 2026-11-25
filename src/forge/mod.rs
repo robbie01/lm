@@ -282,7 +282,7 @@ pub fn write_layout() {
 
     // The trap stub saves every register into a context, so a task's
     // context and a trap frame are the same shape: 32 value slots, slot 0
-    // the pc (MEPCC) and slot i register xi, and a frame for a nested trap
+    // the pc (`mepc`) and slot i register xi, and a frame for a nested trap
     // has its link after them. These name the slots.
     s.push_str("\n;; ---- contexts and trap frames ----\n");
     def!("ctx-slots", 32);

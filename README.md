@@ -1,6 +1,6 @@
 # LM, a Lisp machine
 
-A RISC-V computer with CHERI capabilities that boots into a Lisp image. The
+A RISC-V computer with CHERI capabilities, RVY, that boots into a Lisp image. The
 image holds its own compiler and assembler, and everything above the
 emulator, the kernel, the collector, the compiler and the graphics, is Lisp
 compiled to native RV32 code.
@@ -51,8 +51,8 @@ interpreter nor the tests.
 | the machine | |
 |---|---|
 | `src/cap.rs` | capabilities: the format, the bounds encoding, and the operations on them, shared by the processor, the forge and the bench |
-| `src/cpu.rs` | token-threaded RV32IMC core in CHERI capability mode, with the Lisp instructions |
-| `src/mach.rs` `src/run.rs` | capability registers, tagged memory, CSRs and special capability registers, traps, the outer loop |
+| `src/cpu.rs` | token-threaded RV32IMC core in RVY's capability mode, with the Lisp instructions |
+| `src/mach.rs` `src/run.rs` | capability registers, tagged memory, CSRs and the capabilities they hold, traps, the outer loop |
 | `src/dev/` | uart, timer, display, blitter, input, block storage, the host window and the box filter it draws the display with |
 | `src/heap.rs` `src/image.rs` | object memory, and the image format with its tags |
 | `src/map.rs` | the memory map and the low-memory globals |
@@ -97,10 +97,12 @@ interpreter nor the tests.
 
 ## The processor
 
-`rv32imc_zba_zbb_zbs_zicond_xcheri_xlm`, machine mode, always in capability
-mode, with the CSRs a kernel needs and two custom CSRs. `Xcheri` is a CHERI
-ISAv9 subset for a 32-bit address; `Xlm` is the Lisp instructions below.
-[docs/cheri.md](docs/cheri.md) is the reference for both.
+RV32IMC with Zba, Zbb, Zbs and Zicond; RVY, the RISC-V CHERI extension, as
+RV32Y in machine mode and always in capability mode, with a capability
+encoding of LM's own; and Xlm, the Lisp instructions below. The CSRs are
+those a kernel needs and three custom ones. [docs/cheri.md](docs/cheri.md)
+is the reference for all of it, and [docs/rvy.md](docs/rvy.md) says which
+RVY this is and every place LM departs from it, and why.
 
 Dispatch is token threaded on the opcode: no predecode and no translation
 cache, so nothing has to be invalidated when the compiler writes fresh code
@@ -133,20 +135,23 @@ bits 31..0    the address
 bits 63..32   metadata:
   31 LD  load data            27 LM  load mutable
   30 SD  store data           26 EX  execute
-  29 LC  load capabilities    25 SR  system registers: CSRs, SCRs, DDC
+  29 LC  load capabilities    25 SR  system registers: RVY's ASR
   28 SC  store capabilities   24 SE  seal and unseal
                               23 HD  headed: a Lisp object
-  22..19  otype: 0 unsealed, 1 sentry, 2 closure
+  22..19  otype: 0 unsealed, 1 sentry, 2 closure, 3.. sealed with a key
   18..0   bounds, CHERI Concentrate with a 10-bit mantissa
 ```
 
-Every length below 256 bytes is exact at any base; a larger region is exact
-at the alignment `cram` gives for its length, and the allocators pad and
-align to it. A load through an authority without LC drops the tag of what
-it loads, and one without LM takes SD, SC and LM off it, so a read-only
-list hands out read-only tails. Any store that is not a capability store
-clears the tags it touches, and every integer instruction writes an
-untagged result: a pointer cannot be made from its bits.
+The instructions read and clear the permissions in RVY's bit field, where
+LD, SD, LC, LM, EX and SR are R, W, C, LM, X and ASR, SE is S and U, and SC
+and HD are Xlm's. Every length below 256 bytes is exact at any base; a
+larger region is exact at the alignment `yamask` gives for its length, and
+the allocators pad and align to it. A load through an authority without LC
+drops the tag of what it loads, and one without LM takes SD, SC and LM off
+it, so a read-only list hands out read-only tails. A capability store keeps
+the tag only through an authority with SC, any other store clears the tags
+it touches, and every integer instruction writes an untagged result: a
+pointer cannot be made from its bits.
 
 ### Values
 
@@ -178,43 +183,43 @@ every other type holds values in 8-byte slots.
 
 ### The instructions
 
-CHERI's own instructions sit on custom-2 (`0x5b`): reading a capability's
-fields, setting its address and bounds, dropping permissions, sealing and
-unsealing, the special capability registers, and loads and stores through
-DDC. The base loads, stores and jumps take a capability as their base and
-check its tag, seal, permissions and bounds; `lc` and `sc` move a whole
-capability with its tag. A jump leaves a sentry in its link register, a
-capability that can only be jumped to, so a return address cannot be
-written through or moved.
+RVY's own instructions sit on RVY-A (`0x7b`): reading a capability's
+fields, setting its address and bounds, clearing permissions, sealing and
+unsealing, building one from bits, and `ly` and `sy`, which move a whole
+capability with its tag. The base loads, stores and jumps take a capability
+as their base and check its tag, seal, permissions and bounds. A jump
+leaves a sentry in its link register, a capability that can only be jumped
+to, so a return address cannot be written through or moved. Where RVY
+clears a tag rather than trapping, so does the machine: bounds a capability
+does not allow, or a permission changed on a sealed one, leave the result
+untagged, and the first use of it traps.
 
-The Lisp instructions sit on the other three custom opcodes. Each checks
-its operands as it uses them, so the check costs no extra instructions.
+The Lisp instructions, Xlm, sit on custom-0 (`0x0b`), the opcode RVY leaves
+to its extensions. Each is one capability operation and one check of what
+kind of value its operand holds, made as it uses it, so the check costs no
+extra instructions.
 
-**custom-0: references.** `lref` and `sref` load and store through a pair,
-nil allowed for a load and refused for a store; `car` and `cdr` are offsets
-0 and 8 of the same instruction. `lvar` reads a symbol's slot and traps
-naming the symbol if it holds the unbound marker. `jcl` calls a closure.
-`vkind` answers what kind of value a register holds. `lhdr` reads an
-object's length, checking its type. `beqx` and `bnex` branch on exact
-identity, so a null test is `beqx rs, tp`.
+**References.** `lref` and `sref` load and store through a pair, nil allowed
+for a load and refused for a store; `car` and `cdr` are offsets 0 and 8 of
+the same instruction. `lvar` reads a symbol's slot and traps naming the
+symbol if it holds the unbound marker. `jcl` calls a closure. `vkind`
+answers what kind of value a register holds. `lhdr` reads an object's
+length, checking its type. `beqx` and `bnex` branch on exact identity, so a
+null test is `beqx rs, tp`. `npair` carves the next pair out of the cons
+run, and `sealcl` seals a closure object.
 
-**custom-1: indexed access.** funct7 carries the type the object must be, 0
-for any object. One instruction checks the type in the header, that the
-index is a fixnum, and the bound, then forms the address, which the
+**Indexed access.** funct7 carries the form and the type the object must
+be, 0 for any object. One instruction checks the type in the header, that
+the index is a fixnum, and the bound, then forms the address, which the
 capability's own bounds check again. The value forms move 8-byte slots and
 the byte forms move bytes of a string or a byte object, each refusing the
-other kind.
+other kind; the immediate forms take an index of 0 to 31 in the
+instruction.
 
-```
-funct3 bit 0   store rather than load
-funct3 bit 1   byte rather than value
-funct3 bit 2   the index is a five-bit immediate in the rs2 field
-```
-
-**custom-3: fixnums.** Every operand must be untagged with metadata 0; the
-one that is not traps. Add, subtract, multiply, divide, remainder, the
-logical operations, shifts and compares, with immediate forms of add, and,
-or and shift, and `retag`, which turns a character into its code and back.
+**Fixnums.** Every operand must be untagged with metadata 0; the one that
+is not traps. Add, subtract, multiply, divide, remainder, the logical
+operations, shifts and compares, with immediate forms of add, and, or and
+shift, and `retag`, which turns a character into its code and back.
 
 ```
 add sub mul             wrapping at 32 bits
@@ -229,38 +234,43 @@ that is a bignum takes the same route.
 
 ### Authority
 
-At reset PCC, DDC and MTCC are the root: every permission over the whole
-address space. The reset stub, the one piece of code at a fixed address,
-makes nil, the boot stack and the trap frames out of it, points MTCC at the
-trap stub's entry, and leaves the root in DDC, the default data capability,
-where a load or store whose base is `x0`, and the explicit DDC forms,
-address memory by number.
+At reset PCC, DDC and `mtvec` are the root: every permission over the
+whole address space. The reset stub, the one piece of code at a fixed
+address, makes nil, the boot stack and the trap frames out of it, points
+`mtvec` at the trap stub's entry, and leaves the root in DDC, the default
+data capability, a CSR of Xlm's, where a load or store whose base is `x0`,
+and Xlm's explicit DDC forms, address memory by number.
 
-SR is the privilege. Writing a CSR, reading a machine-level CSR, touching a
-special capability register, `mret`, `wfi`, and every access through DDC
-fault without SR in PCC. The compiler gives a code object's entry SR when
+SR is the privilege, RVY's ASR. Writing a CSR, reading a privileged one, DDC
+among them, `mret`, and every access through DDC are illegal instructions
+without SR in PCC. The compiler gives a code object's entry SR when
 its source was compiled `unsafe`, and no other. So addressing memory by
 number, the collector's and the kernel's way of working, is a permission the
 processor checks on every instruction that does it.
 
 ### Traps
 
-RISC-V leaves causes 24 to 31 to the implementation:
+RISC-V leaves causes 24 to 31 to the implementation, and Xlm's are there;
+32 to 34 are RVY's:
 
 ```
 24   wrong type           mtval: the register holding the value
 25   index out of range   mtval: the register holding the index, 32 for an immediate
 26   fixnum overflow
 27   division by zero
-28   capability fault     mtval: (register << 5) | the ISAv9 code; 32 is PCC, 33 DDC
+28   cons run used up     mtval: the register npair was given, gp
 29   write barrier        a store would overwrite a pointer to an unmarked
                           object; mtval is the granule; see the collector
 30   stack overflow       sp moved below the stack-limit CSR (0x7c0)
+32   capability fault on the pc     mtval: the instruction, or a jump's target
+33   capability fault on a load     mtval: the address
+34   capability fault on a store    mtval: the address
 ```
 
-The handler reads the value from the register the cause names in the saved
-context, decodes the instruction at the faulting pc, and names the operation
-and the value:
+The handler decodes the instruction at the faulting pc, reads the value
+from the register the cause names, or for a capability fault the register
+the instruction took its authority from, in the saved context, asks it what
+refused, and names the operation and the value:
 
 ```
 > (car 5)
@@ -298,7 +308,7 @@ off and may be entered with the stack nearly full. Below the limit `sp` is
 still bounded to its task's stack, so nothing beneath a stack can be
 written whatever the limit says.
 
-Traps nest. MScratchC names the frame a trap saves into: the running task's
+Traps nest. `mscratch` names the frame a trap saves into: the running task's
 context at the outermost level, and below that one of eight frames, objects
 the forge made and a vector in a low global holds. A trap inside the
 handler is normal, because the handler's own arithmetic may widen and its
@@ -336,7 +346,7 @@ is held, by the rule it keeps every object by, and frees it when none is: a
 function defined again and again leaves the heap as it was. Nothing in the
 machine stands at a fixed address but the reset stub, which the processor
 needs to find with nothing else set up; it lies in the low block, which an
-image saves whole. The trap stub is a text like the rest, and MTCC its
+image saves whole. The trap stub is a text like the rest, and `mtvec` its
 entry, which the reset stub loads from `lg-trap-entry`.
 
 A stack is an object too, a `t-stack`, and so is a task's register
@@ -380,13 +390,13 @@ backtrace.
 
 Compiled code holds no heap addresses. A function reaches its symbols and
 constants through its code object, which the prologue loads into `s1`, so a
-constant is one `lc` and an object can move without any instruction being
+constant is one `ly` and an object can move without any instruction being
 patched. A code object's entry capability has EX, SR if the source was
 `unsafe`, and bounds that are exactly its text; a jump within the code is
 relative to it, so the text can move too.
 
 **Closures are sealed.** The compiler makes a closure, copies its captured
-values in and seals it with `csealclo`: anyone may seal their own closure,
+values in and seals it with `sealcl`: anyone may seal their own closure,
 and nothing opens one but calling it. A call is `jcl ra, t0`, which checks
 that `t0` is a sealed closure, leaves it unsealed in `t0` for the callee,
 links a sentry and jumps to the entry capability in slot 0, all in one
@@ -399,15 +409,15 @@ hatch.
 **The cons run.** A pair is four instructions and no branch:
 
 ```
-csetboundsimm a0, gp, 16    ; the pair: the next sixteen bytes of the run
-cincoffsetimm gp, gp, 16
-sc            car, 0(a0)
-sc            cdr, 8(a0)
+npair a0, gp        ; the pair: the next sixteen bytes of the run
+yaddi gp, gp, 16
+sy    car, 0(a0)
+sy    cdr, 8(a0)
 ```
 
-The bounds check is the limit check. When the run is used up the
-`csetboundsimm` faults on `gp`; the trap handler hands the task a fresh run
-without allocating, writes it into the saved `gp` and the live one, and the
+`npair`'s check is the limit check. When the run is used up `npair` traps
+naming `gp`; the trap handler hands the task a fresh run without
+allocating, writes it into the saved `gp` and the live one, and the
 instruction runs again. Each task allocates out of its own run, so the
 sequence needs no lock and a timer interrupt cannot land between two tasks'
 stores. A task starts on an empty run, bounded to no bytes, and its first
@@ -510,7 +520,7 @@ a value, unless the site is inside an `unsafe` form or the file said
 > (%root)
 error: unsafe: not inside an unsafe form: %root in repl
 > (unsafe (%root))
-#<capability 0x0 [0x0,0xffffffff) rwRWmxseh>
+#<capability 0x0 [0x0,0x100000000) rwRWmxseh>
 ```
 
 Code that says `unsafe` is placed with SR in its entry capability, and code
@@ -681,14 +691,15 @@ that belong to the task holding them; interrupt servers on the chips' lines.
 There is no ExecBase: the lists are records held in variables. Sending a
 message costs a pointer on a list.
 
-The context switch is one write of a special capability register. The trap
-stub saves all 32 registers, tags and all, into the block MScratchC names and
-restores from there on the way out, so switching tasks is pointing MScratchC
-at another task's block. Preemption is the timer interrupt; a task that
+The context switch is one write of a CSR. The trap stub saves all 32
+registers, tags and all, into the block `mscratch` names and restores from
+there on the way out, so switching tasks is pointing `mscratch` at another
+task's block. Preemption is the timer interrupt; a task that
 blocks asks for a reschedule with an `ecall`, so the switch always happens
 inside the handler. Which task is running is the register `s2`. A task's
 stack and its context are objects, and the task holds each as a capability
-bounded exactly to it, sealed with an otype of the kernel's: a task record
+bounded exactly to it, sealed with an otype of the kernel's, whose key the
+kernel mints when it starts and keeps in its own closures: a task record
 is anybody's to read, and its frames and saved registers are nobody's but
 the kernel's. When nothing holds the task, the collector takes back all
 three; a task that ends lets go of them at the switch that takes it off

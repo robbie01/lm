@@ -30,10 +30,10 @@ are gone.
 **A moved pointer is made again, not adjusted.** A capability's bounds are
 part of it, so moving an object means deriving a fresh capability from the
 root at the new address, with the same permissions, the same offset and the
-same seal; a sealed closure is sealed again, which takes the root's SE
-authority. Only privileged code can do it, which a mover is anyway. The new
+same seal; a sealed closure is sealed again, which takes the root as the
+key. Only privileged code can do it, which a mover is anyway. The new
 address must also be one the object's bounds can be exact at: a block keeps
-the alignment `cram` gave it.
+the alignment `yamask` gave it.
 
 **Numbers are not pointers.** An address held as a fixnum, in a low global
 or in a chip's register, carries no tag, and no compactor will find it. The
@@ -59,7 +59,7 @@ capability. The stacks themselves are objects, as are the register contexts
 and the trap frames, and slide with the rest; a slot in one that names
 nothing, left there by an earlier call or a long-dead register, loses its
 tag. Nothing the machine needs at reset is outside memory: the reset stub
-loads `sp`, MScratchC and MTCC from `lg-boot-stack`, `lg-trapsave` and
+loads `sp`, `mscratch` and `mtvec` from `lg-boot-stack`, `lg-trapsave` and
 `lg-trap-entry`, and the trap stub its stack and its nested frames from
 `lg-trap-stack` and `lg-trap-nest`, every one a low global the rewrite
 covers.

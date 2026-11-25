@@ -74,7 +74,7 @@ impl Out {
 
 /// Run `code` at BASE on a fresh machine prepared by `setup`, then halt. A
 /// trap goes to a handler that halts with exit code 1, so a test reads the
-/// trap from mcause, mtval and MEPCC.
+/// trap from mcause, mtval and mepc.
 fn go_with(code: &[u32], setup: impl FnOnce(&mut Machine)) -> Out {
     let mut m = Machine::new();
     m.set_reg(ROOT, Cap::ROOT);

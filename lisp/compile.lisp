@@ -713,7 +713,7 @@
     0))
 
 ;; Whether a 32-bit instruction, as its low and high halves, writes a link
-;; into ra: jal, jalr, jcl, or cjalr.
+;; into ra: jal, jalr or jcl.
 (define (links-ra? lo hi)
   (if (%= 1 (%logand (%lsh lo -7) 31))
       (let ((op (%logand lo 127))
