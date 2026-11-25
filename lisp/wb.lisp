@@ -536,16 +536,16 @@
 (define (shell-cell-x win col) (%+ (win-inner-x win) (%* col mono-advance)))
 (define (shell-cell-y win row) (%+ (win-inner-y win) (%* row mono-height)))
 
-;; The grid moves up a line and so does the picture: the blitter copies the
-;; interior over itself, which it may because it walks the right way when
-;; source and destination overlap.
+;; The text moves up a line: in the grid by turning the ring, so the row
+;; going off the top is the one coming in at the bottom, and in the picture
+;; by the blitter copying the interior over itself, which it may because it
+;; walks the right way when source and destination overlap.
 (define (shell-scroll rp win sh)
   (let* ((g (sh-grid sh))
          (cols (sh-cols sh))
          (rows (sh-rows sh))
          (i (shell-cell sh 0 0))
          (n (%+ i cols)))
-    ;; The row going off the top is the one coming in at the bottom.
     (while (%< i n)
       (bytes-set! g i 32)
       (set! i (%+ i 1)))
@@ -580,8 +580,8 @@
   nil)
 
 ;; What has been drawn and not yet handed over: a run of cells on one row.
-;; Handing over a cell at a time was a blit and a mutex per character; a run
-;; goes over when the row changes, when the shell turns to its keyboard, and
+;; Handing over a cell at a time would cost a blit and a mutex a character; a
+;; run goes over when the row changes, when the shell turns to its keyboard, and
 ;; when it scrolls, whose own hand-over covers everything.
 (define (shell-flush win sh)
   (if (%>= (sh-dirty-row sh) 0)

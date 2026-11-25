@@ -25,18 +25,19 @@
 ;;; order.
 
 (in-package lm)
-(unsafe-file)                 ; limbs are read and written with the untyped slot accessors
 
 (define bn-hmask 65535)
 (define bn-hbits 16)
 (define bn-hbase 65536)
 
 ;; ---------------------------------------------------------------- layout
+;; The slots are reached through the bignum's own capability, whose bounds
+;; are its payload.
 (defsubst (bn-limbs b) (%- (%obj-len b) 1))
 (defsubst (bn-halves b) (%lsh (%- (%obj-len b) 1) 1))
-(defsubst (bn-sign b) (%slot b 0))
-(defsubst (bn-limb b i) (%slot b (%+ i 1)))
-(defsubst (bn-set-limb! b i v) (%set-slot! b (%+ i 1) v))
+(defsubst (bn-sign b) (%cap-ld b 0))
+(defsubst (bn-limb b i) (%cap-ld b (%* value-bytes (%+ i 1))))
+(defsubst (bn-set-limb! b i v) (%cap-st! b (%* value-bytes (%+ i 1)) v))
 
 ;; A magnitude is passed as the bignum that holds it plus a count of
 ;; significant halves. A half reads from 0 to 65535, and writing one leaves
@@ -54,7 +55,7 @@
 ;; The limbs of a fresh bignum are zero.
 (define (bn-alloc nlimbs sign)
   (let ((b (alloc-object t-bignum (%+ nlimbs 1))))
-    (%set-slot! b 0 sign)
+    (%cap-st! b 0 sign)
     b))
 
 ;; Room for `nh` halves, rounded up to whole limbs.
