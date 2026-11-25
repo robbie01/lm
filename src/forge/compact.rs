@@ -228,22 +228,33 @@ fn blank_fresh_pool(h: &mut Heap) {
     }
 }
 
+/// A block of code space starts with a header of two granules, its size and
+/// the code object that owns it, and its code follows (see `alloc-code` in
+/// gc.lisp). A free block's header is its size and the next free block.
+pub const CODE_HEADER_BYTES: u32 = 16;
+
+/// Where a code block's code is aligned: as its bounds need, and to the
+/// header at least.
+fn code_align(len: u32) -> u32 {
+    cap::ram(len) & !(CODE_HEADER_BYTES - 1)
+}
+
 /// Slide code space down, for an image that boots through its kickstart.
 ///
 /// That is what makes it possible. Such an image resumes nothing, so no stack
 /// holds a return sentry into code; and compiled code names other code only
 /// through capabilities, a code object's entry and the closures made from
-/// it, while a jump within a function is relative to itself. So the bytes of
-/// a code object can go anywhere, and what has to change with them is every
-/// capability into them, which the tags find.
+/// it, while a jump within a function is relative to itself. So a code block
+/// can go anywhere, and what has to change with it is every capability into
+/// it, which the tags find.
 ///
 /// An image from `(save-image)` resumes, with return sentries all over its
 /// stacks, and this must never be used on one.
 ///
-/// Two things stay exactly where they are: the reset stub at the base, and
-/// the trap stub at `lg-trap-entry`, which are not objects at all. Everything else that is not a live code
-/// object is garbage: dead code the collector freed, and the odd few bytes an
-/// allocation did not hand back.
+/// Two things stay exactly where they are: the reset stub at the base, which
+/// has no header, and the trap stub at `lg-trap-entry`, which is a block no
+/// code object owns. Everything else that is not a live code object's block
+/// is garbage: dead code the collector freed, and code the forge ran once.
 pub fn compact_code(h: &mut Heap, verbose: bool) -> Result<CodeStats, String> {
     let lo = CODE_BASE;
     let hi = h.g(LG_CODE_PTR);
@@ -251,23 +262,26 @@ pub fn compact_code(h: &mut Heap, verbose: bool) -> Result<CodeStats, String> {
         let n = hi.saturating_sub(lo);
         return Ok(CodeStats { before: n, after: n, moved: 0 });
     }
-    if let Some(at) = h.tagged().into_iter().find(|a| (lo..hi).contains(a)) {
-        return Err(format!("code space holds a capability, at {at:#x}"));
-    }
 
-    // Every live code object's machine code: where it is, the room it takes,
-    // and the alignment its bounds need.
+    // Every live code object's block: where it starts, its size, and the
+    // alignment its code needs.
     let mut code: Vec<(u32, u32, u32)> = Vec::new();
     for (b, _, _) in live_blocks(h)? {
         if hdr_type(h.ld(b)) != T_CODE {
             continue;
         }
         let entry = h.ldc(b + HEADER_BYTES + CODE_ENTRY * VALUE_BYTES);
-        let start = entry.base();
-        if entry.tag && start >= lo && start < hi && entry.len() > 0 {
-            let len = entry.len() as u32;
-            code.push((start, round8(len), cap::ram(len)));
+        let base = entry.base();
+        if !entry.tag || base < lo + RESET_RESERVE + CODE_HEADER_BYTES || base >= hi {
+            continue;
         }
+        let start = base - CODE_HEADER_BYTES;
+        let size = h.g(start);
+        let len = entry.len() as u32;
+        if size < CODE_HEADER_BYTES + len || start + size > hi {
+            return Err(format!("the code block at {start:#x} says it is {size} bytes"));
+        }
+        code.push((start, size, code_align(len)));
     }
     code.sort();
     for w in code.windows(2) {
@@ -276,45 +290,37 @@ pub fn compact_code(h: &mut Heap, verbose: bool) -> Result<CodeStats, String> {
         }
     }
 
-    // The trap stub runs from `lg-trap-entry` to whatever comes next that is
-    // something else: a live code object, or a block on the free list.
-    let mut frees: Vec<u32> = Vec::new();
-    let mut p = h.g(LG_CODEFREE);
-    while p != 0 {
-        if p < lo || p >= hi || frees.len() > 1 << 20 {
-            return Err(format!("the code free list runs off at {p:#x}"));
-        }
-        frees.push(p);
-        p = h.ld(p + 4);
-    }
     let mut pins: Vec<(u32, u32)> = vec![(lo, lo + RESET_RESERVE)];
-    let stub = h.g(LG_TRAPENTRY) & !7;
-    if stub >= lo + RESET_RESERVE && stub < hi {
-        let next = code
-            .iter()
-            .map(|c| c.0)
-            .chain(frees.iter().copied())
-            .filter(|&a| a > stub)
-            .min()
-            .unwrap_or(hi);
-        pins.push((stub, next));
+    let stub = h.g(LG_TRAPENTRY);
+    if stub >= lo + RESET_RESERVE + CODE_HEADER_BYTES && stub < hi {
+        let start = stub - CODE_HEADER_BYTES;
+        pins.push((start, (start + h.g(start)).min(hi)));
     }
     pins.sort();
 
-    // Every code object, in address order, into the first room past the last
-    // one placed that is aligned for its bounds and does not run into
-    // something pinned.
-    let mut moves: Vec<Move> = Vec::with_capacity(code.len() + pins.len());
+    // The only capability code space holds is a block's owner, in the
+    // second granule of its header.
+    for at in h.tagged().into_iter().filter(|a| (lo..hi).contains(a)) {
+        if !code.iter().any(|c| c.0 + 8 == at) {
+            return Err(format!("code space holds a capability that owns nothing, at {at:#x}"));
+        }
+    }
+
+    // Every block, in address order, into the first room past the last one
+    // placed where its code is aligned for its bounds and it does not run
+    // into something pinned.
+    let mut moves: Vec<Move> = Vec::with_capacity(code.len());
     let mut free = lo;
     let mut pi = 0;
     for &(from, size, mask) in &code {
-        let mut to = align_up(free, mask);
+        let place = |at: u32| align_up(at + CODE_HEADER_BYTES, mask) - CODE_HEADER_BYTES;
+        let mut to = place(free);
         loop {
             while pi < pins.len() && pins[pi].1 <= to {
                 pi += 1;
             }
             if pi < pins.len() && to + size > pins[pi].0 {
-                to = align_up(pins[pi].1, mask);
+                to = place(pins[pi].1);
                 continue;
             }
             break;
@@ -325,37 +331,38 @@ pub fn compact_code(h: &mut Heap, verbose: bool) -> Result<CodeStats, String> {
     let new_hi = pins.iter().fold(free, |m, p| m.max(p.1));
 
     // Capabilities into the pinned stubs stay as they are; every other one
-    // into code space must be into a code object.
+    // into code space must be into a code object's block.
     let mut owners = moves.clone();
     owners.extend(pins.iter().map(|&(s, e)| Move { from: s, size: e - s, to: s }));
     owners.sort_by_key(|m| m.from);
     rewrite(h, &owners, lo, hi)?;
 
-    // Take every object's bytes out, blank everything that is not pinned, and
-    // put the bytes back where they go. Copying out first is what lets an
-    // object land anywhere, without a care for what it overlaps.
-    let saved: Vec<Vec<u32>> = moves
+    // Take every block out, granule by granule with its tag, blank everything
+    // that is not pinned, and put the blocks back where they go. Copying out
+    // first is what lets a block land anywhere, without a care for what it
+    // overlaps.
+    let saved: Vec<Vec<Cap>> = moves
         .iter()
-        .map(|m| (0..m.size / 4).map(|i| h.ld(m.from + i * 4)).collect())
+        .map(|m| (0..m.size / 8).map(|i| h.ldc(m.from + i * 8)).collect())
         .collect();
     let pinned = |a: u32| pins.iter().any(|p| a >= p.0 && a < p.1);
-    for a in (lo..hi.max(new_hi)).step_by(4) {
+    for a in (lo..hi.max(new_hi)).step_by(8) {
         if !pinned(a) {
-            h.st(a, 0);
+            h.stc(a, Cap::NULL);
         }
     }
     let mut moved = 0;
-    for (m, words) in moves.iter().zip(&saved) {
-        for (k, w) in words.iter().enumerate() {
-            h.st(m.to + 4 * k as u32, *w);
+    for (m, granules) in moves.iter().zip(&saved) {
+        for (k, c) in granules.iter().enumerate() {
+            h.stc(m.to + 8 * k as u32, *c);
         }
         if m.to != m.from {
             moved += 1;
         }
     }
 
-    // The free list: every gap big enough to say how big it is, which is the
-    // same rule the collector's sweep keeps to.
+    // The free list: every gap big enough for a header, which is the same
+    // rule the collector keeps to.
     let mut spans: Vec<(u32, u32)> = pins.clone();
     spans.extend(moves.iter().map(|m| (m.to, m.to + m.size)));
     spans.sort();
@@ -363,9 +370,9 @@ pub fn compact_code(h: &mut Heap, verbose: bool) -> Result<CodeStats, String> {
     let mut freen = 0u32;
     let mut at = lo;
     for &(s, e) in &spans {
-        if s >= at + 16 {
-            h.st(at, s - at);
-            h.st(at + 4, head);
+        if s >= at + CODE_HEADER_BYTES {
+            h.set_g(at, s - at);
+            h.set_g(at + 8, head);
             head = at;
             freen += s - at;
         }
