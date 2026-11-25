@@ -1,22 +1,21 @@
 //! Physical memory map of the LM machine.
 //!
-//!   0000_0000  ..  0000_0007   the nil cell. nil is the word 0, which is also
-//!                              a valid cons whose car and cdr are nil, so car
-//!                              and cdr need no null check and `null?` is one
-//!                              `beqz`. AbsSysBase therefore sits at 8, not at
-//!                              4 as on the Amiga.
-//!   0000_0008                  AbsSysBase -> ExecBase
-//!   0000_0100  ..  0000_01FF   Lisp global block, reachable as `lw t,0x100(x0)`
+//!   0000_0000  ..  0000_000F   the nil cell: a pair whose car and cdr are nil.
+//!                              nil is a capability to these 16 bytes that may
+//!                              read them and nothing else.
+//!   0000_0100  ..              the low-memory globals, one 8-byte slot each
+//!   0000_0400  ..  0000_05FF   the free bins of object space
 //!   0000_1000  ..              trap vectors and the exception stub
-//!   0000_2000  ..  00FF_FFFF   Exec memory pool: tasks, ports, bitmaps
+//!   0000_2000  ..  00FF_FFFF   the pool: stacks, contexts, descriptors
 //!   0100_0000  ..  01FF_FFFF   code space (also the reset vector)
-//!   0200_0000  ..  09FF_FFFF   cons space
+//!   0200_0000  ..  09FF_FFFF   cons space, eight million pairs
 //!   0A00_0000  ..  0DFF_FFFF   object space
-//!   0E00_0000  ..  0FFF_FFFF   unclaimed: mark bitmap, mark stack, buffers
-//!   F000_0000  ..              custom chips
+//!   0E00_0000  ..  0FFF_FFFF   the mark bitmap, scratch
+//!   F000_0000  ..              device pages, 4 KiB each, 32-bit registers
 //!
-//! One flat shared address space, no MMU: every task sees every byte, so
-//! Exec-style message passing by pointer is legal.
+//! One flat address space. Tags exist for RAM only: a device page holds no
+//! capabilities. Every slot below 0x800 is reachable with one load or store
+//! off x0, which addresses memory through DDC.
 
 pub const RAM_BASE: u32 = 0x0000_0000;
 pub const CHIP_SIZE: u32 = 128 << 20;
@@ -24,16 +23,17 @@ pub const FAST_SIZE: u32 = 128 << 20;
 pub const RAM_SIZE: u32 = CHIP_SIZE + FAST_SIZE;
 pub const CHIP_END: u32 = RAM_BASE + CHIP_SIZE;
 
+/// The 16-byte cell nil names. Its car and cdr hold nil.
 pub const NIL_CELL: u32 = 0x0000_0000;
 
-/// Lisp global block. Every slot is reachable with a single `lw`/`sw` off x0
-/// because the whole block sits inside the 12-bit immediate range.
+/// The low-memory globals. A global that holds an address holds it as a
+/// fixnum, and authority to what it names comes from DDC; one that holds a
+/// value holds the value.
 pub const LG_BASE: u32 = 0x0000_0100;
 
-/// Exact-fit free lists for object space, one word per granule count, in
-/// reserved low memory above the Lisp global block. Entry 0 holds everything
-/// too big to have a list of its own.
-pub const OBJ_BINS: u32 = 0x0000_0200;
+/// Exact-fit free lists for object space, one 8-byte slot per granule count.
+/// Entry 0 holds everything too big to have a list of its own.
+pub const OBJ_BINS: u32 = 0x0000_0400;
 pub const OBJ_BIN_COUNT: u32 = 64;
 
 pub const TRAP_BASE: u32 = 0x0000_1000;
@@ -46,7 +46,7 @@ pub const CODE_BASE: u32 = 0x0100_0000;
 pub const CODE_END: u32 = 0x0200_0000; // 16 MiB
 
 pub const CONS_BASE: u32 = 0x0200_0000;
-pub const CONS_END: u32 = 0x0A00_0000; // 128 MiB, sixteen million pairs
+pub const CONS_END: u32 = 0x0A00_0000; // 128 MiB, eight million pairs
 
 pub const OBJ_BASE: u32 = 0x0A00_0000;
 pub const OBJ_END: u32 = 0x0E00_0000; // 64 MiB
@@ -87,61 +87,59 @@ pub const INT_DISK: u32 = 4;
 pub const INT_SOFT: u32 = 5; // software interrupt, for Exec's Cause()
 
 // ============================================================ Lisp globals
-// Offsets within LG_BASE. Kept in one place and emitted into a generated
-// Lisp file at build time so the two sides cannot drift apart.
+// Slot numbers within LG_BASE, eight bytes apart. Kept in one place and
+// emitted into a generated Lisp file at build time so the two sides cannot
+// drift apart.
 
 macro_rules! globals {
-    ($($name:ident = $off:expr, $lisp:expr;)*) => {
-        $(pub const $name: u32 = LG_BASE + $off;)*
-        pub const GLOBAL_NAMES: &[(&str, u32)] = &[$(($lisp, LG_BASE + $off)),*];
+    ($($name:ident = $slot:expr, $lisp:expr;)*) => {
+        $(pub const $name: u32 = LG_BASE + 8 * $slot;)*
+        pub const GLOBAL_NAMES: &[(&str, u32)] = &[$(($lisp, LG_BASE + 8 * $slot)),*];
     };
 }
 
 globals! {
-    LG_CONS_PTR   = 0x00, "cons-ptr";    // bump pointer, cons space
-    LG_CONS_END   = 0x04, "cons-end";
-    LG_OBJ_PTR    = 0x08, "obj-ptr";     // bump pointer, object space
-    LG_OBJ_END    = 0x0c, "obj-end";
-    LG_CODE_PTR   = 0x10, "code-ptr";    // bump pointer, code space
-    LG_CODE_END   = 0x14, "code-end";
-    LG_CONS_FREE  = 0x18, "cons-free";   // free list head, cons space
-    LG_OBARRAY    = 0x20, "obarray";     // vector of symbol buckets
-    LG_GCCOUNT    = 0x28, "gccount";
-    LG_STACKTOP   = 0x34, "stacktop";    // top of the boot stack
-    LG_STACKBOT   = 0x38, "stackbot";
-    LG_TOPLEVEL   = 0x3c, "toplevel";    // closure the kickstart enters
-    LG_POOLPTR    = 0x40, "poolptr";     // Exec pool bump pointer
-    LG_POOLEND    = 0x44, "poolend";
-    LG_ROOTS      = 0x48, "roots";       // vector of extra gc roots
-    LG_ERRHANDLER = 0x50, "errhandler";  // closure called on a lisp error
-    LG_TRAPSAVE   = 0x54, "trapsave";    // scratch for the exception stub
-    LG_SYMLIST    = 0x5c, "symlist";     // every interned symbol, for the gc
-    LG_IMGENTRY   = 0x68, "imgentry";    // entry point recorded in the image
-    LG_CONSFREEN  = 0x70, "cons-free-n"; // cells on the cons free list
-    LG_OBJFREEN   = 0x74, "obj-free-n";
-    LG_GCHOOK     = 0x7c, "gchook";      // raw code address: replenish cons space
-    LG_TRAPHOOK   = 0x84, "traphook";    // closure called from the trap stub
-    LG_BOOTLIST   = 0x88, "bootlist";    // thunks the kickstart runs in order
-    LG_CONS_RUN   = 0x8c, "cons-run";     // start of the run being bumped
-    LG_CONSRUNEND = 0x90, "cons-run-end"; // and its end
-    LG_REFILL     = 0x94, "refill";      // closure: take the next cons run
-    LG_CODEFREE   = 0xb4, "code-free";   // free blocks in code space
-    LG_CODEREG    = 0xb8, "code-reg";    // registry of every code object
-    LG_CODEREGN   = 0xbc, "code-reg-n";
-    LG_CODEFREEN  = 0xc0, "code-free-n";
-    LG_STUBLO     = 0xac, "stub-lo";     // extent of the cons refill stub,
-    LG_STUBHI     = 0xb0, "stub-hi";     // which is not a lisp frame
-    LG_STARTUP    = 0x98, "startup";     // closure run before the repl
-    LG_TASKEXIT   = 0x9c, "task-exit";   // the closure a task returns into
-    LG_TRAPENTRY  = 0xa0, "trap-entry";  // the forge's trap stub, for its collection
-    LG_BOOTARG    = 0xa4, "boot-arg";    // the forge's trampoline argument
-    LG_RAWWORD    = 0xa8, "raw-word";    // a raw 32-bit word in transit; not scanned
-    LG_SYMCOUNT   = 0xc4, "symcount";    // symbols interned so far: the next
-                                         // symbol's identity, and its hash
-    LG_POOLFREE   = 0xc8, "pool-free";   // free list head, exec pool
-    LG_PACKAGES   = 0xcc, "packages";    // every package, as a list
-    LG_PACKAGE    = 0xd0, "package";     // the one a bare name is read in
-    LG_TRAPDEPTH  = 0xd4, "trapdepth";   // traps in progress; 0 outside one
-    LG_TRAPTMP    = 0xd8, "traptmp";     // the stub has no free register at
-    LG_TRAPTMP2   = 0xdc, "traptmp2";    // entry, so two go here for a moment
+    LG_CONS_PTR   = 0,  "cons-ptr";     // bump pointer, cons space
+    LG_CONS_END   = 1,  "cons-end";
+    LG_OBJ_PTR    = 2,  "obj-ptr";      // bump pointer, object space
+    LG_OBJ_END    = 3,  "obj-end";
+    LG_CODE_PTR   = 4,  "code-ptr";     // bump pointer, code space
+    LG_CODE_END   = 5,  "code-end";
+    LG_CONS_FREE  = 6,  "cons-free";    // free list head, cons space
+    LG_OBARRAY    = 7,  "obarray";      // vector of symbol buckets
+    LG_GCCOUNT    = 8,  "gccount";
+    LG_STACKTOP   = 9,  "stacktop";     // top of the boot stack
+    LG_STACKBOT   = 10, "stackbot";
+    LG_TOPLEVEL   = 11, "toplevel";     // closure the kickstart enters
+    LG_POOLPTR    = 12, "poolptr";      // Exec pool bump pointer
+    LG_POOLEND    = 13, "poolend";
+    LG_ROOTS      = 14, "roots";        // vector of extra gc roots
+    LG_ERRHANDLER = 15, "errhandler";   // closure called on a lisp error
+    LG_TRAPSAVE   = 16, "trapsave";     // scratch for the exception stub
+    LG_SYMLIST    = 17, "symlist";      // every interned symbol, for the gc
+    LG_IMGENTRY   = 18, "imgentry";     // entry point recorded in the image
+    LG_CONSFREEN  = 19, "cons-free-n";  // cells on the cons free list
+    LG_OBJFREEN   = 20, "obj-free-n";
+    LG_TRAPHOOK   = 21, "traphook";     // closure called from the trap stub
+    LG_BOOTLIST   = 22, "bootlist";     // thunks the kickstart runs in order
+    LG_CONS_RUN   = 23, "cons-run";     // the running task's cons run
+    LG_STARTUP    = 24, "startup";      // closure run before the repl
+    LG_TASKEXIT   = 25, "task-exit";    // the closure a task returns into
+    LG_TRAPENTRY  = 26, "trap-entry";   // the forge's trap stub, for its collection
+    LG_BOOTARG    = 27, "boot-arg";     // the forge's trampoline argument
+    LG_CODEFREE   = 28, "code-free";    // free blocks in code space
+    LG_CODEREG    = 29, "code-reg";     // registry of every code object
+    LG_CODEREGN   = 30, "code-reg-n";
+    LG_CODEFREEN  = 31, "code-free-n";
+    LG_SYMCOUNT   = 32, "symcount";     // symbols interned so far: the next
+                                        // symbol's identity, and its hash
+    LG_POOLFREE   = 33, "pool-free";    // free list head, exec pool
+    LG_PACKAGES   = 34, "packages";     // every package, as a list
+    LG_PACKAGE    = 35, "package";      // the one a bare name is read in
+    LG_TRAPDEPTH  = 36, "trapdepth";    // traps in progress; 0 outside one
+    LG_TRAPTMP    = 37, "traptmp";      // the stub has no free register at
+    LG_TRAPTMP2   = 38, "traptmp2";     // entry, so two go here for a moment
 }
+
+// The globals must stay below the free bins.
+const _: () = assert!(LG_BASE + 8 * 39 <= OBJ_BINS);

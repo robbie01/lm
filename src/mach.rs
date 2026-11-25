@@ -1,7 +1,8 @@
-//! The machine: register file, physical memory, CSRs, trap entry, and the
-//! outer scheduling loop that hands fuel to the token-threaded core.
+//! The machine: register file, tagged memory, CSRs and special capability
+//! registers, trap entry, and the state the outer loop hands the
+//! token-threaded core.
 
-use crate::cap::Cap;
+use crate::cap::*;
 use crate::dev::blit::Blitter;
 use crate::dev::disk::Disk;
 use crate::dev::gfx::Gfx;
@@ -19,36 +20,96 @@ pub const C_LFAULT: u32 = 5;
 pub const C_SALIGN: u32 = 6;
 pub const C_SFAULT: u32 = 7;
 pub const C_ECALL: u32 = 11;
-/// Wrong type handed to an instruction that checks one. RISC-V reserves
-/// causes 24 through 31 for the implementation. `mtval` carries the
-/// offending value.
+/// Wrong kind of operand handed to an Xlm instruction. RISC-V reserves
+/// causes 24 through 31 for the implementation. `mtval` is the number of the
+/// register that held the operand; the handler reads its value from the trap
+/// frame.
 pub const C_TYPE: u32 = 24;
-/// An index outside the object it was applied to. `mtval` carries the index.
+/// An index at or past the length in an object's header. `mtval` is the
+/// number of the index register, or 32 for an immediate index.
 pub const C_RANGE: u32 = 25;
-/// A fixnum result that does not fit in thirty-one bits. `+`, `-` and `*` emit
-/// the trapping forms; the handler widens the operation to a bignum and
-/// resumes after the instruction.
+/// A fixnum result that does not fit in 32 bits. The handler decodes the
+/// instruction, widens the operation to a bignum and resumes after it.
 pub const C_OVER: u32 = 26;
-/// Division by zero in a checked fixnum instruction. The base ISA's own
-/// division returns -1; the fixnum forms trap instead.
+/// Division by zero in a fixnum instruction.
 pub const C_DIVZERO: u32 = 27;
-/// The stack pointer was moved below `stklim`. mtval holds where it would have
-/// gone; sp itself is left as it was.
-pub const C_STACK: u32 = 28;
-/// The write barrier. With bit 0 of `gcmode` set, a checked store (`sref`,
-/// `sobj`, `stx`, `stxi`) that would overwrite a heap pointer whose mark bit
-/// is clear traps before writing. `mtval` carries the pointer being
-/// overwritten; the handler marks it and the store re-executes. This is what
-/// lets the collector mark while everything else runs: nothing reachable
-/// when marking began can be lost, because the last pointer to it cannot
-/// be overwritten without the collector seeing it first.
+/// A capability check failed. `mtval` is `(register << 5) | code`, the
+/// register 32 for PCC and 33 for DDC, the code one of `CAPEX_*`.
+pub const C_CAP: u32 = 28;
+/// The write barrier. With bit 0 of `gcmode` set, a store of any width that
+/// would overwrite a tagged granule in cons or object space whose capability
+/// points at an unmarked heap object traps before writing. `mtval` is the
+/// address of that granule; the handler marks the object and the store
+/// re-executes. This is what lets the collector mark while everything else
+/// runs: nothing reachable when marking began can be lost, because the last
+/// pointer to it cannot be overwritten without the collector seeing it first.
 pub const C_BARRIER: u32 = 29;
-/// A custom CSR: the lowest address the stack pointer may be moved down to.
-/// Zero means no limit.
+/// A capability offset moved sp below `stklim` with interrupts on. `mtval`
+/// is where it would have gone; sp is left as it was.
+pub const C_STACK: u32 = 30;
+
+/// The capability fault codes, as ISAv9 numbers them.
+pub const CAPEX_LENGTH: u32 = 0x01;
+pub const CAPEX_TAG: u32 = 0x02;
+pub const CAPEX_SEAL: u32 = 0x03;
+pub const CAPEX_TYPE: u32 = 0x04;
+pub const CAPEX_PERM: u32 = 0x08;
+pub const CAPEX_REPRESENTABLE: u32 = 0x0a;
+pub const CAPEX_EXECUTE: u32 = 0x11;
+pub const CAPEX_LOAD: u32 = 0x12;
+pub const CAPEX_STORE: u32 = 0x13;
+pub const CAPEX_LOAD_CAP: u32 = 0x14;
+pub const CAPEX_STORE_CAP: u32 = 0x15;
+pub const CAPEX_SEAL_PERM: u32 = 0x17;
+pub const CAPEX_SYSREG: u32 = 0x18;
+pub const CAPEX_UNSEAL: u32 = 0x19;
+/// Where the register sits in a capability fault's mtval, above the code.
+pub const CAPEX_REG_SHIFT: u32 = 5;
+/// The register numbers a capability fault names beyond the 32 general ones.
+pub const CAPEX_REG_PCC: u32 = 32;
+pub const CAPEX_REG_DDC: u32 = 33;
+/// What a range fault names for an immediate index.
+pub const RANGE_IMM: u32 = 32;
+
+/// The special capability registers, as `cspecialrw` numbers them.
+pub const SCR_PCC: u32 = 0;
+pub const SCR_DDC: u32 = 1;
+pub const SCR_MTCC: u32 = 28;
+pub const SCR_MTDC: u32 = 29;
+pub const SCR_MSCRATCHC: u32 = 30;
+pub const SCR_MEPCC: u32 = 31;
+
+/// The machine CSRs by number. `mtvec`, `mepc` and `mscratch` read and write
+/// the addresses of MTCC, MEPCC and MScratchC.
+pub const CSR_MSTATUS: u32 = 0x300;
+pub const CSR_MIE: u32 = 0x304;
+pub const CSR_MTVEC: u32 = 0x305;
+pub const CSR_MSCRATCH: u32 = 0x340;
+pub const CSR_MEPC: u32 = 0x341;
+pub const CSR_MCAUSE: u32 = 0x342;
+pub const CSR_MTVAL: u32 = 0x343;
+pub const CSR_MIP: u32 = 0x344;
+/// A custom CSR: the lowest address sp may be moved down to with interrupts
+/// on. Zero means no limit.
 pub const CSR_STKLIM: u32 = 0x7c0;
 /// A custom CSR: bit 0 turns the write barrier on. The mark bits it consults
 /// are one per eight bytes of heap, from `CONS_BASE`, at `GC_BITMAP`.
 pub const CSR_GCMODE: u32 = 0x7c1;
+
+/// A task's register save area, which is also a trap frame: 32 capability
+/// slots, slot 0 the pc (MEPCC) and slot i the register x_i.
+pub const CTX_SLOTS: u32 = 32;
+pub const CTX_SLOT_BYTES: u32 = 8;
+pub const CTX_BYTES: u32 = CTX_SLOTS * CTX_SLOT_BYTES;
+
+/// What `vkind` answers beyond an untagged value's metadata (0 to 15): nil,
+/// a pair, any other capability, and an object of header type t as
+/// `KIND_OBJECT + t`.
+pub const KIND_NIL: u32 = 16;
+pub const KIND_PAIR: u32 = 17;
+pub const KIND_CAP: u32 = 31;
+pub const KIND_OBJECT: u32 = 32;
+
 /// Stretches with interrupts off that last longer than this are counted as
 /// pauses: about a millisecond of host time.
 pub const PAUSE_LONG: u64 = 300_000;
@@ -104,16 +165,20 @@ pub enum Stop {
 pub const XM_TAG: u64 = 1 << 32;
 pub const XM_READY: u64 = 1 << 33;
 
+/// How many entry capabilities `jcl` remembers the windows of.
+pub const JCACHE: usize = 256;
+
 pub struct Machine {
     /// The register file. A register is a capability: its address in `x`,
     /// its metadata and tag in `xm` (metadata in the low 32 bits, the tag at
     /// `XM_TAG`). An integer result writes the address and zeroes `xm`, so
     /// the integer instructions touch nothing else.
     ///
-    /// `wb` and `wl` cache where a tagged register may load and store: the
-    /// base and length of its bounds clipped to RAM. They are valid while
-    /// `XM_READY` is set in `xm`; whatever writes a capability either copies
-    /// them or leaves the flag clear for the first access to fill in.
+    /// `wb` and `wl` cache where a tagged register reaches: the base and
+    /// length of its bounds clipped to RAM. They are valid while `XM_READY`
+    /// is set in `xm`, which only a tagged register has; whatever writes a
+    /// capability either copies them or leaves the flag clear for the first
+    /// access to fill in.
     pub x: [u32; 32],
     pub xm: [u64; 32],
     pub wb: [u32; 32],
@@ -126,12 +191,23 @@ pub struct Machine {
     pub pcc_tag: bool,
     pub pcc_wb: u32,
     pub pcc_wl: u32,
-    /// The special capability registers.
+    /// DDC, with its window and the permissions it grants (none unless it is
+    /// tagged and unsealed). `set_ddc` keeps them in step, and the core
+    /// refreshes them on entry, so DDC may also be assigned between runs.
     pub ddc: Cap,
+    pub ddc_wb: u32,
+    pub ddc_wl: u32,
+    pub ddc_perms: u32,
+    /// The other special capability registers.
     pub mtcc: Cap,
     pub mtdc: Cap,
     pub mscratchc: Cap,
     pub mepcc: Cap,
+    /// The windows of entry capabilities `jcl` has jumped through, keyed by
+    /// the capability's bits. A window is a function of the bits alone, so
+    /// nothing ever invalidates an entry.
+    pub jcache: Box<[(u64, u32, u32); JCACHE]>,
+
     ram: Box<[u8]>,
     /// Raw view of `ram` so the hot path skips the slice length load.
     pub ramp: *mut u8,
@@ -146,11 +222,8 @@ pub struct Machine {
     pub mstatus: u32,
     pub mie: u32,
     pub mip: u32,
-    pub mtvec: u32,
-    pub mscratch: u32,
     pub stklim: u32,
     pub gcmode: u32,
-    pub mepc: u32,
     pub mcause: u32,
     pub mtval: u32,
 
@@ -181,17 +254,17 @@ pub struct Machine {
     pub trace_pauses: bool,
 
     /// Dynamic instruction histogram. Slots 0..63 are dispatch tokens; the
-    /// rest break down what a token alone cannot say. See `prof::NAMES`.
-    /// Always present, filled only when `prof_on` is set by `--isaprof`, so
-    /// profiling needs no separate build.
+    /// rest break down what a token alone cannot say. See `prof::name`.
+    /// Always present, filled only by the counting dispatch table that
+    /// `--isaprof` installs, so profiling needs no separate build.
     pub prof: Box<[u64; crate::prof::SLOTS]>,
     pub watch: Box<crate::prof::Watch>,
     pub prof_on: bool,
     /// Samples of which function the machine is in, taken only with
     /// `--fnprof`. See `prof::FnProf`.
     pub fnprof: Option<Box<crate::prof::FnProf>>,
-    /// Which dispatch table the core is using: the plain one, or the
-    /// counting one.
+    /// Which dispatch table the core is using: the plain one, the counting
+    /// one, or the watching one.
     pub table: &'static [crate::cpu::Handler; 64],
     /// The pc and instruction word one instruction ago. Filled only when the
     /// watch table is installed; see `cpu::watch_hook`.
@@ -234,7 +307,22 @@ pub struct Machine {
     pub trace_traps: bool,
 }
 
+/// The part of a capability's bounds that lies in RAM, as a base and a
+/// length; the length is 0 if none does.
+#[inline]
+pub fn ram_window(c: Cap, ramlen: u32) -> (u32, u32) {
+    let (b, t) = c.bounds();
+    let t = t.min(ramlen as u64);
+    if (b as u64) < t {
+        (b, (t - b as u64) as u32)
+    } else {
+        (0, 0)
+    }
+}
+
 impl Machine {
+    /// A machine at reset: PCC, DDC and MTCC the root, every general register
+    /// NULL, PCC at the reset vector.
     pub fn new() -> Box<Machine> {
         let mut ram = vec![0u8; RAM_SIZE as usize].into_boxed_slice();
         let ramp = ram.as_mut_ptr();
@@ -245,16 +333,20 @@ impl Machine {
             xm: [0; 32],
             wb: [0; 32],
             wl: [0; 32],
-            pc: KICK_BASE,
+            pc: 0,
             pcc_meta: 0,
             pcc_tag: false,
             pcc_wb: 0,
             pcc_wl: 0,
-            ddc: Cap::ROOT,
+            ddc: Cap::NULL,
+            ddc_wb: 0,
+            ddc_wl: 0,
+            ddc_perms: 0,
             mtcc: Cap::ROOT,
             mtdc: Cap::NULL,
             mscratchc: Cap::NULL,
             mepcc: Cap::NULL,
+            jcache: Box::new([(0, 0, 0); JCACHE]),
             ram,
             ramp,
             ramlen: RAM_SIZE,
@@ -263,11 +355,8 @@ impl Machine {
             mstatus: 0,
             mie: 0,
             mip: 0,
-            mtvec: 0,
-            mscratch: 0,
             stklim: 0,
             gcmode: 0,
-            mepc: 0,
             mcause: 0,
             mtval: 0,
             cycles: 0,
@@ -308,6 +397,7 @@ impl Machine {
             trace_traps: false,
         });
         m.set_pcc(Cap::ROOT.with_addr(KICK_BASE));
+        m.set_ddc(Cap::ROOT);
         m
     }
 
@@ -347,6 +437,18 @@ impl Machine {
         self.xm[0] = 0;
     }
 
+    /// Fill in the window of register `i` if it is tagged and has none yet.
+    #[inline(never)]
+    pub fn fill_window(&mut self, i: u32) {
+        let i = (i & 31) as usize;
+        if self.xm[i] & (XM_TAG | XM_READY) == XM_TAG {
+            let (b, l) = ram_window(self.reg(i as u32), self.ramlen);
+            self.wb[i] = b;
+            self.wl[i] = l;
+            self.xm[i] |= XM_READY;
+        }
+    }
+
     pub fn pcc(&self) -> Cap {
         Cap { addr: self.pc, meta: self.pcc_meta, tag: self.pcc_tag }
     }
@@ -357,55 +459,49 @@ impl Machine {
         self.pc = c.addr;
         self.pcc_meta = c.meta;
         self.pcc_tag = c.tag;
-        let exec = c.tag && !c.is_sealed() && c.has(crate::cap::P_EX);
+        let exec = c.tag && !c.is_sealed() && c.has(P_EX);
         let (b, l) = if exec { ram_window(c, self.ramlen) } else { (0, 0) };
         self.pcc_wb = b;
         self.pcc_wl = l;
     }
 
-    // ----------------------------------------------------------- tagged memory
     #[inline(always)]
-    pub fn tag_at(&self, a: u32) -> bool {
-        self.in_ram(a, 1) && unsafe { *self.tagp.add((a >> 3) as usize) } != 0
+    pub fn pcc_has(&self, p: u32) -> bool {
+        self.pcc_meta & (p << PERM_SHIFT) != 0
     }
 
-    /// The capability in the granule at `a`, which is 8-byte aligned. Outside
-    /// RAM, NULL.
-    pub fn load_cap(&self, a: u32) -> Cap {
-        if a & 7 != 0 || !self.in_ram(a, 8) {
-            return Cap::NULL;
+    pub fn set_ddc(&mut self, c: Cap) {
+        self.ddc = c;
+        let live = c.tag && !c.is_sealed();
+        let (b, l) = if live { ram_window(c, self.ramlen) } else { (0, 0) };
+        self.ddc_wb = b;
+        self.ddc_wl = l;
+        self.ddc_perms = if live { c.perms() } else { 0 };
+    }
+
+    /// Read a special capability register; None if there is no such one.
+    pub fn scr_read(&self, n: u32) -> Option<Cap> {
+        Some(match n {
+            SCR_PCC => self.pcc(),
+            SCR_DDC => self.ddc,
+            SCR_MTCC => self.mtcc,
+            SCR_MTDC => self.mtdc,
+            SCR_MSCRATCHC => self.mscratchc,
+            SCR_MEPCC => self.mepcc,
+            _ => return None,
+        })
+    }
+
+    /// Write one. PCC is read only here; a jump writes it.
+    pub fn scr_write(&mut self, n: u32, c: Cap) {
+        match n {
+            SCR_DDC => self.set_ddc(c),
+            SCR_MTCC => self.mtcc = c,
+            SCR_MTDC => self.mtdc = c,
+            SCR_MSCRATCHC => self.mscratchc = c,
+            SCR_MEPCC => self.mepcc = c,
+            _ => {}
         }
-        unsafe { self.rd_cap(a) }
-    }
-
-    /// Store a capability, tag and all, into the granule at `a`, which is
-    /// 8-byte aligned. Outside RAM, nothing.
-    pub fn store_cap(&mut self, a: u32, c: Cap) {
-        if a & 7 == 0 && self.in_ram(a, 8) {
-            unsafe { self.wr_cap(a, c) }
-        }
-    }
-
-    #[inline(always)]
-    pub unsafe fn rd_cap(&self, a: u32) -> Cap {
-        let bits = (self.ramp.add(a as usize) as *const u64).read_unaligned();
-        Cap::from_bits(bits, *self.tagp.add((a >> 3) as usize) != 0)
-    }
-    #[inline(always)]
-    pub unsafe fn wr_cap(&mut self, a: u32, c: Cap) {
-        (self.ramp.add(a as usize) as *mut u64).write_unaligned(c.to_bits());
-        *self.tagp.add((a >> 3) as usize) = c.tag as u8;
-    }
-
-    /// Clear the tags of every granule `[a, a + n)` touches, within RAM.
-    pub fn clear_tags(&mut self, a: u32, n: u32) {
-        if n == 0 || a >= self.ramlen {
-            return;
-        }
-        let end = (a as u64 + n as u64).min(self.ramlen as u64);
-        let g0 = (a >> 3) as usize;
-        let g1 = ((end + 7) >> 3) as usize;
-        self.tags[g0..g1].fill(0);
     }
 
     // -------------------------------------------------------------- raw access
@@ -449,6 +545,21 @@ impl Machine {
         (self.ramp.add(a as usize) as *mut u32).write_unaligned(v);
         *self.tagp.add((a >> 3) as usize) = 0;
         *self.tagp.add(((a + 3) >> 3) as usize) = 0;
+    }
+    #[inline(always)]
+    pub unsafe fn rd_tag(&self, a: u32) -> bool {
+        *self.tagp.add((a >> 3) as usize) != 0
+    }
+    /// The capability in the granule at `a`, which is aligned and in RAM.
+    #[inline(always)]
+    pub unsafe fn rd_cap(&self, a: u32) -> Cap {
+        let bits = (self.ramp.add(a as usize) as *const u64).read_unaligned();
+        Cap::from_bits(bits, self.rd_tag(a))
+    }
+    #[inline(always)]
+    pub unsafe fn wr_cap(&mut self, a: u32, c: Cap) {
+        (self.ramp.add(a as usize) as *mut u64).write_unaligned(c.to_bits());
+        *self.tagp.add((a >> 3) as usize) = c.tag as u8;
     }
 
     // Checked helpers for use outside the core: loaders, devices, debugger.
@@ -496,6 +607,39 @@ impl Machine {
         s
     }
 
+    // ----------------------------------------------------------- tagged memory
+    pub fn tag_at(&self, a: u32) -> bool {
+        self.in_ram(a, 1) && unsafe { self.rd_tag(a) }
+    }
+
+    /// The capability in the granule at `a`, which is 8-byte aligned. Outside
+    /// RAM, NULL.
+    pub fn load_cap(&self, a: u32) -> Cap {
+        if a & 7 != 0 || !self.in_ram(a, 8) {
+            return Cap::NULL;
+        }
+        unsafe { self.rd_cap(a) }
+    }
+
+    /// Store a capability, tag and all, into the granule at `a`, which is
+    /// 8-byte aligned. Outside RAM, nothing.
+    pub fn store_cap(&mut self, a: u32, c: Cap) {
+        if a & 7 == 0 && self.in_ram(a, 8) {
+            unsafe { self.wr_cap(a, c) }
+        }
+    }
+
+    /// Clear the tags of every granule `[a, a + n)` touches, within RAM.
+    pub fn clear_tags(&mut self, a: u32, n: u32) {
+        if n == 0 || a >= self.ramlen {
+            return;
+        }
+        let end = (a as u64 + n as u64).min(self.ramlen as u64);
+        let g0 = (a >> 3) as usize;
+        let g1 = ((end + 7) >> 3) as usize;
+        self.tags[g0..g1].fill(0);
+    }
+
     #[inline(always)]
     pub fn is_mmio(a: u32) -> bool {
         a >= MMIO_BASE && a < MMIO_END
@@ -505,9 +649,6 @@ impl Machine {
     #[inline(never)]
     #[cold]
     pub fn fault(&mut self, cause: u32, tval: u32, epc: u32, fuel: u32) -> Stop {
-        if self.prof_on {
-            self.watch.new_block();
-        }
         self.trap = (cause, tval, epc);
         self.pc = epc;
         self.fuel_left = fuel;
@@ -515,18 +656,24 @@ impl Machine {
     }
 
     // ------------------------------------------------------------------ CSRs
+    /// Whether code without SR may read CSR `n`: everything but the machine
+    /// registers, which leaves the counters.
+    pub fn csr_public(n: u32) -> bool {
+        !(0x300..=0x3ff).contains(&n) && (n < 0x7c0 || (0xc00..=0xc9f).contains(&n))
+    }
+
     pub fn csr_read(&mut self, n: u32) -> u32 {
         match n {
-            0x300 => self.mstatus,
-            0x304 => self.mie,
-            0x305 => self.mtvec,
-            0x340 => self.mscratch,
+            CSR_MSTATUS => self.mstatus,
+            CSR_MIE => self.mie,
+            CSR_MTVEC => self.mtcc.addr,
+            CSR_MSCRATCH => self.mscratchc.addr,
             CSR_STKLIM => self.stklim,
             CSR_GCMODE => self.gcmode,
-            0x341 => self.mepc,
-            0x342 => self.mcause,
-            0x343 => self.mtval,
-            0x344 => {
+            CSR_MEPC => self.mepcc.addr,
+            CSR_MCAUSE => self.mcause,
+            CSR_MTVAL => self.mtval,
+            CSR_MIP => {
                 self.refresh_mip();
                 self.mip
             }
@@ -542,21 +689,21 @@ impl Machine {
 
     pub fn csr_write(&mut self, n: u32, v: u32) {
         match n {
-            0x300 => {
+            CSR_MSTATUS => {
                 self.mstatus = v & (MSTATUS_MIE | MSTATUS_MPIE | (3 << 11));
                 let now = self.now;
                 self.note_mie(now);
             }
-            0x304 => self.mie = v & (MIE_MSIE | MIE_MTIE | MIE_MEIE),
-            0x305 => self.mtvec = v,
-            0x340 => self.mscratch = v,
+            CSR_MIE => self.mie = v & (MIE_MSIE | MIE_MTIE | MIE_MEIE),
+            CSR_MTVEC => self.mtcc = self.mtcc.with_addr(v),
+            CSR_MSCRATCH => self.mscratchc = self.mscratchc.with_addr(v),
             CSR_STKLIM => self.stklim = v,
             CSR_GCMODE => self.gcmode = v & 1,
-            0x341 => self.mepc = v & !1,
-            0x342 => self.mcause = v,
-            0x343 => self.mtval = v,
+            CSR_MEPC => self.mepcc = self.mepcc.with_addr(v & !1),
+            CSR_MCAUSE => self.mcause = v,
+            CSR_MTVAL => self.mtval = v,
             // Only the software-interrupt bit is writable by software.
-            0x344 => self.mip = (self.mip & !MIE_MSIE) | (v & MIE_MSIE),
+            CSR_MIP => self.mip = (self.mip & !MIE_MSIE) | (v & MIE_MSIE),
             _ => {}
         }
     }
@@ -594,15 +741,17 @@ impl Machine {
         sp >= self.stklim || self.mstatus & MSTATUS_MIE == 0
     }
 
-    /// Vector to `mtvec`. Interrupt causes carry the top bit.
+    /// Take a trap: MEPCC becomes PCC at the faulting address, and PCC
+    /// becomes MTCC, at an offset of four bytes per cause for an interrupt
+    /// when mtvec's mode is vectored. Interrupt causes carry the top bit.
     pub fn enter_trap(&mut self, cause: u32, tval: u32, epc: u32) {
         if self.trace_traps {
             eprintln!(
-                "[trap cause={cause:#x} epc={epc:#x} mtval={tval:#x} mtvec={:#x}                  mscratch={:#x} sp={:#x} cycles={}]",
-                self.mtvec, self.mscratch, self.x[2], self.cycles
+                "[trap cause={cause:#x} epc={epc:#x} mtval={tval:#x} mtvec={:#x} mscratch={:#x} sp={:#x} cycles={}]",
+                self.mtcc.addr, self.mscratchc.addr, self.x[2], self.cycles
             );
         }
-        self.mepc = epc;
+        self.mepcc = self.pcc().with_addr(epc);
         self.mcause = cause;
         self.mtval = tval;
         let was_enabled = (self.mstatus & MSTATUS_MIE) != 0;
@@ -613,12 +762,29 @@ impl Machine {
             self.note_mie(now);
         }
         self.mstatus |= 3 << 11; // MPP = machine
-        let base = self.mtvec & !3;
-        self.pc = if self.mtvec & 3 == 1 && cause & 0x8000_0000 != 0 {
+        let tv = self.mtcc.addr;
+        let base = tv & !3;
+        let target = if tv & 3 == 1 && cause & 0x8000_0000 != 0 {
             base.wrapping_add(4 * (cause & 0x7fff_ffff))
         } else {
             base
         };
+        let mtcc = if self.mtcc.otype() == OT_SENTRY { self.mtcc.unseal() } else { self.mtcc };
+        self.set_pcc(mtcc.with_addr(target));
+    }
+
+    /// `mret`: interrupts as they were, and PCC from MEPCC.
+    pub fn trap_return(&mut self) {
+        let mpie = (self.mstatus & MSTATUS_MPIE) != 0;
+        self.mstatus &= !MSTATUS_MIE;
+        if mpie {
+            self.mstatus |= MSTATUS_MIE;
+        }
+        self.mstatus |= MSTATUS_MPIE;
+        let now = self.now;
+        self.note_mie(now);
+        let c = self.mepcc;
+        self.set_pcc(if c.otype() == OT_SENTRY { c.unseal() } else { c });
     }
 
     /// Deliver the highest-priority pending interrupt, if any.
@@ -692,28 +858,27 @@ impl Machine {
         }
     }
 
-    /// Whether a checked store at `a` must trap first: the barrier is on and
-    /// the word there is an unmarked heap pointer. Answers the pointer.
-    #[inline(always)]
-    pub fn barrier_hit(&self, a: u32) -> Option<u32> {
-        if self.gcmode & 1 == 0 {
-            return None;
+    /// The write barrier's question for a store of `sz` bytes at `a`, asked
+    /// only while it is on: the address of a granule the store touches that
+    /// holds a capability to an unmarked heap object, if there is one.
+    #[inline(never)]
+    pub fn barrier_hit(&self, a: u32, sz: u32) -> Option<u32> {
+        let first = a & !7;
+        let last = a.wrapping_add(sz - 1) & !7;
+        for g in [first, last] {
+            if g < CONS_BASE || g >= OBJ_END || !unsafe { self.rd_tag(g) } {
+                continue;
+            }
+            let old = unsafe { self.rd_cap(g) };
+            if let Some(obj) = heap_object(old) {
+                let bit = (obj - CONS_BASE) >> 3;
+                let word = unsafe { self.rd32(GC_BITMAP + ((bit >> 5) << 2)) };
+                if word & (1 << (bit & 31)) == 0 {
+                    return Some(g);
+                }
+            }
         }
-        let old = unsafe { self.rd32(a) };
-        // A pair (tag 0, not nil) or an object (tag 4), inside the heap.
-        let tag = old & 7;
-        if (tag != 0 && tag != 4) || old < CONS_BASE || old >= OBJ_END {
-            return None;
-        }
-        // An object's bit is at its header, four bytes below the pointer;
-        // the shift lands on the same bit either way.
-        let bit = (old - CONS_BASE) >> 3;
-        let word = unsafe { self.rd32(GC_BITMAP + ((bit >> 5) << 2)) };
-        if word & (1 << (bit & 31)) == 0 {
-            Some(old)
-        } else {
-            None
-        }
+        None
     }
 
     /// Number of instructions until the timer fires, saturating.
@@ -722,15 +887,18 @@ impl Machine {
     }
 }
 
-/// The part of a capability's bounds that lies in RAM, as a base and a
-/// length; the length is 0 if none does.
-#[inline]
-pub fn ram_window(c: Cap, ramlen: u32) -> (u32, u32) {
+/// The heap object a tagged capability refers to, as the address its mark
+/// bit belongs to: a pair's base, or an object's header. None for anything
+/// else, a run, a code entry, a stack, a device.
+pub fn heap_object(c: Cap) -> Option<u32> {
+    if !c.tag {
+        return None;
+    }
     let (b, t) = c.bounds();
-    let t = t.min(ramlen as u64);
-    if (b as u64) < t {
-        (b, (t - b as u64) as u32)
+    if c.has(P_HD) {
+        let h = b.wrapping_sub(8);
+        (b >= 8 && (OBJ_BASE..OBJ_END).contains(&h)).then_some(h)
     } else {
-        (0, 0)
+        ((CONS_BASE..CONS_END).contains(&b) && t == b as u64 + 16).then_some(b)
     }
 }

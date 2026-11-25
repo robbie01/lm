@@ -30,10 +30,12 @@ pub const CTRL_EACH: u32 = 2;
 /// atomic with interrupts enabled. The block must belong to the task that
 /// filled it.
 ///
+/// ```text
 ///     0 src   1 dst   2 w      3 h
 ///     4 smod  5 dmod  6 val    7 op
 ///     8 x0    9 y0   10 x1    11 y1
 ///    12 status        13 next
+/// ```
 ///
 /// The chip writes `status` back to zero when the command finishes. A task
 /// polls its own block to learn that its transfer is done, instead of waiting
