@@ -10,6 +10,7 @@
 //! is the newer data. A driver that does not wait sees wrong data.
 
 use crate::mach::Machine;
+use crate::dev::TIMER_HZ;
 use crate::map::INT_DISK;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -33,6 +34,13 @@ pub const CMD_TRUNC: u32 = 4; // cut the file to D_COUNT blocks
 /// register holds the result instead: 0 ok, 1 no file attached, 2 the range
 /// is not in RAM, 3 the host's I/O failed.
 pub const STATUS_BUSY: u32 = 0x80;
+
+// What a command takes: a rate a real controller might manage, and a fixed
+// time for getting started. The disk's speed is its medium's, not the
+// processor's, so these are in time, and a command costs more cycles on a
+// faster clock.
+pub const BYTES_PER_SEC: u64 = 80_000_000;
+pub const SETUP_US: u64 = 10;
 
 #[derive(Clone, Copy, Default)]
 struct Cmd {
@@ -146,13 +154,13 @@ pub fn command(m: &mut Machine, reg: u32, v: u32) {
         block: m.disk.block,
         count: m.disk.count,
     };
-    // A rate a real controller might manage, plus a fixed cost for getting
-    // started. The cost is charged to the controller's own clock, not to the
-    // task that issued the command: time passes while the controller works,
-    // and other tasks run in the meantime.
+    // The cost is charged to the controller's own clock, not to the task
+    // that issued the command: time passes while the controller works, and
+    // other tasks run in the meantime.
+    let setup = SETUP_US * TIMER_HZ as u64 / 1_000_000;
     let cost = match v {
-        CMD_READ | CMD_WRITE => (c.count as u64) * BLOCK as u64 / 4 + 200,
-        _ => 200,
+        CMD_READ | CMD_WRITE => (c.count as u64) * BLOCK as u64 * TIMER_HZ as u64 / BYTES_PER_SEC + setup,
+        _ => setup,
     };
     m.disk.cmd = c;
     m.disk.busy = true;

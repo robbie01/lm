@@ -64,11 +64,13 @@ pub const LIST_NEXT: u32 = 13;
 //  - A descriptor fetch is fourteen words, plus one word of status written
 //    back.
 //
-// The numbers assume a 32-bit path to memory at the machine's nominal clock:
-// eighty megabytes a second at twenty million cycles, which is HyperRAM after
-// the processor's share. They are estimates, to be replaced by measurements
-// from the real part. They are kept here so that replacing them is a two-line
-// change.
+// The numbers assume a 32-bit path to memory at the machine's clock. The
+// blitter is a bus master on the processor's own bus, so a faster part's
+// blitter is faster with it and a transfer costs the same cycles at any
+// clock: at two hundred million cycles that is eight hundred megabytes a
+// second, which is sixteen-bit DDR3 at 800 MT/s after the processor's share.
+// They are estimates, to be replaced by measurements from the real part. They
+// are kept here so that replacing them is a two-line change.
 pub const BUS_BYTES: u64 = 4;
 pub const BURST_SETUP: u64 = 4;
 

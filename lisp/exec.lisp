@@ -413,7 +413,8 @@
 ;; in step with the screen. `millis` in hw is the host's clock, for pacing
 ;; to the host, and is not this.
 (define *ticks* 0)                     ; timer interrupts since Exec started
-(define *ms-per-tick* 10)              ; set from the quantum at exec-init
+(define ticks-per-second 100)
+(define *ms-per-tick* (%/ 1000 ticks-per-second))
 
 (define (now-ms) (%* *ticks* *ms-per-tick*))
 
@@ -466,7 +467,6 @@
 
 ;; ---------------------------------------------------------------- tasks
 (define default-stack 65536)
-(define default-quantum 200000)
 
 ;; How far above the bottom of its stack a task is stopped. The processor
 ;; faults when the stack pointer goes below the limit with interrupts on; the
@@ -521,7 +521,7 @@
     (set-tc-blocks! task (list (%car ctx) (%car stack)))
     (set-tc-fn! task fn)
     (set-tc-binds! task binds)
-    (set-tc-quantum! task default-quantum)
+    (set-tc-quantum! task *quantum*)
     (set-tc-sigalloc! task sig-reserved)
     ;; The context is built to look as though the task had just been
     ;; interrupted on the first instruction of its function, on a whole
@@ -1414,9 +1414,10 @@
     (while (%< i 8)
       (%vector-set! *int-vectors* i (new-list))
       (set! i (%+ i 1))))
-  (set! *quantum* default-quantum)
+  ;; A tick is a hundredth of a second of the machine's clock, however fast
+  ;; the part.
+  (set! *quantum* (%/ (timer-hz) ticks-per-second))
   (set! *ticks* 0)
-  (set! *ms-per-tick* (%/ *quantum* (%/ (timer-hz) 1000)))
   ;; The code that is already running becomes task zero. Its context is the
   ;; block the trap stub has been using all along, and its stack the boot
   ;; stack, both made by the reset stub from the bounds the forge left in the
@@ -1427,7 +1428,7 @@
     (set-tc-base! boot 0)
     (set-tc-gen! boot *exec-generation*)
     (zero-task-counters! boot)
-    (set-tc-quantum! boot default-quantum)
+    (set-tc-quantum! boot *quantum*)
     (set-tc-state! boot ts-run)
     (set-tc-context! boot (data-region (%ld-word lg-trapsave) ctx-bytes))
     (set-tc-stack! boot (stack-capability (%ld-word lg-stackbot) (%ld-word lg-stacktop)))

@@ -10,8 +10,9 @@
 //!     cargo run --release --example latency -- SCENARIO [GAP] [N]
 //!
 //! SCENARIO is `type` (keys into the shell), `explorer` (arrow keys in an
-//! explorer), `wheel` (the wheel over an opened package), `drag` (a shell
-//! by its title bar), or any expression, such as `"balls 6"`, run as a demo
+//! explorer), `wheel` (the wheel over an opened package), `shell`
+//! (`(new-shell)` typed and entered, N times), `drag` (a shell by its title
+//! bar), or any expression, such as `"balls 6"`, run as a demo
 //! with no input. GAP is the seconds between events and N how many. Needs
 //! kick.img.
 //!
@@ -153,6 +154,17 @@ fn main() {
             for i in 0..n {
                 let step = if (i / 10) % 2 == 0 { 0xfff } else { 1 };
                 script.push((t0 + i as f64 * gap, event_word(EV_WHEEL, 0, 0, step), at));
+            }
+        }
+        "shell" => {
+            // Each round types `(new-shell)` into the front shell; the
+            // window it opens is the front one for the next round.
+            for i in 0..n {
+                let t = t0 + i as f64 * gap;
+                for (j, c) in "(new-shell)".bytes().enumerate() {
+                    key(t - 0.6 + j as f64 * 0.05, c as u32, c as u32, (0, 0));
+                }
+                key(t, 13, 13, (0, 0));
             }
         }
         "drag" => {

@@ -25,7 +25,7 @@
 (in-package snap)
 (unsafe-file)
 
-(define snap-magic 844385612)     ; "LMS2" as a little-endian word
+(define snap-magic 844320076)     ; "LMS2" as a little-endian word
 (define snap-header-blocks 1)
 (define snap-regions 5)
 
