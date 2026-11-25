@@ -673,6 +673,7 @@ lm --fnprof           which functions the instructions were spent in
 lm --trace-traps      every trap the machine takes
 lm --shot FILE        the final display as a PPM
 LM_FNPROF=1 lmforge rebuild     the same profile of a rebuild
+LM_ISAPROF=1 lmforge rebuild    the same histogram of a rebuild
 LM_TRACE_TRAPS=1 lmforge rebuild  every trap a rebuild takes
 LM_FORGE_PROF=1 lmforge build   which interpreted function the forge spends its time in
 LM_BLIT_GUARD=1       check every blit against the block it named

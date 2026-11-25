@@ -106,9 +106,10 @@ pub fn rebuild(from: &str, out: &str, verbose: bool, check: bool) -> i32 {
         budget: 40_000_000_000,
         disk: if check { None } else { Some(out.to_string()) },
         // LM_FNPROF=1 profiles what the machine does during a rebuild, the
-        // same report `lm --fnprof` prints.
-        trace_exit: verbose || std::env::var_os("LM_FNPROF").is_some(),
-        isaprof: false,
+        // same report `lm --fnprof` prints, and LM_ISAPROF=1 counts what it
+        // executes, as `lm --isaprof` does.
+        trace_exit: verbose || std::env::var_os("LM_FNPROF").is_some() || std::env::var_os("LM_ISAPROF").is_some(),
+        isaprof: std::env::var_os("LM_ISAPROF").is_some(),
         fnprof: std::env::var_os("LM_FNPROF").is_some(),
         screenshot: None,
         // LM_TRACE_TRAPS=1 reports every trap the rebuild takes, as
