@@ -9,6 +9,7 @@
 use crate::cap::Cap;
 use crate::forge::hostlisp::Lisp;
 use crate::forge::{boot_host, write_layout};
+use crate::heap::NIL;
 use crate::mach::{Machine, Stop, C_ECALL, C_RANGE, C_TYPE};
 use crate::map::*;
 use crate::run;
@@ -513,7 +514,8 @@ pub fn run_one(l: &mut Lisp, src: &str) -> String {
             return format!("TRAP: out of range: {tval:#x}");
         }
         if cause == CAUSE_CAP {
-            return format!("TRAP: capability fault: reg {} code {:#x}", tval >> 5, tval & 31);
+            let (reg, code) = (tval >> 5, tval & 31);
+            return format!("TRAP: capability fault: reg {reg} code {code:#x}");
         }
         use crate::mach::{E_ARITY, E_OOM, E_RECORD};
         let what = match (cause, a7) {
@@ -537,7 +539,9 @@ fn printed(m: &Machine, s: Cap) -> String {
         return format!("NOT A STRING: {s:?}");
     }
     let base = s.base();
-    (0..s.len() as u32).map(|i| m.peek8(base + i) as char).collect()
+    (0..s.len() as u32)
+        .map(|i| m.peek8(base + i) as char)
+        .collect()
 }
 
 /// Compile and run one expression against a freshly built library.
