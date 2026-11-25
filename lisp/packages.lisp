@@ -81,7 +81,7 @@
   %closure? %cons %cons? %cycles %disable %display %ecall
   %bignum? %enable %enable-interrupt-lines %eq? %error %eval %fixnum? %float? %flush
   %fluid-value %set-fluid-value!
-  %frame-pointer %from-addr %funcall %gensym %halt %this-task %set-this-task! %int->char
+  %from-addr %funcall %gensym %halt %this-task %set-this-task! %int->char
   %set-stack-limit! %stack-limit %set-gc-mode! %context
   %intern %ld-half %ld-byte %logand %logior %lognot %logxor %lsh %macro?
   %*o %+o %-o
