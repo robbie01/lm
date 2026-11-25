@@ -57,8 +57,12 @@ fn slid(c: Cap, delta: u32) -> Cap {
 /// Rewrite every tagged capability in memory whose bounds lie in a block
 /// that moves, so that it names the block where it is going. One whose base
 /// lies in `lo..hi` but in no block would be a pointer to nothing, and is an
-/// error. One that reaches past its block names a region, not a block, and
-/// stays as it is.
+/// error, except in the pool: a stack slot below a stack pointer, or one a
+/// frame has not written yet, holds what an earlier call left there, and the
+/// stacks of a saved image are all dead. The collector believes nothing it
+/// finds there without its header, so such a capability names nothing it
+/// kept, and loses its tag. One that reaches past its block names a region,
+/// not a block, and stays as it is.
 fn rewrite(h: &mut Heap, moves: &[Move], lo: u32, hi: u32) -> Result<(), String> {
     for at in h.tagged() {
         let c = h.ldc(at);
@@ -74,13 +78,14 @@ fn rewrite(h: &mut Heap, moves: &[Move], lo: u32, hi: u32) -> Result<(), String>
                 h.stc(at, n);
             }
             Some(_) => {}
+            None if (POOL_BASE..POOL_END).contains(&at) => h.stc(at, c.without_tag()),
             None => {
                 let holder = match mover(moves, at) {
                     Some(m) => format!("in the block at {:#x}, type {}", m.from, h.ld(m.from) & 255),
                     None => "outside every block".to_string(),
                 };
                 return Err(format!(
-                    "the capability at {at:#x} ({holder}) names {b:#x}                      (length {}, permissions {:#x}, header {:#x}), which nothing occupies",
+                    "the capability at {at:#x} ({holder}) names {b:#x} (length {}, permissions {:#x}, header {:#x}), which nothing occupies",
                     c.len(),
                     c.perms(),
                     h.ld(b)

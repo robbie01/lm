@@ -290,7 +290,7 @@
   ;; what `mutex-lock` answers instead of `t` when the last owner ended holding it
   abandoned
   preemption-off preemption-on
-  task-snapshot task?
+  task-snapshot task? reap-saved-tasks
   this-task
   remove-task reschedule sigf-vblank signal sigf-blit
   ;; ---- talking between tasks ----
