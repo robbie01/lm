@@ -119,7 +119,7 @@ compiler and the processor.
 | `alloc-pool` `free-pool` | pool memory, by number | a freed block reused under a holder; never traced |
 | `device-page` | any device's page, made from the root | any register of any device, one a driver holds included |
 | `blit-descriptor` `blit-go` | a descriptor: pool memory that holds capabilities | a descriptor written after it was linked, under the chip |
-| `alloc-code`, `register-code`, `refill-cons-run` in gc | code space, the collector's tables | the collector's invariants |
+| `code-object-at`, `refill-cons-run` in gc | a code object by its text's address, a fresh cons run | the collector's invariants |
 
 What left the list with the port: `%addr-of` is safe, because a number is
 no authority; the operations on a capability already held, `%cap-ld`,
@@ -135,8 +135,8 @@ Where it is said: the collector, the kernel, the chips, the trap handler,
 the image writer, the core runtime, the bignums and the compiler are unsafe
 files. Outside those there are about forty sites, each inside an `unsafe`
 form: the printer and the explorer walking objects by slot and opening
-closures, the console's raw line and its wait, the assembler copying code
-into code space, and the suites that exercise raw memory on purpose. The UI
+closures, the console's raw line and its wait, the assembler placing the
+reset stub, and the suites that exercise raw memory on purpose. The UI
 stack, wb, ui, platinum, eyes and the fonts, has none: glyphs and plots
 store into a bitmap's pixels through their byte object, which is the design
 working. Each driver has one, where it makes its device's page as it

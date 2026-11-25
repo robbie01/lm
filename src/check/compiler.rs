@@ -19,7 +19,7 @@ use crate::rvenc::*;
 const ENTRY: u32 = 0x0000_0C00;
 /// The task stack: a capability to these bytes, entered at the top.
 const STACK_BASE: u32 = 0x00F0_0000;
-const STACK_TOP: u32 = 0x0100_0000; // the top of the exec pool
+const STACK_TOP: u32 = POOL_END;
 /// Cause 28, a capability fault: mtval is (register << 5) | code.
 const CAUSE_CAP: u32 = 28;
 

@@ -1,18 +1,18 @@
 # Moving objects
 
-The machine's collector sweeps objects and code in place, and compacts pairs
-only on the way into an image. The forge slides object space down on the way
-into an image, and `lmforge compact` does the same to an image that came off
-the disk, so every path that persists an image compacts it; an image from
-`lmforge rebuild`, which resumes nothing, has its code space slid down as
-well. A long-running machine does not compact its own object space or code
-space. This note records what it would take.
+The machine's collector sweeps objects in place, machine code among them,
+and compacts pairs only on the way into an image. The forge slides object
+space down on the way into an image, and `lmforge compact` does the same to
+an image that came off the disk, so every path that persists an image
+compacts it. A long-running machine does not compact its own object space.
+This note records what it would take.
 
 ## Why the machine does not move objects
 
 The collector is written in the language it collects. It calls its functions
-through symbol value cells and reaches its constants through its own code
-object, and every one of those is an object. The pair compactor runs plan,
+through symbol value cells, reaches its constants through its own code
+object and runs in its functions' texts, and every one of those is an
+object. The pair compactor runs plan,
 update, slide: the update pass rewrites every capability to a pair to its
 post-move address while nothing has moved, and between the end of update and
 the end of slide every such capability names an address whose contents have
@@ -45,14 +45,17 @@ with the chips idle and their registers rewritten.
 
 ## What is built
 
-The forge's compactors in `src/forge/compact.rs`, which run on a heap that
+The forge's compactor in `src/forge/compact.rs`, which runs on a heap that
 has stopped. `compact_objects` walks object space as a sequence of live
 blocks and `t-free` holes, which the machine's own collection for the image
 has already left, slides the live blocks down keeping each one's alignment,
-and rewrites every tagged capability in memory whose block moved.
-`compact_code` does the same for code space, moving each block whole with
-its two-granule header, for an image that resumes nothing: the reset stub
-and the trap stub stay where they are.
+and rewrites every tagged capability in memory whose block moved. Texts
+move with the rest: a jump within a function is relative to it, and every
+other way into code is a capability, an entry or a return sentry, which is
+derived again where the text went and sealed again. A saved image's stacks
+hold return sentries, and they move with their texts like any other
+capability. MTCC is the one capability to code outside memory, and the
+reset stub loads it from `lg-trap-entry` whenever the machine starts.
 
 On the machine, the pair compactor in gc.lisp, for the image collection.
 There is no object compactor in Lisp.
@@ -65,12 +68,13 @@ objects they name there. Sliding would have put them at the bottom anyway,
 so protecting them costs nothing, and the test is one address comparison.
 
 **The slide as a stub.** Only the planning lookup and the slide have to be
-immune. Written as assembly in code space with no literals, reading only the
-mark bitmap, the offset tables and raw memory through DDC, the mover touches
-no object. It must be entered through a raw code address in a global, as
-the trap stub is through `lg-trap-entry`, and it must reload `s1` on the way
-out from a slot the update pass filled in, because the collector's live
-registers are not in any frame for the update pass to rewrite.
+immune. Written as assembly with no literals, reading only the mark bitmap,
+the offset tables and raw memory through DDC, the mover touches no object
+but its own text, which must not move under it: it would live in the low
+immobile region, or at a fixed address as the reset stub does. It must
+reload `s1`, its caller's PCC and every live register on the way out from
+slots the update pass filled in, because the collector's live registers
+are not in any frame for the update pass to rewrite.
 
 **A nursery for objects.** The garbage in a build is macro expansions,
 assembler buffers and analysis lists, all short-lived. A young-generation
@@ -79,13 +83,6 @@ is old. It needs a remembered set for old objects that point at young ones;
 the write barrier is already a trap on every store into the heap while it is
 on, and is where one would be kept. This is the only option that reduces
 peak usage rather than cleaning up after it.
-
-**Code space on a running machine.** Every function the machine replaces
-leaves a hole. A running machine, and an image from `(save-image)`, have
-return sentries on their stacks, which cannot be re-derived for a block that
-moved while the frame waits to return into it; only a fresh image is free of
-them, which is why the forge slides code only in a rebuilt image or under
-`lmforge compact --fresh`.
 
 ## Two cautions
 
@@ -97,5 +94,5 @@ Measure before choosing a strategy. `lmdev reach` reports object pages by
 how full they are. Before the forge compacted, a fresh image had 473 of 715
 pages under a quarter full, so evacuating only the sparse pages would have
 moved most of the live data anyway; the full slide was the right shape. The
-image `lmforge build` makes now has 128 of its 129 object pages more than
-three quarters full. A long-running machine has not been measured.
+image `lmforge build` makes now has 1 KiB dead across its 241 object pages,
+code included. A long-running machine has not been measured.

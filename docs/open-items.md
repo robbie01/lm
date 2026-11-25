@@ -105,9 +105,11 @@ Resize needs a size-changed event and a reallocation of both bitmaps;
 menus need the toolkit. *Trigger:* an application that needs either.
 
 **A saved image resumes with none of its tasks. WONTFIX**, as design. A
-task's stack holds return addresses into code space, and the forge
-compacts code space when it makes a fresh image; the two cannot both hold.
-Windows are data and survive the save; only their tasks are gone. If a
+task's stack and its return addresses survive a save, and a compaction
+too, since a return address is a capability into a text that the forge
+moves with the text; what does not survive is the machine around them: the
+chips come back reset and every driver starts again. Windows are data and
+survive the save; only their tasks are gone. If a
 resume ever wants its windows back, keeping `*windows*` and re-running each
 window's refresh under a fresh task is a wb.lisp-only change.
 
@@ -373,12 +375,12 @@ and laying the frame out upward is a handful of constants and the worst
 class of bug if one of them is wrong. If ever attempted,
 `rebuild --check` is the gate.
 
-**Records cost about nine percent of code space. WONTFIX**, measured and
+**Records cost about nine percent of the code. WONTFIX**, measured and
 confirmed: 395 accessor, predicate and allocator functions hold 50.5 KiB of
 the image's 527 KiB of code, 9.4%. The definitions are load-bearing in the
 forge, where they are interpreted before any inline exists, so suppressing
-them needs the two-pass build to know which are only ever called. Code
-space is 16 MiB and 3% used.
+them needs the two-pass build to know which are only ever called. Code is
+under half a megabyte of a 64 MiB object space.
 
 ## Instructions with no users
 
@@ -409,13 +411,12 @@ instruction-width scanner, for 2.8%.
 
 ## Images
 
-**Code space is never compacted. RESOLVED** for the path that ships: the
-forge's `compact_code` exists and `lmforge rebuild` runs it, moving each
-block whole with its header and deriving every capability into a moved
-block afresh, so a rebuilt image carries no holes. An image from
-`(save-image)` is not compacted, and cannot be, because its stacks hold
-return addresses; that is the same fact as the resume item above, and is
-by design.
+**Code is collected and compacted like any object. RESOLVED**: a function's
+machine code is a text in object space, which the collector frees once no
+entry or return address into it is held, and which the forge slides with
+everything else, in a rebuilt image and in one from `(save-image)` alike.
+`(capabilities)` defines a function a hundred times over and checks that
+the code and the objects in use come back to where they were.
 
 **The machine cannot move objects. WONTFIX.** [moving-objects.md](moving-objects.md)
 has what it would take. The forge covers the case that matters, the size

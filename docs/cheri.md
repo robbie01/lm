@@ -48,8 +48,9 @@ stored: they are B's, plus a carry when T's low bits are below B's, plus
 one with IE. E is at most 24, for which T = 0x100 is a top of 2^32. The
 representable region, the corrections, and the instructions that round
 (`crrl`, `cram`) are as ISAv9 defines them for this MW. The allocators ask
-`crrl` and `cram` what a length rounds to, and pad and align objects, code
-blocks, cons runs, stacks and contexts to bounds that are exact.
+`crrl` and `cram` what a length rounds to, and pad and align objects,
+machine code among them, cons runs, stacks and contexts to bounds that are
+exact.
 
 The root is every permission over `[0, 2^32)`. `cgetlen` and `cgettop` of
 it saturate at 0xffffffff.
@@ -105,7 +106,8 @@ tagged, the nil cell      nil
 tagged, unsealed, no HD   a pair: 16 bytes at its base, car at 0, cdr at 8
 tagged, HD                an object: header at base-8, payload from base
 tagged, HD, otype 2       a closure
-tagged, otherwise         a raw capability: code, a stack, a device, a pool block, a cons run
+tagged, otherwise         a raw capability: an entry or a return address, a stack,
+                          a device, a pool block, a cons run
 ```
 
 The layout names the untagged kinds `imm-fixnum` to `imm-default`.
@@ -153,37 +155,39 @@ hole the sweep walks like any other.
 | 8 port | `perms-object` | values |
 | 9 bignum | `perms-object` | 0 the sign, then 32-bit limbs as fixnums, least significant first |
 | 10 code | `perms-object` | 0 entry, 1 name, 2.. literals |
+| 11 text | `perms-bytes` | a function's machine code |
 
 `perms-pair` is LD SD LC SC LM; `perms-object` is that and HD; `perms-bytes`
-is LD SD HD, so no capability can be stored in a string or byte object and
-none is ever found there. A value slot starts as nil.
+is LD SD HD, so no capability can be stored in a string, a byte object or a
+text, and none is ever found there. A value slot starts as nil.
 
-**Code** lives in code space. A code object's entry capability has EX, and
-SR when the source said `unsafe`, and nothing else; its bounds are the
-machine code, so the code's length is the capability's length. Every return
-address is a sentry, so a frame's saved `ra` can only be returned through.
+**Code** is an object. A function's machine code is a text, its length in
+bytes in the header, allocated and aligned as any byte object is. A code
+object's entry capability is derived from the root at the text's payload:
+EX, and SR when the source said `unsafe`, and nothing else, with bounds
+exactly the code, so the code's length is the capability's length. The
+text's own headed capability goes no further than the assembler that fills
+it. Every return address is a sentry, so a frame's saved `ra` can only be
+returned through.
 
-A code block is laid out round its entry:
+An entry or a return address is a capability based in object space, so it
+keeps the text it lies in alive by the same rule as any other (see the
+write barrier below); nothing in a text says which code object it belongs
+to, and nothing needs to. A pc names its function by a walk of object space
+for the code object whose entry starts the same text, which only a
+backtrace and the debugging tools ask. A jump within a function is relative
+to its pc, and anything else reaches code through a capability, so a text
+can be anywhere and the forge slides it with the rest of object space.
 
-```
-entry - 16    the block's size in bytes, header included
-entry - 8     the code object that owns it, once registered
-entry         the machine code
-```
-
-Blocks are whole multiples of 16 bytes, and the entry is aligned as `cram`
-asks for the code's length, at least to 16. A free block holds its size and
-the next free block where the header would be. A code capability finds its
-code object through the header, which is how a return address keeps its
-function alive. Two blocks are owned by no code object: the reset stub, in
-the `reset-reserve` bytes at the base of code space with no header, and the
-trap stub, whose address is in `lg-trap-entry`.
+The one piece of code that is not an object is the reset stub, in the
+`reset-reserve` bytes at `reset-vector` in the low block. The trap stub is a
+text, and its entry is kept in `lg-trap-entry`.
 
 ## Authority
 
 At reset PCC, DDC and MTCC are the root and the general registers are NULL.
-The reset stub derives nil, the boot stack and the trap frames from DDC and
-leaves the root there.
+The reset stub derives nil, the boot stack and the trap frames from DDC,
+loads MTCC from `lg-trap-entry`, and leaves the root in DDC.
 
 **Integer addressing is a privilege.** A load or store whose base register
 is `x0`, and the explicit DDC loads and stores, address memory through DDC
@@ -426,10 +430,11 @@ unseen.
 0x0000_0000  the nil cell, 16 bytes
 0x0000_0100  low-memory globals, one 8-byte slot each
 0x0000_0400  the free bins of object space, one 8-byte slot each
-0x0000_2000  the pool: stacks, contexts, descriptors, the code registry
-0x0100_0000  code space, 16 MiB; the reset stub at its base
+0x0000_0800  the reset stub, `reset-reserve` bytes at `reset-vector`
+0x0000_2000  the pool: stacks, contexts, descriptors
+0x0100_0000  unused, 16 MiB
 0x0200_0000  cons space, 128 MiB, eight million pairs
-0x0A00_0000  object space, 64 MiB
+0x0A00_0000  object space, 64 MiB, machine code among the objects
 0x0E00_0000  the mark bitmap, the object-start map, the mark stack, scratch
 0xF000_0000  device pages, 4 KiB each, 32-bit registers and two capability registers
 ```

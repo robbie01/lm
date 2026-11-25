@@ -23,7 +23,7 @@ $ ./target/release/lmforge build   # compile the Lisp sources into kick.img
 $ ./target/release/lm              # boot it
 
 LM 0.1 - a lisp machine
-cons space 8192k pairs, object space 65536k, code 557k used
+cons space 8192k pairs, object space 65536k, 1016k used
 exec: 6 tasks
 type (help) for what to try
 
@@ -63,7 +63,7 @@ interpreter nor the tests.
 | `src/forge/hostlisp.rs` | the bootstrap interpreter |
 | `src/forge/read.rs` | the bootstrap reader: lists, and nothing else |
 | `src/forge/mod.rs` | the build driver, and the generator for `lisp/layout.lisp` |
-| `src/forge/compact.rs` | sliding object space, and a fresh image's code space, down on the way into an image |
+| `src/forge/compact.rs` | sliding object space, machine code and all, down on the way into an image |
 
 | the Lisp | |
 |---|---|
@@ -157,7 +157,8 @@ tagged, the nil cell     nil
 tagged, no HD, 16 bytes  pair: car at 0, cdr at 8
 tagged, HD               object: header in the granule below the base, payload in the bounds
 tagged, HD, otype 2      a closure, sealed
-tagged, anything else    a raw capability: code, a stack, a device page, a cons run
+tagged, anything else    a raw capability: an entry or a return address, a stack,
+                         a device page, a cons run
 ```
 
 nil is a capability to the 16 bytes at address 0, which hold nil twice, with
@@ -170,9 +171,10 @@ An object's header word 0 holds the type in its low eight bits and the
 length in elements above them; word 1 is zero. The capability to an object
 is bounded to its payload and has HD, so the header is outside the bounds
 and no holder of the object can write it. The types are symbol, string,
-vector, bytes, closure, record, float, port, bignum and code. A string or a
-byte object has LD and SD only, so no capability can be stored in one; every
-other type holds values in 8-byte slots.
+vector, bytes, closure, record, float, port, bignum, code and text, a
+function's machine code. A string, a byte object or a text holds bytes, and
+its capability has LD and SD only, so no capability can be stored in one;
+every other type holds values in 8-byte slots.
 
 ### The instructions
 
@@ -228,10 +230,11 @@ that is a bignum takes the same route.
 ### Authority
 
 At reset PCC, DDC and MTCC are the root: every permission over the whole
-address space. The reset stub makes nil, the boot stack and the trap frames
-out of it and leaves it in DDC, the default data capability, where a load or
-store whose base is `x0`, and the explicit DDC forms, address memory by
-number.
+address space. The reset stub, the one piece of code at a fixed address,
+makes nil, the boot stack and the trap frames out of it, points MTCC at the
+trap stub's entry, and leaves the root in DDC, the default data capability,
+where a load or store whose base is `x0`, and the explicit DDC forms,
+address memory by number.
 
 SR is the privilege. Writing a CSR, reading a machine-level CSR, touching a
 special capability register, `mret`, `wfi`, and every access through DDC
@@ -261,29 +264,29 @@ and the value:
 
 ```
 > (car 5)
-*** car: expected a pair, got 5, at pc 10264a4
+*** car: expected a pair, got 5, at pc a0ff02c
 > (vector-ref "abc" 0)
-*** vector-ref: expected a vector, got "abc", at pc 1023c86
+*** vector-ref: expected a vector, got "abc", at pc a0ff886
 > (let ((f 5)) (f 1))
-*** call: expected a function, got 5, at pc 1093a66
+*** call: expected a function, got 5, at pc a0ef86e
 > (+ nil 1)
-*** +: expected a number, got nil, at pc 1023c44
+*** +: expected a number, got nil, at pc a100894
 > (car undefined)
-*** unbound variable: undefined, at pc 1093a96
+*** unbound variable: undefined, at pc a101096
 > (set-car! nil 1)
-*** set-car!: nil has no cell, at pc 1093ad6
+*** set-car!: nil has no cell, at pc a101866
 > (vector-ref (make-vector 3 0) 5)
-*** vector-ref: index 5 is outside a vector of 3, at pc 1093b38
+*** vector-ref: index 5 is outside a vector of 3, at pc a10207c
 > (define w (%cap-and-perms (vector 1 2 3) (lognot perm-sd)))
 w
 > (vector-set! w 0 9)
-*** vector-set!: #(1 2 3) is read-only, at pc 1093c0e
+*** vector-set!: #(1 2 3) is read-only, at pc a102e46
 > (%cap-ld-word (make-bytes 8) 8)
-*** load: outside the bounds of #<bytes 8>, at pc 1093c68
+*** load: outside the bounds of #<bytes 8>, at pc a103688
 > (define (deep n) (+ 1 (deep (+ n 1))))
 deep
 > (deep 0)
-*** stack overflow at pc 1093cc4, value 41ff8
+*** stack overflow at pc a103f26, value 41fd0
 ```
 
 Each report is followed by a backtrace.
@@ -310,13 +313,26 @@ unchecked is in [docs/memory-safety.md](docs/memory-safety.md).
 0x0000_0000  the nil cell, 16 bytes
 0x0000_0100  low-memory globals, one 8-byte slot each (the lg-* names in layout.lisp)
 0x0000_0400  the free bins of object space
-0x0000_2000  the pool: raw memory for stacks, contexts, descriptors, the code registry
-0x0100_0000  code space, 16 MiB, the reset stub at its base, swept but never moved
+0x0000_0800  the reset stub, 256 bytes, where the processor starts
+0x0000_2000  the pool: raw memory for stacks, contexts, descriptors
+0x0100_0000  unused, 16 MiB
 0x0200_0000  cons space, 128 MiB, eight million pairs
-0x0A00_0000  object space, 64 MiB, swept in place; the forge compacts it
+0x0A00_0000  object space, 64 MiB, machine code among the objects, swept in
+             place; the forge compacts it
 0x0E00_0000  the mark bitmap, the mark stack, scratch
 0xF000_0000  device pages, 4 KiB each
 ```
+
+Machine code is an object like any other. A function's code is a text, a
+byte object no capability can be stored in, and what reaches it is its
+entry, a capability with EX bounded exactly to the code, and the return
+addresses into it. The collector keeps a text for as long as one of those
+is held, by the rule it keeps every object by, and frees it when none is: a
+function defined again and again leaves the heap as it was. Nothing in the
+machine stands at a fixed address but the reset stub, which the processor
+needs to find with nothing else set up; it lies in the low block, which an
+image saves whole. The trap stub is a text like the rest, and MTCC its
+entry, which the reset stub loads from `lg-trap-entry`.
 
 Every slot is 8 bytes: a global, a value slot of an object, a frame slot, a
 saved register. A low global that holds an address holds it as a fixnum,
@@ -355,7 +371,8 @@ Compiled code holds no heap addresses. A function reaches its symbols and
 constants through its code object, which the prologue loads into `s1`, so a
 constant is one `lc` and an object can move without any instruction being
 patched. A code object's entry capability has EX, SR if the source was
-`unsafe`, and bounds that are exactly its machine code.
+`unsafe`, and bounds that are exactly its text; a jump within the code is
+relative to it, so the text can move too.
 
 **Closures are sealed.** The compiler makes a closure, copies its captured
 values in and seals it with `csealclo`: anyone may seal their own closure,
@@ -521,7 +538,7 @@ a pointer if and only if its tag is set, and only a capability store sets
 one. The roots are the tagged granules of low memory, of every stack from
 its stack pointer to its top, and of every saved register context. Marking
 an object is pushing every tagged granule of its payload; the type matters
-only to skip strings and byte objects, which hold none. Nothing is guessed,
+only to skip strings, byte objects and texts, which hold none. Nothing is guessed,
 so nothing is pinned. What the port to capabilities took away: the
 allocator's mask of live registers, the conservative scan of a suspended
 task's registers and the pins it left, and the rule that kept every word
@@ -532,10 +549,12 @@ length: based in cons space without HD, the pair at its base rounded down to
 16; based in object space, the object whose block holds the granule below its
 base, found by an object-start map beside the mark bitmap. A capability
 narrowed to a car or to a vector's slot keeps its pair or its vector, and the
-processor's barrier and both compactors follow the same rule. Code, with EX,
-keeps the code object that owns its block alive through the block's header.
-A stack, a device page or a pool block is somebody else's; a task's cons run
-keeps at most the one pair at its base.
+processor's barrier and both compactors follow the same rule. An entry or a
+return address keeps its function's text alive the same way, with nothing
+to say which code object the text belongs to: the code object is kept by
+the closures and frames that hold it. A stack, a device page or a pool
+block is somebody else's; a task's cons run keeps at most the one pair at
+its base.
 
 Free memory holds no tags. The sweep zeroes every dead object that could
 hold a pointer and every dead stretch of pairs, so an allocator's stores
@@ -563,9 +582,9 @@ collected to the end on the spot. A fresh rebuild finishes any cycle still
 marking before the image's definitions replace the builder's, because the
 barrier's handler is reached through the very symbols being replaced.
 
-Objects and code are never moved by the machine: the collector is written in
-the language it collects, and reaches its own functions and constants
-through objects. Pairs are compacted only on the way into an image, by the
+Objects, machine code among them, are never moved by the machine: the
+collector is written in the language it collects, and runs in and reaches
+its own functions and constants through objects. Pairs are compacted only on the way into an image, by the
 compactor in gc.lisp: plan where every live pair goes, rewrite every
 capability to a pair to its destination with the same permissions and
 offset, slide. The tags say exactly where every pointer is, so the rewrite
@@ -585,9 +604,10 @@ there the bootstrap reads with that. The compiler, also one of the sources,
 compiles the whole system into the same heap the interpreter has been
 filling. The heap is tagged from the first pair: the interpreter's values
 are the same capabilities the machine's are. The machine's own collector then
-runs on the machine, the forge slides object space down, re-deriving every
-capability into a block that moves from the root with its permissions and
-seal, and what is left in memory is the image. The file is the 4 KiB pages
+runs on the machine, the forge slides object space down, code and all,
+re-deriving every capability into a block that moves from the root with its
+permissions and seal, return addresses included, and what is left in memory
+is the image. The file is the 4 KiB pages
 that hold something, each with its 512 tag bits.
 
 ```
@@ -606,16 +626,16 @@ machine, so the compiler and macros doing the work are the new ones;
 table for the image; `snap:save-fresh` warm-resets the machine through its
 reset stub into the image's own `finish-fresh`, which gives every symbol what
 the table says, collects from the image's own roots, and writes the file.
-The forge then slides object space and code space down in it, which a fresh
-image allows because nothing in it resumes. The result is a fresh image, not
-an updated one.
+The forge then slides object space down in it and blanks the pool's scratch,
+which a fresh image writes before it reads. The result is a fresh image,
+not an updated one.
 
 ```
-lmforge build                       kick.img, 1.4 MiB
+lmforge build                       kick.img, 1.2 MiB
 lmforge rebuild --from kick.img     next.img
 lmforge rebuild --check             compile everything twice, collect, write nothing
 lmforge compact [-f IMG] [-o OUT]   slide object space down in a saved image;
-                                    --fresh slides code space too
+                                    --fresh blanks the pool's scratch too
 lmforge layout                      regenerate lisp/layout.lisp from the Rust definitions
 ```
 
@@ -876,8 +896,10 @@ past the bounds of a byte object, a narrowed capability or a device page is
 refused, that a closure is sealed and only calling it or the escape hatch
 opens it, that the compiler refuses `%slot` outside `unsafe` and the
 processor refuses it on a sealed closure, that a pointer cannot be made from
-its bits, and that a capability store keeps the tag and a word store clears
-it.
+its bits, that a capability store keeps the tag and a word store clears
+it, and that a function defined a hundred times over leaves the code and
+the objects in use as they were once the collector has run, while an entry
+still held keeps its text.
 
 Instrumentation, all off by default:
 
@@ -911,9 +933,10 @@ drawn it.
 - Floats are boxed and the compiler does no arithmetic on them.
 - Bignums have no bitwise operations, and division is a bit at a time.
 - Open-coded operators and self-calls do not see a redefinition.
-- The machine never moves objects, code or, between images, pairs, so a
-  long session can fragment the heap; holes in cons space smaller than 512
-  bytes wait for the compactor, which only an image gets.
+- The machine never moves objects, machine code among them, or, between
+  images, pairs, so a long session can fragment the heap; holes in cons
+  space smaller than 512 bytes wait for the compactor, which only an image
+  gets.
 - Marking costs about 220 cycles a pair, and while a cycle is marking the
   program allocating pays for it.
 - Calls with more than eight arguments are never tail calls.

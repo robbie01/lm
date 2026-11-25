@@ -181,9 +181,8 @@ held as the slots for a tagged half-word load for the collector's
 run-skipping test; since the port that test reads a whole word of the mark
 map, and a half-word by number is one instruction anyway, `lhu.ddc`.
 
-**The `lg-scratch` cells. RESOLVED.** They are `lg-task-exit`,
-`lg-trap-entry` and `lg-boot-arg`. `scratch3` had two unrelated jobs, the
-forge's trap entry and `peek`'s staging word; they became two cells, and
+**The `lg-scratch` cells. RESOLVED.** They are `lg-task-exit` and
+`lg-trap-entry`. `scratch3` had two unrelated jobs, the forge's trap entry and `peek`'s staging word; they became two cells, and
 the staging word went with the port, a word being a fixnum. Every low
 global is an 8-byte slot now, numbered in `src/map.rs`.
 
