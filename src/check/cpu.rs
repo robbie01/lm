@@ -614,6 +614,10 @@ pub fn run_all() -> bool {
         li32(&mut c6, A2, P_ALL & !P_SE);
         c6.extend([candperm(A1, ROOT, A2), addi(A3, ZERO, 5), csetaddr(A3, A1, A3), cseal(A4, ROOT, A3)]);
         ok("cseal needs SE", go(&c6).took(C_CAP, (A3 << 5) | CAPEX_SEAL_PERM));
+        let mut c7 = code[..6].to_vec();
+        li32(&mut c7, A2, P_ALL & !P_SE);
+        c7.extend([candperm(A1, A3, A2), cunseal(A6, A4, A1)]);
+        ok("cunseal needs SE", go(&c7).took(C_CAP, (A1 << 5) | CAPEX_UNSEAL));
     }
 
     // ---- capability loads and stores, and tags in memory ----
@@ -709,6 +713,8 @@ pub fn run_all() -> bool {
     {
         let o = go(&[addi(A0, ZERO, 77), sw(A0, ZERO, 0x100), lw(A1, ZERO, 0x100)]);
         ok("x0-based addressing reaches DDC", o.x(A1) == 77 && o.m.peek32(0x100) == 77);
+        let o = go(&[sc(ROOT, ZERO, 0x108), lc(A1, ZERO, 0x108)]);
+        ok("...for capabilities too", o.c(A1) == Cap::ROOT && o.m.load_cap(0x108) == Cap::ROOT);
         let mut v = vec![];
         li32(&mut v, A2, 0x5000);
         v.extend([addi(A0, ZERO, -2), sw_ddc(A0, A2), lw_ddc(A1, A2), lbu_ddc(A3, A2), lh_ddc(A4, A2)]);
@@ -780,6 +786,16 @@ pub fn run_all() -> bool {
         });
         ok("a jal out of PCC's bounds faults at the jal", o.took(C_CAP, (CAPEX_REG_PCC << 5) | CAPEX_LENGTH));
         ok("...with mepc at the jal", o.trap().map(|t| t.2) == Some(BASE + 0x104) && o.x(A0) == 1);
+        // A taken branch out of PCC's bounds faults at the branch too.
+        for (name, br) in [("beq", beq(ZERO, ZERO, 8)), ("beqx", beqx(ZERO, ZERO, 8)), ("c.beqz", c_beqz(S0, 8))] {
+            let o = go_with(&v, |m| {
+                emit(m, BASE + 0x100, &[addi(A0, ZERO, 1), br]);
+            });
+            ok(
+                &format!("a {name} out of PCC's bounds faults at the branch"),
+                o.took(C_CAP, (CAPEX_REG_PCC << 5) | CAPEX_LENGTH) && o.trap().map(|t| t.2) == Some(BASE + 0x104),
+            );
+        }
         let o = go_with(&v, |m| {
             emit(m, BASE + 0x100, &[addi(A0, ZERO, 1), addi(A0, ZERO, 2)]);
         });

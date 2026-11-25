@@ -57,10 +57,9 @@ struct Cli {
 
     /// Count what the machine executes, and print the histogram on exit
     ///
-    /// One counter per dispatch slot, the custom opcodes broken down by form,
-    /// memory traffic by base register, a census of which functions never call
-    /// anything, and how many instructions exist only because values are
-    /// tagged. Implies --stats.
+    /// One counter per dispatch slot, the custom and CHERI opcodes broken down
+    /// by form, memory traffic by base register, and a census of which
+    /// functions never call anything. Implies --stats.
     #[arg(long)]
     isaprof: bool,
 

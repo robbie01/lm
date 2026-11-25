@@ -190,7 +190,7 @@ pub fn write_layout() {
     def!("chip-size", CHIP_SIZE);
     def!("nil-cell", NIL_CELL);
     def!("lg-base", LG_BASE);
-    def!("trap-base", TRAP_BASE);
+    def!("low-end", LOW_END);
     def!("pool-base", POOL_BASE);
     def!("pool-limit", POOL_END);
     def!("code-base", CODE_BASE);
@@ -232,10 +232,10 @@ pub fn write_layout() {
     def!("kind-eof", IMM_EOF);
     def!("kind-void", IMM_VOID);
     def!("kind-default", IMM_DEFAULT);
-    def!("kind-nil", VK_NIL);
-    def!("kind-pair", VK_PAIR);
-    def!("kind-cap", VK_CAP);
-    def!("kind-object", VK_OBJECT);
+    def!("kind-nil", KIND_NIL);
+    def!("kind-pair", KIND_PAIR);
+    def!("kind-cap", KIND_CAP);
+    def!("kind-object", KIND_OBJECT);
 
     // Permissions in the positions `cgetperm` answers and `candperm` takes,
     // and the sets the allocators hand out.
@@ -355,12 +355,14 @@ pub fn write_layout() {
     def!("capex-tag", CAPEX_TAG);
     def!("capex-seal", CAPEX_SEAL);
     def!("capex-type", CAPEX_TYPE);
+    def!("capex-soft-perm", CAPEX_SOFT_PERM);
     def!("capex-representable", CAPEX_REPRESENTABLE);
     def!("capex-execute", CAPEX_EXECUTE);
     def!("capex-load", CAPEX_LOAD);
     def!("capex-store", CAPEX_STORE);
     def!("capex-load-cap", CAPEX_LOAD_CAP);
     def!("capex-store-cap", CAPEX_STORE_CAP);
+    def!("capex-seal-perm", CAPEX_SEAL_PERM);
     def!("capex-sysreg", CAPEX_SYSREG);
     def!("capex-unseal", CAPEX_UNSEAL);
 

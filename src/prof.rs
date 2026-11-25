@@ -119,7 +119,7 @@ fn ext_slot(f7: u32, f3: u32) -> Option<usize> {
 
 /// Count one instruction, before it runs.
 pub fn count(m: &mut Machine, w: u32, pc: u32) {
-    let tok = if w & 3 == 3 { 32 + ((w >> 2) & 31) } else { ((w & 3) << 3) | ((w >> 13) & 7) } as usize;
+    let tok = crate::cpu::token(w) as usize;
     m.prof[tok] += 1;
     m.prof[TOTAL] += 1;
     let rd = (w >> 7) & 31;

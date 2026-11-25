@@ -48,21 +48,35 @@ pub const C_BARRIER: u32 = 29;
 /// is where it would have gone; sp is left as it was.
 pub const C_STACK: u32 = 30;
 
-/// The capability fault codes, as ISAv9 numbers them.
+// The capability fault codes, as ISAv9 numbers them: what a capability
+// fault's `mtval` carries below the register.
+
+/// An access outside the bounds, or bounds outside the authority's.
 pub const CAPEX_LENGTH: u32 = 0x01;
+/// An untagged capability used as one.
 pub const CAPEX_TAG: u32 = 0x02;
+/// A sealed capability used, or one entered other than as its seal allows.
 pub const CAPEX_SEAL: u32 = 0x03;
+/// The wrong otype, or for `csealclo` an object that is not a closure.
 pub const CAPEX_TYPE: u32 = 0x04;
-pub const CAPEX_PERM: u32 = 0x08;
+/// ISAv9's software-defined permission violation, which `cbuildcap` raises
+/// for bits asking for a permission its authority lacks.
+pub const CAPEX_SOFT_PERM: u32 = 0x08;
+/// `csetboundsexact` of bounds that would round.
 pub const CAPEX_REPRESENTABLE: u32 = 0x0a;
+/// The missing permission: EX, LD, SD, LC, SC.
 pub const CAPEX_EXECUTE: u32 = 0x11;
 pub const CAPEX_LOAD: u32 = 0x12;
 pub const CAPEX_STORE: u32 = 0x13;
 pub const CAPEX_LOAD_CAP: u32 = 0x14;
 pub const CAPEX_STORE_CAP: u32 = 0x15;
+/// `cseal` through an authority without SE.
 pub const CAPEX_SEAL_PERM: u32 = 0x17;
+/// SR, missing from PCC for a privileged act.
 pub const CAPEX_SYSREG: u32 = 0x18;
-pub const CAPEX_UNSEAL: u32 = 0x19;
+/// `cunseal` through an authority without SE.
+pub const CAPEX_UNSEAL: u32 = 0x1b;
+
 /// Where the register sits in a capability fault's mtval, above the code.
 pub const CAPEX_REG_SHIFT: u32 = 5;
 /// The register numbers a capability fault names beyond the 32 general ones.
