@@ -12,7 +12,7 @@
 ;;;
 ;;; The file starts with one block describing the regions:
 ;;;
-;;;   word 0          the magic, "LMS2"
+;;;   word 0          the magic, "LMS2", `snap-magic` in the layout
 ;;;   word 1          the entry address
 ;;;   word 2          the number of regions
 ;;;   12 + 16i        region i: its base, its length in bytes, the first block
@@ -25,9 +25,13 @@
 (in-package snap)
 (unsafe-file)
 
-(define snap-magic 844320076)     ; "LMS2" as a little-endian word
 (define snap-header-blocks 1)
 (define snap-regions 5)
+
+;; The header is put together in the collector's scratch memory, which no
+;; allocator hands out, and each region's tag map after it.
+(define snap-header gc-scratch)
+(define snap-tag-map (%+ gc-scratch 512))
 
 (define (region-blocks len) (%lsh (%+ len 511) -9))
 
@@ -64,8 +68,8 @@
 ;; Everything from the collection to the last block written is one critical
 ;; section, and nothing inside it allocates: another task could otherwise
 ;; allocate out of a free block this is blanking, and an allocation inside
-;; the section could call the collector. So the header block is claimed
-;; first and the regions are written out by hand.
+;; the section could call the collector. So the regions are written out by
+;; hand, from scratch memory.
 ;;
 ;; The section runs in the disk driver's task: a transfer inside a section
 ;; with interrupts off can only be watched, and only the task holding the
@@ -73,11 +77,13 @@
 ;; task sleeps until it answers with the blocks written, or minus the first
 ;; status that was not ok.
 (define (save-image-with top)
-  (let* ((hdr (%addr-of (alloc-pool 512)))
-         (saved-top (%ld-cap lg-toplevel))
+  (let* ((saved-top (%ld-cap lg-toplevel))
          (result
           (disk:exclusive
             (lambda ()
+              ;; Every task there is, for the resumed image to give back
+              ;; their stacks: none can start or end until this returns.
+              (set! *saved-tasks* (task-snapshot))
               ;; Collect first and blank what was reclaimed: afterwards the
               ;; live pairs are one block at the bottom of cons space and
               ;; everything above it is zero, which is what makes an image
@@ -90,10 +96,15 @@
               ;; A resumed image re-enters through `top` rather than through
               ;; the boot list: every global it would have set is already set.
               (%st-cap! lg-toplevel top)
-              (let ((r (write-regions hdr)))
+              (let ((r (write-regions)))
                 (%st-cap! lg-toplevel saved-top)
+                (set! *saved-tasks* nil)
                 r)))))
     (report-save result)))
+
+;; The tasks of the machine that saved, in the image it wrote, and nil
+;; anywhere else.
+(define *saved-tasks* nil)
 
 ;; Five regions: low memory, the pool, code, pairs, objects, each from its
 ;; base to as far as its allocator has reached, each followed by its tag map,
@@ -101,28 +112,28 @@
 ;; last, so that a run that is interrupted leaves a file with no valid header
 ;; rather than a wrong one. Answers the blocks written, or minus the first
 ;; status that was not ok. Allocates nothing.
-(define (write-regions hdr)
-  (put-region hdr 0 0 4096)
-  (put-region hdr 1 pool-base (%- (%ld-word lg-poolptr) pool-base))
-  (put-region hdr 2 code-base (%- (%ld-word lg-code-ptr) code-base))
-  (put-region hdr 3 cons-base (%- (%ld-word lg-cons-ptr) cons-base))
-  (put-region hdr 4 obj-base (%- (%ld-word lg-obj-ptr) obj-base))
+(define (write-regions)
+  (put-region snap-header 0 0 4096)
+  (put-region snap-header 1 pool-base (%- (%ld-word lg-poolptr) pool-base))
+  (put-region snap-header 2 code-base (%- (%ld-word lg-code-ptr) code-base))
+  (put-region snap-header 3 cons-base (%- (%ld-word lg-cons-ptr) cons-base))
+  (put-region snap-header 4 obj-base (%- (%ld-word lg-obj-ptr) obj-base))
   (let ((i 0) (k snap-header-blocks) (bad 0))
     (while (%< i snap-regions)
-      (let* ((base (peek (region-field hdr i 0)))
-             (len (peek (region-field hdr i 1)))
+      (let* ((base (peek (region-field snap-header i 0)))
+             (len (peek (region-field snap-header i 1)))
              (n (region-blocks len))
-             (m (tag-map base (%+ base len) gc-scratch)))
-        (poke (region-field hdr i 2) k)
-        (poke (region-field hdr i 3) (%+ k n))
+             (m (tag-map base (%+ base len) snap-tag-map)))
+        (poke (region-field snap-header i 2) k)
+        (poke (region-field snap-header i 3) (%+ k n))
         (set! bad (first-bad bad (disk:write-raw base k n)))
-        (set! bad (first-bad bad (disk:write-raw gc-scratch (%+ k n) m)))
+        (set! bad (first-bad bad (disk:write-raw snap-tag-map (%+ k n) m)))
         (set! k (%+ k (%+ n m))))
       (set! i (%+ i 1)))
-    (poke hdr snap-magic)
-    (poke (%+ hdr 4) (%ld-word lg-imgentry))
-    (poke (%+ hdr 8) snap-regions)
-    (set! bad (first-bad bad (disk:write-raw hdr 0 1)))
+    (poke snap-header snap-magic)
+    (poke (%+ snap-header 4) (%ld-word lg-imgentry))
+    (poke (%+ snap-header 8) snap-regions)
+    (set! bad (first-bad bad (disk:write-raw snap-header 0 1)))
     (if (%= bad 0) k (%- 0 bad))))
 
 (define (report-save result)
@@ -138,11 +149,14 @@
 ;; Everything the boot list would set up is already in the image. Exec is
 ;; rebuilt, because the task that saved is not the task that resumes, and
 ;; every device claim is stale: the drivers start again in `exec-init` and
-;; claim theirs afresh.
+;; claim theirs afresh. The tasks that were saved never run again, so their
+;; stacks and contexts go back to the pool first.
 (define (resume-kickstart)
   (%st-cap! lg-traphook (%symbol-value 'handle-trap))
   (%st-cap! lg-errhandler (%symbol-value 'error-trap))
   (release-all-devices)
+  (reap-saved-tasks *saved-tasks*)
+  (set! *saved-tasks* nil)
   (exec-init)
   (exec-start)
   (if *resume-fn* (%funcall *resume-fn*) nil)
@@ -189,25 +203,24 @@
 ;; it, so the collection's roots are the image's own globals and what
 ;; survives is exactly the image.
 (define (finish-fresh)
-  (let ((hdr (fresh-become)))
-    (forget-unused-packages)
-    (%st-cap! lg-package (find-package "user"))
-    (collect-for-image)
-    (let ((r (write-regions hdr)))
-      (if (%< r 0)
-          (begin
-            (uart-string "fresh image: the disk answered ")
-            (uart-num (%- 0 r))
-            (uart-nl)
-            (%halt exit-error))
-          (begin
-            (uart-string "fresh image: ")
-            (uart-num r)
-            (uart-string " blocks")
-            (uart-nl)
-            (%halt exit-ok))))))
+  (fresh-become)
+  (forget-unused-packages)
+  (%st-cap! lg-package (find-package "user"))
+  (collect-for-image)
+  (let ((r (write-regions)))
+    (if (%< r 0)
+        (begin
+          (uart-string "fresh image: the disk answered ")
+          (uart-num (%- 0 r))
+          (uart-nl)
+          (%halt exit-error))
+        (begin
+          (uart-string "fresh image: ")
+          (uart-num r)
+          (uart-string " blocks")
+          (uart-nl)
+          (%halt exit-ok)))))
 
-;; Answers the address of a block to write the file's header from.
 (define (fresh-become)
   (let* ((fresh (%ld-cap lg-roots))
          (image (%car fresh))
@@ -220,12 +233,15 @@
          ;; the image's marker is not this machine's.
          (entries (table->alist image))
          (unbound (%unbound))
-         (macro-bit sym-macro)
-         ;; Claimed now, above where the pool is about to end: in memory for
-         ;; the write, and not in the file.
-         (hdr (%addr-of (alloc-pool 512))))
+         (macro-bit sym-macro))
     (%st-cap! lg-roots nil)
     (keep-image-symbols image seen)
+    ;; No trap may come while the cells change, and a collection still
+    ;; marking would bring one with the first store over an unmarked pointer:
+    ;; the barrier's handler is reached through those very cells. So the
+    ;; cycle is finished here, after the last allocation, and none can start
+    ;; again before the allocator is the image's.
+    (if (busy?) (collect) nil)
     (become-image all entries unbound macro-bit)
     ;; The image's own globals, as the forge sets them for an image it builds.
     (%st-cap! lg-toplevel (%symbol-value 'kickstart))
@@ -243,7 +259,7 @@
     ;; machine carved from it since.
     (%st-word! lg-poolptr (%+ (%ld-word lg-code-reg) code-registry-bytes))
     (%st-word! lg-pool-free 0)
-    hdr))
+    nil))
 
 ;; The image's symbols: the ones its sources use, any it gives something to,
 ;; and each package's tag. A new obarray and a new symbol list, made with the

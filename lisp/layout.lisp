@@ -22,6 +22,7 @@
 (define gc-bitmap #xe000000)
 (define kick-base #x1000000)
 (define reset-reserve #x100)
+(define snap-magic #x32534d4c)
 
 ;; ---- low-memory globals, one value slot each ----
 (define lg-cons-ptr #x100)
