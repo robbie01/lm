@@ -52,28 +52,31 @@
   (int-enable int-input)
   nil)
 
-(define (decode e)
-  (let ((kind (%car e)) (hi (cadr e)) (lo (caddr e)))
+;; The chip's event word, laid out as the input section of hw.lisp says.
+(define (decode w)
+  (let ((kind (%lsh w -28)))
     (cond ((%= kind ev-keydown)
-           (list 'key 'down (key-ascii-bits hi) (key-code-bits hi lo) (input-mods)))
+           (list 'key 'down (key-ascii-bits w) (key-code-bits w) (input-mods)))
           ((%= kind ev-keyup)
-           (list 'key 'up (key-ascii-bits hi) (key-code-bits hi lo) (input-mods)))
+           (list 'key 'up (key-ascii-bits w) (key-code-bits w) (input-mods)))
           ((%= kind ev-wheel)
-           (list 'wheel (wheel-delta (%logand lo 4095)) *mouse-x* *mouse-y*))
+           (list 'wheel (wheel-delta (%logand w 4095)) *mouse-x* *mouse-y*))
           ((if (%>= kind ev-mousemove) (%<= kind ev-buttonup) nil)
            ;; A pointer event says where it happened, which is not where the
            ;; pointer is now if the event was taken off the queue late.
-           (let ((x (%lsh lo -4)) (y (%logand hi 4095)) (b (%logand lo 15)))
+           (let ((x (%logand (%lsh w -4) 4095))
+                 (y (%logand (%lsh w -16) 4095))
+                 (b (%logand w 15)))
              (set! *mouse-x* x)
              (set! *mouse-y* y)
              (set! *mouse-buttons* (input-buttons))
              (cond ((%= kind ev-mousemove) (list 'mouse 'moved x y))
                    ((%= kind ev-buttondown) (list 'button 'down b x y))
                    (else (list 'button 'up b x y)))))
-          (else (list 'unknown kind hi lo)))))
+          (else (list 'unknown kind w)))))
 
-(define (key-ascii-bits hi) (%logand (%lsh hi -4) 255))
-(define (key-code-bits hi lo) (%logior (%lsh (%logand hi 15) 4) (%lsh lo -12)))
+(define (key-ascii-bits w) (%logand (%lsh w -20) 255))
+(define (key-code-bits w) (%logand (%lsh w -12) 255))
 
 ;; Twelve bits, two's complement.
 (define (wheel-delta p) (if (%>= p 2048) (%- p 4096) p))

@@ -169,15 +169,14 @@
 
 (in-package hw)
 (export '(
-  peek-signed
   bm-pixels bitmap? make-bitmap alloc-bitmap
   blit-busy? blit-drain blit-sync blit-wait-descriptor blit-wait-ring
-  make-device device? device-owner device-name device-usable? dev-reg
+  make-device device? device-owner device-name device-usable? dev-page dev-ld dev-st!
   claim-device claim-device-for release-device release-devices-of release-all-devices
   *disk* disk-go disk-status disk-busy? disk-blocks disk-interrupts!
   *blit-ring* *gc-blit-ring* *in-interrupt* blit-descriptor gc-blit-descriptor blit-go
   *screen* alloc-pool bm-blit-rect bm-fill-rect
-  bm-plot bm-point bm-at bm-addr bm-w bm-h
+  bm-plot bm-point bm-index bm-w bm-h
   make-bitmap-rastport make-rastport-on rp-bitmap
   blit-rect
   draw-circle draw-line

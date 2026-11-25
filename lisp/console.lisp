@@ -134,7 +134,7 @@
 (define (can-ask?)
   (unsafe
   (if (running?)
-      (if (%= 0 (%ld-fixnum lg-trapdepth))
+      (if (%= 0 (%ld-word lg-trapdepth))
           (if *in-interrupt* nil (interrupts-on?))
           nil)
       nil)))
@@ -146,7 +146,7 @@
 (define (can-listen?)
   (unsafe
   (if (running?)
-      (if (%= 0 (%ld-fixnum lg-trapdepth)) (if *in-interrupt* nil t) nil)
+      (if (%= 0 (%ld-word lg-trapdepth)) (if *in-interrupt* nil t) nil)
       nil)))
 
 (define (open)

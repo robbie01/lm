@@ -1,15 +1,21 @@
 ;;; hw.lisp - the custom chips.
 ;;;
-;;; Every device is a 4 KiB page of naturally aligned 32-bit registers. There
-;;; is no MMU and no privileged mode. What keeps a task off a device it does
-;;; not own is that it cannot name one: a device is a value, a register is an
-;;; offset into its page (generated into layout.lisp from the Rust side), and
-;;; `dev-reg` is the only way to turn the two into an address.
+;;; Every device is a 4 KiB page of naturally aligned 32-bit registers. Naming
+;;; memory by number is a privilege: a load or store through an integer
+;;; address goes through DDC and needs SR, which only code compiled unsafe
+;;; has, and this file is that code for the chips. A device is a value, a
+;;; register is an offset into its page (generated into layout.lisp from the
+;;; Rust side), and `dev-page` is the only way to the registers: for the task
+;;; that holds the device it makes a capability bounded exactly to the page,
+;;; so a register offset that leaves the page is a bounds fault and never a
+;;; store into the next device.
 
 (in-package hw)
 (unsafe-file)
 
-(define (dev-addr dev reg) (%+ mmio-base (%+ (%lsh dev 12) reg)))
+(define device-page-bytes 4096)
+
+(define (dev-addr dev reg) (%+ mmio-base (%+ (%* dev device-page-bytes) reg)))
 
 ;; ---------------------------------------------------------------- devices
 ;; A device's owner is one of three things:
@@ -21,7 +27,10 @@
 ;;   nil      A driver's device that no driver has claimed. Usable by whoever
 ;;            holds it, which is how the machine works before its drivers are
 ;;            up and during a rebuild.
-;;   a task   Claimed. `dev-reg` from any other task is an error.
+;;   a task   Claimed. `dev-page` from any other task is an error.
+;;
+;; The record holds the page's address as a number, which is no authority:
+;; only privileged code can follow it.
 (defrecord (device dv) name base owner)
 
 (define (make-device name dev owner)
@@ -38,10 +47,19 @@
   (let ((o (dv-owner d)))
     (if (%null? o) t (if (%eq? o 'kernel) t (%eq? o (%this-task))))))
 
-(define (dev-reg d off)
+;; The capability a device's registers are reached through: the root narrowed
+;; to the page and to loading and storing data. It is made afresh for each
+;; use and never stored, so no capability to a device lies anywhere a program
+;; could come across one; making it is a few instructions and allocates
+;; nothing, so the trap handler and interrupt servers use it too.
+(define (dev-page d)
   (if (device-usable? d)
-      (%+ (dv-base d) off)
-      (error "dev-reg:" (dv-name d) "belongs to another task")))
+      (%cap-and-perms (%cap-bounds-exact (%from-addr (dv-base d)) device-page-bytes)
+                      (%logior perm-ld perm-sd))
+      (error "dev-page:" (dv-name d) "belongs to another task")))
+
+(define (dev-ld d reg) (%cap-ld-word (dev-page d) reg))
+(define (dev-st! d reg v) (%cap-st-word! (dev-page d) reg v))
 
 ;; The devices some task holds right now, so that a task that dies gives back
 ;; exactly what it held.
@@ -72,72 +90,41 @@
   nil)
 
 ;; ---------------------------------------------------------------- words
-;; A location holds thirty-two bits and a fixnum thirty-one, so reading one
-;; has to say which number it means:
-;;
-;;   peek / poke               the word as an unsigned integer, 0..2^32-1
-;;   peek-signed               the same word as -2^31..2^31-1
-;;   %ld-fixnum / %st-fixnum!  the raw instruction: the low thirty-one bits,
-;;                             sign extended. Right for an address or a count,
-;;                             neither of which can have the top bit set here.
-;;
-;; `poke` takes anything from -2^31 to 2^32-1 and stores the low thirty-two
-;; bits, so a word read either way goes back unchanged. A word with its top
-;; bit set reads as a bignum under `peek`, so the collector and the device
-;; code use the raw forms where they can.
-;;
-;; The location is read once, with one access, and taken apart in a scratch
-;; cell: two half-word loads would read a device register twice, and a
-;; half-word store would write one lane. `lg-raw-word` is not scanned by the
-;; collector; what sits here is a raw word.
-(define peek-scratch lg-raw-word)
-
-;; Neither of these widens by trapping: they are reachable from interrupt
-;; servers, and build the object directly.
-(define (peek a)
-  (without-interrupts
-    (%st-word! peek-scratch (%ld-word a))
-    (halves->unsigned (%ld-half peek-scratch)
-                      (%ld-half (%+ peek-scratch 2)))))
-
-(define (peek-signed a)
-  (without-interrupts
-    (%st-word! peek-scratch (%ld-word a))
-    (halves->signed (%ld-half peek-scratch)
-                    (%ld-half (%+ peek-scratch 2)))))
+;; A machine word is a fixnum. `peek` reads the word at an address as a
+;; number from -2^31 to 2^31-1 and `poke` stores one back unchanged, both by
+;; number through DDC. `poke` takes nothing but a fixnum: anything else would
+;; store its address, which is never what was meant.
+(define (peek a) (%ld-word a))
 
 (define (poke a v)
-  (if (%fixnum? v)
-      ;; one instruction, and exact: the store sign-extends the fixnum
-      (%st-fixnum! a v)
-      (without-interrupts
-        (bignum-poke-word peek-scratch v)
-        (%st-word! a (%ld-word peek-scratch))
-        v)))
+  (if (%fixnum? v) (%st-word! a v) (error "poke: not a machine word:" v))
+  v)
+
 (define (peek8 a) (%ld-byte a))
 (define (poke8 a v) (%st-byte! a v))
 
 ;; ---------------------------------------------------------------- system
 (define *sys* (make-device "sys" dev-sys 'kernel))
 
-;; Thirty bits and never negative, so it stays a fixnum.
-(define (random) (%logand (%ld-fixnum (dev-reg *sys* sys-random)) 1073741823))
+;; Thirty-one bits and never negative.
+(define (random) (%logand (dev-ld *sys* sys-random) most-positive-fixnum))
 
 ;; Read-modify-write of the enable register, atomic: a task turning a line
 ;; back on races the interrupt server that masks it.
 (define (int-enable line)
-  (let ((r (dev-reg *sys* sys-intena)))
-    (without-interrupts (poke r (%logior (peek r) (%lsh 1 line))))))
+  (let ((p (dev-page *sys*)))
+    (without-interrupts
+      (%cap-st-word! p sys-intena (%logior (%cap-ld-word p sys-intena) (%lsh 1 line))))))
 (define (int-disable line)
-  (let ((r (dev-reg *sys* sys-intena)))
-    (without-interrupts (poke r (%logand (peek r) (%lognot (%lsh 1 line)))))))
-(define (int-ack line) (poke (dev-reg *sys* sys-intreq) (%lsh 1 line)))
-(define (int-raise line) (poke (dev-reg *sys* sys-intset) (%lsh 1 line)))
+  (let ((p (dev-page *sys*)))
+    (without-interrupts
+      (%cap-st-word! p sys-intena
+                     (%logand (%cap-ld-word p sys-intena) (%lognot (%lsh 1 line)))))))
+(define (int-ack line) (dev-st! *sys* sys-intreq (%lsh 1 line)))
+(define (int-raise line) (dev-st! *sys* sys-intset (%lsh 1 line)))
 ;; The lowest pending and enabled line, or -1, which the chip spells as a
-;; word of all ones. The raw load: a line number is five bits, and the
-;; sentinel is the one value where the two readings differ. Runs inside the
-;; trap handler and must not allocate.
-(define (int-pending) (%ld-fixnum (dev-reg *sys* sys-intnum)))
+;; word of all ones. Runs inside the trap handler and must not allocate.
+(define (int-pending) (dev-ld *sys* sys-intnum))
 
 ;; ---------------------------------------------------------------- timer
 (define *timer* (make-device "timer" dev-timer 'kernel))
@@ -147,33 +134,31 @@
 ;; The host's clock, in milliseconds since boot, read as a fixnum: for pacing
 ;; something to the host, not for deadlines, which exec keeps on the machine's
 ;; own ticks (`now-ms`). No allocation and no critical section.
-(define (millis) (%ld-fixnum (dev-reg *timer* tmr-wall)))
+(define (millis) (dev-ld *timer* tmr-wall))
 
 ;; Cycles per second of the machine's clock.
-(define (timer-hz) (%ld-fixnum (dev-reg *timer* tmr-freq)))
+(define (timer-hz) (dev-ld *timer* tmr-freq))
 
-;; Fire n ticks from now. The compare is 64 bits: the high half is written
-;; first so a wrap cannot leave a compare in the past, and both halves go out
-;; inside one section. Sixteen bits at a time with fixnum operations, because
-;; this runs from the timer interrupt every quantum and the promoting `+`
-;; would take a second trap and allocate a bignum each time.
+;; Fire n ticks from now, n a fixnum no smaller than zero. The compare is 64
+;; bits: the high half is written first so a wrap cannot leave a compare in
+;; the past, and both halves go out inside one section. The low word, read as
+;; unsigned, carries into the high one exactly when it was negative and its
+;; wrapping sum with n is not. Wrapping fixnum operations throughout, because
+;; this runs from the timer interrupt every quantum and must not allocate.
 (define (timer-set-in n)
-  (without-interrupts
-    (%st-word! peek-scratch (%ld-word (dev-reg *timer* tmr-lo)))
-    (let* ((l0 (%ld-half peek-scratch))
-           (l1 (%ld-half (%+ peek-scratch 2)))
-           (s0 (%+ l0 (%logand n 65535)))
-           (s1 (%+ (%+ l1 (%lsh n -16)) (%lsh s0 -16))))
-      (%st-fixnum! (dev-reg *timer* tmr-cmphi)
-                   (%+ (%ld-fixnum (dev-reg *timer* tmr-hi)) (%lsh s1 -16)))
-      (%st-half! peek-scratch (%logand s0 65535))
-      (%st-half! (%+ peek-scratch 2) (%logand s1 65535))
-      (%st-word! (dev-reg *timer* tmr-cmplo) (%ld-word peek-scratch)))))
+  (let ((p (dev-page *timer*)))
+    (without-interrupts
+      (let* ((lo (%cap-ld-word p tmr-lo))
+             (sum (%+ lo n))
+             (carry (if (%< lo 0) (if (%>= sum 0) 1 0) 0)))
+        (%cap-st-word! p tmr-cmphi (%+ (%cap-ld-word p tmr-hi) carry))
+        (%cap-st-word! p tmr-cmplo sum)))))
 
 (define (timer-never)
-  (without-interrupts
-    (poke (dev-reg *timer* tmr-cmphi) -1)
-    (poke (dev-reg *timer* tmr-cmplo) -1)))
+  (let ((p (dev-page *timer*)))
+    (without-interrupts
+      (%cap-st-word! p tmr-cmphi -1)
+      (%cap-st-word! p tmr-cmplo -1))))
 
 ;; ---------------------------------------------------------------- releasing
 ;; A driver that dies must not take its peripheral with it.
@@ -205,13 +190,15 @@
 (define screen-height 768)
 
 ;; ---------------------------------------------------------------- bitmaps
-;; A bitmap is a byte object and its two dimensions. Holding the object rather
-;; than an address means a bitmap cannot be forged, an overrun reaches at
-;; worst another object, the collector frees the pixels when the last
-;; reference goes, and the extent is checked once at construction so that
-;; everything downstream can trust `w` and `h`. An address taken out of a
+;; A bitmap is a byte object and its two dimensions. The pixels are a
+;; capability with LD and SD whose bounds are exactly the pixels, so a bitmap
+;; cannot be forged, a store the processor makes outside it is a bounds fault,
+;; the collector frees the pixels when the last reference goes, and the
+;; extent is checked once at construction so that everything downstream can
+;; trust `w` and `h`. The chips address memory by number: the address of a
 ;; byte object is good for ever because objects never move, which is what
-;; lets one be handed to the display register and to the blitter.
+;; lets one be handed to the display register and to the blitter, and only
+;; privileged code can write a number into either.
 (defrecord (bitmap bm) pixels w h)
 
 (define (make-bitmap pixels w h)
@@ -227,7 +214,7 @@
     (set-bm-h! b h)
     b))
 
-;; Where the pixels are, as a raw address, for command blocks and the display
+;; Where the pixels are, as a number, for descriptors and the display
 ;; register.
 (defsubst (bm-addr b) (%addr-of (bm-pixels b)))
 
@@ -240,35 +227,39 @@
 ;; clock on: writing the control register without the interrupt bit would
 ;; stop the vertical blank.
 (define (gfx-show b)
-  (let ((base (dev-reg *gfx* 0)))
-    (poke (%+ base gfx-base) (bm-addr b))
-    (poke (%+ base gfx-width) (bm-w b))
-    (poke (%+ base gfx-height) (bm-h b))
-    (poke (%+ base gfx-pitch) (bm-w b))
-    (poke (%+ base gfx-mode) 8)
-    (poke (%+ base gfx-ctrl) (%logior gfx-on gfx-vbirq)))
+  (let ((p (dev-page *gfx*)))
+    (%cap-st-word! p gfx-base (bm-addr b))
+    (%cap-st-word! p gfx-width (bm-w b))
+    (%cap-st-word! p gfx-height (bm-h b))
+    (%cap-st-word! p gfx-pitch (bm-w b))
+    (%cap-st-word! p gfx-mode 8)
+    (%cap-st-word! p gfx-ctrl (%logior gfx-on gfx-vbirq)))
   b)
 
 (define (gfx-vblank-irq! on)
-  (let ((r (dev-reg *gfx* gfx-ctrl)))
-    (poke r (if on
-                (%logior (peek r) gfx-vbirq)
-                (%logand (peek r) (%lognot gfx-vbirq))))))
+  (let ((p (dev-page *gfx*)))
+    (%cap-st-word! p gfx-ctrl
+                   (if on
+                       (%logior (%cap-ld-word p gfx-ctrl) gfx-vbirq)
+                       (%logand (%cap-ld-word p gfx-ctrl) (%lognot gfx-vbirq))))))
 
 ;; An index register and a data register: two writes that mean one thing.
 (define (gfx-colour! i c)
-  (let ((base (dev-reg *gfx* 0)))
+  (let ((p (dev-page *gfx*)))
     (without-interrupts
-      (poke (%+ base gfx-palidx) i)
-      (poke (%+ base gfx-paldat) c))))
+      (%cap-st-word! p gfx-palidx i)
+      (%cap-st-word! p gfx-paldat c))))
 
-(define (gfx-present!) (poke (dev-reg *gfx* gfx-sync) 1))
+(define (gfx-present!) (dev-st! *gfx* gfx-sync 1))
 
 (define (rgb r g b)
   (%logior (%lsh (%logand r 255) 16)
            (%logior (%lsh (%logand g 255) 8) (%logand b 255))))
 
-(define (bm-at b x y) (%+ (bm-addr b) (%+ (%* y (bm-w b)) x)))
+;; Where pixel x, y is: its index in the pixels, for the processor, and its
+;; address, for the blitter.
+(define (bm-index b x y) (%+ (%* y (bm-w b)) x))
+(define (bm-at b x y) (%+ (bm-addr b) (bm-index b x y)))
 
 (define (bm-inside? b x y)
   (if (%>= x 0)
@@ -277,26 +268,24 @@
 
 ;; A pixel with the processor. Both wait for this task's blits first, because
 ;; the blitter may still be about to write the same pixels. Code that plots
-;; many pixels should call `blit-sync` once and store through `bm-at`.
+;; many pixels should call `blit-sync` once and store into the pixels at
+;; `bm-index`.
 (define (bm-plot b x y c)
   (blit-sync)
-  (if (bm-inside? b x y) (poke8 (bm-at b x y) c) nil))
+  (if (bm-inside? b x y) (bytes-set! (bm-pixels b) (bm-index b x y) c) nil))
 
 (define (bm-point b x y)
   (blit-sync)
-  (if (bm-inside? b x y) (peek8 (bm-at b x y)) 0))
+  (if (bm-inside? b x y) (bytes-ref (bm-pixels b) (bm-index b x y)) 0))
 
 ;; ---------------------------------------------------------------- blitter
 ;; Every task blits, dozens of times a frame, so the blitter belongs to the
 ;; kernel like `sys` and the timer: never claimed, reached only through the
 ;; functions below. The chip has parameter registers too, but programming
 ;; through them takes six stores that something would have to hold off, and
-;; descriptors exist to avoid that. Three registers are named here and none
-;; is exported; the only way onto the chain is `blit-go`.
+;; descriptors exist to avoid that. Three registers are used, all of them
+;; here; the only way onto the chain is `blit-go`.
 (define *blit* (make-device "blit" dev-blit 'kernel))
-(define blt-list (dev-reg *blit* blit-list-reg))
-(define blt-status (dev-reg *blit* blit-status-reg))
-(define blt-ctrl (dev-reg *blit* blit-ctrl-reg))
 
 ;; ---------------------------------------------------------------- descriptors
 ;; A blit is a descriptor in memory: the parameters, a status word the chip
@@ -317,28 +306,22 @@
 (define *in-interrupt* nil) ; set by the trap handler, cleared before it returns
 
 ;; A ring is a word saying which descriptor is next, then the descriptors.
+;; Every word in it is a machine word, and the chip reads the descriptors by
+;; number.
 (define (ring-slot r i) (%+ r (%+ 8 (%* i blit-list-size))))
 
-;; Every status cleared: pool memory is not zeroed, and a descriptor that read
-;; as pending before it was ever used would wait for a write-back that never
-;; comes.
+;; The pool hands a block out zeroed: the next descriptor is the first, and
+;; every status reads as done, so no descriptor that was never used waits for
+;; a write-back that never comes.
 (define (new-blit-ring)
-  (let ((r (alloc-pool (%+ 8 (%* blit-ring-size blit-list-size))))
-        (i 0))
-    (%st-fixnum! r 0)
-    (while (%< i blit-ring-size)
-      (let ((d (ring-slot r i)))
-        (%st-fixnum! (%+ d bl-status) 0)
-        (%st-fixnum! (%+ d bl-next) 0))
-      (set! i (%+ i 1)))
-    r))
+  (alloc-pool (%+ 8 (%* blit-ring-size blit-list-size))))
 
 ;; The ring's next descriptor, once the chip has finished with it.
 (define (ring-take r)
-  (let* ((i (%ld-fixnum r))
+  (let* ((i (%ld-word r))
          (d (ring-slot r i)))
     (blit-wait-descriptor d)
-    (%st-fixnum! r (if (%= (%+ i 1) blit-ring-size) 0 (%+ i 1)))
+    (%st-word! r (if (%= (%+ i 1) blit-ring-size) 0 (%+ i 1)))
     d))
 
 ;; A descriptor from the running task's ring. Not in an interrupt server: a
@@ -367,7 +350,7 @@
 ;; pixels with the processor, `blit-sync`: reading too early shows the old
 ;; picture.
 
-(define (blit-busy?) (%= 1 (%logand (%ld-fixnum blt-status) 1)))
+(define (blit-busy?) (%= 1 (%logand (dev-ld *blit* blit-status-reg) 1)))
 
 ;; Reading the status register is what lets a finished transfer be noticed,
 ;; so this spin also drives completion. Preemptible.
@@ -375,7 +358,7 @@
   (while (blit-busy?) nil)
   nil)
 
-(define (blit-done? d) (%= 0 (%ld-fixnum (%+ d bl-status))))
+(define (blit-done? d) (%= 0 (%ld-word (%+ d bl-status))))
 
 ;; How a task whose blit has not landed goes to sleep instead of spinning.
 ;; gfx.driver installs it, since the driver owns the completion interrupt.
@@ -391,7 +374,7 @@
 
 ;; Ask the chip for an interrupt after every descriptor, not only at the end
 ;; of the chain, while anybody is asleep waiting for one.
-(define (blit-irq-each! on) (%st-fixnum! blt-ctrl (if on 2 0)))
+(define (blit-irq-each! on) (dev-st! *blit* blit-ctrl-reg (if on 2 0)))
 
 ;; A short spin first: most blits are small and done before a sleep could be
 ;; arranged.
@@ -429,18 +412,18 @@
 ;; went idle without taking this one. The fields go in before the section:
 ;; the descriptor is this task's and on no chain yet.
 (define (blit-go d op)
-  (%st-fixnum! (%+ d bl-op) op)
-  (%st-fixnum! (%+ d bl-next) 0)
-  (%st-fixnum! (%+ d bl-status) 1)
+  (%st-word! (%+ d bl-op) op)
+  (%st-word! (%+ d bl-next) 0)
+  (%st-word! (%+ d bl-status) 1)
   (without-interrupts
     (let ((linked (if (if (%> *blit-tail* 0) (blit-busy?) nil)
-                      (begin (%st-fixnum! (%+ *blit-tail* bl-next) d) t)
+                      (begin (%st-word! (%+ *blit-tail* bl-next) d) t)
                       nil)))
       (set! *blit-tail* d)
       (if (if linked (blit-busy?) nil)
           nil
-          (if (%= 1 (%ld-fixnum (%+ d bl-status)))
-              (%st-fixnum! blt-list d)
+          (if (%= 1 (%ld-word (%+ d bl-status)))
+              (dev-st! *blit* blit-list-reg d)
               nil))))
   nil)
 
@@ -731,37 +714,25 @@
 ;; claimed the device, whoever holds it may use it.
 (define *input* (make-device "input" dev-input nil))
 
-;; The next event as (kind hi lo): the kind, and the word's two halves for
-;; whoever knows how that kind is laid out; or nil when the queue is empty.
-;; Read once, because reading takes the event, and into the scratch cell,
-;; because a button event has bit 30 set.
+;; The next event's word, or nil when the queue is empty. Read once, because
+;; reading takes the event.
 (define (input-take)
-  (let ((r (dev-reg *input* inp-event)) (hi 0) (lo 0))
-    (without-interrupts
-      (%st-word! peek-scratch (%ld-word r))
-      (set! lo (%ld-half peek-scratch))
-      (set! hi (%ld-half (%+ peek-scratch 2))))
-    (if (if (%= hi 0) (%= lo 0) nil)
-        nil
-        (list (%lsh hi -12) hi lo))))
+  (let ((w (dev-ld *input* inp-event)))
+    (if (%= w 0) nil w)))
 
 ;; The same word the other way, into the loopback register: an event as
 ;; though the keyboard had sent it.
 (define (input-inject kind ascii code payload)
-  (let ((r (dev-reg *input* inp-inject))
-        (hi (%logior (%lsh kind 12) (%logior (%lsh ascii 4) (%lsh code -4))))
-        (lo (%logior (%lsh (%logand code 15) 12) payload)))
-    (without-interrupts
-      (%st-half! peek-scratch lo)
-      (%st-half! (%+ peek-scratch 2) hi)
-      (%st-word! r (%ld-word peek-scratch))))
+  (dev-st! *input* inp-inject
+           (%logior (%logior (%lsh kind 28) (%lsh ascii 20))
+                    (%logior (%lsh code 12) payload)))
   nil)
 
-(define (input-interrupts! on) (poke (dev-reg *input* inp-ctrl) (if on 1 0)))
-(define (input-mouse-x) (%ld-fixnum (dev-reg *input* inp-mousex)))
-(define (input-mouse-y) (%ld-fixnum (dev-reg *input* inp-mousey)))
-(define (input-buttons) (%ld-fixnum (dev-reg *input* inp-buttons)))
-(define (input-mods) (%ld-fixnum (dev-reg *input* inp-mods)))
+(define (input-interrupts! on) (dev-st! *input* inp-ctrl (if on 1 0)))
+(define (input-mouse-x) (dev-ld *input* inp-mousex))
+(define (input-mouse-y) (dev-ld *input* inp-mousey))
+(define (input-buttons) (dev-ld *input* inp-buttons))
+(define (input-mods) (dev-ld *input* inp-mods))
 
 ;; ---------------------------------------------------------------- serial
 ;; The serial line. Its registers are reached raw from runtime.lisp by
@@ -770,8 +741,10 @@
 ;; claims it, which says which task is reading the line.
 (define *serial* (make-device "serial" dev-uart nil))
 
-;; Whether the chip raises its line when a byte arrives.
-(define (serial-interrupts! on) (%st-fixnum! uart-ctrl (if on 1 0)))
+;; Whether the chip raises its line when a byte arrives. Raw, like the rest of
+;; the line's registers: it is turned on by whoever starts console.driver and
+;; off when the driver ends, which need not be the task that holds the line.
+(define (serial-interrupts! on) (%st-word! uart-ctrl (if on 1 0)))
 
 ;; ---------------------------------------------------------------- storage
 ;; The disk controller. A command runs on its own time: `disk-go` programs it
@@ -785,28 +758,33 @@
 
 ;; The command goes last: the controller latches the other three when it
 ;; arrives, so they can be rewritten for the next command while this one runs.
+;; The controller reads or writes memory by number, so a call names memory by
+;; number, and is privileged like any other store that does.
 (define (disk-go cmd addr block n)
-  (let ((base (dev-reg *disk* 0)))
+  (let ((p (dev-page *disk*)))
     (without-interrupts
-      (poke (%+ base dsk-addr) addr)
-      (poke (%+ base dsk-block) block)
-      (poke (%+ base dsk-count) n)
-      (poke (%+ base dsk-cmd) cmd)))
+      (%cap-st-word! p dsk-addr addr)
+      (%cap-st-word! p dsk-block block)
+      (%cap-st-word! p dsk-count n)
+      (%cap-st-word! p dsk-cmd cmd)))
   nil)
 
 ;; One load and no allocation: a status is a small number, read in a loop
 ;; with interrupts off.
-(define (disk-status) (%ld-fixnum (dev-reg *disk* dsk-status)))
+(define (disk-status) (dev-ld *disk* dsk-status))
 (define (disk-busy?) (%= (disk-status) disk-busy))
-(define (disk-blocks) (peek (dev-reg *disk* dsk-blocks)))
-(define (disk-interrupts! on) (poke (dev-reg *disk* dsk-ctrl) (if on 1 0)))
+(define (disk-blocks) (dev-ld *disk* dsk-blocks))
+(define (disk-interrupts! on) (dev-st! *disk* dsk-ctrl (if on 1 0)))
 
 ;; ---------------------------------------------------------------- pool
-;; Raw memory the collector never touches and nothing moves: task contexts,
-;; stacks and descriptor rings. Every block carries an eight byte header, its
-;; total size and then a tag, and the free blocks are threaded on one list in
+;; Raw memory that nothing moves: task contexts, stacks and descriptor rings.
+;; Every block carries an eight byte header, its total size and then a tag,
+;; both machine words, and the free blocks are threaded on one list in
 ;; address order, so coalescing is a comparison against the neighbour. First
-;; fit, split when the remainder is worth having.
+;; fit, split when the remainder is worth having. A block is a whole number of
+;; granules, so it can hold capabilities, and it is handed out zeroed by word
+;; stores, which clear every tag they touch: a block holds no capability its
+;; last owner left in it.
 ;;
 ;; What the forge handed out before the machine ran, the trap frames, the
 ;; trap stack and the boot stack, has no header and is never freed. It sits
@@ -815,24 +793,24 @@
 (define pool-tag #x1feeded)     ; not a pool address, so it cannot be a link
 (define pool-min 24)            ; a free block must hold its size and its link
 
-(define (pool-size b) (%ld-fixnum b))
-(define (pool-next b) (%ld-fixnum (%+ b 4)))
-(define (pool-set-size! b n) (%st-fixnum! b n))
-(define (pool-set-next! b n) (%st-fixnum! (%+ b 4) n))
+(define (pool-size b) (%ld-word b))
+(define (pool-next b) (%ld-word (%+ b 4)))
+(define (pool-set-size! b n) (%st-word! b n))
+(define (pool-set-next! b n) (%st-word! (%+ b 4) n))
 
 (define (pool-zero p n)
   (let ((i 0))
     (while (%< i n)
-      (%st-fixnum! (%+ p i) 0)
+      (%st-word! (%+ p i) 0)
       (set! i (%+ i 4)))))
 
 ;; A fresh block off the top, when nothing on the free list fits.
 (define (pool-extend need)
-  (let ((p (%ld-fixnum lg-poolptr)))
-    (if (%> (%+ p need) (%ld-fixnum lg-poolend))
+  (let ((p (%ld-word lg-poolptr)))
+    (if (%> (%+ p need) (%ld-word lg-poolend))
         (out-of-memory "exec pool")
         nil)
-    (%st-fixnum! lg-poolptr (%+ p need))
+    (%st-word! lg-poolptr (%+ p need))
     p))
 
 ;; Hand out the front of a free block and put any worthwhile remainder back
@@ -845,8 +823,8 @@
           (pool-set-size! rest (%- size need))
           (pool-set-next! rest next)
           (pool-set-size! b need)
-          (if prev (pool-set-next! prev rest) (%st-fixnum! lg-pool-free rest)))
-        (if prev (pool-set-next! prev next) (%st-fixnum! lg-pool-free next)))
+          (if prev (pool-set-next! prev rest) (%st-word! lg-pool-free rest)))
+        (if prev (pool-set-next! prev next) (%st-word! lg-pool-free next)))
     b))
 
 ;; Finding a block and claiming it is one act. Clearing it is not: once the
@@ -861,7 +839,7 @@
   (without-interrupts
   (let* ((need (let ((n (%logand (%+ (%+ nbytes 8) 7) -8)))
                  (if (%< n pool-min) pool-min n)))
-         (b (let ((p (%ld-fixnum lg-pool-free)) (prev nil) (found nil))
+         (b (let ((p (%ld-word lg-pool-free)) (prev nil) (found nil))
               (while (if found nil (%> p 0))
                 (if (%>= (pool-size p) need)
                     (set! found (pool-take p prev need))
@@ -869,19 +847,19 @@
               (if found found (let ((n (pool-extend need)))
                                 (pool-set-size! n need)
                                 n)))))
-    (%st-fixnum! (%+ b 4) pool-tag)
+    (%st-word! (%+ b 4) pool-tag)
     b)))
 
 ;; Insert in address order, joining up with either neighbour that touches.
 (define (free-pool p)
   (let ((b (%- p 8)))
-    (if (%= (%ld-fixnum (%+ b 4)) pool-tag)
+    (if (%= (%ld-word (%+ b 4)) pool-tag)
         nil
         (error "free-pool: not an allocated block" p))
     (without-interrupts
       (let ((size (pool-size b))
             (prev nil)
-            (q (%ld-fixnum lg-pool-free)))
+            (q (%ld-word lg-pool-free)))
         (while (if (%> q 0) (%< q b) nil)
           (set! prev q)
           (set! q (pool-next q)))
@@ -899,18 +877,19 @@
               (pool-set-next! prev q))
             (if prev
                 (pool-set-next! prev b)
-                (%st-fixnum! lg-pool-free b)))
+                (%st-word! lg-pool-free b)))
         nil))))
 
-(define (pool-used) (%- (%ld-fixnum lg-poolptr) pool-base))
+(define (pool-used) (%- (%ld-word lg-poolptr) pool-base))
 
 (define (pool-free-bytes)
-  (let ((p (%ld-fixnum lg-pool-free)) (n 0))
+  (let ((p (%ld-word lg-pool-free)) (n 0))
     (while (%> p 0)
       (set! n (%+ n (pool-size p)))
       (set! p (pool-next p)))
     n))
 
-;; What hands out raw memory or writes it: needs an `unsafe` around the call.
-(unsafe-names (quote (peek poke peek8 poke8 peek-signed alloc-pool free-pool
-                      dev-reg bm-addr bm-at blit-descriptor blit-go)))
+;; What reaches memory by number, hands it out or frees it, or reaches a
+;; device: needs an `unsafe` around the call.
+(unsafe-names (quote (peek poke peek8 poke8 alloc-pool free-pool
+                      dev-page dev-ld dev-st! disk-go blit-descriptor blit-go)))

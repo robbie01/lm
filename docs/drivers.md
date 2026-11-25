@@ -43,29 +43,39 @@ operation, never a primitive. Where a client needs the hardware inside its
 own hot loop, messaging is the wrong tool and the safety has to come from
 the arguments.
 
-## Enforcement is scoping, not checking
+## Enforcement is the processor
 
-A device page is reachable only by its address, and those addresses are
-constants in hw.lisp. None of them is exported: no device register is named
-outside that file. `mmio-base` and the device numbers are exported with the
-rest of the memory map, so a program can compute a register's address and
-store to it; that is the wild store, the general memory-safety problem,
-which nothing here closes. There is no MMU and no supervisor by design: the
-address space is safe because of what the language lets you say, and the
-Rust side only observes.
+A device page is memory above the top of RAM, and the only way to it is by
+number. Naming memory by number is a privilege: an integer load or store
+goes through DDC and needs SR, which only code compiled `unsafe` has (see
+[cheri.md](cheri.md)). `mmio-base` and the device numbers are exported with
+the rest of the memory map, so a program can compute a register's address,
+but an address is a number, and a program that says nothing unsafe can
+store only through capabilities it was handed. None of those reaches a
+device.
 
 A device is a value:
 
     (defrecord (device dv) name base owner)
 
-`dev-reg` turns a register offset into an address only for the task that
-holds the device. The owner is one of three things: `kernel` (never claimed,
-reached only through hw.lisp's own functions), nil (a driver's device
-nobody has claimed, usable by whoever calls, which is what keeps the machine
-working before Exec is up and between a driver ending and the next one
-starting), or a task (every other task is refused). `remove-task` releases
-what a task held, and a resume releases every claim, because every task
-that made one is gone.
+The record holds the page's address as a number, which is no authority.
+`dev-page` makes the authority, only for the task that holds the device: a
+capability bounded exactly to the device's page, with LD and SD and nothing
+else. `dev-ld` and `dev-st!` load and store a register through it. A
+register offset that leaves the page is a bounds fault, never a store into
+the next device. The capability is made afresh for each use and never
+stored: a record field or a global can be read by anyone who can name it,
+so a device capability kept in one would be a device anybody could reach.
+Making one is a few instructions and allocates nothing, which is what lets
+the trap handler and interrupt servers use the same path. `dev-page` and
+the functions that reach memory by number are unsafe names.
+
+The owner is one of three things: `kernel` (never claimed, reached only
+through hw.lisp's own functions), nil (a driver's device nobody has claimed,
+usable by whoever calls, which is what keeps the machine working before
+Exec is up and between a driver ending and the next one starting), or a task
+(every other task is refused). `remove-task` releases what a task held, and
+a resume releases every claim, because every task that made one is gone.
 
 ## A bitmap is a value
 
@@ -74,13 +84,18 @@ A bitmap holds its pixels as a byte object:
     (defrecord (bitmap bm) pixels w h)
     (define (alloc-bitmap w h) (make-bitmap (make-bytes (%* w h)) w h))
 
-`make-bitmap` checks once that `w * h` fits in the object. A bitmap cannot
-be forged from an address; an overrun stays in object space, where a damaged
-header is something the collector names; the collector frees the pixels
-when the last reference goes, so closing a window drops it from the list
-and does nothing else; and a new bitmap starts zeroed. Objects never move,
-so an address taken from the pixels is good for ever, which is what lets one
-be handed to the display register and the blitter.
+`make-bitmap` checks once that `w * h` fits in the object. The pixels are a
+capability with LD and SD whose bounds are exactly the pixels, so a bitmap
+cannot be forged from an address, and a store the processor makes outside
+it is a bounds fault. Glyphs, plots and the demos that walk a bitmap store
+into the pixels at `bm-index`, with no `unsafe` anywhere. The collector
+frees the pixels when the last reference goes, so closing a window drops it
+from the list and does nothing else, and a new bitmap starts zeroed.
+
+The chips address memory by number. Objects never move, so the address of
+the pixels is good for ever, which is what lets it be handed to the display
+register and the blitter; only privileged code can write a number into
+either.
 
 Drawing goes through a rastport: a bitmap, an origin and a clip region.
 Every rectangle is clipped to the region and the bitmap before a descriptor
@@ -91,8 +106,12 @@ is filled.
 The chip walks a chain of descriptors in memory. A descriptor is a block of
 `blit-list-size` words: source, destination, width, height, the two
 strides, a value, the operation, a status word, a link, and a clip
-rectangle. Each task has a ring of eight in the pool; an interrupt server
-has a ring of its own.
+rectangle, every one of them a machine word, the addresses among them
+numbers the chip follows. Each task has a ring of eight in the pool; an
+interrupt server has a ring of its own. Filling a descriptor is a store by
+number, so `blit-descriptor` and `blit-go` are unsafe names, and the
+rectangle calls in hw.lisp, which take bitmaps, are how everything else
+blits.
 
 A blit is queued by filling the next free descriptor of the ring and linking
 it onto the chain. Linking follows the hardware rule: link only while the
@@ -147,7 +166,9 @@ language.
 bytes)`, `(flush)`, `(size)`, `(exclusive job)`. Synchronous to the caller,
 asynchronous to the device: the driver sleeps on the completion interrupt
 and the client sleeps on its reply. A transfer names a byte object, never an
-address, and the driver checks that the blocks fit. `exclusive` runs a job
+address, and the driver checks that the blocks fit before it takes the
+object's address; the controller writes memory by number, so the transfers
+by address underneath are unsafe names. `exclusive` runs a job
 in the driver's task with interrupts off, with every transfer watched rather
 than slept through; saving an image is one such job, since the collection
 and every region's write must happen with nothing else running.
@@ -194,8 +215,10 @@ directly.
 
 ## What this does not do
 
-- It is not memory protection. A task can write anywhere with an ordinary
-  store.
+- Privileged code still names memory by number. The collector, the kernel
+  and the chips can write anywhere, and so can the blitter and the disk
+  controller on behalf of whoever programmed them; what keeps that to those
+  few files is that programming them is an unsafe name.
 - Ports have no priority, so a low-priority client's request sits in front
   of a high-priority client's.
 - `wait-ports` answers the first ready port, so a busy client can starve a
@@ -207,4 +230,6 @@ directly.
   the granularity rule above matters.
 
 `(devices)` checks ownership at the prompt and `(drivers)` checks the
-drivers end to end; the latter needs a disk.
+drivers end to end; the latter needs a disk. `(capabilities)` checks, among
+the rest of what the processor guarantees, that a device's capability is
+its page and no more.

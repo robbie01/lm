@@ -7,16 +7,76 @@
 ;;; of a code object. `(explore x)` opens the same outline on any object.
 ;;; Double-clicking a row, or pressing return on it, opens a new explorer on
 ;;; what the row holds.
+;;;
+;;; Every value is a capability, and every pointer's row opens first onto
+;;; what its capability says: the address, the bounds, the permissions and the
+;;; seal. A raw capability, a code entry, a stack or a device page, is nothing
+;;; but that, and opens onto it in full.
 
 (in-package explorer)
 
 (define label-max 96)
 
+;; ---------------------------------------------------------------- capabilities
+(define perm-names
+  (list (%cons perm-ld "LD") (%cons perm-sd "SD") (%cons perm-lc "LC")
+        (%cons perm-sc "SC") (%cons perm-lm "LM") (%cons perm-ex "EX")
+        (%cons perm-sr "SR") (%cons perm-se "SE") (%cons perm-hd "HD")))
+
+;; Tagged, and neither nil, a pair nor an object.
+(define (raw-capability? x)
+  (if (%cap-tag? x)
+      (if (%null? x)
+          nil
+          (if (%cons? x) nil (%= 0 (%logand (%cap-perms x) perm-hd))))
+      nil))
+
+(define (hex n) (string-append "#x" (number->hex n)))
+
+(define (perms-string c)
+  (let ((ps (%cap-perms c)) (s nil))
+    (dolist (pn perm-names)
+      (if (%= 0 (%logand ps (%car pn)))
+          nil
+          (set! s (if s (string-append s " " (%cdr pn)) (%cdr pn)))))
+    (if s s "none")))
+
+(define (seal-string c)
+  (if (%cap-sealed? c)
+      (let ((o (%cap-otype c)))
+        (cond ((%= o otype-sentry) "sealed as a sentry")
+              ((%= o otype-closure) "sealed as a closure")
+              (else (string-append "sealed with otype " (number->string o)))))
+      "unsealed"))
+
+;; The address, the bounds from base up to top, and the permissions, on one
+;; line; the seal when there is one.
+(define (cap-summary c)
+  (string-append (hex (%addr-of c))
+                 " in [" (hex (%cap-base c)) ", " (hex (%cap-top c)) ") "
+                 (perms-string c)
+                 (if (%cap-sealed? c) (string-append ", " (seal-string c)) "")))
+
+(define (fact name s) (list (string-append name ": " s) nil nil))
+
+;; A length of 2^31 or more, which only a capability to most of the address
+;; space has, reads as negative, so it is shown in hex.
+(define (capability-parts c)
+  (let ((n (%cap-len c)))
+    (list (fact "address" (hex (%addr-of c)))
+          (fact "base" (hex (%cap-base c)))
+          (fact "top" (hex (%cap-top c)))
+          (fact "length" (if (%< n 0) (hex n) (number->string n)))
+          (fact "permissions" (perms-string c))
+          (fact "seal" (seal-string c)))))
+
 ;; ---------------------------------------------------------------- printing
 ;; What a row says about an object: its printed form, cut to fit.
 (define (brief x)
   (unsafe
-  (let ((s (cond ((code-object? x)
+  (let ((s (cond ((raw-capability? x)
+                  (string-append "#<capability " (cap-summary x) ">"))
+                 ((code-object? x)
                   (string-append "#<code " (display-to-string (%slot x code-name)) ">"))
                  ((package? x) (string-append "#<package " (package-name x) ">"))
                  (else (write-to-string x)))))
@@ -27,16 +87,9 @@
 (define (labelled name x) (string-append name ": " (brief x)))
 
 ;; ---------------------------------------------------------------- parts
-;; Whether an object opens onto anything.
-(define (has-parts? x)
-  (cond ((%null? x) nil)
-        ((%cons? x) t)
-        ((%vector? x) (%> (%vector-length x) 0))
-        ((%symbol? x) t)
-        ((%closure? x) t)
-        ((code-object? x) t)
-        ((%record? x) t)
-        (else nil)))
+;; Whether a value opens onto anything: every pointer but nil does, onto its
+;; capability at least, and no number does.
+(define (has-parts? x) (if (%null? x) nil (%cap-tag? x)))
 
 (define (part name x) (list (labelled name x) x (has-parts? x)))
 
@@ -64,7 +117,7 @@
 
 (define (package-symbols p)
   (unsafe
-  (let ((acc nil) (l (%ld-word lg-symlist)))
+  (let ((acc nil) (l (%ld-cap lg-symlist)))
     (while (%cons? l)
       (if (%eq? (symbol-package (%car l)) p) (set! acc (%cons (%car l) acc)) nil)
       (set! l (%cdr l)))
@@ -109,25 +162,34 @@
       (set! i (%+ i 1)))
     (reverse acc))))
 
+;; A closure is sealed, so that only its own code can read what it holds. The
+;; explorer opens it through the escape hatch: the root, at the closure
+;; otype, is authority to unseal it. The opened capability stays here; the
+;; rows hold what is in its slots.
 (define (closure-parts c)
   (unsafe
-  (let ((acc (list (part "code" (%slot c clo-code))))
-        (i clo-free)
-        (n (%obj-len c)))
+  (let* ((o (%cap-unseal c (%from-addr otype-closure)))
+         (acc (list (part "entry" (%slot o clo-entry))
+                    (part "code" (%slot o clo-code))))
+         (i clo-free)
+         (n (%obj-len o)))
     (while (%< i n)
       (set! acc (%cons (part (string-append "free " (number->string (%- i clo-free)))
-                             (%slot c i))
+                             (%slot o i))
                        acc))
       (set! i (%+ i 1)))
     (reverse acc))))
 
+;; The entry is a capability to the machine code, so its length is the
+;; code's.
 (define (code-parts c)
   (unsafe
-  (let ((acc (list (list (string-append "entry: " (number->hex (%ld-fixnum (%addr-of c)))) nil nil)
-                   (list (string-append "bytes: " (number->string (%ld-fixnum (%+ (%addr-of c) 4)))) nil nil)
-                   (part "name" (%slot c code-name))))
-        (i code-lits)
-        (n (%obj-len c)))
+  (let* ((entry (%slot c code-entry))
+         (acc (list (fact "bytes" (number->string (%cap-len entry)))
+                    (part "entry" entry)
+                    (part "name" (%slot c code-name))))
+         (i code-lits)
+         (n (%obj-len c)))
     (while (%< i n)
       (set! acc (%cons (part (string-append "literal " (number->string (%- i code-lits)))
                              (%slot c i))
@@ -135,15 +197,19 @@
       (set! i (%+ i 1)))
     (reverse acc))))
 
+;; A pointer's parts start with what its capability says.
 (define (parts x)
-  (cond ((%cons? x) (list-parts x))
-        ((%vector? x) (vector-parts x))
-        ((%symbol? x) (symbol-parts x))
-        ((%closure? x) (closure-parts x))
-        ((code-object? x) (code-parts x))
-        ((package? x) (package-parts x))
-        ((%record? x) (record-parts x))
-        (else nil)))
+  (if (raw-capability? x)
+      (capability-parts x)
+      (let ((ps (cond ((%cons? x) (list-parts x))
+                      ((%vector? x) (vector-parts x))
+                      ((%symbol? x) (symbol-parts x))
+                      ((%closure? x) (closure-parts x))
+                      ((code-object? x) (code-parts x))
+                      ((package? x) (package-parts x))
+                      ((%record? x) (record-parts x))
+                      (else nil))))
+        (if (%cap-tag? x) (%cons (fact "capability" (cap-summary x)) ps) ps))))
 
 ;; ---------------------------------------------------------------- the window
 (define *count* 0)
