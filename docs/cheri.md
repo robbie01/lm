@@ -56,7 +56,10 @@ it saturate at 0xffffffff.
 
 **HD** is a software-defined permission. It says the capability's base is
 the payload of a Lisp object whose header is the granule just below the
-base. Only the allocators mint it. Clearing it, like clearing any
+base. Only the root mints it: `csetbounds` keeps HD when the base stays
+where it was or the authority is the whole address space, and drops it
+otherwise, so narrowing an object to one of its slots can never pass the
+slot below off as a header. Clearing it, like clearing any
 permission, only takes authority away: a headed object with HD cleared
 looks like an unheaded block, which is safe. A pair can never acquire it, so
 the processor never reads a header that is not there. The root has HD
