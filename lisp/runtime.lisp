@@ -139,9 +139,9 @@
                       nil)
                   (let ((h (%cap-set-addr space p)))
                     (%cap-st! h 0 (%logior (%lsh len 8) type))
-                    (if later nil (fill-granules h value-bytes size (fresh-slot type))))
-                  (%cap-and-perms (%cap-bounds-exact (%cap-set-addr space (%+ p value-bytes)) span)
-                                  (if bytes perms-bytes perms-object))))))
+                    (if later nil (fill-granules h value-bytes size (fresh-slot type)))
+                    (%cap-and-perms (%cap-bounds-exact (%cap-inc h value-bytes) span)
+                                    (if bytes perms-bytes perms-object)))))))
     ;; Through object space's capability, which covers the whole block: a
     ;; byte payload's own bounds can stop short of its last granule.
     (if later (fill-granules (%cap-set-addr space (%cap-base obj)) 0 (%- size value-bytes) 0) nil)
@@ -155,9 +155,10 @@
 ;; Every granule `from` bytes into `c` up to `to` set to `v`. A store of an
 ;; untagged value clears the granule's tag.
 (define (fill-granules c from to v)
-  (while (%< from to)
-    (%cap-st! c from v)
-    (set! from (%+ from value-bytes))))
+  (let ((g (%cap-inc c from)) (end (%+ (%addr-of c) to)))
+    (while (%< (%addr-of g) end)
+      (%cap-st! g 0 v)
+      (set! g (%cap-inc g 8)))))
 
 (define (make-record n tag)
   (let ((r (alloc-object t-record n)))
@@ -418,6 +419,17 @@
 ;; A character's code to the line, and the next code from it, or -1.
 (define (uart-put n) (%cap-st-word! (uart-page) uart-data-reg n))
 (define (uart-get) (%cap-ld-word (uart-page) uart-data-reg))
+
+;; Whatever is waiting on the line, into the string `s` from its start,
+;; until nothing is or `s` is full: answers how many characters came.
+(define (uart-get-into s)
+  (let ((p (uart-page)) (n 0) (max (%string-length s)) (more t))
+    (while (if more (%< n max) nil)
+      (let ((v (%cap-ld-word p uart-data-reg)))
+        (if (%= v -1)
+            (set! more nil)
+            (begin (%string-set! s n (%int->char v)) (set! n (%+ n 1))))))
+    n))
 
 (define (uart-nl) (uart-put 10))
 

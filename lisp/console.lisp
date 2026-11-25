@@ -60,11 +60,7 @@
 
 (define (take-typed)
   (if (%null? *typed*) (set! *typed* (make-string-n typed-max)) nil)
-  (let ((n 0) (c (uart-char)))
-    (while c
-      (%string-set! *typed* n c)
-      (set! n (%+ n 1))
-      (set! c (if (%< n typed-max) (uart-char) nil)))
+  (let ((n (uart-get-into *typed*)))
     (if (%= n 0)
         nil
         (let ((s (make-string-n n)) (i 0))

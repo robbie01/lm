@@ -156,7 +156,7 @@
   symbol-package symbol-plist symbol-value symbol? t table->alist
   table-capacity table-count table-del! table-for-each table-has?
   table-keys table-ref table-set! table? third time uart-char
-  uart-page uart-put uart-get uart-ctrl-reg uart-hex uart-nl uart-num uart-string
+  uart-page uart-put uart-get uart-get-into uart-ctrl-reg uart-hex uart-nl uart-num uart-string
   undefined-globals unless unquote unquote-splicing use-stream! vector
   vector->list vector-equal? vector-fill! vector-grow vector-length
   vector-map vector-ref vector-set! vector? warn when when-let while

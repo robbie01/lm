@@ -290,9 +290,10 @@
 ;; Every granule of region `r` from `lo` up to `hi` zeroed, which also clears
 ;; its tag.
 (define (blank r lo hi)
-  (while (%< lo hi)
-    (%cap-st-at! r lo 0)
-    (set! lo (%+ lo 8))))
+  (let ((g (%cap-set-addr r lo)))
+    (while (%< (%addr-of g) hi)
+      (%cap-st! g 0 0)
+      (set! g (%cap-inc g 8)))))
 
 ;; ---------------------------------------------------------------- objects
 ;; The bytes a block occupies, header included, from its header word: a free
