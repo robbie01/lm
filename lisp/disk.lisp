@@ -25,7 +25,7 @@
 
 (in-package disk)
 
-(define disk-block-bytes 512)
+(defconstant disk-block-bytes 512)
 
 ;; The running driver, and the port its completion interrupt notifies. Both
 ;; are replaced whenever a driver starts.

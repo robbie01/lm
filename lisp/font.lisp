@@ -16,12 +16,12 @@
 
 (in-package wb)
 
-(define font-first 32)
-(define font-last 131)
-(define font-height 15)
-(define font-ascent 12)
-(define font-cap 9)
-(define font-cell 15)
+(defconstant font-first 32)
+(defconstant font-last 131)
+(defconstant font-height 15)
+(defconstant font-ascent 12)
+(defconstant font-cap 9)
+(defconstant font-cell 15)
 
 ;; Advance, left bearing and ink width, one entry per code.
 (define *font-adv* '(

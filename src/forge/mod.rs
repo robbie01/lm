@@ -152,6 +152,7 @@ pub fn write_layout() {
     s.push_str(";;; src/heap.rs and src/dev/*.rs; this file is regenerated on every build.\n\n");
     s.push_str("(in-package lm)\n\n");
 
+    // Every name is a `defconstant`, so a use compiles to the number itself.
     // A fixnum is 32 bits, so a constant at or above 2^31 is written as the
     // signed value with the same bits: `li` encodes it into the same
     // lui/addi pair either way.
@@ -159,9 +160,9 @@ pub fn write_layout() {
         ($name:expr, $v:expr) => {{
             let v: u32 = $v;
             if v >= (1 << 31) {
-                s.push_str(&format!("(define {} {})\n", $name, v as i32))
+                s.push_str(&format!("(defconstant {} {})\n", $name, v as i32))
             } else {
-                s.push_str(&format!("(define {} #x{:x})\n", $name, v))
+                s.push_str(&format!("(defconstant {} #x{:x})\n", $name, v))
             }
         }};
     }
@@ -273,6 +274,7 @@ pub fn write_layout() {
     def!("sym-macro", SYM_MACRO as u32);
     def!("sym-exported", SYM_EXPORTED as u32);
     def!("sym-unsafe", SYM_UNSAFE as u32);
+    def!("sym-constant", SYM_CONSTANT as u32);
     def!("pkg-tag", PKG_TAG);
     def!("pkg-name", PKG_NAME);
     def!("pkg-use", PKG_USE);

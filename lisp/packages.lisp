@@ -54,7 +54,7 @@
   otype-sentry otype-closure
   obj-bins obj-bin-count t-free t-symbol t-string t-vector t-bytes t-closure t-record t-float
   t-port t-bignum t-code code-entry code-name code-lits clo-entry clo-code clo-free
-  sym-name sym-value sym-function sym-plist sym-flags sym-package sym-macro pkg-tag
+  sym-name sym-value sym-function sym-plist sym-flags sym-package sym-macro sym-constant pkg-tag
   ctx-bytes reg-pc reg-ra reg-sp reg-gp reg-tp reg-t0 reg-t1 reg-t3 reg-s0 reg-s1 reg-s2
   reg-a0 reg-a7
   scr-ddc scr-mtcc scr-mscratchc scr-mepcc

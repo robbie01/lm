@@ -14,7 +14,7 @@
 (in-package hw)
 (unsafe-file)
 
-(define device-page-bytes 4096)
+(defconstant device-page-bytes 4096)
 
 ;; ---------------------------------------------------------------- devices
 ;; A device's page: the root narrowed to it, to loading and storing data,
@@ -109,8 +109,8 @@
 ;; page (see gfx.lisp), and these take it.
 
 ;; The size the machine comes up in.
-(define screen-width 1024)
-(define screen-height 768)
+(defconstant screen-width 1024)
+(defconstant screen-height 768)
 
 ;; ---------------------------------------------------------------- bitmaps
 ;; A bitmap is a byte object and its two dimensions. The pixels are a
@@ -224,7 +224,7 @@
 ;; the chip reads a descriptor when it reaches it, so one cannot be refilled
 ;; until the chip has finished it, and a task with one descriptor would wait
 ;; for each blit before starting the next.
-(define blit-ring-size 8)
+(defconstant blit-ring-size 8)
 (define *blit-ring* 0)      ; the running task's, swapped in with its bindings
 (define *gc-blit-ring* 0)   ; and one the collector owns outright
 (define *blit-tail* 0)      ; the last descriptor put on the chain, anybody's
@@ -744,8 +744,8 @@
 ;; trap stack and the boot stack, has no header and is never freed. It sits
 ;; below the bump pointer this allocator starts from, and the tag is what
 ;; tells anyone who tries to free one that they have made a mistake.
-(define pool-tag #x1feeded)     ; not a pool address, so it cannot be a link
-(define pool-min 24)            ; a free block must hold its size and its link
+(defconstant pool-tag #x1feeded)     ; not a pool address, so it cannot be a link
+(defconstant pool-min 24)            ; a free block must hold its size and its link
 
 (define (pool-size b) (%ld-word b))
 (define (pool-next b) (%ld-word (%+ b 4)))

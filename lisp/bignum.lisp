@@ -26,9 +26,9 @@
 
 (in-package lm)
 
-(define bn-hmask 65535)
-(define bn-hbits 16)
-(define bn-hbase 65536)
+(defconstant bn-hmask 65535)
+(defconstant bn-hbits 16)
+(defconstant bn-hbase 65536)
 
 ;; ---------------------------------------------------------------- layout
 ;; The slots are reached through the bignum's own capability, whose bounds
@@ -326,7 +326,7 @@
 ;; ---------------------------------------------------------------- printing
 ;; Four decimal digits at a time: ten thousand is the largest power of ten
 ;; under the small-divisor limit.
-(define bn-decimal-chunk 10000)
+(defconstant bn-decimal-chunk 10000)
 
 (define (bignum->string b)
   (let* ((n (bn-limbs b))

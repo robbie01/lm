@@ -83,22 +83,22 @@
 ;; finds its object. It lives in scratch memory, which an image does not
 ;; carry, so the first collection on a machine builds it (`ensure-starts`).
 ;; The barrier reads it too.
-(define obj-starts-size (%lsh (%- obj-limit obj-base) -6))
+(defconstant obj-starts-size (%lsh (%- obj-limit obj-base) -6))
 ;; The mark stack holds the address of each block pushed: a pair's, or an
 ;; object's header. Cons space lies below object space, so the address says
 ;; which it is.
-(define gc-stack (%+ obj-starts-ready 8))
-(define gc-stack-cap 262144)
-(define gc-stack-end (%+ gc-stack (%lsh gc-stack-cap 2)))
+(defconstant gc-stack (%+ obj-starts-ready 8))
+(defconstant gc-stack-cap 262144)
+(defconstant gc-stack-end (%+ gc-stack (%lsh gc-stack-cap 2)))
 
 ;; Forwarding is not stored per pair. A word of the mark map covers 256 bytes
 ;; of cons space, sixteen pairs, and the compactor records where the free
 ;; pointer had reached when its walk arrived at each word; a lookup adds the
 ;; live pairs ahead in the same word, which is a popcount.
-(define gc-cons-prefix gc-stack-end)
-(define gc-cons-words (%lsh (%- cons-limit cons-base) -8))
+(defconstant gc-cons-prefix gc-stack-end)
+(defconstant gc-cons-words (%lsh (%- cons-limit cons-base) -8))
 ;; The rest of scratch memory, where the image writer builds its tag maps.
-(define gc-scratch (%+ gc-cons-prefix (%lsh gc-cons-words 2)))
+(defconstant gc-scratch (%+ gc-cons-prefix (%lsh gc-cons-words 2)))
 
 ;; A free block in object space carries t-free in its header with its size in
 ;; granules where a live object keeps its length, and the address of the next
@@ -206,7 +206,7 @@
 ;; words at a time so that no stale bit is left beside a live one. Only an
 ;; image collection does this: it waits for the chip, behind whatever the
 ;; screen has queued.
-(define gc-clear-w 1024)
+(defconstant gc-clear-w 1024)
 
 ;; n bytes of zero at `at`, as rows the blitter can take, through the
 ;; collector's own descriptor ring. The chip is handed the root narrowed to
@@ -394,7 +394,7 @@
 
 ;; How much a slice traces before it lets interrupts back in: a few thousand
 ;; bytes, on the order of a hundred thousand cycles.
-(define slice-bytes 4096)
+(defconstant slice-bytes 4096)
 
 ;; Pop and trace until the slice is full or the stack is empty. Answers the
 ;; bytes traced. Runs with interrupts off: the barrier pushes from the trap
@@ -544,9 +544,9 @@
 ;; began: the sweep goes that far and no further, because everything above
 ;; was made during the cycle and is black.
 
-(define phase-idle 0)
-(define phase-marking 1)
-(define phase-sweeping 2)
+(defconstant phase-idle 0)
+(defconstant phase-marking 1)
+(defconstant phase-sweeping 2)
 (define *phase* 0)
 
 (define *cons-hi* 0)         ; the frontiers when the cycle began
@@ -586,12 +586,12 @@
 (define *t-mark* 0) (define *t-code* 0) (define *t-objects* 0) (define *t-pairs* 0) (define *t-clear* 0)
 (define *small-holes* 0) (define *inner-dead* 0) (define *refills* 0)
 
-(define kind-start 1)
-(define kind-mark 2)
-(define kind-code 3)
-(define kind-objects 4)
-(define kind-pairs 5)
-(define kind-clear 6)
+(defconstant kind-start 1)
+(defconstant kind-mark 2)
+(defconstant kind-code 3)
+(defconstant kind-objects 4)
+(defconstant kind-pairs 5)
+(defconstant kind-clear 6)
 
 (define (kind-name k)
   (cond ((%= k kind-start) "the start")
@@ -603,7 +603,7 @@
 
 ;; A hole in cons space worth handing out as a run. Smaller ones wait for the
 ;; compactor, which an image gets.
-(define gap-min 512)
+(defconstant gap-min 512)
 
 ;; The sweep clears the mark bits behind it. The compactor wants them
 ;; afterwards, so a collection for an image asks for them to be kept.
@@ -713,7 +713,7 @@
 ;; sweep are cleared for the next cycle. A dead run at the very top lowers the
 ;; frontier, if nothing has been allocated above it since the cycle began.
 ;; Answers the bytes walked.
-(define sweep-obj-bytes 8192)
+(defconstant sweep-obj-bytes 8192)
 
 (define (sweep-objects-some)
   (let* ((start *sweep-obj*)
@@ -769,7 +769,7 @@
 ;; budget. Each word is cleared once it has been read. The last word may
 ;; reach past the frontier the cycle began with, into pairs made since, so
 ;; nothing past that frontier is zeroed. Answers the bytes of heap walked.
-(define sweep-cons-words 512)
+(defconstant sweep-cons-words 512)
 
 (define (sweep-cons-some)
   (let* ((start *sweep-cons*)
@@ -821,7 +821,7 @@
 
 ;; The bits of what was made black while marking, a stretch at a time.
 ;; Answers the bytes of heap covered.
-(define clear-bytes 262144)
+(defconstant clear-bytes 262144)
 
 (define (clear-cons-some)
   (let* ((lo *clear-cons*)
@@ -929,8 +929,8 @@
 ;; over, so it is not a long one either. A caller already inside a critical
 ;; section gets two slices at most: the rest waits for one that is not. The
 ;; idle task does whatever is left.
-(define pace-cycles 12)
-(define pace-max-slices 64)
+(defconstant pace-cycles 12)
+(defconstant pace-max-slices 64)
 (define *debt* 0)
 
 (define (pace bytes)
@@ -961,7 +961,7 @@
 ;; allocated since the last reach twice the live data or eight megabytes,
 ;; whichever is more, so the heap walked stays a small multiple of what is
 ;; live.
-(define budget-min 8388608)
+(defconstant budget-min 8388608)
 (define *budget* budget-min)    ; bytes allowed between collections
 (define *gc-allocated* 0)             ; object bytes handed out since the last
 (define *cons-given* 0)               ; and bytes of cons runs
@@ -982,7 +982,7 @@
 ;; much. The run is the task's alone until it is used up, which is what makes
 ;; the four-instruction allocator safe without a lock. Fresh ground is carved
 ;; on boundaries of this size, where a run's bounds are exact.
-(define cons-chunk 262144)     ; 16384 pairs
+(defconstant cons-chunk 262144)     ; 16384 pairs
 
 ;; The run from `start` up to `end`, as a capability: bounded exactly, so the
 ;; stretch is cut down to what the processor can represent, its base rounded
@@ -1259,8 +1259,8 @@
 ;; the heap: a list would be a root, and a root would keep every version of
 ;; every function alive.
 
-(define code-registry-max 65536)
-(define code-registry-bytes (%lsh code-registry-max 3))
+(defconstant code-registry-max 65536)
+(defconstant code-registry-bytes (%lsh code-registry-max 3))
 
 (define (code-registry)
   (let ((r (%ld-word lg-code-reg)))
@@ -1351,7 +1351,7 @@
 (define *code-i* 0)
 (define *code-keep* 0)
 (define *code-n* 0)
-(define sweep-code-entries 1024)
+(defconstant sweep-code-entries 1024)
 
 (define (sweep-code-some)
   (let* ((r (code-registry))

@@ -32,12 +32,12 @@
 (define *mouse-y* 0)
 (define *mouse-buttons* 0)
 
-(define ev-keydown 1)
-(define ev-keyup 2)
-(define ev-mousemove 3)
-(define ev-buttondown 4)
-(define ev-buttonup 5)
-(define ev-wheel 6)
+(defconstant ev-keydown 1)
+(defconstant ev-keyup 2)
+(defconstant ev-mousemove 3)
+(defconstant ev-buttondown 4)
+(defconstant ev-buttonup 5)
+(defconstant ev-wheel 6)
 
 ;; ---------------------------------------------------------------- the driver
 ;; The chip raises its line for as long as it has events. The interrupt

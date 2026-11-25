@@ -93,7 +93,7 @@
 ;; How deep traps may nest before the handler is taken to be faulting in a
 ;; loop. The stub has this many frames for traps inside traps: `trap-nest-max`
 ;; in boot.lisp, which is not in the image.
-(define trap-nest-limit 8)
+(defconstant trap-nest-limit 8)
 
 (define (trap-spiral cause epc tval)
   (uart-string "\n*** the trap handler is faulting in a loop: ")
@@ -573,7 +573,7 @@
 ;; bounded to the code it is in, whose block names the code object that
 ;; owns it. The frame pointer is a capability to the stack, and NULL at the
 ;; bottom.
-(define backtrace-limit 24)
+(defconstant backtrace-limit 24)
 
 ;; The closure a call was about to enter.
 (define (emit-callee f)

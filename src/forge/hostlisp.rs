@@ -81,6 +81,7 @@ pub struct Syms {
     pub lambda: V,
     pub set: V,
     pub define: V,
+    pub defconstant: V,
     pub begin: V,
     pub while_: V,
     pub let_: V,
@@ -222,6 +223,7 @@ impl<'a> Lisp<'a> {
             lambda: h.intern("lambda"),
             set: h.intern("set!"),
             define: h.intern("define"),
+            defconstant: h.intern("defconstant"),
             begin: h.intern("begin"),
             while_: h.intern("while"),
             let_: h.intern("let"),
@@ -428,7 +430,9 @@ impl<'a> Lisp<'a> {
                     }
                     break Ok(val);
                 }
-                if head == self.s.define {
+                // A constant is a variable here: the compiler is what puts a
+                // constant's value in the code that uses it.
+                if head == self.s.define || head == self.s.defconstant {
                     break self.eval_define(args, &env);
                 }
                 if head == self.s.defmacro {

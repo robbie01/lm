@@ -55,7 +55,7 @@
 ;; `poll` turns it back on, and arrives as the next string. Read
 ;; into a buffer the driver keeps and copied out at the length it came to,
 ;; so that a pasted megabyte of source does not become a list of characters.
-(define typed-max 4096)
+(defconstant typed-max 4096)
 (define *typed* nil)
 
 (define (take-typed)
@@ -115,7 +115,7 @@
 ;; sending whatever it had collected, so that nothing comes out of order. It
 ;; sends what it has collected before it waits for input: a prompt that is
 ;; still in a buffer is a prompt nobody sees.
-(define line-max 200)
+(defconstant line-max 200)
 
 (define (driver-port)
   (if *driver* (server-port *driver*) (error "console: there is no driver")))

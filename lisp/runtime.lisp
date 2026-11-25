@@ -377,8 +377,8 @@
 ;; a trap handler, and after the scheduler has stopped being trustworthy,
 ;; which is why the collector and the panic path report through it. Nothing
 ;; here allocates. Ordinary console output goes through console.driver.
-(define uart-data (%+ mmio-base (%+ (%lsh dev-uart 12) uart-data-reg)))
-(define uart-ctrl (%+ mmio-base (%+ (%lsh dev-uart 12) uart-ctrl-reg)))
+(defconstant uart-data (%+ mmio-base (%+ (%lsh dev-uart 12) uart-data-reg)))
+(defconstant uart-ctrl (%+ mmio-base (%+ (%lsh dev-uart 12) uart-ctrl-reg)))
 
 (define (uart-nl) (%st-word! uart-data 10))
 

@@ -51,11 +51,11 @@
 (in-package compiler)
 
 ;; The fixed slots of a frame, below s0.
-(define ra-slot -8)
-(define link-slot -16)
-(define clo-slot -24)
-(define code-slot -32)
-(define frame-fixed 40)
+(defconstant ra-slot -8)
+(defconstant link-slot -16)
+(defconstant clo-slot -24)
+(defconstant code-slot -32)
+(defconstant frame-fixed 40)
 (define (local-off n) (%- (%- 0 frame-fixed) (%* value-bytes n)))
 
 ;; The byte offset of slot k of an object.
@@ -72,8 +72,8 @@
 ;; Nothing else in the machine touches those nine registers, so a leaf saves
 ;; and restores none of them.
 (define (local-reg n) (%+ $s3 n))
-(define leaf-locals 8)
-(define $caller-code $s11)
+(defconstant leaf-locals 8)
+(defconstant $caller-code $s11)
 
 ;; ---------------------------------------------------------------- context
 ;; What the compiler knows while it compiles one function.
@@ -293,6 +293,42 @@
    ((%bignum? v) (frozen v))
    (else v)))
 
+;; ---------------------------------------------------------------- named constants
+;; `(defconstant name value)` names a fixnum or a character for good. The
+;; value goes in the symbol's value cell and the symbol is marked
+;; `sym-constant`, and from then on a use of the name compiles to the value
+;; itself: an `li`, or the immediate of an instruction that takes one, where
+;; a variable is a load of the symbol and a load of its value. A local of the
+;; same name shadows it, as it would a variable.
+;;
+;; Code compiled against a constant holds its value, so a constant cannot
+;; change: defining it again with another value, defining the name as a
+;; variable or a function, and assigning to it are errors. Defining it again
+;; with the same value is not, which is what lets a machine compile its own
+;; sources.
+(define (constant? sym) (%> (%logand (%symbol-flags sym) sym-constant) 0))
+
+(define (define-constant! name v)
+  (if (if (%fixnum? v) t (%char? v))
+      nil
+      (error "defconstant: not a fixnum or a character:" name))
+  (if (constant? name)
+      (if (%eq? (%symbol-value name) v)
+          nil
+          (error "defconstant: a constant cannot change:" name))
+      (begin
+        (%set-symbol-value! name v)
+        (%set-symbol-flags! name (%logior (%symbol-flags name) sym-constant))))
+  name)
+
+;; What a form stands for if it is written down: a number or a character is
+;; itself, and the name of a constant that nothing local shadows is its
+;; value. Any other form is answered as it is.
+(define (written-down c form)
+  (if (%symbol? form)
+      (if (constant? form) (if (cx-lookup c form) form (%symbol-value form)) form)
+      form))
+
 (define (emit-literal c v reg)
   (let* ((a (cx-asm c))
          (off (literal-offset (literal a v))))
@@ -358,11 +394,13 @@
     s))
 
 ;; ---------------------------------------------------------------- variables
-;; A location is (local n), (boxed-local n), (free n), (boxed-free n) or
-;; (global sym).
+;; A location is (local n), (boxed-local n), (free n), (boxed-free n),
+;; (constant sym) or (global sym).
 (define (location-of c sym)
   (let ((p (cx-lookup c sym)))
-    (if p (%cdr p) (list 'global sym))))
+    (cond (p (%cdr p))
+          ((constant? sym) (list 'constant sym))
+          (else (list 'global sym)))))
 
 ;; A local is a frame slot, or in a leaf a register. These three are the only
 ;; places that know which.
@@ -401,6 +439,7 @@
      ((%eq? kind 'boxed-free)
       (i-lc a reg (closure-reg c $t6) (free-off (cadr loc)))
       (i-car a reg reg))
+     ((%eq? kind 'constant) (emit-const c (%symbol-value (cadr loc)) reg))
      ;; A global's value cell, through the load that refuses the unbound
      ;; marker: a name nothing was stored in is an error where it is read.
      (else
@@ -451,6 +490,7 @@
       (let ((cr (closure-reg c $t6)))
         (i-lc a $t6 cr (free-off (cadr loc))))
       (i-set-car a reg $t6))
+     ((%eq? kind 'constant) (error "set!: a constant cannot change:" (cadr loc)))
      ;; Through the typed store, which checks that the literal is a symbol.
      ;; Like every store it goes through the write barrier, which matters
      ;; here: a global's old value may be the last pointer to something the
@@ -846,10 +886,10 @@
   (let* ((h (%car form)) (args (%cdr form)) (n (length args)))
     (if (if (%symbol? h) (cx-lookup c h) t)
         nil
-        (let ((ca (const-arg-entry h args)))
+        (let ((ca (const-arg-entry c h args)))
           (cond
            (ca (emit-const-arg c ca args dst) t)
-           ((indexed-imm-entry h args) nil)
+           ((indexed-imm-entry c h args) nil)
            (else
             (let ((op (assq (intrinsic-name h n) *in-place-ops*)))
               (if (if op (%= n (%car (inline-entry h n))) nil)
@@ -897,8 +937,8 @@
       (i-mv a $a0 $a2))))
 
 ;; ---------------------------------------------------------------- constant argument
-;; A second operand that is written down needs no register and no instruction
-;; to load it, and a shift by a written-down amount needs no run-time choice
+;; A second operand that is written down, as a number or as the name of a
+;; constant, needs no register and no instruction to load it, and a shift by a written-down amount needs no run-time choice
 ;; of direction. Entries are (name fits? emitter); the emitter is handed the
 ;; assembler, the register for the result, the register holding the first
 ;; argument, and the constant. A name that aliases one of these, such as `+`
@@ -911,11 +951,11 @@
 (define (fits-negated-imm? k) (if (%> k -2048) (%<= k 2048) nil))
 (define (shift-amount? k) (if (%> k -32) (%< k 32) nil))
 
-(define (const-arg-entry h args)
+(define (const-arg-entry c h args)
   (let ((e (assq (intrinsic-name h 2) *const-arg*)))
     (if e
         (if (%= (length args) 2)
-            (let ((k (cadr args)))
+            (let ((k (written-down c (cadr args))))
               (if (%fixnum? k) (if (%funcall (cadr e) k) e nil) nil))
             nil)
         nil)))
@@ -923,7 +963,7 @@
 ;; The first argument is read where it is when it is a leaf's local.
 (define (emit-const-arg c e args dst)
   (%funcall (caddr e) (cx-asm c) (value-reg dst)
-            (compile-operand c (%car args)) (cadr args)))
+            (compile-operand c (%car args)) (written-down c (cadr args))))
 
 ;; `faddi` wraps and `faddio` traps on overflow, which the handler widens.
 (define (emit-add-const a d s k) (i-faddi a d s k))
@@ -968,12 +1008,12 @@
 ;; argument for the load and the store both.
 (define *indexed-imm* nil)
 
-(define (indexed-imm-entry h args)
+(define (indexed-imm-entry c h args)
   (let ((e (assq h *indexed-imm*)))
     (if e
         (let* ((store (caddr e))
                (want (if store 3 2))
-               (idx (if (%= (length args) want) (cadr args) nil)))
+               (idx (if (%= (length args) want) (written-down c (cadr args)) nil)))
           (if (%fixnum? idx)
               (if (%>= idx 0) (if (%< idx 32) e nil) nil)
               nil))
@@ -981,7 +1021,7 @@
 
 (define (emit-indexed-imm c e args tail)
   (let ((ty (cadr e))
-        (i (cadr args)))
+        (i (written-down c (cadr args))))
     (if (caddr e)
         (begin
           (compile-args c (list (%car args) (caddr args)) 2)
@@ -1555,7 +1595,7 @@
 ;; Where a simple operand can be read without a register of its own: x0 for
 ;; a written-down 0 where that is allowed, a leaf's local where it lives.
 (define (operand-home c form zero-ok)
-  (if (if zero-ok (%eq? form 0) nil) $zero (in-place-reg c form)))
+  (if (if zero-ok (%eq? (written-down c form) 0) nil) $zero (in-place-reg c form)))
 
 (define (compile-simple-into c form reg)
   (cond
@@ -1858,9 +1898,9 @@
 
          ;; ---- indexed access with the index written down ----
          ((if (%symbol? h)
-              (if (cx-lookup c h) nil (indexed-imm-entry h (%cdr form)))
+              (if (cx-lookup c h) nil (indexed-imm-entry c h (%cdr form)))
               nil)
-          (emit-indexed-imm c (indexed-imm-entry h (%cdr form)) (%cdr form) tail))
+          (emit-indexed-imm c (indexed-imm-entry c h (%cdr form)) (%cdr form) tail))
 
          ;; ---- open-coded operations ----
          ((if (%symbol? h)
@@ -2277,14 +2317,16 @@
 ;; in the same way.
 (define *image* nil)
 
-;; symbol -> #(value function macro?), made the first time the image gives the
-;; symbol anything.
+;; symbol -> #(value function flags), made the first time the image gives the
+;; symbol anything. The flags are the bits the image sets in the symbol's own:
+;; a macro's and a constant's.
 (define (image-entry sym)
   (let ((e (table-ref *image* sym nil)))
     (if e
         e
         (let ((v (make-vector 3 nil)))
           (%vector-set! v 0 (%unbound))
+          (%vector-set! v 2 0)
           (table-set! *image* sym v)
           v))))
 
@@ -2301,11 +2343,16 @@
   (if *image*
       (let ((e (image-entry sym)))
         (%vector-set! e 1 expander)
-        (%vector-set! e 2 t))
+        (%vector-set! e 2 (%logior (%vector-ref e 2) sym-macro)))
       (begin
         (%set-symbol-function! sym expander)
         (%set-symbol-flags! sym (%logior (%symbol-flags sym) sym-macro))))
   expander)
+
+(define (image-set-constant! sym v)
+  (let ((e (image-entry sym)))
+    (%vector-set! e 0 v)
+    (%vector-set! e 2 (%logior (%vector-ref e 2) sym-constant))))
 
 ;; A macro expander takes the form's argument list as one argument and picks
 ;; it apart itself, so the calling convention's limit of eight register
@@ -2348,7 +2395,10 @@
   (if (%cons? form)
       (let ((h (%car form)))
         (cond
+         ((%eq? h 'defconstant) (compile-defconstant form))
          ((%eq? h 'define)
+          (let ((name (if (%cons? (cadr form)) (caadr form) (cadr form))))
+            (if (constant? name) (error "define: a constant cannot change:" name) nil))
           (if (%cons? (cadr form))
               (let* ((name (caadr form))
                      (r (compile-function (cdadr form) (cddr form) name nil))
@@ -2394,6 +2444,16 @@
             last))
          (else (top-level-form form))))
       (top-level-form form)))
+
+;; A constant is known from here on to the compiler doing the compiling, and
+;; during genesis it is given to the image as well. Nothing goes on the boot
+;; list: the value is in the symbol, and in the code that uses it.
+(define (compile-defconstant form)
+  (let ((name (cadr form))
+        (v (compile-time-eval (caddr form))))
+    (define-constant! name v)
+    (if *image* (image-set-constant! name v) nil)
+    name))
 
 ;; The same expansion the interpreter's macro uses, compiled rather than
 ;; evaluated, with the shape registered on the way past, both here and, by

@@ -119,11 +119,11 @@ The diagnosis was wrong, though: an opcode profile of a run that is 91%
 marking puts 20.7% of it in frame loads and stores and 9.1% in literal
 loads of the globals and constants the loop names, and the symbol read and
 barrier store of `*mark-sp*` are a small part of that. Making it a machine
-global was tried and is a loss, 7.7% more cycles per collection, because a
-layout name compiles to the same two instructions as any global and the
-tagged load comes on top; caching the frontiers in locals is a loss of 4.6%
-for the same reason, a local in a non-leaf being a frame slot. The lever is
-register allocation, below. Where it stands: 64% of a synthetic cons churn,
+global was a loss, 7.7% more cycles per collection, because the tagged load
+came on top of the two instructions a layout name then compiled to; a layout
+name is now a constant, one `li` or none, so that is worth measuring again.
+Caching the frontiers in locals is a loss of 4.6%, a local in a non-leaf
+being a frame slot. The lever is register allocation, below. Where it stands: 64% of a synthetic cons churn,
 2.8% of a rebuild, and none of `(check)`, which runs no collection at all
 and is not a collector benchmark. The collector's report now splits its
 cycles by phase, since its "of N cycles" was elapsed time and misled. After

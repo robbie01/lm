@@ -11,31 +11,34 @@
 (in-package asm)
 
 ;; ---------------------------------------------------------------- registers
-(define $zero 0) (define $ra 1)  (define $sp 2)  (define $gp 3)
-(define $tp 4)   (define $t0 5)  (define $t1 6)  (define $t2 7)
-(define $s0 8)   (define $s1 9)  (define $a0 10) (define $a1 11)
-(define $a2 12)  (define $a3 13) (define $a4 14) (define $a5 15)
-(define $a6 16)  (define $a7 17) (define $s2 18) (define $s3 19)
-(define $s4 20)  (define $s5 21) (define $s6 22) (define $s7 23)
-(define $s8 24)  (define $s9 25) (define $s10 26) (define $s11 27)
-(define $t3 28)  (define $t4 29) (define $t5 30) (define $t6 31)
+(defconstant $zero 0)    (defconstant $ra 1)      (defconstant $sp 2)
+(defconstant $gp 3)      (defconstant $tp 4)      (defconstant $t0 5)
+(defconstant $t1 6)      (defconstant $t2 7)      (defconstant $s0 8)
+(defconstant $s1 9)      (defconstant $a0 10)     (defconstant $a1 11)
+(defconstant $a2 12)     (defconstant $a3 13)     (defconstant $a4 14)
+(defconstant $a5 15)     (defconstant $a6 16)     (defconstant $a7 17)
+(defconstant $s2 18)     (defconstant $s3 19)     (defconstant $s4 20)
+(defconstant $s5 21)     (defconstant $s6 22)     (defconstant $s7 23)
+(defconstant $s8 24)     (defconstant $s9 25)     (defconstant $s10 26)
+(defconstant $s11 27)    (defconstant $t3 28)     (defconstant $t4 29)
+(defconstant $t5 30)     (defconstant $t6 31)
 
 ;; gp is the running task's cons run and tp holds nil, for the life of the
 ;; machine. Nothing else may use them.
 
 ;; ---------------------------------------------------------------- csr numbers
-(define csr-mstatus  #x300)
-(define csr-mie      #x304)
-(define csr-mtvec    #x305)
-(define csr-mscratch #x340)
-(define csr-mepc     #x341)
-(define csr-mcause   #x342)
-(define csr-mtval    #x343)
-(define csr-mip      #x344)
-(define csr-stklim   #x7c0)   ; custom: the lowest address sp may reach
-(define csr-gcmode   #x7c1)   ; custom: bit 0 turns the write barrier on
-(define csr-cycle    #xc00)
-(define csr-cycleh   #xc80)
+(defconstant csr-mstatus  #x300)
+(defconstant csr-mie      #x304)
+(defconstant csr-mtvec    #x305)
+(defconstant csr-mscratch #x340)
+(defconstant csr-mepc     #x341)
+(defconstant csr-mcause   #x342)
+(defconstant csr-mtval    #x343)
+(defconstant csr-mip      #x344)
+(defconstant csr-stklim   #x7c0)   ; custom: the lowest address sp may reach
+(defconstant csr-gcmode   #x7c1)   ; custom: bit 0 turns the write barrier on
+(defconstant csr-cycle    #xc00)
+(defconstant csr-cycleh   #xc80)
 
 ;; The special capability registers, reached with cspecialrw, are numbered by
 ;; the generated layout's `scr-*`.
@@ -187,26 +190,26 @@
     (i-u a rd f op)))
 
 ;; ---------------------------------------------------------------- opcodes
-(define op-load  #x03)
-(define op-imm   #x13)
-(define op-auipc #x17)
-(define op-store #x23)
-(define op-reg   #x33)
-(define op-lui   #x37)
-(define op-br    #x63)
-(define op-jalr  #x67)
-(define op-jal   #x6f)
-(define op-sys   #x73)
+(defconstant op-load  #x03)
+(defconstant op-imm   #x13)
+(defconstant op-auipc #x17)
+(defconstant op-store #x23)
+(defconstant op-reg   #x33)
+(defconstant op-lui   #x37)
+(defconstant op-br    #x63)
+(defconstant op-jalr  #x67)
+(defconstant op-jal   #x6f)
+(defconstant op-sys   #x73)
 ;; custom-0: references. Loads, stores, a call and branches that check the
 ;; kind of value each operand holds as they use it.
-(define op-ref   #x0b)
+(defconstant op-ref   #x0b)
 ;; custom-1: indexed access. funct7 carries the type the object has to be, so
 ;; one instruction checks the tag, the type, the index and the bound.
-(define op-index #x2b)
+(defconstant op-index #x2b)
 ;; The CHERI instructions, in the custom-2 slot.
-(define op-cheri #x5b)
+(defconstant op-cheri #x5b)
 ;; custom-3: fixnum arithmetic with every operand checked.
-(define op-fixnum #x7b)
+(defconstant op-fixnum #x7b)
 
 ;; ---------------------------------------------------------------- RV32I
 (define (i-lui a rd imm20)   (i-u a rd imm20 op-lui))
