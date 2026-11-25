@@ -23,7 +23,7 @@ $ ./target/release/lmforge build   # compile the Lisp sources into kick.img
 $ ./target/release/lm              # boot it
 
 LM 0.1 - a lisp machine
-cons space 8192k pairs, object space 65536k, code 590k used
+cons space 8192k pairs, object space 65536k, code 557k used
 exec: 6 tasks
 type (help) for what to try
 
