@@ -20,6 +20,7 @@
 
 // ---- the machine ----
 pub mod boot;
+pub mod cap;
 pub mod cpu;
 pub mod dev;
 pub mod heap;

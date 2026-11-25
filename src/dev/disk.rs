@@ -203,6 +203,10 @@ fn perform(m: &mut Machine, c: Cmd) -> u32 {
         CMD_TRUNC => f.set_len((c.count as u64) * BLOCK as u64),
         _ => Ok(()),
     };
+    // What the disk wrote into RAM is data.
+    if c.op == CMD_READ {
+        m.clear_tags(c.addr, n as u32);
+    }
     if r.is_err() {
         3
     } else {

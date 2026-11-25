@@ -319,6 +319,14 @@ fn perform(m: &mut Machine) {
         line(m, dst, dmod, x0, y0, x1, y1, val as u8);
     } else {
         let ramlen = m.ramlen as usize;
+        // Every row the transfer writes is data afterwards.
+        for y in 0..h {
+            let dofs = (dst as usize).wrapping_add((y as usize).wrapping_mul(dmod as usize));
+            if dofs >= ramlen || dofs + w as usize > ramlen {
+                break;
+            }
+            m.clear_tags(dofs as u32, w);
+        }
         let ram = m.ram_mut();
         // Rows run bottom-up when the destination lies above the source, so
         // an overlapping copy within one bitmap (a scroll down) never reads a
