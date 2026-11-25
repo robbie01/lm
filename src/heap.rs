@@ -28,7 +28,7 @@
 //! compiler builds is what the machine runs.
 
 use crate::cap::{self, Cap, P_EX, P_HD, P_LC, P_LD, P_LM, P_SC, P_SD};
-use crate::mach::Machine;
+use crate::mach::{Machine, KIND_CAP, KIND_NIL, KIND_OBJECT, KIND_PAIR};
 use crate::map::*;
 use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
@@ -63,14 +63,6 @@ pub const NIL: V = Cap::NIL;
 pub use crate::cap::{IMM_CHAR, IMM_DEFAULT, IMM_EOF, IMM_FIXNUM, IMM_UNBOUND, IMM_VOID};
 
 pub const UNBOUND: V = Cap::imm(IMM_UNBOUND, 0);
-
-// ---- kinds, as `vkind` answers them ----
-/// 0..15 is an untagged value's metadata; these are the tagged kinds.
-pub const VK_NIL: u32 = 16;
-pub const VK_PAIR: u32 = 17;
-pub const VK_CAP: u32 = 31;
-/// An object's kind is this plus its header type.
-pub const VK_OBJECT: u32 = 32;
 
 // ---- values ----
 #[inline]
@@ -140,13 +132,13 @@ pub fn vkind(h: &Heap, v: V) -> u32 {
     if !v.tag {
         v.meta.min(15)
     } else if v == NIL {
-        VK_NIL
+        KIND_NIL
     } else if is_obj(v) {
-        VK_OBJECT + hdr_type(h.hdr(v))
+        KIND_OBJECT + hdr_type(h.hdr(v))
     } else if is_cons(v) {
-        VK_PAIR
+        KIND_PAIR
     } else {
-        VK_CAP
+        KIND_CAP
     }
 }
 
@@ -1173,10 +1165,10 @@ mod tests {
         assert_eq!(h.cdr(NIL), NIL);
         assert_eq!(vkind(&h, fix(3)), IMM_FIXNUM);
         assert_eq!(vkind(&h, UNBOUND), IMM_UNBOUND);
-        assert_eq!(vkind(&h, NIL), VK_NIL);
-        assert_eq!(vkind(&h, p), VK_PAIR);
-        assert_eq!(vkind(&h, s), VK_OBJECT + T_STRING);
-        assert_eq!(vkind(&h, Cap::root()), VK_CAP);
+        assert_eq!(vkind(&h, NIL), KIND_NIL);
+        assert_eq!(vkind(&h, p), KIND_PAIR);
+        assert_eq!(vkind(&h, s), KIND_OBJECT + T_STRING);
+        assert_eq!(vkind(&h, Cap::root()), KIND_CAP);
         assert_eq!(h.write(v), "#((1) \"abc\")");
     }
 
@@ -1217,10 +1209,10 @@ mod tests {
         let s = h.string("abc");
         let (w, t) = (v.inc(8), s.inc(2));
         assert!(w.tag && t.tag);
-        assert_eq!(vkind(&h, w), VK_OBJECT + T_VECTOR);
+        assert_eq!(vkind(&h, w), KIND_OBJECT + T_VECTOR);
         assert_eq!(h.olen(w), 3);
         assert_eq!(h.slot(w, 0), fix(1));
-        assert_eq!(vkind(&h, t), VK_OBJECT + T_STRING);
+        assert_eq!(vkind(&h, t), KIND_OBJECT + T_STRING);
         assert_eq!(h.str_of(t), "abc");
     }
 
