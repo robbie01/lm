@@ -116,13 +116,10 @@
     nil))
 
 ;; ---------------------------------------------------------------- boxes
-;; The close, zoom and collapse boxes: a #222 frame-rect round a diagonal ramp
-;; from #99 at the top left to white at the bottom right, with a white
-;; highlight along the outside of the right and bottom edges.
-;; The eight by eight gradient inside a title-bar box, darker toward the
-;; bottom right, stored straight into the bitmap after one wait for the
-;; blitter, each pixel cut to the rastport's region. A `plot` a pixel is a
-;; wait a pixel, and was most of what drawing a window's frame cost.
+;; The eight by eight ramp inside a title-bar box, lighter toward the bottom
+;; right, stored straight into the bitmap after one wait for the blitter,
+;; each pixel cut to the rastport's region. Plotting it would wait for the
+;; blitter once a pixel.
 (define (box-shade rp x y)
   (let ((bmp (rp-bitmap rp))
         (ox (%+ x (rp-origin-x rp)))
@@ -153,6 +150,9 @@
         nil)
     in))
 
+;; The close, zoom and collapse boxes: a #222 frame-rect round a diagonal ramp
+;; from #99 at the top left to white at the bottom right, with a white
+;; highlight along the outside of the right and bottom edges.
 (define (title-box rp x y kind)
   ;; kind 0 close, 1 zoom, 2 collapse.
   (fill-rect rp x y 12 12 g7)

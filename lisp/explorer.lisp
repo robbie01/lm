@@ -33,7 +33,7 @@
           (if (%cons? x) nil (if (%object? x) nil t)))
       nil))
 
-(define (hex n) (string-append "#x" (number->hex n)))
+(define (hex n) (string-append "0x" (number->hex n)))
 
 (define (perms-string c)
   (let ((ps (%cap-perms c)) (s nil))
@@ -51,40 +51,35 @@
               (else (string-append "sealed with otype " (number->string o)))))
       "unsealed"))
 
-;; The address, the bounds from base up to top, and the permissions, on one
-;; line; the seal when there is one.
+;; The address, the bounds and the permissions, as the printer shows them.
 (define (cap-summary c)
-  (string-append (hex (%addr-of c))
-                 " in [" (hex (%cap-base c)) ", " (hex (%cap-top c)) ") "
-                 (perms-string c)
-                 (if (%cap-sealed? c) (string-append ", " (seal-string c)) "")))
+  (with-output-to-string (lambda () (emit-cap-summary c))))
+
+;; `%cap-len` reads a length of 2^31 or more as negative, and saturates the
+;; root's, 2^32, at 0xffffffff.
+(define (length-string c)
+  (let ((n (%cap-len c)))
+    (cond ((%= n -1) "4294967296")
+          ((%< n 0) (number->string (+ n 4294967296)))
+          (else (number->string n)))))
 
 (define (fact name s) (list (string-append name ": " s) nil nil))
 
-;; A length of 2^31 or more, which only a capability to most of the address
-;; space has, reads as negative, so it is shown in hex.
 (define (capability-parts c)
-  (let ((n (%cap-len c)))
-    (list (fact "address" (hex (%addr-of c)))
-          (fact "base" (hex (%cap-base c)))
-          (fact "top" (hex (%cap-top c)))
-          (fact "length" (if (%< n 0) (hex n) (number->string n)))
-          (fact "permissions" (perms-string c))
-          (fact "seal" (seal-string c)))))
+  (list (fact "address" (hex (%addr-of c)))
+        (fact "base" (hex (%cap-base c)))
+        (fact "top" (string-append "0x" (cap-top-hex c)))
+        (fact "length" (length-string c))
+        (fact "permissions" (perms-string c))
+        (fact "seal" (seal-string c))))
 
 ;; ---------------------------------------------------------------- printing
 ;; What a row says about an object: its printed form, cut to fit.
 (define (brief x)
-  (unsafe
-  (let ((s (cond ((raw-capability? x)
-                  (string-append "#<capability " (cap-summary x) ">"))
-                 ((code-object? x)
-                  (string-append "#<code " (display-to-string (%slot x code-name)) ">"))
-                 ((package? x) (string-append "#<package " (package-name x) ">"))
-                 (else (write-to-string x)))))
+  (let ((s (write-to-string x)))
     (if (%> (string-length s) label-max)
         (string-append (substring s 0 label-max) "...")
-        s))))
+        s)))
 
 (define (labelled name x) (string-append name ": " (brief x)))
 
@@ -149,7 +144,6 @@
 
 ;; A record's fields by name when its shape is known, by index otherwise.
 (define (record-parts r)
-  (unsafe
   (let* ((shape (record-shape (record-tag r)))
          (fields (if shape (shape-fields shape) nil))
          (n (%obj-len r))
@@ -159,10 +153,10 @@
       (let ((name (if (%cons? fields)
                       (symbol-name (%car fields))
                       (number->string i))))
-        (set! acc (%cons (part name (%slot r i)) acc)))
+        (set! acc (%cons (part name (%record-ref r i)) acc)))
       (if (%cons? fields) (set! fields (%cdr fields)) nil)
       (set! i (%+ i 1)))
-    (reverse acc))))
+    (reverse acc)))
 
 ;; A closure is sealed, so that only its own code can read what it holds. The
 ;; explorer opens it through the escape hatch: the root, at the closure
@@ -199,9 +193,8 @@
       (set! i (%+ i 1)))
     (reverse acc))))
 
-;; A pointer's parts start with what its capability says, and a sealed one's
-;; with its seal on a row of its own, since the summary is wider than the
-;; window.
+;; A pointer's parts start with what its capability says, and a sealed
+;; one's with its seal on the row after.
 (define (parts x)
   (if (raw-capability? x)
       (capability-parts x)

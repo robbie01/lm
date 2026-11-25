@@ -199,16 +199,20 @@
      ((%eq? c #\b) (string->number-radix (read-token) 2))
      (else (error "unknown # syntax")))))
 
+;; #\a, a name such as #\space, or #\x followed by the code in hex.
 (define (read-char-literal)
   (let ((first (wait-char)))
     (if (char-alphabetic? first)
-        (let ((name (string-append (string first) (read-token))))
-          (cond ((%= 1 (%string-length name)) first)
+        (let* ((name (string-append (string first) (read-token)))
+               (n (%string-length name)))
+          (cond ((%= 1 n) first)
                 ((string=? name "space") #\space)
                 ((string=? name "newline") #\newline)
                 ((string=? name "tab") #\tab)
                 ((string=? name "return") (%int->char 13))
                 ((string=? name "backspace") (%int->char 8))
+                ((if (%eq? first #\x) (digits-in-radix? name 1 16) nil)
+                 (%int->char (string->number-radix (substring name 1 n) 16)))
                 (else (error "unknown character name" name))))
         first)))
 
@@ -268,15 +272,26 @@
         (if (%eq? (%string-ref s 0) #\-) (begin (set! neg t) (set! i 1)) nil)
         nil)
     (while (%< i n)
-      (let* ((c (%char->int (%string-ref s i)))
-             (d (cond ((if (%>= c 48) (%<= c 57) nil) (%- c 48))
-                      ((if (%>= c 97) (%<= c 102) nil) (%- c 87))
-                      ((if (%>= c 65) (%<= c 70) nil) (%- c 55))
-                      (else 99))))
+      (let ((d (digit-value (%string-ref s i))))
         (if (%>= d radix) (error "bad digit in" s) nil)
         (set! acc (+ (* acc radix) d))
         (set! i (%+ i 1))))
     (if neg (- 0 acc) acc)))
+
+;; What a digit is worth, up to f; 99 for anything that is not one.
+(define (digit-value ch)
+  (let ((c (%char->int ch)))
+    (cond ((if (%>= c 48) (%<= c 57) nil) (%- c 48))
+          ((if (%>= c 97) (%<= c 102) nil) (%- c 87))
+          ((if (%>= c 65) (%<= c 70) nil) (%- c 55))
+          (else 99))))
+
+;; Whether s from i on is one or more digits of the radix.
+(define (digits-in-radix? s i radix)
+  (let* ((n (%string-length s)) (ok (%< i n)))
+    (while (if ok (%< i n) nil)
+      (if (%< (digit-value (%string-ref s i)) radix) (set! i (%+ i 1)) (set! ok nil)))
+    ok))
 
 ;; ---------------------------------------------------------------- strings
 ;; A source file is a stream that happens to be a string.

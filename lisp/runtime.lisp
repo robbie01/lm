@@ -23,11 +23,6 @@
         ((%= type t-float) value-bytes)
         (else (%* value-bytes len))))
 
-;; What a holder of an object may do with it is `perms-object`: load and
-;; store, values and capabilities alike; or for a string or byte vector
-;; `perms-bytes`, data only. Both carry HD, which says the header sits in the
-;; granule below the base; only an allocator mints it.
-
 ;; The closure is answered unsealed, so that its maker can fill in the free
 ;; variables; sealing it with `%cap-seal-closure` is the maker's last act. Its
 ;; entry is the code's.
@@ -86,7 +81,10 @@
 ;; to represent them: `%rrl` gives the length and `%ram` the alignment the
 ;; base must have. The collector's allocator is handed the size of the whole
 ;; block, header and rounded payload, and that alignment mask, and answers
-;; the address of a block whose payload starts suitably aligned, or 0.
+;; the address of a block whose payload starts suitably aligned, or 0. The
+;; capability's permissions are `perms-object`, values and capabilities
+;; alike, or for a string or byte vector `perms-bytes`, data only. Both carry
+;; HD, which only an allocator mints.
 (define (alloc-object type len)
   (let* ((bytes (byte-payload? type))
          ;; A record, which is most of what gets made, is sized here rather
@@ -138,7 +136,8 @@
 ;; computes exactly what `qualified-hash` does.
 (define (string-hash s) (hash-string-into 5381 s))
 
-;; djb2, masked to 30 bits every round so that every intermediate is a fixnum.
+;; djb2 with wrapping arithmetic, masked to 30 bits every round, as the
+;; forge computes it: the hash is never negative.
 (define (hash-string-into h s)
   (let ((i 0) (n (%string-length s)))
     (while (%< i n)
@@ -147,10 +146,11 @@
     h))
 
 ;; The bucket is hashed over the package name, a colon and the symbol name.
+(define (prefix-hash pkg-name)
+  (%logand (%+ (%* (hash-string-into 5381 pkg-name) 33) 58) 1073741823))
+
 (define (qualified-hash pkg-name name)
-  (hash-string-into
-   (%logand (%+ (%* (hash-string-into 5381 pkg-name) 33) 58) 1073741823)
-   name))
+  (hash-string-into (prefix-hash pkg-name) name))
 
 ;; djb2 is a polynomial, so the hash of pkg:name is the prefix's hash times 33
 ;; to the power of the name's length, plus the name's own hash counted from
@@ -164,9 +164,6 @@
       (set! p (%logand (%* p 33) 1073741823))
       (set! i (%- i 1)))
     p))
-
-(define (prefix-hash pkg-name)
-  (%logand (%+ (%* (hash-string-into 5381 pkg-name) 33) 58) 1073741823))
 
 ;; ---------------------------------------------------------------- packages
 ;; A package is a record: its tag, its name and the list of packages whose
@@ -367,7 +364,6 @@
 ;; deterministically.
 (define (symbol-index s) (%lsh (%slot s sym-flags) -8))
 (define (symbol-flags s) (%logand (%slot s sym-flags) 255))
-(define (symbol-hash s) (symbol-index s))
 
 ;; ---------------------------------------------------------------- diagnostics
 (define (out-of-memory what)
@@ -393,12 +389,17 @@
       (set! i (%+ i 1)))
     s))
 
+;; A negative number's digits are taken from it as it is, since the most
+;; negative fixnum has no positive counterpart.
 (define (uart-num n)
   (if (%< n 0)
-      (begin (%st-word! uart-data 45) (set! n (%- 0 n)))
-      nil)
-  (if (%>= n 10) (uart-num (%/ n 10)) nil)
-  (%st-word! uart-data (%+ 48 (%mod n 10))))
+      (begin
+        (%st-word! uart-data 45)
+        (if (%< n -9) (uart-num (%- 0 (%/ n 10))) nil)
+        (%st-word! uart-data (%- 48 (%rem n 10))))
+      (begin
+        (if (%>= n 10) (uart-num (%/ n 10)) nil)
+        (%st-word! uart-data (%+ 48 (%rem n 10))))))
 
 (define (uart-hex n)
   (%st-word! uart-data 48)

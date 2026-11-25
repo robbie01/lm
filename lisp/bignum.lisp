@@ -383,12 +383,3 @@
       (if (%< (generic-cmp x 0) 0)
           (if (generic-zero? (generic-remainder x d)) q (generic-sub q 1))
           q)))))
-
-;; ---------------------------------------------------------------- words
-;; A bignum from 2^31 to 2^32 - 1 as the fixnum with the same thirty-two
-;; bits, which is the word a store of it writes. Anything wider, or
-;; negative, is not a machine word. Nothing is allocated.
-(define (bignum->word b)
-  (if (if (%= (bn-limbs b) 1) (%= (bn-sign b) 0) nil)
-      (bn-limb b 0)
-      (error "not a machine word:" b)))

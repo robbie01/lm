@@ -240,7 +240,9 @@
       (generic-ash n k)))
 
 (define (lsh n k) (%lsh n k))
-(define (bit-set? n k) (%= 1 (%logand 1 (%ash n (%- 0 k)))))
+;; A fixnum's bits from 31 up are all its sign.
+(define (bit-set? n k)
+  (if (%< k 32) (%= 1 (%logand 1 (%ash n (%- 0 k)))) (%< n 0)))
 
 ;; By squaring, and promoting: (expt 2 100) is exact.
 (define (expt b e)
@@ -530,20 +532,19 @@
     (if (%float? b) (%= (%cap-ld-word a 0) (%cap-ld-word b 0)) nil))
    (else nil)))
 
+;; Structure compared element by element, and numbers as `eqv?` compares them.
 (define (equal? a b)
-  (if (%eq? a b)
-      t
-      (if (%bignum? a)
-          (if (%bignum? b) (%= a b) nil)
-      (if (%cons? a)
-          (if (%cons? b)
-              (if (equal? (%car a) (%car b)) (equal? (%cdr a) (%cdr b)) nil)
-              nil)
-          (if (%string? a)
-              (if (%string? b) (string=? a b) nil)
-              (if (%vector? a)
-                  (if (%vector? b) (vector-equal? a b) nil)
-                  nil))))))
+  (cond
+   ((%eq? a b) t)
+   ((%cons? a)
+    (if (%cons? b)
+        (if (equal? (%car a) (%car b)) (equal? (%cdr a) (%cdr b)) nil)
+        nil))
+   ((%string? a) (if (%string? b) (string=? a b) nil))
+   ((%vector? a) (if (%vector? b) (vector-equal? a b) nil))
+   ((%bignum? a) (if (%bignum? b) (%= a b) nil))
+   ((%float? a) (eqv? a b))
+   (else nil)))
 
 (define (vector-equal? a b)
   (if (%= (%vector-length a) (%vector-length b))

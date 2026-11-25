@@ -135,6 +135,7 @@
   object-payload byte-payload? odd? or out-char out-of-memory *names-seen* package package-name
   package-use package? pair? pop position positive? princ print print-list
   print-obj print-record print-symbol print-vector print-function print-capability
+  emit-cap-summary cap-top-hex cap-top-saturated?
   push put qualified-hash
   quasiquote quote quotient reduce rem remainder remove-if rest revappend
   read-char-or-nil read-form read-toplevel read-forms-from-string read-from-string
@@ -148,7 +149,7 @@
   string->symbol string-append string-downcase string-hash string-index
   string-length string-ref string-set! string-upcase string<? string=?
   string? sub2 substring symbol->string symbol-exported?
-  symbol-flags symbol-function symbol-hash symbol-index symbol-name
+  symbol-flags symbol-function symbol-index symbol-name
   symbol-package symbol-plist symbol-value symbol? t table->alist
   table-capacity table-count table-del! table-for-each table-has?
   table-keys table-ref table-set! table? third time uart-char
@@ -162,7 +163,7 @@
   with-output-to-string write write-char-name write-string-quoted
   write-to-string zero?
   ;; ---- bignums ----
-  bignum? bignum-even? bignum->string bignum->word bn-two-to generic-ash bn-alloc bn-alloc-halves bn-finish bn-halves
+  bignum? bignum-even? bignum->string bn-two-to generic-ash bn-alloc bn-alloc-halves bn-finish bn-halves
   bn-limbs bn-limb bn-set-limb! bn-of bn-shrink bn-sign
   generic-add generic-cmp generic-divmod generic-mul generic-neg
   generic-quotient generic-remainder generic-sub generic-zero?

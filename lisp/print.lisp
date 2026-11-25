@@ -40,14 +40,18 @@
               (emit-str "#:"))
           (emit-str name)))))
 
+;; A character with neither a name nor a glyph is written as its code in
+;; hex, #\x0, which the reader takes back.
 (define (write-char-name c)
   (emit-str "#\\")
-  (cond ((%eq? c #\space) (emit-str "space"))
-        ((%eq? c #\newline) (emit-str "newline"))
-        ((%eq? c #\tab) (emit-str "tab"))
-        ((%eq? c (%int->char 13)) (emit-str "return"))
-        ((%eq? c #\backspace) (emit-str "backspace"))
-        (else (emit-ch c))))
+  (let ((n (%char->int c)))
+    (cond ((%eq? c #\space) (emit-str "space"))
+          ((%eq? c #\newline) (emit-str "newline"))
+          ((%eq? c #\tab) (emit-str "tab"))
+          ((%= n 13) (emit-str "return"))
+          ((%eq? c #\backspace) (emit-str "backspace"))
+          ((if (%> n 32) (%< n 127) nil) (emit-ch c))
+          (else (emit-ch #\x) (emit-str (number->hex n))))))
 
 (define (write-string-quoted s)
   (emit-ch #\")
@@ -81,6 +85,8 @@
         (emit-str (number->string (%obj-len x)))
         (emit-ch #\>))
        ((%= ty t-float) (emit-str "#<float>"))
+       ((%= ty t-code) (emit-str "#<code ") (emit-code-label x) (emit-ch #\>))
+       ((%= ty t-port) (emit-str "#<port>"))
        ((%= ty t-record)
         (cond
          ((package? x)
@@ -107,20 +113,36 @@
 ;;   #<capability 0x2040 [0x2000,0x3000) rwRWm>
 ;;   #<capability 0x10002a4 [0x1000200,0x1000400) xs sentry>
 (define (print-capability x)
-  (emit-str "#<capability 0x")
-  (emit-str (number->hex (%addr-of x)))
-  (emit-str " [0x")
-  (emit-str (number->hex (%cap-base x)))
-  (emit-str ",0x")
-  (emit-str (number->hex (%cap-top x)))
-  (emit-str ") ")
-  (emit-perms (%cap-perms x))
+  (emit-str "#<capability ")
+  (emit-cap-summary x)
   (if (%cap-sealed? x)
       (if (%= (%cap-otype x) otype-sentry)
           (emit-str " sentry")
           (begin (emit-str " sealed ") (emit-str (number->string (%cap-otype x)))))
       nil)
   (emit-ch #\>))
+
+;; The address, the bounds and the permissions: 0x2040 [0x2000,0x3000) rwRWm.
+(define (emit-cap-summary x)
+  (emit-str "0x")
+  (emit-str (number->hex (%addr-of x)))
+  (emit-str " [0x")
+  (emit-str (number->hex (%cap-base x)))
+  (emit-str ",0x")
+  (emit-str (cap-top-hex x))
+  (emit-str ") ")
+  (emit-perms (%cap-perms x)))
+
+;; `%cap-top` saturates, so a top of 2^32, the root's, reads as 0xffffffff.
+;; A capability that really ends there is shorter than 256 bytes, because a
+;; longer one's top is aligned.
+(define (cap-top-saturated? x)
+  (if (%= (%cap-top x) -1)
+      (let ((n (%cap-len x))) (if (%< n 0) t (%> n 255)))
+      nil))
+
+(define (cap-top-hex x)
+  (if (cap-top-saturated? x) "100000000" (number->hex (%cap-top x))))
 
 ;; Each permission as a letter, in the order of the bits: r and w to load and
 ;; store data, R and W capabilities, m load mutable, x execute, s the system
@@ -188,18 +210,17 @@
 ;; its type: records point at each other, a task at its parent, every node
 ;; at its neighbours, and following them would print the whole kernel.
 (define (print-record r quoted depth)
-  (unsafe
   (emit-str "#[")
   (if (%> depth 0)
       (begin
-        (if (%> (%obj-len r) 0) (print-obj (%slot r 0) quoted (%+ depth 1)) nil)
+        (if (%> (%obj-len r) 0) (print-obj (%record-ref r 0) quoted (%+ depth 1)) nil)
         (emit-str " ..."))
       (let ((i 0) (n (%obj-len r)))
         (while (%< i n)
           (if (%> i 0) (space) nil)
-          (print-obj (%slot r i) quoted (%+ depth 1))
+          (print-obj (%record-ref r i) quoted (%+ depth 1))
           (set! i (%+ i 1)))))
-  (emit-ch #\])))
+  (emit-ch #\]))
 
 (define (write x) (print-obj x t 0) x)
 (define (display x) (print-obj x nil 0) x)
