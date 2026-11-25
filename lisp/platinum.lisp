@@ -119,19 +119,45 @@
 ;; The close, zoom and collapse boxes: a #222 frame-rect round a diagonal ramp
 ;; from #99 at the top left to white at the bottom right, with a white
 ;; highlight along the outside of the right and bottom edges.
+;; The eight by eight gradient inside a title-bar box, darker toward the
+;; bottom right, stored straight into the bitmap after one wait for the
+;; blitter, each pixel cut to the rastport's region. A `plot` a pixel is a
+;; wait a pixel, and was most of what drawing a window's frame cost.
+(define (box-shade rp x y)
+  (let ((bmp (rp-bitmap rp))
+        (ox (%+ x (rp-origin-x rp)))
+        (oy (%+ y (rp-origin-y rp)))
+        (row 0))
+    (blit-sync)
+    (while (%< row 8)
+      (let ((col 0) (py (%+ oy row)))
+        (while (%< col 8)
+          (let ((px (%+ ox col)))
+            (if (in-region? rp bmp px py)
+                (unsafe (poke8 (bm-at bmp px py)
+                               (grey (%+ 9 (%/ (%* (%+ row col) 6) 14)))))
+                nil))
+          (set! col (%+ col 1))))
+      (set! row (%+ row 1)))
+    nil))
+
+;; Whether a pixel of the bitmap, in its own coordinates, is inside the
+;; bitmap and the rastport's region.
+(define (in-region? rp bmp px py)
+  (let ((in nil))
+    (if (if (%>= px 0) (if (%>= py 0) (if (%< px (bm-w bmp)) (%< py (bm-h bmp)) nil) nil) nil)
+        (dolist (cr (rp-region rp))
+          (if (if (%>= px (rect-x cr)) (if (%< px (rect-x2 cr)) (if (%>= py (rect-y cr)) (%< py (rect-y2 cr)) nil) nil) nil)
+              (set! in t)
+              nil))
+        nil)
+    in))
+
 (define (title-box rp x y kind)
   ;; kind 0 close, 1 zoom, 2 collapse.
   (fill-rect rp x y 12 12 g7)
   (fill-rect rp (%+ x 1) (%+ y 1) 10 10 g13)
-  (let ((row 0))
-    (while (%< row 8)
-      (let ((col 0))
-        (while (%< col 8)
-          (let ((d (%+ row col)))
-            (plot rp (%+ x (%+ col 2)) (%+ y (%+ row 2))
-                  (grey (%+ 9 (%/ (%* d 6) 14)))))
-          (set! col (%+ col 1))))
-      (set! row (%+ row 1))))
+  (box-shade rp (%+ x 2) (%+ y 2))
   ;; The mark inside: a vertical bar for zoom, a horizontal one for collapse,
   ;; nothing for close.
   (if (%= kind 1)
