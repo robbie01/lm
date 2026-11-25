@@ -15,11 +15,11 @@
   (emit-str system-version)
   (emit-str " - a lisp machine\n")
   (emit-str "cons space ")
-  (emit-str (number->string (%lsh (%- cons-limit cons-base) -13)))
+  (emit-str (number->string (%lsh (%- cons-limit cons-base) -14)))
   (emit-str "k pairs, object space ")
   (emit-str (number->string (%lsh (%- obj-limit obj-base) -10)))
   (emit-str "k, code ")
-  (emit-str (number->string (%lsh (%- (%ld-fixnum lg-code-ptr) code-base) -10)))
+  (emit-str (number->string (%lsh (%- (%ld-word lg-code-ptr) code-base) -10)))
   (emit-str "k used\n")
   nil)
 
@@ -28,6 +28,36 @@
   (emit-str (number->string (task-count)))
   (emit-str (if (%= (task-count) 1) " task" " tasks"))
   (newline))
+
+;; ---------------------------------------------------------------- authority
+;; The kernel makes its stacks and register contexts out of the root, and
+;; gives each capability only what it is for. Permissions are in the
+;; positions `candperm` takes them: LD 256, SD 128, LC 64, SC 32, LM 16, EX 8,
+;; SR 4, SE 2, HD 1.
+(define data-perms 496)                ; LD SD LC SC LM
+
+;; `len` bytes of memory at `base`, as a capability to load and store values
+;; in them and nothing else. The caller has made sure the bounds are exact.
+(define (data-region base len)
+  (%cap-and-perms (%cap-bounds-exact (%from-addr base) len) data-perms))
+
+;; A stack runs down from its top, so its capability stands there.
+(define (stack-capability lo hi) (%cap-set-addr (data-region lo (%- hi lo)) hi))
+
+;; ---------------------------------------------------------------- contexts
+;; The registers a trap saved, reached through the capability to the block
+;; they were saved in. Slot 0 is the pc, where x0 would be, and slots 1..31
+;; are x1..x31, eight bytes each; `reg-<name>` for each comes from the
+;; generated layout. A slot holds what the register held, tag and all, so an
+;; integer reads back as a fixnum and a pointer as the value it was.
+(define (ctx-off n) (%* 8 n))
+(define (ctx-ref ctx n) (%cap-ld ctx (ctx-off n)))
+(define (ctx-set! ctx n v) (%cap-st! ctx (ctx-off n) v))
+
+;; Moving the saved pc past the instruction is what makes a trap resume after
+;; it rather than run it again.
+(define (step-past ctx n)
+  (ctx-set! ctx reg-zero (%cap-inc (ctx-ref ctx reg-zero) n)))
 
 ;; ---------------------------------------------------------------- traps
 ;; Everything that goes wrong arrives here, along with every interrupt. The
@@ -48,14 +78,14 @@
         ((%= c cause-range) "index out of range")
         ((%= c cause-overflow) "fixnum overflow")
         ((%= c cause-divzero) "division by zero")
-        ((%= c cause-stack) "stack overflow")
+        ((%= c cause-capability) "capability fault")
         ((%= c cause-barrier) "write barrier")
+        ((%= c cause-stack) "stack overflow")
         (else "trap")))
 
-;; The trap stub hands over the cause with the interrupt flag moved from bit
-;; 31 down to bit 6, because bit 31 does not fit in a fixnum.
-(define cause-interrupt-bit 64)
-(define (interrupt? c) (%>= c cause-interrupt-bit))
+;; The stub hands over mcause as it is: the interrupt flag is bit 31, which
+;; makes an interrupt's cause negative.
+(define (interrupt? c) (%< c 0))
 (define (interrupt-number c) (%logand c 31))
 
 ;; How deep traps may nest before the handler is taken to be faulting in a
@@ -73,69 +103,244 @@
   (uart-nl)
   (%halt exit-trap-spiral))
 
+;; The stub passes mcause, the pc and mtval as integers, and the capability
+;; to the frame it saved the registers into.
 (define (handle-trap cause epc tval ctx)
-  (if (%>= (%ld-fixnum lg-trapdepth) trap-nest-limit) (trap-spiral cause epc tval) nil)
-  (if (interrupt? cause)
-      (handle-interrupt (interrupt-number cause) ctx)
-      ;; The barrier first: while a collection is marking it is the commonest
-      ;; trap by far, and the store that took it is waiting to re-execute.
-      (cond ((%= cause cause-barrier) (barrier tval))
-            ((%= cause cause-ecall) (handle-ecall epc ctx))
-            ((%= cause cause-wrong-type)
-             (if (try-widen epc ctx) nil (check-trap cause epc tval ctx)))
-            ((%= cause cause-range) (check-trap cause epc tval ctx))
-            ((%= cause cause-overflow)
-             (if (try-widen epc ctx) nil (check-trap cause epc tval ctx)))
-            ((%= cause cause-divzero) (check-trap cause epc tval ctx))
-            (else (fatal-trap cause epc tval ctx))))
-  (keep-cons-run ctx))
+  (if (%>= (%ld-word lg-trapdepth) trap-nest-limit) (trap-spiral cause epc tval) nil)
+  (if (cons-refill? cause epc tval)
+      (refill-run ctx)
+      (begin
+        (if (interrupt? cause)
+            (handle-interrupt (interrupt-number cause) ctx)
+            ;; The barrier first: while a collection is marking it is the
+            ;; commonest trap by far, and the store that took it is waiting to
+            ;; re-execute.
+            (cond ((%= cause cause-barrier) (barrier tval))
+                  ((%= cause cause-ecall) (handle-ecall epc ctx))
+                  ((%= cause cause-wrong-type)
+                   (if (try-widen epc ctx) nil (check-trap cause epc tval ctx)))
+                  ((%= cause cause-range) (check-trap cause epc tval ctx))
+                  ((%= cause cause-overflow)
+                   (if (try-widen epc ctx) nil (check-trap cause epc tval ctx)))
+                  ((%= cause cause-divzero) (check-trap cause epc tval ctx))
+                  ((%= cause cause-capability) (capability-trap epc tval ctx))
+                  (else (fatal-trap cause epc tval ctx))))
+        (keep-cons-run ctx))))
+
+;; ---------------------------------------------------------------- the cons run
+;; The inline allocator narrows gp to the next pair with `csetboundsimm`, and
+;; when the run is used up that is a length fault on gp. It is the refill, not
+;; an error, and it is dealt with before anything here conses: every pair the
+;; handler made would come out of the run that has just run out.
+(define (cons-refill? cause epc tval)
+  (if (%= cause cause-capability)
+      (if (%= tval (%logior (%lsh reg-gp 5) cf-length))
+          (let ((w (insn-at epc)))
+            (if (%= (insn-op w) opc-cheri)
+                (if (%= (insn-f3 w) 2) (%= (insn-rs1 w) reg-gp) nil)
+                nil))
+          nil)
+      nil))
+
+;; The collector hands over a fresh run, collecting first if it has to, and
+;; takes no pair to do it. The run goes into the saved gp, which the stub
+;; puts back and the task resumes with at the same instruction, and into the
+;; live one, so that nothing is left holding the run that ran out.
+(define (refill-run ctx)
+  (let ((run (refill-cons-run)))
+    (%st-cap! lg-cons-run run)
+    (%reload-cons-run)
+    (ctx-set! ctx reg-gp run)
+    nil))
 
 ;; The handler conses out of the cons run of the task it interrupted, and the
-;; stub restores the gp and tp it saved on the way in. So the run goes back
-;; into the frame as the handler left it, or the task would hand out the
-;; handler's pairs a second time. That frame is `ctx` whatever else happened
-;; here: a task switch points mscratch at the next task's frame and leaves
-;; this one to be resumed later, with this run.
+;; stub restores the gp it saved on the way in. So the run goes back into the
+;; frame as the handler left it, or the task would hand out the handler's
+;; pairs a second time. That frame is `ctx` whatever else happened here: a
+;; task switch points MScratchC at the next task's frame and leaves this one
+;; to be resumed later, with this run.
 (define (keep-cons-run ctx)
   (%sync-cons-run)
-  (%st-word! (ctx-reg ctx reg-gp) (%ld-word lg-cons-run))
-  (%st-word! (ctx-reg ctx reg-tp) (%ld-word lg-cons-run-end))
+  (ctx-set! ctx reg-gp (%ld-cap lg-cons-run))
   nil)
 
-;; ------------------------- the instructions that check their operands
-;; car, cdr and their setters check a tag; the indexed accesses check a tag,
-;; a type and a bound; the fixnum instructions check both operands. The
-;; report says which operation it was and what it was handed: the instruction
-;; is at the saved pc, and every register it named is in the saved context.
-(define (insn-f3 w)  (%logand (%lsh w -12) 7))
-(define (insn-f7 w)  (%logand (%lsh w -25) 127))
-(define (insn-rs1 w) (%logand (%lsh w -15) 31))
-(define (insn-rs2 w) (%logand (%lsh w -20) 31))
+;; ------------------------- the instruction that trapped
+;; The report says which operation failed and what it was handed: the
+;; instruction is at the saved pc, and every register it named is in the
+;; saved context. The pc is an integer, read through DDC a halfword at a time
+;; because an instruction is only aligned to two bytes; a compressed one is
+;; the low half alone.
+(define (insn-at pc)
+  (let ((lo (%logand (%ld-half pc) #xffff)))
+    (if (%= (%logand lo 3) 3)
+        (%logior lo (%lsh (%ld-half (%+ pc 2)) 16))
+        lo)))
+
+(define (compressed? w) (if (%= (%logand w 3) 3) nil t))
 (define (insn-op w)  (%logand w 127))
 (define (insn-rd w)  (%logand (%lsh w -7) 31))
+(define (insn-f3 w)  (%logand (%lsh w -12) 7))
+(define (insn-rs1 w) (%logand (%lsh w -15) 31))
+(define (insn-rs2 w) (%logand (%lsh w -20) 31))
+(define (insn-f7 w)  (%logand (%lsh w -25) 127))
 
-;; The stub narrows mtval to thirty bits so it survives as a fixnum. Every
-;; address fits, and so does any fixnum small enough to be worth printing;
-;; the rest come back as a word.
-(define (emit-value w)
-  (let ((tag (%logand w 7)))
-    (cond ((%= w 0) (emit-str "nil"))
-          ((%= (%logand w 1) 1)
-           (let ((v (%ash w -1)))
-             (emit-str (number->string (if (%>= v 268435456)
-                                           (%- v 536870912)
-                                           v)))))
-          ((%= tag 2) (write (%from-addr w)))
-          ((and (%= tag 4) (%>= w obj-base) (%< w obj-limit))
-           (write (%from-addr w)))
-          (else (emit-str (number->hex w))))))
+;; The I-type and S-type immediates, sign-extended as the processor reads
+;; them.
+(define (insn-imm-i w) (%ash w -20))
+(define (insn-imm-s w) (%logior (%lsh (%ash w -25) 5) (%logand (%lsh w -7) 31)))
 
-;; A value the handler is about to print may be a word that only looks like
-;; a pointer, so it is checked before the printer is allowed near it.
-(define (safe-object? v)
-  (if (%object? v)
-      (if (%>= (%addr-of v) obj-base) (%< (%addr-of v) obj-limit) nil)
-      nil))
+;; The major opcodes the handler tells apart.
+(define opc-load   #x03)
+(define opc-ref    #x0b)               ; custom-0: references
+(define opc-store  #x23)
+(define opc-index  #x2b)               ; custom-1: indexed access
+(define opc-cheri  #x5b)
+(define opc-jalr   #x67)
+(define opc-jal    #x6f)
+(define opc-system #x73)
+(define opc-fixnum #x7b)               ; custom-3: fixnums
+
+;; ISAv9's capability fault codes, the low five bits of mtval for cause 28.
+;; The bits above them are the register that held the capability: 32 is PCC
+;; and 33 is DDC.
+(define cf-length #x01)
+(define cf-tag #x02)
+(define cf-seal #x03)
+(define cf-type #x04)
+(define cf-representable #x0a)
+(define cf-execute #x11)
+(define cf-load #x12)
+(define cf-store #x13)
+(define cf-load-cap #x14)
+(define cf-store-cap #x15)
+(define cf-sr #x18)
+(define cf-unseal #x19)
+
+;; The value a fault names by its register. Register 0 is x0, which reads as
+;; NULL, the integer 0; its slot in the context holds the pc.
+(define (fault-value ctx reg)
+  (if (if (%> reg 0) (%< reg 32) nil) (ctx-ref ctx reg) 0))
+
+;; ------------------------- naming the operation
+(define (pair-op-name w)
+  (if (%= (insn-f3 w) 4)
+      (if (%= (insn-imm-s w) 0) "set-car!" "set-cdr!")
+      (if (%= (insn-imm-i w) 0) "car" "cdr")))
+
+(define (length-op-name ty)
+  (cond ((%= ty t-vector) "vector-length")
+        ((%= ty t-string) "string-length")
+        ((%= ty t-bytes) "bytes-length")
+        (else "length")))
+
+;; custom-0, by funct3: lref, vkind, lvar, jcl, sref, lhdr, and the two
+;; branches. car and cdr are offsets 0 and 8 of `lref`, their setters the
+;; same offsets of `sref`.
+(define (ref-op-name w)
+  (let ((f (insn-f3 w)))
+    (cond ((%= f 2) "variable")
+          ((%= f 3) "call")
+          ((%= f 5) (length-op-name (insn-imm-i w)))
+          ((if (%= f 0) t (%= f 4)) (pair-op-name w))
+          (else "compare"))))
+
+;; custom-1: funct7 is the type the object must be, funct3 bit 0 a store.
+(define (index-op-name w)
+  (let ((ty (insn-f7 w))
+        (store (%= 1 (%logand (insn-f3 w) 1))))
+    (cond ((%= ty t-vector) (if store "vector-set!" "vector-ref"))
+          ((%= ty t-string) (if store "string-set!" "string-ref"))
+          ((%= ty t-bytes) (if store "bytes-set!" "bytes-ref"))
+          (else (if store "set-slot!" "slot")))))
+
+;; custom-3 `fop`, by funct7: the eight operations, their trapping forms 8
+;; above them, then the shifts and the comparisons.
+(define (arith-op-name k)
+  (cond ((%= k 0) "+") ((%= k 1) "-") ((%= k 2) "*") ((%= k 3) "/")
+        ((%= k 4) "rem") ((%= k 5) "logand") ((%= k 6) "logior")
+        (else "logxor")))
+
+(define (fop-name f7)
+  (cond ((%>= f7 #x13) (if (%= f7 #x15) "=" "<"))
+        ((%>= f7 #x10) (if (%= f7 #x11) "lsh" "ash"))
+        ((%>= f7 8) (arith-op-name (%- f7 8)))
+        (else (arith-op-name f7))))
+
+;; `retag`'s immediate is read unsigned: the kind the operand must be in its
+;; top six bits, the metadata it is given in the low six.
+(define (retag-from w) (%logand (%lsh w -26) 63))
+(define (retag-to w) (%logand (%lsh w -20) 63))
+
+(define (retag-name w)
+  (cond ((if (%= (retag-from w) 1) (%= (retag-to w) 0) nil) "char->integer")
+        ((if (%= (retag-from w) 0) (%= (retag-to w) 1) nil) "integer->char")
+        (else "retag")))
+
+;; custom-3 by funct3: faddi, faddio, fandi, fori, fshi, fop, and retag.
+(define (fixnum-op-name w)
+  (let ((f (insn-f3 w)))
+    (cond ((%= f 5) (fop-name (insn-f7 w)))
+          ((%= f 4) (if (%= (%logand (%lsh (insn-imm-i w) -5) 3) 1) "lsh" "ash"))
+          ((%= f 2) "logand")
+          ((%= f 3) "logior")
+          ((%= f 7) (retag-name w))
+          (else "+"))))
+
+(define (cheri-op-name w)
+  (let ((f (insn-f3 w)) (f7 (insn-f7 w)))
+    (cond ((%= f 1) "capability offset")
+          ((%= f 2) "capability bounds")
+          ((%= f7 #x7c) "store")
+          ((%= f7 #x7d) "load")
+          ((%= f7 #x01) "special register access")
+          (else "capability operation"))))
+
+;; Quadrants 0 and 2 hold the compressed loads and stores, funct3 2 and 3
+;; loading and 6 and 7 storing; quadrant 2's funct3 4 is the register jumps.
+(define (compressed-op-name w)
+  (let ((q (%logand w 3)) (f (%logand (%lsh w -13) 7)))
+    (cond ((%= q 1) "instruction")
+          ((%>= f 6) "store")
+          ((%>= f 4) (if (%= q 2) "jump" "instruction"))
+          ((%>= f 2) "load")
+          (else "instruction"))))
+
+;; What an instruction does, said the way the source says it where the
+;; source has a word for it.
+(define (op-name w)
+  (if (compressed? w)
+      (compressed-op-name w)
+      (let ((op (insn-op w)))
+        (cond ((%= op opc-ref) (ref-op-name w))
+              ((%= op opc-index) (index-op-name w))
+              ((%= op opc-fixnum) (fixnum-op-name w))
+              ((%= op opc-cheri) (cheri-op-name w))
+              ((%= op opc-load) "load")
+              ((%= op opc-store) "store")
+              ((if (%= op opc-jalr) t (%= op opc-jal)) "jump")
+              ((%= op opc-system) "machine instruction")
+              (else "instruction")))))
+
+;; ------------------------- naming the value
+;; Tags make every value say what it is, so anything a register held can be
+;; printed, except a capability that is neither a pair nor an object: a
+;; stack, a run, code, a device. The printer would read one as a pair, so it
+;; is described instead.
+(define (pair-value? v) (if (%cons? v) (%= (%cap-len v) 16) nil))
+
+(define (plain-value? v)
+  (if (%cap-tag? v)
+      (if (%null? v) t (if (%object? v) t (pair-value? v)))
+      t))
+
+(define (emit-value v)
+  (if (plain-value? v)
+      (write v)
+      (begin
+        (emit-str "the capability to ")
+        (emit-str (number->string (%cap-len v)))
+        (emit-str " bytes at ")
+        (emit-str (number->hex (%cap-base v))))))
 
 (define (emit-a-or-an sym)
   (if (%symbol? sym)
@@ -146,212 +351,218 @@
                       "an "
                       "a "))
         (emit-str (%symbol-name sym)))
-      (emit-object sym)))
+      (emit-value sym)))
 
-(define (emit-object v)
-  (if (safe-object? v) (write v) (emit-value (%addr-of v))))
+(define (type-name ty)
+  (cond ((%= ty t-vector) "a vector")
+        ((%= ty t-string) "a string")
+        ((%= ty t-bytes) "a byte vector")
+        ((%= ty t-symbol) "a symbol")
+        ((%= ty t-closure) "a function")
+        ((%= ty t-record) "a record")
+        ((%= ty t-code) "a code object")
+        ((%= ty t-bignum) "a bignum")
+        ((%= ty t-port) "a port")
+        (else "an object")))
 
-(define (emit-type-name ty)
-  (cond ((%= ty t-vector) (emit-str "a vector"))
-        ((%= ty t-string) (emit-str "a string"))
-        ((%= ty t-bytes) (emit-str "a byte vector"))
-        ((%= ty t-symbol) (emit-str "a symbol"))
-        ((%= ty t-closure) (emit-str "a function"))
-        ((%= ty t-record) (emit-str "a record"))
-        ((%= ty t-code) (emit-str "a code object"))
-        ((%= ty t-bignum) (emit-str "a bignum"))
-        (else (emit-str "an object"))))
-
-;; custom-0 is one load and one store, so which operation it was is the
-;; offset: car is slot 0 and cdr is slot 4 of the same instruction. Anything
-;; else is a slot access the compiler generated. Only the low bits of the
-;; offset are read, because the instruction word arrives through
-;; `%ld-fixnum`, which drops bit 31.
-(define (insn-imm-i w) (%logand (%lsh w -20) 2047))
-(define (insn-imm-s w) (%logand (%lsh w -7) 31))
-
-(define (emit-pair-op w)
+;; ------------------------- wrong type, out of range, arithmetic
+;; custom-0 checks its operand as it uses it. `lref` takes nil, which reads as
+;; a pair of nils; `sref` refuses it, because nil has no cell to write. `lvar`
+;; traps on the unbound marker naming the symbol's register, and `jcl` on
+;; anything that is not a closure.
+(define (emit-ref-fault w v)
   (let ((f (insn-f3 w)))
-    (if (%= (%logand f 4) 4)
-        (let ((o (insn-imm-s w)))
-          (cond ((%= f 5) (emit-str "set-slot!"))
-                ((%= o 0) (emit-str "set-car!"))
-                ((%= o 4) (emit-str "set-cdr!"))
-                (else (emit-str "set-slot!"))))
-        (let ((o (insn-imm-i w)))
-          (cond ((%= f 1) (emit-str "slot"))
-                ((%= o 0) (emit-str "car"))
-                ((%= o 4) (emit-str "cdr"))
-                (else (emit-str "slot")))))))
-
-(define (emit-index-op ty f)
-  (cond ((%= ty t-closure) (emit-str "call"))
-        ((%= ty t-vector) (emit-str (if (%= f 0) "vector-ref" "vector-set!")))
-        ((%= ty t-string) (emit-str (if (%= f 2) "string-ref" "string-set!")))
-        ((%= ty t-bytes)  (emit-str (if (%= f 2) "bytes-ref" "bytes-set!")))
-        (else (emit-str (if (%= (%logand f 1) 1) "set-slot!" "slot")))))
-
-;; nil reads as a pair of nils but has no cell to write to, so the store
-;; side rejects it and gets its own sentence. `lvar` reads a variable and
-;; traps on the unbound marker with the symbol in mtval.
-(define (emit-pair-fault w tval)
-  (cond
-   ((%= (insn-f3 w) 2)
-    (let ((x (%from-addr tval)))
-      (if (%symbol? x)
-          (begin (emit-str "unbound variable: ") (emit-str (%symbol-name x)))
-          (begin (emit-str "variable: expected a symbol, got ") (emit-value tval)))))
-   ((%= (%logand (insn-f3 w) 1) 1)
-    (emit-pair-op w)
-    (emit-str ": expected an object, got ") (emit-value tval))
-   ((%= tval 0) (emit-pair-op w) (emit-str ": nil has no cell to write"))
-   (else (emit-pair-op w) (emit-str ": expected a pair, got ") (emit-value tval))))
+    (cond
+     ((%= f 2)
+      (if (%symbol? v)
+          (begin (emit-str "unbound variable: ") (emit-str (%symbol-name v)))
+          (begin (emit-str "variable: expected a symbol, got ") (emit-value v))))
+     ((%= f 3)
+      (emit-str "call: ")
+      ;; A name nothing was ever stored in holds the unbound marker.
+      (if (%eq? v (%unbound))
+          (emit-str "undefined function")
+          (begin (emit-str "expected a function, got ") (emit-value v))))
+     ((%= f 5)
+      (emit-str (length-op-name (insn-imm-i w)))
+      (emit-str ": expected ")
+      (emit-str (type-name (insn-imm-i w)))
+      (emit-str ", got ")
+      (emit-value v))
+     (else
+      (emit-str (pair-op-name w))
+      (cond ((%null? v) (emit-str ": nil has no cell"))
+            ((pair-value? v)
+             (emit-str (if (%= f 4) ": the pair is read-only" ": the pair cannot be read")))
+            (else (emit-str ": expected a pair, got ") (emit-value v)))))))
 
 ;; Both operands are still in the registers the instruction named, so the
 ;; report can say what was indexed as well as what with. The immediate form
-;; keeps the index in the instruction, where the rs2 field is the index
-;; itself.
-(define (emit-index-fault w ctx)
+;; keeps the index in the rs2 field, and a wrong type there can only be the
+;; object's.
+(define (emit-index-fault w cause tval ctx)
   (let* ((ty (insn-f7 w))
          (f (insn-f3 w))
-         (obj (trap-raw ctx (insn-rs1 w)))
-         (idx (if (%= 4 (%logand f 4))
-                  (insn-rs2 w)
-                  (trap-raw ctx (insn-rs2 w)))))
-    (emit-index-op ty (%logand f 3))
+         (imm (%= 4 (%logand f 4)))
+         (obj (ctx-ref ctx (insn-rs1 w)))
+         (idx (if imm (insn-rs2 w) (ctx-ref ctx (insn-rs2 w))))
+         (wanted (if (if (%= ty 0) (%= 2 (%logand f 2)) nil)
+                     "a string or byte vector"
+                     (type-name ty))))
+    (emit-str (index-op-name w))
     (cond
-     ;; Calling a name nothing was ever stored in: the value is the unbound
-     ;; marker, an immediate.
-     ((if (%= ty t-closure) (%eq? obj (%unbound)) nil)
-      (emit-str ": undefined function"))
-     ((not (safe-object? obj))
-      (emit-str ": expected ") (emit-type-name ty)
-      (emit-str ", got ") (emit-value (%addr-of obj)))
-     ;; `call` is the entry-point load the call sequence does, and reaching
-     ;; here means the thing being called was an object of the wrong sort.
-     ((%= ty t-closure)
-      (emit-str ": expected a function, got ") (emit-object obj))
-     ((if (%> ty 0) (not (%= (%obj-type obj) ty)) nil)
-      (emit-str ": expected ") (emit-type-name ty)
-      (emit-str ", got ") (emit-object obj))
-     ((not (%fixnum? idx))
-      (emit-str ": index is not a number, it is ") (emit-value (%addr-of idx)))
+     ((%= cause cause-range)
+      (emit-str ": index ") (emit-value idx)
+      (emit-str " is outside ") (emit-str wanted)
+      (emit-str " of ") (emit-str (number->string (%obj-len obj))))
+     ((if imm t (%= tval (insn-rs1 w)))
+      (emit-str ": expected ") (emit-str wanted)
+      (emit-str ", got ") (emit-value obj))
      (else
-      (emit-str ": index ") (emit-str (number->string idx))
-      (emit-str " is outside ") (emit-type-name ty)
-      (emit-str " of ") (emit-str (number->string (%obj-len obj)))))))
-
-;; Which arithmetic instruction this was, said the way the source says it.
-;; The register forms are custom-2, in two banks by funct7; the forms with a
-;; constant are custom-3, which also carries the two tagged memory accesses.
-(define (fixnum-op-name w)
-  (let ((f (insn-f3 w)))
-    (if (%= (insn-f7 w) 1)
-        (cond ((%= f 0) "ash") ((%= f 1) "lsh") ((%= f 2) "ash")
-              ((%= f 5) "=") (else "<"))
-        (cond ((%= f 0) "+") ((%= f 1) "-") ((%= f 2) "*") ((%= f 3) "/")
-              ((%= f 4) "rem") ((%= f 5) "logand") ((%= f 6) "logior")
-              (else "logxor")))))
-
-(define (tagged-op-name w)
-  (let ((f (insn-f3 w)))
-    (cond ((%= f 0) "+") ((%= f 1) "logand") ((%= f 2) "logior")
-          ((%= f 3) "ash") ((%= f 4) "peek") ((%= f 5) "peek8")
-          ((%= f 6) "poke") (else "poke8"))))
+      (emit-str ": index is not a number, it is ") (emit-value idx)))))
 
 ;; `try-widen` has already had its chance, so a bignum reaching here means
 ;; this operator has no bignum form, not that the operand was the wrong kind
 ;; of thing.
-(define (emit-arith-fault name cause tval)
-  (emit-str name)
+(define (emit-arith-fault w cause v)
+  (emit-str (fixnum-op-name w))
   (cond
    ((%= cause cause-divzero) (emit-str ": division by zero"))
-   ((%= cause cause-overflow)
-    (emit-str ": the result does not fit in a fixnum"))
-   ((%bignum? (%from-addr tval))
-    (emit-str ": no bignum form, given ") (emit-value tval))
-   (else (emit-str ": expected a number, got ") (emit-value tval))))
+   ((%= cause cause-overflow) (emit-str ": the result does not fit in a fixnum"))
+   ((%= (insn-f3 w) 7)
+    (emit-str (if (%= (retag-from w) 1) ": expected a character, got " ": expected a number, got "))
+    (emit-value v))
+   ((%bignum? v) (emit-str ": no bignum form, given ") (emit-value v))
+   (else (emit-str ": expected a number, got ") (emit-value v))))
+
+;; Causes 24 to 27. A wrong type or an index out of range names the register
+;; that held the offending value, and the instruction at the pc says what the
+;; value was for.
+(define (check-trap cause epc tval ctx)
+  (fault-report epc ctx
+    (lambda ()
+      (let* ((w (insn-at epc))
+             (op (insn-op w)))
+        (cond ((%= op opc-index) (emit-index-fault w cause tval ctx))
+              ((%= op opc-fixnum) (emit-arith-fault w cause (fault-value ctx tval)))
+              ((if (%= op opc-ref) (%= cause cause-wrong-type) nil)
+               (emit-ref-fault w (fault-value ctx tval)))
+              (else (emit-str (op-name w)) (emit-str ": ") (emit-str (cause-name cause))))))))
+
+;; ------------------------- capability faults
+;; Cause 28 says which register held the capability and what it refused.
+(define (capability-trap epc tval ctx)
+  (fault-report epc ctx
+    (lambda ()
+      (emit-capability-fault (insn-at epc) (%lsh tval -5) (%logand tval 31) ctx))))
+
+;; SD, bit 7 of the permissions: whether the capability stores data at all.
+(define (stores-data? c) (%= 128 (%logand (%cap-perms c) 128)))
+
+(define (emit-sealed v)
+  (cond ((%= (%cap-otype v) 2) (emit-str " is a sealed function: only calling it opens it"))
+        ((%= (%cap-otype v) 1) (emit-str " is a sealed entry: only jumping to it opens it"))
+        (else (emit-str " is sealed"))))
+
+(define (emit-pc-fault code)
+  (emit-str (cond ((%= code cf-length) "the pc has run off the end of its code")
+                  ((%= code cf-execute) "the pc is not in code")
+                  (else "the pc's capability refuses it"))))
+
+(define (emit-capability-fault w reg code ctx)
+  (let ((v (fault-value ctx reg)))
+    (if (if (%= reg reg-sp) (%= code cf-length) nil)
+        ;; `sp` is bounded to its task's stack, so writing below the bottom
+        ;; is a bounds fault even where the stack limit has not caught it.
+        (emit-str "stack overflow: below the bottom of the stack")
+        (begin
+          (emit-str (op-name w))
+          (emit-str ": ")
+          (cond
+           ((%= code cf-sr) (emit-str "privileged operation in code compiled without unsafe"))
+           ((%= reg 32) (emit-pc-fault code))
+           ((%= reg 33) (emit-str "integer addressing refused by the default data capability"))
+           ((%= code cf-tag) (emit-value v) (emit-str " is not a pointer"))
+           ((%= code cf-seal) (emit-value v) (emit-sealed v))
+           ((if (%= code cf-store) t (%= code cf-store-cap))
+            (cond ((%null? v) (emit-str "nil has no cell"))
+                  ((if (%= code cf-store-cap) (stores-data? v) nil)
+                   (emit-value v) (emit-str " cannot hold pointers"))
+                  (else (emit-value v) (emit-str " is read-only"))))
+           ((%= code cf-length) (emit-str "outside the bounds of ") (emit-value v))
+           ((%= code cf-execute) (emit-value v) (emit-str " is not code"))
+           ((if (%= code cf-load) t (%= code cf-load-cap))
+            (emit-value v) (emit-str " cannot be read"))
+           ((%= code cf-representable)
+            (emit-value v) (emit-str " cannot be narrowed to those bounds exactly"))
+           ((if (%= code cf-unseal) t (%= code cf-type))
+            (emit-value v) (emit-str " is not unsealed by that key"))
+           (else
+            (emit-str "capability fault ") (emit-str (number->hex code))
+            (emit-str " on ") (emit-value v)))))))
 
 ;; ---------------------------------------------------------------- widening
 ;; Overflow and mixed-mode arithmetic both arrive as traps, and neither is an
 ;; error. `+`, `-` and `*` emit the trapping forms of the fixnum instructions,
 ;; and every fixnum instruction refuses an operand that is not one, so a sum
-;; that outgrows 31 bits and a sum with a bignum in it both stop here, and
+;; that outgrows 32 bits and a sum with a bignum in it both stop here, and
 ;; both are the same operation done in a width that fits.
 ;;
-;; Only the one instruction is emulated. A comparison writes a raw zero or
-;; one and the instructions after it turn that into `t` or `nil`; an
-;; arithmetic instruction writes a tagged value. The trap returns to the
-;; instruction after this one and the rest of the sequence runs as compiled.
+;; Only the one instruction is emulated. A comparison leaves the fixnum 0 or
+;; 1 and the instructions after it turn that into `t` or `nil`; an arithmetic
+;; instruction leaves a number. The trap returns to the instruction after
+;; this one and the rest of the sequence runs as compiled.
 ;;
 ;; A trap costs around ten times what the allocation inside it costs, so the
 ;; fast path is one instruction that asks nothing.
 (defsubst (widenable? v) (if (%fixnum? v) t (%bignum? v)))
 
-(define (widen-arith w epc ctx x y)
-  (let ((rd (insn-rd w))
-        (f3 (insn-f3 w))
-        (f7 (insn-f7 w))
-        (ok t))
-    (if (%= f7 1)
-        ;; the compare group: `flt` and `feq` leave a raw flag behind
-        (cond ((%= f3 3) (%st-fixnum! (ctx-reg ctx rd)
-                                      (if (%< (generic-cmp x y) 0) 1 0)))
-              ((%= f3 5) (%st-fixnum! (ctx-reg ctx rd)
-                                      (if (%= (generic-cmp x y) 0) 1 0)))
-              (else (set! ok nil)))
-        (cond ((%= f3 0) (%st-word! (ctx-reg ctx rd) (generic-add x y)))
-              ((%= f3 1) (%st-word! (ctx-reg ctx rd) (generic-sub x y)))
-              ((%= f3 2) (%st-word! (ctx-reg ctx rd) (generic-mul x y)))
-              ((%= f3 3) (%st-word! (ctx-reg ctx rd) (generic-quotient x y)))
-              ((%= f3 4) (%st-word! (ctx-reg ctx rd) (generic-remainder x y)))
-              (else (set! ok nil))))
-    ;; Stepping the saved pc is what makes the trap resume after the
-    ;; instruction rather than run it again.
-    (if ok (%st-fixnum! ctx (%+ epc 4)) nil)
-    ok))
+;; The register form's funct7, its trapping forms folded onto the wrapping
+;; ones: what the operation is in a width that fits, or nil where it has no
+;; such form.
+(define (widened-op f7 x y)
+  (let ((k (if (if (%>= f7 8) (%< f7 #x10) nil) (%- f7 8) f7)))
+    (cond ((%= k 0) (generic-add x y))
+          ((%= k 1) (generic-sub x y))
+          ((%= k 2) (generic-mul x y))
+          ((%= k 3) (generic-quotient x y))
+          ((%= k 4) (generic-remainder x y))
+          ((%= k #x13) (if (%< (generic-cmp x y) 0) 1 0))
+          ((%= k #x15) (if (%= (generic-cmp x y) 0) 1 0))
+          (else nil))))
 
-(define (try-widen epc ctx)
-  (let ((w (%ld-fixnum epc)))
-    (if (%= (insn-op w) op-fixnum)
-        (let ((rd (insn-rd w))
-              (x (trap-raw ctx (insn-rs1 w)))
-              (y (trap-raw ctx (insn-rs2 w))))
-          ;; Slot zero of the context is the saved pc, not register x0, so an
-          ;; instruction that writes x0 has nowhere to put an answer. The
-          ;; compiler emits none; this keeps a corrupt word read as an
-          ;; instruction from scribbling on the return address.
-          (if (%= rd 0)
-              nil
-              (if (if (widenable? x) (widenable? y) nil)
-                  (widen-arith w epc ctx x y)
-                  nil)))
+;; `faddi` and `faddio` add their immediate; `fop` takes both operands from
+;; registers.
+(define (widened w ctx)
+  (let* ((f (insn-f3 w))
+         (x (ctx-ref ctx (insn-rs1 w)))
+         (y (if (%= f 5) (ctx-ref ctx (insn-rs2 w)) (insn-imm-i w))))
+    (if (if (widenable? x) (widenable? y) nil)
+        (cond ((%< f 2) (generic-add x y))
+              ((%= f 5) (widened-op (insn-f7 w) x y))
+              (else nil))
         nil)))
 
-(define (check-trap cause epc tval ctx)
-  (abort-to-repl ctx
-    (compose-report
-      (lambda ()
-        (let ((w (%ld-fixnum epc)))
-          (emit-str "\n*** ")
-          (cond
-           ((%= (insn-op w) op-index) (emit-index-fault w ctx))
-           ((%= (insn-op w) op-fixnum)
-            (emit-arith-fault (fixnum-op-name w) cause tval))
-           ((%= (insn-op w) op-tagged)
-            (emit-arith-fault (tagged-op-name w) cause tval))
-           (else (emit-pair-fault w tval)))
-          (emit-str ", at pc ")
-          (emit-str (number->hex epc))
-          (emit-str "\n")
-          (backtrace-from-context epc ctx))))))
+;; Slot zero of the context is the saved pc, not register x0, so an
+;; instruction that writes x0 has nowhere to put an answer. The compiler
+;; emits none; this keeps a corrupt word read as an instruction from
+;; scribbling on the pc.
+(define (try-widen epc ctx)
+  (let ((w (insn-at epc)))
+    (if (if (%= (insn-op w) opc-fixnum) (%> (insn-rd w) 0) nil)
+        (let ((v (widened w ctx)))
+          (if v
+              (begin (ctx-set! ctx (insn-rd w) v) (step-past ctx 4) t)
+              nil))
+        nil)))
 
+;; ---------------------------------------------------------------- ecalls
 ;; The compiler emits `ecall` for the conditions it detects inline, with the
 ;; reason in a7. The saved pc is stepped over the instruction first: the stub
-;; reloads mepc from the context on its way out.
+;; reloads MEPCC from the context on its way out.
 (define (handle-ecall epc ctx)
-  (%st-fixnum! ctx (%+ epc 4))
-  (let ((code (trap-reg ctx reg-a7)))
+  (step-past ctx 4)
+  (let ((code (ctx-ref ctx reg-a7)))
     (if (%= code ecall-reschedule)
         ;; A task asking to be switched out. Returning from here resumes
         ;; whichever task the scheduler picked.
@@ -361,11 +572,11 @@
           (lambda ()
           (cond
            ((%= code ecall-arity)
-            ;; t0 still holds the closure that was about to be entered and t1
-            ;; the count it was handed.
+            ;; t0 still holds the closure that was about to be entered, opened
+            ;; by the `jcl` that entered it, and t1 the count it was handed.
             (emit-str "\ncalled ")
-            (emit-callee (trap-raw ctx reg-t0))
-            (let ((n (trap-reg ctx reg-t1)))
+            (emit-callee (ctx-ref ctx reg-t0))
+            (let ((n (ctx-ref ctx reg-t1)))
               (emit-str " with ")
               (emit-str (number->string n))
               (emit-str (if (%= n 1) " argument" " arguments")))
@@ -376,9 +587,9 @@
             ;; A record accessor was handed the wrong kind of record. It left
             ;; the tag it wanted in t3 and what it was given in a0.
             (emit-str "\nexpected ")
-            (emit-a-or-an (trap-raw ctx reg-t3))
+            (emit-a-or-an (ctx-ref ctx reg-t3))
             (emit-str ", got ")
-            (emit-object (trap-raw ctx reg-a0))
+            (emit-value (ctx-ref ctx reg-a0))
             (emit-str ", at ")
             (emit-str (number->hex epc))
             (emit-str "\n"))
@@ -393,48 +604,58 @@
           ;; caller. Starting the walk at the return address makes the first
           ;; line name the call site.
           (if (%= code ecall-arity)
-              (backtrace-from-context (trap-reg ctx reg-ra) ctx)
+              (backtrace-from-context (%addr-of (ctx-ref ctx reg-ra)) ctx)
               (backtrace-from-context epc ctx))))))))
 
 ;; ---------------------------------------------------------------- backtrace
-;; Every prologue saves its caller's frame base at s0-8 and its caller's code
-;; object, which carries the name, at s0-16. So a backtrace needs no side
-;; table: the words that make a frame make the trace.
+;; Every prologue saves its return address at s0-8, its caller's frame at
+;; s0-16 and its caller's code object, which carries the name, at s0-32. So a
+;; backtrace needs no side table: the slots that make a frame make the trace.
+;; The frame pointer is a capability to the stack, and NULL at the bottom.
 (define backtrace-limit 24)
 
 ;; The closure a call was about to enter.
 (define (emit-callee f)
   (if (%closure? f) (emit-code-label (%slot f clo-code)) (emit-str "a non-function")))
 
+;; A frame whose slots below it can be read without faulting: the trace is
+;; printed from inside the trap handler, where a fault would stop the machine.
+(define (frame-readable? f)
+  (if (%cap-tag? f)
+      (if (%cap-sealed? f)
+          nil
+          (if (%>= (%- (%addr-of f) 32) (%cap-base f)) (%<= (%addr-of f) (%cap-top f)) nil))
+      nil))
+
 (define (print-backtrace s0 code pc)
   (emit-str "backtrace:\n")
-  (let ((f s0) (c code) (p pc) (i 0) (go t))
-    (while (if go (if (%< i backtrace-limit) (frame-ok? f) nil) nil)
+  (let ((f s0) (c code) (p pc) (i 0))
+    (while (if (%< i backtrace-limit) (frame-readable? f) nil)
       (emit-str "  ")
       (emit-code-label c)
       (emit-str " at ")
       (emit-str (number->hex p))
       (emit-str "\n")
-      (let ((ra (%ld-fixnum (%- f 4))))
-        ;; The allocator's refill stub sits between two Lisp frames without a
-        ;; frame of its own, so the chain steps over it.
-        (if (in-stub? ra) (emit-str "  (allocating)\n") nil)
-        (set! p ra))
-      (set! c (%ld-word (%- f 16)))
-      (set! f (%ld-fixnum (%- f 8)))
+      (set! p (%addr-of (%cap-ld f -8)))
+      (set! c (%cap-ld f -32))
+      (set! f (%cap-ld f -16))
       (set! i (%+ i 1)))
-    (if (if go (frame-ok? f) nil) (emit-str "  ...\n") nil)))
-
-;; The registers a trap saved. Word 0 of the block is the pc and words 1..31
-;; are x1..x31; `reg-<name>` for each comes from the generated layout.
-(define (ctx-pc c) c)
-(define (ctx-reg c n) (%+ c (%* 4 n)))
-
-(define (trap-reg ctx n) (%ld-fixnum (ctx-reg ctx n)))
-(define (trap-raw ctx n) (%ld-word (ctx-reg ctx n)))
+    (if (frame-readable? f) (emit-str "  ...\n") nil)))
 
 (define (backtrace-from-context epc ctx)
-  (print-backtrace (trap-reg ctx reg-s0) (trap-raw ctx reg-s1) epc))
+  (print-backtrace (ctx-ref ctx reg-s0) (ctx-ref ctx reg-s1) epc))
+
+;; One line for the fault, made by `what`, and the trace below it.
+(define (fault-report epc ctx what)
+  (abort-to-repl ctx
+    (compose-report
+      (lambda ()
+        (emit-str "\n*** ")
+        (%funcall what)
+        (emit-str ", at pc ")
+        (emit-str (number->hex epc))
+        (emit-str "\n")
+        (backtrace-from-context epc ctx)))))
 
 (define (fatal-trap cause epc tval ctx)
   (abort-to-repl ctx
@@ -446,11 +667,6 @@
         (emit-str (number->hex epc))
         (emit-str ", value ")
         (emit-str (number->hex tval))
-        ;; The machine refuses any store into its first eight bytes, which
-        ;; are what car and cdr of nil read.
-        (if (if (%= cause cause-store-fault) (%< tval 8) nil)
-            (emit-str ", which is nil's cell")
-            nil)
         (emit-str "\n")
         (backtrace-from-context epc ctx)))))
 
@@ -511,29 +727,46 @@
 ;; rest happens where every other failure goes.
 (define (error-trap args) (%ecall ecall-error))
 
-;; A task restarts on its own stack. Before there are tasks, on the boot
-;; stack.
+;; A task restarts on its own stack, which is a capability standing at its
+;; top. Before there are tasks, on the boot stack, whose bounds the forge left
+;; in two low globals.
 (define (restart-stack)
-  (if *stack-top-fn* (%funcall *stack-top-fn*) (%ld-fixnum lg-stacktop)))
+  (if *stack-top-fn*
+      (%funcall *stack-top-fn*)
+      (stack-capability (%ld-word lg-stackbot) (%ld-word lg-stacktop))))
 
 ;; Where a restarted closure returns to when it finally does: on the machine
-;; the task exit stub, so a prompt in a window that is dismissed ends its
-;; task.
+;; the sentry for the task exit stub, so a prompt in a window that is
+;; dismissed ends its task. Before there are tasks, NULL.
 (define (restart-ra)
   (if *return-addr-fn* (%funcall *return-addr-fn*) 0))
 
+;; What `jcl` does to a closure, done by hand for a context that is to start
+;; in one. A closure is sealed, so the escape hatch makes the same capability
+;; unsealed out of the root: the bounds and permissions of the closure, and
+;; none of its seal. Its slot 0 is the entry.
+(define (open-closure f)
+  (%cap-and-perms (%cap-bounds-exact (%from-addr (%addr-of f)) (%cap-len f))
+                  (%cap-perms f)))
+
 ;; The closure is entered with one argument, if one is given: the report of
-;; the fault that brought it here.
+;; the fault that brought it here. Nothing the abandoned code left in a
+;; register survives except the task in s2 and its cons run in gp, and the
+;; NULL left in s0 is the bottom of the new stack.
 (define (enter-closure ctx f sp . arg)
-  (%st-fixnum! (ctx-reg ctx reg-zero) (%ld-fixnum (%addr-of f)))  ; pc = its entry
-  (%st-word! (ctx-reg ctx reg-t0) f)                   ; t0 = the closure
-  (if (%cons? arg)
-      (begin (%st-word! (ctx-reg ctx reg-a0) (%car arg))    ; a0 = the argument
-             (%st-fixnum! (ctx-reg ctx reg-t1) 1))          ; t1 = one of them
-      (%st-fixnum! (ctx-reg ctx reg-t1) 0))                 ; t1 = no arguments
-  (%st-fixnum! (ctx-reg ctx reg-sp) sp)                    ; a whole stack
-  (%st-fixnum! (ctx-reg ctx reg-ra) (restart-ra))          ; where it ends up
-  (%st-fixnum! (ctx-reg ctx reg-s0) 0)                     ; and no caller
+  (let ((open (open-closure f)) (r 1))
+    (while (%< r 32)
+      (if (if (%= r reg-gp) t (%= r reg-s2)) nil (ctx-set! ctx r 0))
+      (set! r (%+ r 1)))
+    (ctx-set! ctx reg-zero (%cap-ld open (%* 8 clo-entry)))     ; pc = its entry
+    (ctx-set! ctx reg-t0 open)                                 ; t0 = the closure
+    (if (%cons? arg)
+        (begin (ctx-set! ctx reg-a0 (%car arg))                ; a0 = the argument
+               (ctx-set! ctx reg-t1 1))                        ; t1 = one of them
+        (ctx-set! ctx reg-t1 0))                               ; t1 = no arguments
+    (ctx-set! ctx reg-sp sp)                                   ; a whole stack
+    (ctx-set! ctx reg-ra (restart-ra))                         ; where it ends up
+    (ctx-set! ctx reg-tp nil))                                 ; and nil, as ever
   nil)
 
 ;; Nothing is unwound: the stack the fault happened on is abandoned where it
@@ -546,7 +779,7 @@
 ;; The machine stops and says so.
 (define (abort-to-repl ctx . report)
   (let ((r (if (%cons? report) (%car report) nil)))
-    (if (%> (%ld-fixnum lg-trapdepth) 1)
+    (if (%> (%ld-word lg-trapdepth) 1)
         (begin
           (uart-string "\n*** error inside the trap handler\n")
           (if r (uart-string r) nil)
@@ -738,7 +971,7 @@
 ;; The forge left a thunk for every top level form that was not a function
 ;; definition, in source order.
 (define (run-boot-list)
-  (let ((l (%ld-word lg-bootlist)))
+  (let ((l (%ld-cap lg-bootlist)))
     (while (%cons? l)
       (%funcall (%car l))
       (set! l (%cdr l)))))
@@ -746,8 +979,8 @@
 (define (kickstart)
   ;; The allocator first: the first thing the boot list does is allocate.
   (install-allocator)
-  (%st-word! lg-traphook (%symbol-value 'handle-trap))
-  (%st-word! lg-errhandler (%symbol-value 'error-trap))
+  (%st-cap! lg-traphook (%symbol-value 'handle-trap))
+  (%st-cap! lg-errhandler (%symbol-value 'error-trap))
   (run-boot-list)
   ;; Exec comes up before anything can want a task: the code already running
   ;; becomes task zero, and its context is the trap frame the stub has been
@@ -757,8 +990,8 @@
   (banner)
   (banner-exec)
   (emit-str "type (help) for what to try\n")
-  (if (%ld-word lg-startup)
-      (%funcall (%ld-word lg-startup))
+  (if (%ld-cap lg-startup)
+      (%funcall (%ld-cap lg-startup))
       nil)
   ;; A prompt starts in user, whatever package the boot list left the reader
   ;; in.

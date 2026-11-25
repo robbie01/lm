@@ -1,7 +1,9 @@
 ;;; exec.lisp - an Amiga Exec, in Lisp.
 ;;;
-;;; One shared address space, no protection, no MMU. Message passing costs a
-;;; pointer on a list, because there is nothing to copy it between.
+;;; One shared address space and no MMU: what keeps one task out of another's
+;;; memory is that it holds only the capabilities it was handed. Message
+;;; passing costs a pointer on a list, because there is nothing to copy it
+;;; between.
 ;;;
 ;;; The structures are Exec's: doubly linked lists with sentinel nodes at both
 ;;; ends so that insert and remove need no special cases; tasks with 32 signal
@@ -11,9 +13,10 @@
 ;;; or owned by one task and reached through its port, and the kernel's own
 ;;; few-instruction sections turn interrupts off.
 ;;;
-;;; The context switch is one CSR write. The trap stub saves all 32 registers
-;;; into the block mscratch points at and restores from there on the way out,
-;;; so switching tasks is pointing mscratch at a different task's context.
+;;; The context switch is one special register write. The trap stub saves all
+;;; 32 registers into the block MScratchC names and restores from there on the
+;;; way out, so switching tasks is pointing MScratchC at a different task's
+;;; context.
 
 (in-package exec)
 (unsafe-file)
@@ -33,9 +36,9 @@
 
 ;; ---------------------------------------------------------------- List
 ;; A header owning two sentinel nodes, one before the first real node and one
-;; after the last. Exec packs them into three words by pointing four bytes
-;; into the header, which this machine cannot represent, since four bytes past an
-;; object reference reads as a cons, so they are real nodes here.
+;; after the last. Exec packs them into three words by pointing into the
+;; middle of the header; a reference here is a capability to a whole object,
+;; so they are real nodes.
 (defrecord (exec-list list) head tail)
 
 (define (new-list)
@@ -123,13 +126,14 @@
     (reverse acc)))
 
 ;; ---------------------------------------------------------------- Task
-;; The stack and the 128-byte register context are raw pool memory: the trap
-;; stub writes the context as thirty-two untagged words, and a record's slots
-;; are tagged values.
+;; The stack and the 256-byte register context are pool memory, and the task
+;; holds each as a capability bounded to it. The trap stub saves the
+;; registers into the context as thirty-two capabilities, tags and all.
 (defrecord (task tc) (include node)
   state sigalloc sigwait sigrecvd
-  splower spupper                ; raw addresses, held as fixnums
-  context                        ; 128-byte register block, raw
+  stack                          ; the whole stack, standing at its top
+  context                        ; the register block MScratchC names
+  blocks                         ; the pool blocks behind both, to give back
   fn                             ; the closure the task runs
   result switches
   binds                          ; this task's fluid bindings, innermost first
@@ -267,7 +271,7 @@
   (set-tc-state! task ts-ready)
   (enqueue (ready-list) task))
 
-;; Choose the next task and point mscratch at its context. Called only from
+;; Choose the next task and point MScratchC at its context. Called only from
 ;; inside the trap handler, with the outgoing task's registers already saved.
 (define (switch-tasks)
   (let* ((cur (this-task))
@@ -305,8 +309,8 @@
 ;; ---------------------------------------------------------------- signals
 ;; Three bits are fixed, the same in every task, so that waking every waiter
 ;; is a walk of the wait list: the vertical blank, the blitter, and a mutex
-;; handed over. Every other bit from 0 to 29 is for allocation. Bit 30 is
-;; not: a mask is a fixnum, and a fixnum with bit 30 set is negative, which
+;; handed over. Every other bit from 0 to 30 is for allocation. Bit 31 is
+;; not: a mask is a fixnum, and a fixnum with bit 31 set is negative, which
 ;; the tests below would misread.
 (define sigb-vblank 5)
 (define sigf-vblank (%lsh 1 sigb-vblank))
@@ -325,7 +329,7 @@
 (define (alloc-signal task)
   (let ((got (without-interrupts
                (let ((alloc (tc-sigalloc task)) (n 0) (g -1))
-                 (while (if (%< n 30) (%< g 0) nil)
+                 (while (if (%< n 31) (%< g 0) nil)
                    (if (%= 0 (%logand alloc (%lsh 1 n)))
                        (begin
                          (set-tc-sigalloc! task (%logior alloc (%lsh 1 n)))
@@ -461,10 +465,6 @@
 (define (sleep ms) (wait-timeout 0 ms) nil)
 
 ;; ---------------------------------------------------------------- tasks
-;; Slot 0 of a closure holds a raw code address, so it is read with %addr-of
-;; rather than %from-addr: the word is already an address.
-(define (closure-entry fn) (%addr-of (%ld-word (%addr-of fn))))
-
 (define default-stack 65536)
 (define default-quantum 200000)
 
@@ -476,9 +476,23 @@
 (define stack-reserve 8192)
 
 (define (task-stack-limit task)
-  (let* ((lo (tc-splower task))
-         (quarter (%lsh (%- (tc-spupper task) lo) -2)))
+  (let* ((lo (%cap-base (tc-stack task)))
+         (quarter (%lsh (%cap-len (tc-stack task)) -2)))
     (%+ lo (if (%< quarter stack-reserve) quarter stack-reserve))))
+
+;; Pool memory that a capability bounds exactly: the length rounded up, and
+;; the base aligned, the way the processor says a capability of that length
+;; needs. Answers the pool block, for giving it back, and the capability.
+(define (pool-region n)
+  (let* ((len (%rrl n))
+         (mask (%ram n))
+         (block (alloc-pool (%+ len (%lognot mask))))
+         (base (%logand (%+ block (%lognot mask)) mask)))
+    (%cons block (data-region base len))))
+
+;; A task's first cons comes out of no run at all: a capability to nothing,
+;; which faults into a refill the first time the allocator narrows it.
+(define (empty-run) (%cap-bounds-exact (%from-addr cons-base) 0))
 
 ;; A fresh record's slots hold nil, and nil is not the fixnum zero, so
 ;; anything counted or masked is set before it is read.
@@ -496,33 +510,31 @@
 ;; before it can run.
 (define (make-task name pri fn . opts)
   (let* ((binds (initial-binds))
-         (stack (if (%cons? opts) (%car opts) default-stack))
+         (size (if (%cons? opts) (%car opts) default-stack))
          (task (tc-alloc))
-         (ctx (alloc-pool ctx-bytes))
-         (sp (alloc-pool stack)))
+         (ctx (pool-region ctx-bytes))
+         (stack (pool-region size)))
     (set-node-name! task name)
     (set-node-pri! task pri)
     (set-tc-base! task pri)
     (set-tc-gen! task *exec-generation*)
     (zero-task-counters! task)
     (set-tc-state! task ts-added)
-    (set-tc-splower! task sp)
-    (set-tc-spupper! task (%+ sp stack))
-    (set-tc-context! task ctx)
+    (set-tc-stack! task (%cap-set-addr (%cdr stack) (%cap-top (%cdr stack))))
+    (set-tc-context! task (%cdr ctx))
+    (set-tc-blocks! task (list (%car ctx) (%car stack)))
     (set-tc-fn! task fn)
     (set-tc-binds! task binds)
     (set-tc-quantum! task default-quantum)
     (set-tc-sigalloc! task sig-reserved)
     ;; The context is built to look as though the task had just been
-    ;; interrupted on the first instruction of its function.
-    (poke (ctx-pc ctx) (closure-entry fn))
-    (poke (ctx-reg ctx reg-sp) (%+ sp stack))
-    (poke (ctx-reg ctx reg-ra) *task-exit-stub*)
+    ;; interrupted on the first instruction of its function, on a whole
+    ;; stack, returning to the exit stub when it is done.
+    (enter-closure (tc-context task) fn (tc-stack task))
     ;; s2 says which task is running, so the context carries it the way it
     ;; carries the stack pointer.
-    (%st-word! (ctx-reg ctx reg-s2) task)
-    (%st-word! (ctx-reg ctx reg-t0) fn)
-    (poke (ctx-reg ctx reg-t1) 0)
+    (ctx-set! (tc-context task) reg-s2 task)
+    (ctx-set! (tc-context task) reg-gp (empty-run))
     task))
 
 ;; Onto the ready list: from here it runs when the scheduler says so.
@@ -534,13 +546,6 @@
 
 (define (add-task name pri fn . opts)
   (start-task (apply make-task name pri fn opts)))
-
-;; What the forge handed out before the machine ran has no header and was
-;; never meant to come back.
-(define (free-if-ours p)
-  (if (if p (%> p 0) nil)
-      (if (%= (%ld-fixnum (%+ p -4)) pool-tag) (free-pool p) nil)
-      nil))
 
 ;; A dependent task: removed when the task that made it is, so a server that
 ;; fans work out does not have to remember what it started. A parent holds
@@ -633,15 +638,16 @@
         nil)
       (begin (reap-task task) nil)))
 
-;; The stack and the register context are pool memory, given back by hand.
-;; The task itself is an object, collected when the last reference goes; its
-;; links go first so that a task somebody still holds does not keep every
-;; task behind it alive.
+;; The stack and the register context are pool memory, given back by hand;
+;; the boot task's came from the forge and have no blocks to give. The task
+;; itself is an object, collected when the last reference goes; its links go
+;; first so that a task somebody still holds does not keep every task behind
+;; it alive.
 (define (reap-task task)
   (forget-node task)
-  (free-if-ours (tc-splower task))
-  (free-if-ours (tc-context task))
-  (set-tc-splower! task nil)
+  (dolist (b (tc-blocks task)) (free-pool b))
+  (set-tc-blocks! task nil)
+  (set-tc-stack! task nil)
   (set-tc-context! task nil)
   nil)
 
@@ -685,8 +691,13 @@
 
 ;; The stub a task returns to when its function finishes. It cannot be a Lisp
 ;; closure directly, because it is reached by `ret` with the argument
-;; registers holding whatever the task left in them.
+;; registers holding whatever the task left in them. This is the sentry a
+;; task's first frame saves as its return address, NULL until Exec builds it.
 (define *task-exit-stub* 0)
+
+;; The stub reads `task-finished` out of a low global, which takes integer
+;; addressing, so it is code with SR: EX 8 and SR 4.
+(define kernel-code-perms 12)
 
 (define (task-finished)
   (let ((task (this-task)))
@@ -706,11 +717,14 @@
 (define (build-task-exit-stub)
   (let ((a (make-assembler)))
     (i-li a $t1 0)
-    (i-lw a $t0 $zero lg-task-exit)
-    (i-lw a $t2 $t0 0)
-    (i-jr a $t2)
-    (set! *task-exit-stub* (place a))
-    (%st-word! lg-task-exit (%symbol-value 'task-finished))
+    (i-lc a $t0 $zero lg-task-exit)
+    (i-jcl a $ra $t0)
+    (place a)
+    (%st-cap! lg-task-exit (%symbol-value 'task-finished))
+    (set! *task-exit-stub*
+          (%cap-seal-entry
+           (%cap-and-perms (%cap-bounds-exact (%from-addr (asm-origin a)) (asm-len a))
+                           kernel-code-perms)))
     *task-exit-stub*))
 
 ;; ---------------------------------------------------------------- ports
@@ -1405,7 +1419,9 @@
   (set! *ticks* 0)
   (set! *ms-per-tick* (%/ *quantum* (%/ (timer-hz) 1000)))
   ;; The code that is already running becomes task zero. Its context is the
-  ;; block the trap stub has been using all along.
+  ;; block the trap stub has been using all along, and its stack the boot
+  ;; stack, both made by the reset stub from the bounds the forge left in the
+  ;; low globals.
   (let ((boot (tc-alloc)))
     (set-node-name! boot "boot")
     (set-node-pri! boot 0)
@@ -1414,9 +1430,8 @@
     (zero-task-counters! boot)
     (set-tc-quantum! boot default-quantum)
     (set-tc-state! boot ts-run)
-    (set-tc-context! boot (%ld-fixnum lg-trapsave))
-    (set-tc-splower! boot (%ld-fixnum lg-stackbot))
-    (set-tc-spupper! boot (%ld-fixnum lg-stacktop))
+    (set-tc-context! boot (data-region (%ld-word lg-trapsave) ctx-bytes))
+    (set-tc-stack! boot (stack-capability (%ld-word lg-stackbot) (%ld-word lg-stacktop)))
     (set-tc-sigalloc! boot sig-reserved)
     ;; Task zero takes whatever was bound before there were tasks.
     (set-tc-binds! boot *boot-binds*)
@@ -1429,7 +1444,7 @@
   ;; What sys.lisp had to leave blank: a task restarts on its own stack, and a
   ;; task that faults with no prompt behind it ends rather than halting the
   ;; machine.
-  (set! *stack-top-fn* (lambda () (tc-spupper (this-task))))
+  (set! *stack-top-fn* (lambda () (tc-stack (this-task))))
   (set! *return-addr-fn* (lambda () *task-exit-stub*))
   (vblank-start)
   (idle-start)
@@ -1480,24 +1495,26 @@
 ;; ---------------------------------------------------------------- gc roots
 ;; Exec's records are objects hanging off variables, so the collector finds
 ;; the tasks, ports, messages and interrupt servers and every value in them
-;; by itself. What it cannot reach are the raw stacks and register blocks the
-;; tasks were suspended on. Nothing here may allocate: these run inside a
-;; collection.
+;; by itself. What it cannot reach are the stacks and register blocks the
+;; tasks were suspended on, which are pool memory. Nothing here may allocate:
+;; these run inside a collection.
 
-;; A cycle has begun, or a compaction moved every pair: the run a suspended
-;; task was holding is not its own any more. The cell gp names is kept: the
-;; task may have been preempted between the room check and the two stores
-;; that fill the cell, and would finish its pair there. `scan-run` has the
-;; collector treat that cell as a live pair, and here the run shrinks to
-;; that one cell; the next cons after it asks for a fresh run. A run with
-;; nothing left is left with nothing: extending it would hand the task the
-;; cell past its end, which belongs to whoever got the next run.
+;; A cycle has begun: the run a suspended task was holding is not its own any
+;; more, because whatever it makes from now on has to come from a run handed
+;; out marked. The cell gp stands at is kept: the task may have been
+;; preempted after narrowing a pair out of it and before filling it in, and
+;; would finish its pair there. So the run shrinks to that one cell, which
+;; the collector sees as a pair like any other and marks, and the next cons
+;; after it faults into a refill. A run with less than a cell left is left as
+;; it is: its next cons faults anyway, and the cell past its end belongs to
+;; whoever got the next run.
 (define (drop-task-run task)
   (let ((ctx (tc-context task)))
-    (if (if ctx (%> ctx 0) nil)
-        (let ((gp (%ld-fixnum (ctx-reg ctx reg-gp)))
-              (tp (%ld-fixnum (ctx-reg ctx reg-tp))))
-          (if (%< gp tp) (poke (ctx-reg ctx reg-tp) (%+ gp 8)) nil))
+    (if ctx
+        (let ((gp (ctx-ref ctx reg-gp)))
+          (if (if (%cap-tag? gp) (%<= (%+ (%addr-of gp) 16) (%cap-top gp)) nil)
+              (ctx-set! ctx reg-gp (%cap-bounds-exact gp 16))
+              nil))
         nil)))
 
 (define (invalidate-runs)
@@ -1509,7 +1526,8 @@
   nil)
 
 ;; The run a task was handed is owed by that task, not by whoever refills
-;; next; see `refill-cons` in gc.lisp. Before there are tasks, gc's own cell.
+;; next; see `refill-cons-run` in gc.lisp. Before there are tasks, gc's own
+;; cell.
 (define (note-run! bytes)
   (let ((me (this-task)))
     (if me (set-tc-run-owed! me bytes) (set! gc::*run-owed* bytes))))
@@ -1520,32 +1538,12 @@
         (let ((b (tc-run-owed me))) (set-tc-run-owed! me 0) b)
         (let ((b gc::*run-owed*)) (set! gc::*run-owed* 0) b))))
 
-;; A suspended task's stack, precisely, and its saved registers,
-;; conservatively: a task preempted mid-expression has live values in
-;; registers whose types nothing recorded, and the compactor pins whatever
-;; they reach. gp and tp are not guesses, they are the cons run, and are
-;; handled by `scan-run`.
+;; A suspended task's saved registers and its stack from the saved sp to the
+;; top, scanned precisely: a granule holds a pointer exactly when its tag is
+;; set, whatever the code that left it there was in the middle of.
 (define (scan-task task)
   (let ((ctx (tc-context task)))
-    (if (if ctx (%> ctx 0) nil)
-        (begin
-          (scan-frames (%ld-fixnum (%+ ctx (%* 4 reg-sp)))
-                          (%ld-fixnum (%+ ctx (%* 4 reg-s0))))
-          (scan-conservative ctx (ctx-reg ctx reg-gp))
-          (scan-conservative (ctx-reg ctx reg-t0) (%+ ctx ctx-bytes))
-          (scan-run ctx))
-        nil)))
-
-;; The cell at the front of a suspended task's run: nothing yet, or a pair the
-;; task was interrupted in the middle of filling in. Kept as a pair like any
-;; other, with gp rewritten to wherever it goes. A run with nothing left in it
-;; is given up here and now.
-(define (scan-run ctx)
-  (let ((gp (ctx-reg ctx reg-gp))
-        (tp (ctx-reg ctx reg-tp)))
-    (if (%< (%ld-fixnum gp) (%ld-fixnum tp))
-        (slot gp)
-        (begin (poke gp 0) (poke tp 0)))))
+    (if ctx (scan-context ctx) nil)))
 
 (define (scan-list-of l fn)
   (let ((p (list-first l)))
