@@ -75,7 +75,8 @@ out read-only tails. nil has none of the three, so loading nil through
 anything leaves it nil.
 
 **Sealing.** A sealed capability cannot be dereferenced or modified; moving
-its address or changing its permissions clears its tag. otype 1, the
+its address or changing its permissions clears its tag, and a `candperm`
+whose mask keeps every permission it has changes nothing and keeps it. otype 1, the
 sentry, is unsealed by jumping to it, at its own address only. otype 2, the
 closure, is unsealed by calling it (`jcl`, below). Neither needs an
 authority to make: anyone may seal their own code (`csealentry`) or closure

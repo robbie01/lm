@@ -627,6 +627,15 @@ pub fn run_all() -> bool {
         c4.push(cincoffsetimm(A6, A4, 8));
         c4.push(cgettag(A7, A6));
         ok("moving a sealed capability clears its tag", go(&c4).x(A7) == 0);
+        // candperm changes a sealed capability's permissions only by
+        // untagging it; a mask that clears nothing it has changes nothing.
+        let mut c8 = vec![];
+        li32(&mut c8, A2, P_ALL);
+        li32(&mut c8, A3, P_ALL & !P_SE);
+        c8.extend([csealentry(A0, ROOT), candperm(A1, A0, A2), cseqx(A4, A1, A0), candperm(A5, A0, A3), cgettag(A6, A5)]);
+        let o = go(&c8);
+        ok("candperm of a sealed capability by every permission keeps it", o.x(A4) == 1);
+        ok("...and by fewer untags it", o.x(A6) == 0);
         // The escape hatch: an SE authority at otype 2 opens a closure.
         let mut c5 = vec![addi(A3, ZERO, 2), csetaddr(A3, ROOT, A3), cseal(A4, ROOT, A3), cgettype(A5, A4)];
         c5.extend([cunseal(A6, A4, A3), cgettype(A7, A6)]);

@@ -306,12 +306,13 @@ impl Cap {
         b == base || (b == 0 && t == 1 << 32)
     }
 
-    /// Keep only the permissions in `mask`. A sealed capability loses its
-    /// tag.
+    /// Keep only the permissions in `mask`. A sealed capability whose
+    /// permissions this changes loses its tag; one the mask leaves as it
+    /// was keeps it, as RVY's `YPERMC` does.
     #[inline]
     pub fn and_perms(self, mask: u32) -> Cap {
         let meta = self.meta & !(((!mask) & P_ALL) << PERM_SHIFT);
-        Cap { addr: self.addr, meta, tag: self.tag && !self.is_sealed() }
+        Cap { addr: self.addr, meta, tag: self.tag && (!self.is_sealed() || meta == self.meta) }
     }
 
     /// Clear permissions, sealed or not; the tag is kept. This is what a
@@ -633,6 +634,7 @@ mod tests {
         assert_eq!(s.otype(), OT_CLOSURE);
         assert!(s.is_sealed());
         assert!(!s.and_perms(P_LD).tag);
+        assert_eq!(s.and_perms(P_ALL), s);
         assert!(s.with_bounds(8).is_none());
         assert_eq!(s.unseal(), c);
         assert!(Cap::int(3).with_bounds(1).is_none());
