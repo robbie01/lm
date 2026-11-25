@@ -240,7 +240,9 @@ reached with `cspecialrw`: 0 PCC (read only), 1 DDC, 28 MTCC, 29 MTDC, 30
 MScratchC, 31 MEPCC; the layout names them `scr-*`. The CSRs `mtvec`,
 `mscratch` and `mepc` read and write the addresses of MTCC, MScratchC and
 MEPCC. A trap sets MEPCC to PCC with the faulting address and PCC to MTCC;
-`mret` sets PCC to MEPCC.
+`mret` sets PCC to MEPCC, unsealed if it is a sentry. MTCC is not unsealed,
+as RVY's `mtvec` is not: a sealed MTCC leaves PCC untagged, and the trap's
+first fetch faults again.
 
 Fetch needs PCC tagged, unsealed, with EX, and the instruction inside its
 bounds. A jump or branch whose target leaves PCC's bounds faults at the

@@ -862,6 +862,10 @@ pub fn run_all() -> bool {
         let o = go(&[addi(A0, ZERO, 1), 0xffff_ffff]);
         ok("illegal traps to MTCC", o.took(C_ILLEGAL, 0xffff_ffff));
         ok("MEPCC is PCC at the fault", o.m.mepcc.tag && o.m.mepcc.addr == BASE + 4 && o.m.mepcc.has(P_EX));
+        // MTCC goes into PCC as it is, as RVY's mtvec does: a sentry is not
+        // unsealed, so PCC is untagged and the handler is never reached.
+        let o = go_with(&[0xffff_ffff], |m| m.mtcc = m.mtcc.seal(OT_SENTRY));
+        ok("a trap does not unseal MTCC", !o.m.halted && o.m.mcause == C_CAP && o.m.mtval == (CAPEX_REG_PCC << 5) | CAPEX_TAG);
         // ecall, then mret resumes after it.
         let code = [ecall(), addi(A2, ZERO, 77)];
         let handler = [csrrs(A1, 0x341, ZERO), addi(A1, A1, 4), csrrw(ZERO, 0x341, A1), mret()];

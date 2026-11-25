@@ -800,6 +800,8 @@ impl Machine {
     /// Take a trap: MEPCC becomes PCC at the faulting address, and PCC
     /// becomes MTCC, at an offset of four bytes per cause for an interrupt
     /// when mtvec's mode is vectored. Interrupt causes carry the top bit.
+    /// MTCC is not unsealed, as RVY's mtvec is not: a sealed one leaves
+    /// PCC untagged, and the handler's first fetch faults.
     pub fn enter_trap(&mut self, cause: u32, tval: u32, epc: u32) {
         if self.trace_traps {
             eprintln!(
@@ -825,8 +827,7 @@ impl Machine {
         } else {
             base
         };
-        let mtcc = if self.mtcc.otype() == OT_SENTRY { self.mtcc.unseal() } else { self.mtcc };
-        self.set_pcc(mtcc.with_addr(target));
+        self.set_pcc(self.mtcc.with_addr(target));
     }
 
     /// `mret`: interrupts as they were, and PCC from MEPCC.
