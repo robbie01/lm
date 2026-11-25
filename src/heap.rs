@@ -1,118 +1,180 @@
 //! Object memory.
 //!
-//! A Lisp value is one 32-bit word:
+//! A Lisp value is a capability (`src/cap.rs`), 64 bits and a tag:
 //!
-//!     w == 0            nil. Also a legal cons whose car and cdr are both
-//!                       nil, so `car`/`cdr` need no null check at all and
-//!                       `null?` is a single `beqz`.
-//!     w & 1 == 1        fixnum, value = (i32)w >> 1, range +-2^30. Tagging is
-//!                       order preserving, so signed compares work untagged,
-//!                       and `add`/`sub` need only a single correction.
-//!     w & 7 == 0        cons.   car at [w], cdr at [w+4].
-//!     w & 7 == 4        object. header at [w-4], payload from [w].
-//!     w & 7 == 2        immediate: kind = (w >> 3) & 31, payload = w >> 8.
+//!     untagged, metadata 0     a fixnum: the address field, 32 bits signed
+//!     untagged, metadata k     an immediate of kind k: a character, the
+//!                              unbound marker, eof, void, the default marker
+//!     tagged, no HD            a pair: 16 bytes in cons space, car at 0 and
+//!                              cdr at 8
+//!     tagged, HD               an object: the header is the granule below
+//!                              the base, and the bounds are the payload
+//!     tagged, HD, otype 2      a closure, sealed
+//!     tagged, otherwise        a raw capability: code, a stack, a pool block
 //!
-//! Header word: (len << 8) | type. `len` counts payload elements: words for
-//! the tagged types, bytes for the byte types.
+//! nil is a read-only capability to the 16-byte cell at address 0, whose car
+//! and cdr hold nil, so `car` and `cdr` of nil need no test.
 //!
-//! Nothing ever moves. The collector is conservative over task stacks, so
-//! compiled code can keep values in registers and the Exec kernel can hold
-//! raw pointers into the heap.
+//! An object's header word 0 is `(len << 8) | type`, and word 1 is 0. `len`
+//! counts elements: 8-byte value slots, or bytes for a string or a byte
+//! object. A payload whose length is not exactly representable as bounds is
+//! rounded up to one that is, and its base aligned to match; the space the
+//! alignment skips is a free hole.
+//!
+//! This is the forge's view of the heap: the bootstrap interpreter, the image
+//! writer and the bench all build and read objects through it, so what the
+//! compiler builds is what the machine runs.
 
-#![allow(dead_code)]
-
+use crate::cap::{self, Cap, P_EX, P_HD, P_LC, P_LD, P_LM, P_SC, P_SD};
 use crate::mach::Machine;
 use crate::map::*;
 use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
 
-pub type V = u32; // a tagged Lisp value
+/// A Lisp value.
+pub type V = Cap;
 
-pub const NIL: V = 0;
+/// The size of a value slot, and of a granule: one capability.
+pub const VALUE_BYTES: u32 = 8;
+/// An object's header is one granule, just below its payload.
+pub const HEADER_BYTES: u32 = 8;
 
-// ---- tags ----
+// ---- permissions, in `cgetperm` positions ----
+/// A pair can be read and written, and holds capabilities.
+pub const PERMS_PAIR: u32 = P_LD | P_SD | P_LC | P_SC | P_LM;
+/// An object of a value type: a pair's permissions and HD.
+pub const PERMS_OBJECT: u32 = PERMS_PAIR | P_HD;
+/// A string or a byte object holds data and never a capability.
+pub const PERMS_BYTES: u32 = P_LD | P_SD | P_HD;
+/// nil can be read, and nothing else.
+pub const PERMS_NIL: u32 = P_LD | P_LC;
+/// A code object's entry: execute, and nothing else. `unsafe` code adds SR.
+pub const PERMS_CODE: u32 = P_EX;
+
+/// The bytes nil names: its car and its cdr.
+pub const NIL_BYTES: u32 = 16;
+/// A pair's bounds.
+pub const PAIR_BYTES: u32 = 16;
+
+/// nil: the capability to the cell at 0, with LD and LC.
+pub const NIL: V = Cap::NIL;
+
+/// The immediate kinds: the metadata of an untagged value.
+pub use crate::cap::{IMM_CHAR, IMM_DEFAULT, IMM_EOF, IMM_FIXNUM, IMM_UNBOUND, IMM_VOID};
+
+pub const UNBOUND: V = Cap::imm(IMM_UNBOUND, 0);
+pub const EOF: V = Cap::imm(IMM_EOF, 0);
+pub const VOID: V = Cap::imm(IMM_VOID, 0);
+pub const DEFAULT: V = Cap::imm(IMM_DEFAULT, 0);
+
+// ---- kinds, as `vkind` answers them ----
+/// 0..15 is an untagged value's metadata; these are the tagged kinds.
+pub const VK_NIL: u32 = 16;
+pub const VK_PAIR: u32 = 17;
+pub const VK_CAP: u32 = 31;
+/// An object's kind is this plus its header type.
+pub const VK_OBJECT: u32 = 32;
+
+// ---- values ----
 #[inline]
-pub fn is_fixnum(v: V) -> bool {
-    v & 1 == 1
-}
-#[inline]
-pub fn is_cons(v: V) -> bool {
-    v != NIL && v & 7 == 0
-}
-#[inline]
-pub fn is_obj(v: V) -> bool {
-    v & 7 == 4
-}
-#[inline]
-pub fn is_imm(v: V) -> bool {
-    v & 7 == 2
-}
-#[inline]
-pub fn is_ptr(v: V) -> bool {
-    v != NIL && (v & 3) == 0
-}
-#[inline]
-pub fn fix(n: i32) -> V {
-    ((n as u32) << 1) | 1
+pub const fn fix(n: i32) -> V {
+    Cap::int(n as u32)
 }
 #[inline]
 pub fn unfix(v: V) -> i32 {
-    (v as i32) >> 1
+    v.addr as i32
 }
 #[inline]
-pub fn obj_addr(v: V) -> u32 {
-    v - 4
+pub fn is_fixnum(v: V) -> bool {
+    !v.tag && v.meta == IMM_FIXNUM
 }
-
-// ---- immediate kinds ----
-pub const IMM_CHAR: u32 = 0;
-pub const IMM_UNBOUND: u32 = 1;
-pub const IMM_EOF: u32 = 2;
-pub const IMM_VOID: u32 = 3;
-pub const IMM_DEFAULT: u32 = 4;
-
+/// An untagged value that is not a fixnum.
 #[inline]
-pub const fn imm(kind: u32, payload: u32) -> V {
-    (payload << 8) | (kind << 3) | 2
+pub fn is_imm(v: V) -> bool {
+    !v.tag && v.meta != IMM_FIXNUM
 }
 #[inline]
 pub fn imm_kind(v: V) -> u32 {
-    (v >> 3) & 31
+    v.meta
 }
 #[inline]
 pub fn imm_payload(v: V) -> u32 {
-    v >> 8
+    v.addr
 }
-pub const UNBOUND: V = imm(IMM_UNBOUND, 0);
-pub const EOF: V = imm(IMM_EOF, 0);
-pub const VOID: V = imm(IMM_VOID, 0);
 #[inline]
-pub fn chr(c: u32) -> V {
-    imm(IMM_CHAR, c)
+pub const fn chr(c: u32) -> V {
+    Cap::imm(IMM_CHAR, c)
 }
 #[inline]
 pub fn is_char(v: V) -> bool {
-    is_imm(v) && imm_kind(v) == IMM_CHAR
+    !v.tag && v.meta == IMM_CHAR
+}
+/// A tagged, unsealed capability without HD to a pair's 16 bytes in cons
+/// space. nil is not one.
+#[inline]
+pub fn is_cons(v: V) -> bool {
+    v.tag
+        && (CONS_BASE..CONS_END).contains(&v.addr)
+        && !v.is_sealed()
+        && !v.has(P_HD)
+        && v.bounds() == (v.addr, (v.addr + PAIR_BYTES) as u64)
+}
+/// A tagged capability with HD into object space: an object, sealed or not.
+/// The root has HD as it has every permission, but it is not an object.
+#[inline]
+pub fn is_obj(v: V) -> bool {
+    v.tag && v.has(P_HD) && (OBJ_BASE + HEADER_BYTES..OBJ_END).contains(&v.addr)
+}
+/// What `vkind` answers for this value.
+pub fn vkind(h: &Heap, v: V) -> u32 {
+    if !v.tag {
+        v.meta.min(15)
+    } else if v == NIL {
+        VK_NIL
+    } else if is_obj(v) {
+        VK_OBJECT + hdr_type(h.hdr(v))
+    } else if is_cons(v) {
+        VK_PAIR
+    } else {
+        VK_CAP
+    }
+}
+
+/// A capability to `len` bytes at `base`, with `perms`, derived from the
+/// root. The bounds must be exactly representable.
+pub fn cap_to(base: u32, len: u32, perms: u32) -> Cap {
+    match Cap::root().with_addr(base).with_bounds_exact(len) {
+        Some(c) => c.and_perms(perms),
+        None => panic!("{len} bytes at {base:#x} are not representable"),
+    }
+}
+
+/// `x` rounded up to the alignment `mask` asks for, as CRAM answers it.
+#[inline]
+pub fn align_up(x: u32, mask: u32) -> u32 {
+    x.wrapping_add(!mask) & mask
+}
+#[inline]
+pub fn round8(x: u32) -> u32 {
+    (x + 7) & !7
 }
 
 // ---- object types ----
-pub const T_FREE: u32 = 0; // a hole in object space: size in granules, then next
-pub const T_SYMBOL: u32 = 1; // 5 tagged words: name value function plist flags
-pub const T_STRING: u32 = 2; // len bytes
-pub const T_VECTOR: u32 = 3; // len tagged words
-pub const T_BYTES: u32 = 4; // len raw bytes; machine code lives here
-pub const T_CLOSURE: u32 = 5; // word0 raw entry address, rest tagged
-pub const T_RECORD: u32 = 6; // len tagged words, word0 is a type tag
-pub const T_FLOAT: u32 = 7; // one raw word
-pub const T_PORT: u32 = 8; // len tagged words
-// Slot 0 is the sign, 0 for positive and 1 for negative. The rest are the
-// magnitude as raw 32-bit limbs, least significant first. Normalised: the top
-// limb is never zero, the magnitude is never zero, and the value never fits a
-// fixnum. Any value that fits a fixnum is a fixnum, so `eq?` works on small
-// numbers.
+pub const T_FREE: u32 = 0; // a hole: its size in granules, header included
+pub const T_SYMBOL: u32 = 1; // name value function plist flags package
+pub const T_STRING: u32 = 2; // bytes
+pub const T_VECTOR: u32 = 3; // values
+pub const T_BYTES: u32 = 4; // bytes
+pub const T_CLOSURE: u32 = 5; // entry, code object, free variables
+pub const T_RECORD: u32 = 6; // the type symbol, then fields
+pub const T_FLOAT: u32 = 7; // the bits, as a fixnum
+pub const T_PORT: u32 = 8; // values
+/// Slot 0 is the sign, 0 for positive and 1 for negative; the rest are the
+/// magnitude as 32-bit limbs held as fixnums, least significant first.
+/// Normalised: the top limb is never zero and the value never fits a fixnum,
+/// so any value that fits is a fixnum and `eq?` works on small numbers.
 pub const T_BIGNUM: u32 = 9;
-pub const T_CODE: u32 = 10; // word0 raw entry, word1 raw length, word2 name,
-                            // then the literal vector; all tagged from 2 on
+pub const T_CODE: u32 = 10; // entry, name, literals
 
 pub const SYM_SLOTS: u32 = 6;
 pub const SYM_NAME: u32 = 0;
@@ -139,14 +201,16 @@ pub const PKG_NAME: u32 = 1;
 pub const PKG_USE: u32 = 2;
 pub const PKG_SLOTS: u32 = 3;
 
-/// Closure slot 0 is the raw entry address; slot 1 is the code object; free
-/// variables start at slot 2. An entry of 0 marks a closure the build-time
-/// interpreter made, whose slots are (0, params, body, env, name).
+/// A code object: slot 0 the entry, an EX capability whose bounds are the
+/// machine code; slot 1 the name; the literals from slot 2.
 pub const CODE_ENTRY: u32 = 0;
-pub const CODE_LEN: u32 = 1;
-pub const CODE_NAME: u32 = 2;
-pub const CODE_LITS: u32 = 3;
+pub const CODE_NAME: u32 = 1;
+pub const CODE_LITS: u32 = 2;
 
+/// A closure: slot 0 the entry, slot 1 the code object, the free variables
+/// from slot 2. The machine's closures are sealed. One the bootstrap
+/// interpreter makes is not, and holds a fixnum where the entry would be,
+/// then its parameters, body, environment and name.
 pub const CLO_ENTRY: u32 = 0;
 pub const CLO_CODE: u32 = 1;
 pub const CLO_FREE: u32 = 2;
@@ -154,6 +218,23 @@ pub const CLO_PARAMS: u32 = 1;
 pub const CLO_BODY: u32 = 2;
 pub const CLO_ENV: u32 = 3;
 pub const CLO_NAME: u32 = 4;
+
+/// The low-memory globals that hold values rather than addresses or counts.
+/// They start as nil.
+pub const VALUE_GLOBALS: &[u32] = &[
+    LG_SYMLIST,
+    LG_OBARRAY,
+    LG_PACKAGES,
+    LG_PACKAGE,
+    LG_BOOTLIST,
+    LG_ROOTS,
+    LG_TOPLEVEL,
+    LG_ERRHANDLER,
+    LG_TRAPHOOK,
+    LG_STARTUP,
+    LG_TASKEXIT,
+    LG_BOOTARG,
+];
 
 #[inline]
 pub fn header(len: u32, ty: u32) -> u32 {
@@ -167,27 +248,50 @@ pub fn hdr_len(h: u32) -> u32 {
 pub fn hdr_type(h: u32) -> u32 {
     h & 0xff
 }
+/// Strings and byte objects hold bytes; every other type holds values.
+#[inline]
+pub fn is_byte_type(ty: u32) -> bool {
+    ty == T_STRING || ty == T_BYTES
+}
 
-/// Payload size in bytes for a given header.
+/// The payload's length in bytes, which is the length its bounds round up
+/// from.
 pub fn payload_bytes(h: u32) -> u32 {
-    let len = hdr_len(h);
-    match hdr_type(h) {
-        T_SYMBOL => SYM_SLOTS * 4,
-        T_STRING | T_BYTES => len,
-        T_FLOAT => 4,
-        _ => len * 4,
+    if is_byte_type(hdr_type(h)) {
+        hdr_len(h)
+    } else {
+        hdr_len(h) * VALUE_BYTES
     }
 }
 
-/// Total bytes an object occupies, header included, rounded to 8.
-pub fn obj_size(h: u32) -> u32 {
-    (4 + payload_bytes(h) + 7) & !7
+/// The bytes an object's bounds cover: its payload, rounded up to a length
+/// the bounds can say exactly.
+pub fn bounds_bytes(h: u32) -> u32 {
+    cap::rrl(payload_bytes(h))
+}
+
+/// The bytes a block in object space occupies, header included: a hole says
+/// its size in granules, and an object is its header and its bounds rounded
+/// up to a granule.
+pub fn block_size(h: u32) -> u32 {
+    if hdr_type(h) == T_FREE {
+        hdr_len(h) * 8
+    } else {
+        HEADER_BYTES + round8(bounds_bytes(h))
+    }
+}
+
+/// The permissions an object of this type is handed out with.
+pub fn object_perms(ty: u32) -> u32 {
+    if is_byte_type(ty) {
+        PERMS_BYTES
+    } else {
+        PERMS_OBJECT
+    }
 }
 
 // ============================================================== the heap view
-/// A view onto the machine's RAM that knows about Lisp objects. The build-time
-/// interpreter and the image writer both work through this, so what the
-/// compiler builds is what the machine runs.
+/// A view onto the machine's RAM that knows about Lisp objects.
 pub struct Heap<'a> {
     pub m: &'a mut Machine,
 }
@@ -197,29 +301,65 @@ impl<'a> Heap<'a> {
         Heap { m }
     }
 
-    // ---- raw words ----
+    // ---- words and capabilities ----
     #[inline]
     pub fn ld(&self, a: u32) -> u32 {
         self.m.peek32(a)
     }
+    /// A data store: it clears the tag of the granule it lands in.
     #[inline]
     pub fn st(&mut self, a: u32, v: u32) {
         self.m.poke32(a, v)
     }
+    #[inline]
+    pub fn ldc(&self, a: u32) -> V {
+        self.m.load_cap(a)
+    }
+    #[inline]
+    pub fn stc(&mut self, a: u32, v: V) {
+        self.m.store_cap(a, v)
+    }
+
+    /// The address of every granule of RAM that holds a capability, in
+    /// ascending order.
+    pub fn tagged(&self) -> Vec<u32> {
+        let tags = self.m.tags();
+        let mut out = Vec::new();
+        for (i, chunk) in tags.chunks(8).enumerate() {
+            if u64::from_ne_bytes(chunk.try_into().unwrap()) != 0 {
+                for (j, &t) in chunk.iter().enumerate() {
+                    if t != 0 {
+                        out.push(((i * 8 + j) * 8) as u32);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// A low global that holds an address or a count, as that number.
     pub fn g(&self, off: u32) -> u32 {
-        self.m.peek32(off)
+        self.ldc(off).addr
     }
     pub fn set_g(&mut self, off: u32, v: u32) {
-        self.m.poke32(off, v)
+        self.stc(off, fix(v as i32))
+    }
+    /// A low global that holds a value.
+    pub fn gv(&self, off: u32) -> V {
+        self.ldc(off)
+    }
+    pub fn set_gv(&mut self, off: u32, v: V) {
+        self.stc(off, v)
     }
 
     /// Lay out the empty heap. Everything after this is allocation.
     pub fn format(&mut self) {
-        // Covers the nil cell, the global block and the object free
-        // list bins at 0x200.
-        for a in (0..0x300u32).step_by(4) {
-            self.st(a, 0);
+        // The nil cell, the global block and the object bins.
+        for a in (0..TRAP_BASE).step_by(8) {
+            self.stc(a, Cap::NULL);
         }
+        self.stc(NIL_CELL, NIL);
+        self.stc(NIL_CELL + 8, NIL);
         self.set_g(LG_CONS_PTR, CONS_BASE);
         self.set_g(LG_CONS_END, CONS_END);
         self.set_g(LG_OBJ_PTR, OBJ_BASE);
@@ -228,76 +368,99 @@ impl<'a> Heap<'a> {
         self.set_g(LG_CODE_END, CODE_END);
         self.set_g(LG_POOLPTR, POOL_BASE);
         self.set_g(LG_POOLEND, POOL_END);
-        self.set_g(LG_CONS_FREE, NIL);
-        self.set_g(LG_SYMLIST, NIL);
+        for g in VALUE_GLOBALS {
+            self.set_gv(*g, NIL);
+        }
     }
 
     // ---- allocation (bump only; the collector lives in Lisp) ----
     pub fn cons(&mut self, a: V, d: V) -> V {
         let p = self.g(LG_CONS_PTR);
-        if p + 8 > self.g(LG_CONS_END) {
+        if p + PAIR_BYTES > self.g(LG_CONS_END) {
             panic!("cons space exhausted at build time");
         }
-        self.set_g(LG_CONS_PTR, p + 8);
-        self.st(p, a);
-        self.st(p + 4, d);
-        p
+        self.set_g(LG_CONS_PTR, p + PAIR_BYTES);
+        self.stc(p, a);
+        self.stc(p + 8, d);
+        cap_to(p, PAIR_BYTES, PERMS_PAIR)
     }
 
+    /// Write a hole's header over `len` bytes at `at`. It is on no free list:
+    /// the sweep and the compactor find it by walking.
+    pub fn hole(&mut self, at: u32, len: u32) {
+        self.st(at, header(len / 8, T_FREE));
+        self.st(at + 4, 0);
+    }
+
+    /// A fresh object of `len` elements: values start as nil, bytes as
+    /// zero. Its base is aligned for its bounds, and a hole fills whatever
+    /// the alignment skipped.
     pub fn alloc_obj(&mut self, ty: u32, len: u32) -> V {
         let h = header(len, ty);
-        let sz = obj_size(h);
+        let bytes = payload_bytes(h);
+        let span = bounds_bytes(h);
         let p = self.g(LG_OBJ_PTR);
-        if p + sz > self.g(LG_OBJ_END) {
+        let base = align_up(p + HEADER_BYTES, cap::ram(bytes));
+        let at = base - HEADER_BYTES;
+        let end = base + round8(span);
+        if end > self.g(LG_OBJ_END) {
             panic!("object space exhausted at build time");
         }
-        self.set_g(LG_OBJ_PTR, p + sz);
-        self.st(p, h);
-        // Tagged payloads start as nil and raw payloads as zero; both are 0.
-        for i in (4..sz).step_by(4) {
-            self.st(p + i, 0);
+        if at > p {
+            self.hole(p, at - p);
         }
-        p + 4
+        self.set_g(LG_OBJ_PTR, end);
+        self.st(at, h);
+        self.st(at + 4, 0);
+        let fill = if is_byte_type(ty) { Cap::NULL } else { NIL };
+        for a in (base..end).step_by(8) {
+            self.stc(a, fill);
+        }
+        cap_to(base, span, object_perms(ty))
     }
 
+    /// Room for `nbytes` of machine code, aligned so that a capability can
+    /// have exactly those bytes as its bounds. Answers the address.
     pub fn alloc_code(&mut self, nbytes: u32) -> u32 {
-        let p = self.g(LG_CODE_PTR);
-        let sz = (nbytes + 7) & !7;
-        if p + sz > self.g(LG_CODE_END) {
+        let p = align_up(self.g(LG_CODE_PTR), cap::ram(nbytes));
+        let end = p + round8(cap::rrl(nbytes));
+        if end > self.g(LG_CODE_END) {
             panic!("code space exhausted");
         }
-        self.set_g(LG_CODE_PTR, p + sz);
+        self.set_g(LG_CODE_PTR, end);
         p
     }
 
-    /// Exec pool. Raw memory, never collected, never moved.
+    /// Exec pool: raw memory, never collected, never moved, aligned the same
+    /// way so that a block can be handed out as a capability. Answers the
+    /// address.
     pub fn alloc_pool(&mut self, nbytes: u32) -> u32 {
-        let p = self.g(LG_POOLPTR);
-        let sz = (nbytes + 7) & !7;
-        if p + sz > self.g(LG_POOLEND) {
+        let p = align_up(self.g(LG_POOLPTR), cap::ram(nbytes));
+        let end = p + round8(cap::rrl(nbytes));
+        if end > self.g(LG_POOLEND) {
             panic!("exec pool exhausted");
         }
-        self.set_g(LG_POOLPTR, p + sz);
-        for i in (0..sz).step_by(4) {
-            self.st(p + i, 0);
+        self.set_g(LG_POOLPTR, end);
+        for a in (p..end).step_by(8) {
+            self.stc(a, Cap::NULL);
         }
         p
     }
 
-    // ---- cons accessors ----
+    // ---- pairs ----
     #[inline]
     pub fn car(&self, v: V) -> V {
-        self.ld(v)
+        self.ldc(v.addr)
     }
     #[inline]
     pub fn cdr(&self, v: V) -> V {
-        self.ld(v + 4)
+        self.ldc(v.addr + 8)
     }
     pub fn set_car(&mut self, v: V, x: V) {
-        self.st(v, x)
+        self.stc(v.addr, x)
     }
     pub fn set_cdr(&mut self, v: V, x: V) {
-        self.st(v + 4, x)
+        self.stc(v.addr + 8, x)
     }
     pub fn cadr(&self, v: V) -> V {
         self.car(self.cdr(v))
@@ -315,12 +478,14 @@ impl<'a> Heap<'a> {
         self.car(self.cdddr(v))
     }
 
-    // ---- object accessors ----
+    // ---- objects ----
+    /// Header word 0 of an object.
     #[inline]
     pub fn hdr(&self, v: V) -> u32 {
-        self.ld(v - 4)
+        self.ld(v.addr - HEADER_BYTES)
     }
-    pub fn otype(&self, v: V) -> u32 {
+    /// The header type of an object, and 0 for anything else.
+    pub fn obj_type(&self, v: V) -> u32 {
         if is_obj(v) {
             hdr_type(self.hdr(v))
         } else {
@@ -332,11 +497,11 @@ impl<'a> Heap<'a> {
     }
     #[inline]
     pub fn slot(&self, v: V, i: u32) -> V {
-        self.ld(v + i * 4)
+        self.ldc(v.addr + i * VALUE_BYTES)
     }
     #[inline]
     pub fn set_slot(&mut self, v: V, i: u32, x: V) {
-        self.st(v + i * 4, x)
+        self.stc(v.addr + i * VALUE_BYTES, x)
     }
     pub fn is_type(&self, v: V, t: u32) -> bool {
         is_obj(v) && hdr_type(self.hdr(v)) == t
@@ -383,16 +548,22 @@ impl<'a> Heap<'a> {
         r
     }
     pub fn reverse(&mut self, v: V) -> V {
-        let items = self.list_vec(v);
+        let mut items = self.list_vec(v);
+        items.reverse();
         self.list(&items)
     }
 
-    // ---- strings ----
+    // ---- strings, bytes, vectors, floats ----
     pub fn string(&mut self, s: &str) -> V {
-        let b = s.as_bytes();
-        let p = self.alloc_obj(T_STRING, b.len() as u32);
+        self.byte_object(T_STRING, s.as_bytes())
+    }
+    pub fn bytes(&mut self, b: &[u8]) -> V {
+        self.byte_object(T_BYTES, b)
+    }
+    fn byte_object(&mut self, ty: u32, b: &[u8]) -> V {
+        let p = self.alloc_obj(ty, b.len() as u32);
         for (i, &c) in b.iter().enumerate() {
-            self.m.poke8(p + i as u32, c);
+            self.m.poke8(p.addr + i as u32, c);
         }
         p
     }
@@ -401,19 +572,7 @@ impl<'a> Heap<'a> {
             return String::new();
         }
         let n = self.olen(v);
-        let mut s = String::with_capacity(n as usize);
-        for i in 0..n {
-            s.push(self.m.peek8(v + i) as char);
-        }
-        s
-    }
-
-    pub fn bytes(&mut self, b: &[u8]) -> V {
-        let p = self.alloc_obj(T_BYTES, b.len() as u32);
-        for (i, &c) in b.iter().enumerate() {
-            self.m.poke8(p + i as u32, c);
-        }
-        p
+        (0..n).map(|i| self.m.peek8(v.addr + i) as char).collect()
     }
 
     pub fn vector(&mut self, items: &[V]) -> V {
@@ -426,11 +585,11 @@ impl<'a> Heap<'a> {
 
     pub fn float(&mut self, f: f32) -> V {
         let p = self.alloc_obj(T_FLOAT, 1);
-        self.st(p, f.to_bits());
+        self.set_slot(p, 0, fix(f.to_bits() as i32));
         p
     }
     pub fn float_of(&self, v: V) -> f32 {
-        f32::from_bits(self.ld(v))
+        f32::from_bits(self.slot(v, 0).addr)
     }
 
     // ---- bignums ----
@@ -438,10 +597,7 @@ impl<'a> Heap<'a> {
     // The magnitude arithmetic here is `num_bigint`'s. This is the host side:
     // it runs at build time, and a number read out of a source file must be
     // the same number the machine would read. The machine's own bignum
-    // arithmetic is in lisp/bignum.lisp and works in sixteen-bit pieces,
-    // because a Lisp value there cannot hold a limb.
-    //
-    // `num_bigint` is pure Rust, so the build stays a plain `cargo build`.
+    // arithmetic is in lisp/bignum.lisp.
 
     /// A number of either kind as a `BigInt`.
     pub fn to_big(&self, v: V) -> Option<BigInt> {
@@ -449,7 +605,7 @@ impl<'a> Heap<'a> {
             return Some(BigInt::from(unfix(v)));
         }
         if self.is_type(v, T_BIGNUM) {
-            let sign = if self.slot(v, 0) != 0 { Sign::Minus } else { Sign::Plus };
+            let sign = if unfix(self.slot(v, 0)) != 0 { Sign::Minus } else { Sign::Plus };
             return Some(BigInt::from_slice(sign, &self.bignum_limbs(v)));
         }
         None
@@ -459,10 +615,8 @@ impl<'a> Heap<'a> {
     /// invariant the machine's `bn-finish` keeps, so a number read at build
     /// time is `eqv` to the same number read at run time.
     pub fn from_big(&mut self, n: &BigInt) -> V {
-        if let Some(i) = n.to_i64() {
-            if (-(1 << 30)..(1 << 30)).contains(&i) {
-                return fix(i as i32);
-            }
+        if let Some(i) = n.to_i32() {
+            return fix(i);
         }
         let (sign, mag) = (n.sign(), n.magnitude().to_u32_digits());
         self.make_bignum(sign == Sign::Minus, &mag)
@@ -481,19 +635,19 @@ impl<'a> Heap<'a> {
         if n == 1 {
             let m = mag[0] as i64;
             let v = if neg { -m } else { m };
-            if (-(1 << 30)..(1 << 30)).contains(&v) {
-                return fix(v as i32);
+            if let Ok(i) = i32::try_from(v) {
+                return fix(i);
             }
         }
         let b = self.alloc_obj(T_BIGNUM, n as u32 + 1);
-        self.st(b, if neg { 1 } else { 0 });
+        self.set_slot(b, 0, fix(neg as i32));
         for (i, &l) in mag[..n].iter().enumerate() {
-            self.st(b + 4 + i as u32 * 4, l);
+            self.set_slot(b, 1 + i as u32, fix(l as i32));
         }
         b
     }
 
-    /// The same, from a value that already fits in 64 bits.
+    /// The same, from a value that fits in 64 bits.
     pub fn bignum_of_i64(&mut self, v: i64) -> V {
         let m = v.unsigned_abs();
         self.make_bignum(v < 0, &[m as u32, (m >> 32) as u32])
@@ -504,8 +658,6 @@ impl<'a> Heap<'a> {
     /// so a literal is only as wide as these operations allow.
     pub fn num_add(&mut self, a: V, b: V) -> Option<V> {
         // Two fixnums is the common case, once per digit of every number read.
-        // Both are thirty-one bits, so i64 holds the answer exactly and
-        // nothing is allocated.
         if is_fixnum(a) && is_fixnum(b) {
             return Some(self.bignum_of_i64(unfix(a) as i64 + unfix(b) as i64));
         }
@@ -546,21 +698,19 @@ impl<'a> Heap<'a> {
 
     /// The limbs, least significant first.
     pub fn bignum_limbs(&self, v: V) -> Vec<u32> {
-        (1..self.olen(v)).map(|i| self.slot(v, i)).collect()
+        (1..self.olen(v)).map(|i| self.slot(v, i).addr).collect()
     }
-
-
 
     // ---- symbols ----
     /// Symbols are chained through the obarray, a vector of buckets, and also
     /// threaded onto a flat list so the collector can walk every one of them.
     pub fn obarray(&mut self) -> V {
-        let o = self.g(LG_OBARRAY);
+        let o = self.gv(LG_OBARRAY);
         if o != NIL {
             return o;
         }
         let v = self.alloc_obj(T_VECTOR, 1021);
-        self.set_g(LG_OBARRAY, v);
+        self.set_gv(LG_OBARRAY, v);
         v
     }
 
@@ -587,7 +737,7 @@ impl<'a> Heap<'a> {
     /// Find a package by name, or make one. The first one made is `lm`, which
     /// has to exist before any symbol can, so its tag is filled in afterwards.
     pub fn package(&mut self, name: &str) -> V {
-        let mut p = self.g(LG_PACKAGES);
+        let mut p = self.gv(LG_PACKAGES);
         while p != NIL {
             let pkg = self.car(p);
             if self.package_name(pkg) == name {
@@ -597,12 +747,10 @@ impl<'a> Heap<'a> {
         }
         let nm = self.string(name);
         let pkg = self.alloc_obj(T_RECORD, PKG_SLOTS);
-        self.set_slot(pkg, PKG_TAG, NIL);
         self.set_slot(pkg, PKG_NAME, nm);
-        self.set_slot(pkg, PKG_USE, NIL);
-        let all = self.g(LG_PACKAGES);
+        let all = self.gv(LG_PACKAGES);
         let cell = self.cons(pkg, all);
-        self.set_g(LG_PACKAGES, cell);
+        self.set_gv(LG_PACKAGES, cell);
         let tag = self.intern("package");
         self.set_slot(pkg, PKG_TAG, tag);
         pkg
@@ -646,33 +794,37 @@ impl<'a> Heap<'a> {
         let ob = self.obarray();
         let n = self.olen(ob);
         let b = Heap::qual_hash(&self.package_name(pkg), name) % n;
+        let s = self.new_symbol(name, pkg);
+        // The index for the name alone, which the build's tables use.
+        let idx = self.sym_index(s);
+        let next = self.m.name_ids.len() as u32;
+        let nid = *self.m.name_ids.entry(name.to_string()).or_insert(next);
+        if idx >= self.m.sym_name_id.len() {
+            self.m.sym_name_id.resize(idx + 1, u32::MAX);
+        }
+        self.m.sym_name_id[idx] = nid;
+        let head = self.slot(ob, b);
+        let cell = self.cons(s, head);
+        self.set_slot(ob, b, cell);
+        let all = self.gv(LG_SYMLIST);
+        let cell2 = self.cons(s, all);
+        self.set_gv(LG_SYMLIST, cell2);
+        s
+    }
+
+    /// A symbol with nothing in it. Flags are in the low eight bits and the
+    /// symbol's identity above them: every symbol takes its number from the
+    /// counter in low memory, on either side of the bootstrap, so no two
+    /// symbols share one.
+    fn new_symbol(&mut self, name: &str, pkg: V) -> V {
         let nm = self.string(name);
         let s = self.alloc_obj(T_SYMBOL, SYM_SLOTS);
         self.set_slot(s, SYM_NAME, nm);
         self.set_slot(s, SYM_VALUE, UNBOUND);
-        self.set_slot(s, SYM_FUNCTION, NIL);
-        self.set_slot(s, SYM_PLIST, NIL);
-        // Flags in the low eight bits, the symbol's identity above them. Every
-        // symbol takes its number from the counter in low memory, on either
-        // side of the bootstrap, so no two symbols share one.
         let idx = self.g(LG_SYMCOUNT);
         self.set_g(LG_SYMCOUNT, idx + 1);
         self.set_slot(s, SYM_FLAGS, fix((idx << 8) as i32));
-        // The index for the name alone, which the build's tables use.
-        let next = self.m.name_ids.len() as u32;
-        let nid = *self.m.name_ids.entry(name.to_string()).or_insert(next);
-        let i = idx as usize;
-        if i >= self.m.sym_name_id.len() {
-            self.m.sym_name_id.resize(i + 1, u32::MAX);
-        }
-        self.m.sym_name_id[i] = nid;
         self.set_slot(s, SYM_PACKAGE, pkg);
-        let head = self.slot(ob, b);
-        let cell = self.cons(s, head);
-        self.set_slot(ob, b, cell);
-        let all = self.g(LG_SYMLIST);
-        let cell2 = self.cons(s, all);
-        self.set_g(LG_SYMLIST, cell2);
         s
     }
 
@@ -686,17 +838,7 @@ impl<'a> Heap<'a> {
     /// when that code goes. It takes an identity from the counter like any
     /// other symbol, so tables can hash it.
     pub fn make_symbol(&mut self, name: &str) -> V {
-        let nm = self.string(name);
-        let s = self.alloc_obj(T_SYMBOL, SYM_SLOTS);
-        self.set_slot(s, SYM_NAME, nm);
-        self.set_slot(s, SYM_VALUE, UNBOUND);
-        self.set_slot(s, SYM_FUNCTION, NIL);
-        self.set_slot(s, SYM_PLIST, NIL);
-        let idx = self.g(LG_SYMCOUNT);
-        self.set_g(LG_SYMCOUNT, idx + 1);
-        self.set_slot(s, SYM_FLAGS, fix((idx << 8) as i32));
-        self.set_slot(s, SYM_PACKAGE, NIL);
-        s
+        self.new_symbol(name, NIL)
     }
 
     /// `pkg:name`, for the places on the Rust side that reach into the Lisp
@@ -744,8 +886,7 @@ impl<'a> Heap<'a> {
     /// interpreted during the build, and those arrive without one.
     pub fn name_id(&mut self, s: V) -> usize {
         let i = self.sym_index(s);
-        if i < self.m.sym_name_id.len() {
-            let id = self.m.sym_name_id[i];
+        if let Some(&id) = self.m.sym_name_id.get(i) {
             if id != u32::MAX {
                 return id as usize;
             }
@@ -796,6 +937,23 @@ impl<'a> Heap<'a> {
         self.set_slot(s, SYM_PLIST, c2);
     }
 
+    // ---- code and closures ----
+    /// The name a code object or a closure goes by, if it has one.
+    pub fn fn_name(&self, f: V) -> Option<String> {
+        let code = if self.is_type(f, T_CLOSURE) { self.slot(f, CLO_CODE) } else { f };
+        if !self.is_type(code, T_CODE) {
+            return None;
+        }
+        let nm = self.slot(code, CODE_NAME);
+        if self.is_symbol(nm) {
+            Some(self.sym_name(nm))
+        } else if nm != NIL {
+            Some(self.write(nm))
+        } else {
+            None
+        }
+    }
+
     // ---- printing ----
     pub fn write(&self, v: V) -> String {
         let mut s = String::new();
@@ -840,7 +998,8 @@ impl<'a> Heap<'a> {
                 IMM_UNBOUND => out.push_str("#<unbound>"),
                 IMM_EOF => out.push_str("#<eof>"),
                 IMM_VOID => out.push_str("#<void>"),
-                _ => out.push_str("#<immediate>"),
+                IMM_DEFAULT => out.push_str("#<default>"),
+                k => out.push_str(&format!("#<immediate {k} {:#x}>", v.addr)),
             }
             return;
         }
@@ -848,8 +1007,7 @@ impl<'a> Heap<'a> {
             // (quote x) prints as 'x, which keeps compiler dumps readable.
             let h = self.car(v);
             if self.is_symbol(h) && is_cons(self.cdr(v)) && self.cddr(v) == NIL {
-                let n = self.sym_name(h);
-                let pre = match n.as_str() {
+                let pre = match self.sym_name(h).as_str() {
                     "quote" => Some("'"),
                     "quasiquote" => Some("`"),
                     "unquote" => Some(","),
@@ -888,110 +1046,178 @@ impl<'a> Heap<'a> {
             out.push(')');
             return;
         }
-        if is_obj(v) {
-            match self.otype(v) {
-                T_SYMBOL => {
-                    // Printed as a bare name, without its package. An
-                    // uninterned symbol is marked `#:` as the machine marks one.
-                    if self.slot(v, SYM_PACKAGE) == NIL {
-                        out.push_str("#:");
-                    }
-                    out.push_str(&self.sym_name(v))
-                }
-                T_STRING => {
-                    let s = self.str_of(v);
-                    if quoted {
-                        out.push('"');
-                        for c in s.chars() {
-                            match c {
-                                '"' => out.push_str("\\\""),
-                                '\\' => out.push_str("\\\\"),
-                                '\n' => out.push_str("\\n"),
-                                _ => out.push(c),
-                            }
-                        }
-                        out.push('"');
-                    } else {
-                        out.push_str(&s);
-                    }
-                }
-                T_VECTOR => {
-                    out.push_str("#(");
-                    let n = self.olen(v);
-                    for i in 0..n.min(256) {
-                        if i > 0 {
-                            out.push(' ');
-                        }
-                        self.write_into(self.slot(v, i), out, quoted, depth + 1);
-                    }
-                    if n > 256 {
-                        out.push_str(" ...");
-                    }
-                    out.push(')');
-                }
-                T_BYTES => {
-                    out.push_str(&format!("#<bytes {} @{:#x}>", self.olen(v), v));
-                }
-                T_CODE => {
-                    let nm = self.slot(v, CODE_NAME);
-                    let nm = if self.is_symbol(nm) {
-                        self.sym_name(nm)
-                    } else {
-                        "anonymous".to_string()
-                    };
-                    out.push_str(&format!(
-                        "#<code {} {:#x} {} bytes, {} literals>",
-                        nm,
-                        self.slot(v, CODE_ENTRY),
-                        self.slot(v, CODE_LEN),
-                        self.olen(v).saturating_sub(CODE_LITS)
-                    ));
-                }
-                T_CLOSURE => {
-                    let entry = self.slot(v, CLO_ENTRY);
-                    if entry == 0 {
-                        let nm = self.slot(v, CLO_NAME);
-                        if self.is_symbol(nm) {
-                            out.push_str(&format!("#<interpreted {}>", self.sym_name(nm)));
-                        } else {
-                            out.push_str("#<interpreted>");
-                        }
-                    } else {
-                        // A compiled closure knows its own name, through the
-                        // code object it shares with every frame that runs it.
-                        let code = self.slot(v, CLO_CODE);
-                        let nm = if is_obj(code) && self.otype(code) == T_CODE {
-                            self.slot(code, CODE_NAME)
-                        } else {
-                            NIL
-                        };
-                        if self.is_symbol(nm) {
-                            out.push_str(&format!("#<function {}>", self.sym_name(nm)));
-                        } else if nm != NIL {
-                            out.push_str("#<function ");
-                            self.write_into(nm, out, quoted, depth + 1);
-                            out.push('>');
-                        } else {
-                            out.push_str(&format!("#<function {entry:#x}>"));
-                        }
-                    }
-                }
-                T_FLOAT => out.push_str(&format!("{}", self.float_of(v))),
-                T_BIGNUM => out.push_str(&self.bignum_string(v)),
-                T_RECORD => {
-                    let tag = self.slot(v, 0);
-                    out.push_str("#[");
-                    self.write_into(tag, out, quoted, depth + 1);
-                    for i in 1..self.olen(v).min(64) {
-                        out.push(' ');
-                        self.write_into(self.slot(v, i), out, quoted, depth + 1);
-                    }
-                    out.push(']');
-                }
-                t => out.push_str(&format!("#<type{t} {v:#x}>")),
-            }
+        if !is_obj(v) {
+            out.push_str(&format!(
+                "#<cap {:#x} [{:#x},{:#x}) perms {:#x} otype {}>",
+                v.addr,
+                v.base(),
+                v.top(),
+                v.perms(),
+                v.otype()
+            ));
             return;
         }
-        out.push_str(&format!("#<raw {v:#x}>"));
+        match self.obj_type(v) {
+            T_SYMBOL => {
+                // Printed as a bare name, without its package. An uninterned
+                // symbol is marked `#:` as the machine marks one.
+                if self.slot(v, SYM_PACKAGE) == NIL {
+                    out.push_str("#:");
+                }
+                out.push_str(&self.sym_name(v))
+            }
+            T_STRING => {
+                let s = self.str_of(v);
+                if quoted {
+                    out.push('"');
+                    for c in s.chars() {
+                        match c {
+                            '"' => out.push_str("\\\""),
+                            '\\' => out.push_str("\\\\"),
+                            '\n' => out.push_str("\\n"),
+                            _ => out.push(c),
+                        }
+                    }
+                    out.push('"');
+                } else {
+                    out.push_str(&s);
+                }
+            }
+            T_VECTOR => {
+                out.push_str("#(");
+                let n = self.olen(v);
+                for i in 0..n.min(256) {
+                    if i > 0 {
+                        out.push(' ');
+                    }
+                    self.write_into(self.slot(v, i), out, quoted, depth + 1);
+                }
+                if n > 256 {
+                    out.push_str(" ...");
+                }
+                out.push(')');
+            }
+            T_BYTES => out.push_str(&format!("#<bytes {} @{:#x}>", self.olen(v), v.addr)),
+            T_CODE => {
+                let entry = self.slot(v, CODE_ENTRY);
+                out.push_str(&format!(
+                    "#<code {} {:#x} {} bytes, {} literals>",
+                    self.fn_name(v).unwrap_or_else(|| "anonymous".into()),
+                    entry.addr,
+                    if entry.tag { entry.len() } else { 0 },
+                    self.olen(v).saturating_sub(CODE_LITS)
+                ));
+            }
+            T_CLOSURE => {
+                if !self.slot(v, CLO_ENTRY).tag {
+                    let nm = self.slot(v, CLO_NAME);
+                    if self.is_symbol(nm) {
+                        out.push_str(&format!("#<interpreted {}>", self.sym_name(nm)));
+                    } else {
+                        out.push_str("#<interpreted>");
+                    }
+                } else {
+                    // A compiled closure knows its own name, through the code
+                    // object it shares with every frame that runs it.
+                    match self.fn_name(v) {
+                        Some(n) => out.push_str(&format!("#<function {n}>")),
+                        None => out.push_str(&format!(
+                            "#<function {:#x}>",
+                            self.slot(v, CLO_ENTRY).addr
+                        )),
+                    }
+                }
+            }
+            T_FLOAT => out.push_str(&format!("{}", self.float_of(v))),
+            T_BIGNUM => out.push_str(&self.bignum_string(v)),
+            T_RECORD => {
+                out.push_str("#[");
+                self.write_into(self.slot(v, 0), out, quoted, depth + 1);
+                for i in 1..self.olen(v).min(64) {
+                    out.push(' ');
+                    self.write_into(self.slot(v, i), out, quoted, depth + 1);
+                }
+                out.push(']');
+            }
+            t => out.push_str(&format!("#<type{t} {:#x}>", v.addr)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn heap() -> Box<Machine> {
+        let mut m = Machine::new();
+        Heap::new(&mut m).format();
+        m
+    }
+
+    #[test]
+    fn values_are_told_apart() {
+        let mut m = heap();
+        let mut h = Heap::new(&mut m);
+        let p = h.cons(fix(1), NIL);
+        let s = h.string("abc");
+        let v = h.vector(&[p, s]);
+        assert!(is_cons(p) && !is_obj(p));
+        assert!(!is_cons(NIL) && !is_obj(NIL));
+        assert!(is_obj(s) && is_obj(v) && !is_cons(v));
+        assert!(is_fixnum(fix(-1)) && is_fixnum(fix(i32::MAX)));
+        assert!(is_char(chr(65)) && !is_fixnum(chr(65)));
+        assert_ne!(fix(65), chr(65));
+        assert_eq!(h.car(NIL), NIL);
+        assert_eq!(h.cdr(NIL), NIL);
+        assert_eq!(vkind(&h, fix(3)), IMM_FIXNUM);
+        assert_eq!(vkind(&h, UNBOUND), IMM_UNBOUND);
+        assert_eq!(vkind(&h, NIL), VK_NIL);
+        assert_eq!(vkind(&h, p), VK_PAIR);
+        assert_eq!(vkind(&h, s), VK_OBJECT + T_STRING);
+        assert_eq!(vkind(&h, Cap::root()), VK_CAP);
+        assert_eq!(h.write(v), "#((1) \"abc\")");
+    }
+
+    /// Every object's capability has its payload as bounds, rounded only
+    /// where a long payload has to be, and HD; a byte object cannot hold a
+    /// capability. Neighbours never overlap, and what alignment skips is a
+    /// hole the walk steps over.
+    #[test]
+    fn objects_have_their_payload_as_bounds() {
+        let mut m = heap();
+        let mut h = Heap::new(&mut m);
+        let mut last_top = 0u64;
+        for (ty, len) in [(T_VECTOR, 3), (T_STRING, 5), (T_VECTOR, 300), (T_BYTES, 5000), (T_VECTOR, 0), (T_BYTES, 70000)] {
+            let o = h.alloc_obj(ty, len);
+            let want = payload_bytes(header(len, ty));
+            assert_eq!(h.hdr(o), header(len, ty));
+            assert_eq!(o.addr, o.base());
+            assert_eq!(o.len(), cap::rrl(want) as u64);
+            if want < 256 {
+                assert_eq!(o.len(), want as u64);
+            }
+            assert!(o.has(P_HD | P_LD | P_SD));
+            assert_eq!(o.has(P_SC), !is_byte_type(ty));
+            assert!(o.base() as u64 - HEADER_BYTES as u64 >= last_top);
+            last_top = o.top();
+        }
+        let mut p = OBJ_BASE;
+        while p < h.g(LG_OBJ_PTR) {
+            let sz = block_size(h.ld(p));
+            assert!(sz > 0);
+            p += sz;
+        }
+        assert_eq!(p, h.g(LG_OBJ_PTR));
+    }
+
+    #[test]
+    fn numbers_are_32_bits_and_widen_past_them() {
+        let mut m = heap();
+        let mut h = Heap::new(&mut m);
+        let big = h.num_add(fix(i32::MAX), fix(1)).unwrap();
+        assert!(h.is_type(big, T_BIGNUM));
+        assert_eq!(h.bignum_string(big), "2147483648");
+        assert_eq!(h.num_sub(big, fix(1)).unwrap(), fix(i32::MAX));
+        assert_eq!(h.num_mul(fix(-65536), fix(32768)).unwrap(), fix(i32::MIN));
     }
 }

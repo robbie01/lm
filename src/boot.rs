@@ -1,5 +1,7 @@
-//! Booting an image: load it, attach the peripherals, run.
+//! Booting an image: load it with its tags, set the reset state, attach the
+//! peripherals, run.
 
+use crate::cap::Cap;
 use crate::dev::win::Host;
 use crate::image;
 use crate::mach::{Machine, Stop};
@@ -63,7 +65,11 @@ fn run_machine(o: &Options, host: Option<Host>) -> i32 {
             return 1;
         }
     };
-    m.pc = loaded.entry;
+    // The reset state: PCC, DDC and MTCC are the root, PCC at the image's
+    // entry, and every general register is NULL.
+    m.set_pcc(Cap::ROOT.with_addr(loaded.entry));
+    m.ddc = Cap::ROOT;
+    m.mtcc = Cap::ROOT;
     m.trace_traps = o.trace_traps;
 
     if let Some(path) = &o.disk {

@@ -3,338 +3,196 @@
 //! Objects are never moved by the machine's own collector, and the reason is
 //! in `gc.lisp`: that collector is written in the language it collects, and
 //! reaches its functions through symbol value cells and its constants through
-//! the literal vector of its own code object. Every one of those is an object.
-//! Move them and it loses the ability to run, halfway through running.
+//! its own code object. Every one of those is an object. Move them and it
+//! loses the ability to run, halfway through running.
 //!
 //! None of that applies here. The forge is not made of Lisp objects, and by
-//! the time this runs the heap has stopped: the machine is not executing, no
-//! task holds a register, and the only things that name an object are places
-//! this file can enumerate.
+//! the time this runs the heap has stopped: the machine is not executing and
+//! no task holds a register. Every pointer is a tagged capability and the
+//! tags say exactly where they are, so every one is found and none is
+//! guessed at.
 //!
-//! Liveness is not recomputed. `gc-for-image` has already run a full
-//! collection with the machine's own root set, which knows about task stacks
-//! and pinned registers and everything else this side would have to guess at,
-//! and it leaves object space as a walkable sequence of live blocks and
-//! `t-free` holes. The holes are the answer; this only closes them.
+//! Liveness is not recomputed. `collect-for-image` has already run a full
+//! collection with the machine's own root set, and it leaves object space as
+//! a walkable sequence of live blocks and `t-free` holes. The holes are the
+//! answer; this only closes them.
 
+use crate::cap::{self, Cap};
 use crate::heap::*;
 use crate::map::*;
 
 pub struct Stats {
     pub before: u32,
     pub after: u32,
-    /// Bytes actually occupied by live blocks. Below `after` whenever a pin
-    /// holds the top of the heap up and leaves holes underneath it.
+    /// Bytes occupied by live blocks. Below `after` by what alignment for
+    /// bounds leaves between them.
     pub used: u32,
     pub moved: u32,
-    pub pinned: u32,
 }
 
-/// A live object rounds its payload up to eight; a hole records its own size
-/// in granules where a live object keeps its length.
-fn block_size(hdr: u32) -> u32 {
-    if hdr_type(hdr) == T_FREE {
-        hdr_len(hdr) * 8
-    } else {
-        obj_size(hdr)
-    }
+/// A block that moves: where it was, how long it is, and where it goes.
+#[derive(Clone, Copy)]
+struct Move {
+    from: u32,
+    size: u32,
+    to: u32,
 }
 
-/// The global slots that hold a tagged Lisp value. Every other slot holds a
-/// raw address or a count, and rewriting one would be a bug, so this is a
-/// list and not a scan of the whole global block.
-const TAGGED_GLOBALS: &[u32] = &[
-    LG_SYMLIST,
-    LG_OBARRAY,
-    LG_PACKAGES,
-    LG_PACKAGE,
-    LG_BOOTLIST,
-    LG_ROOTS,
-    LG_TOPLEVEL,
-    LG_ERRHANDLER,
-    LG_TRAPHOOK,
-    LG_REFILL,
-    LG_STARTUP,
-    LG_TASKEXIT,
-];
-
-struct Plan {
-    lo: u32,
-    hi: u32,
-    /// New address of the block starting here, indexed by granule.
-    fwd: Vec<u32>,
-    live: Vec<bool>,
+/// The move whose block holds address `a`, if any. `moves` is in ascending
+/// order of `from`.
+fn mover(moves: &[Move], a: u32) -> Option<&Move> {
+    let i = moves.partition_point(|m| m.from <= a);
+    let m = moves.get(i.checked_sub(1)?)?;
+    (a < m.from + m.size).then_some(m)
 }
 
-impl Plan {
-    fn idx(&self, block: u32) -> usize {
-        ((block - self.lo) / 8) as usize
-    }
-    /// Where a tagged value points after the slide. Anything that is not an
-    /// object pointer into the moved range answers itself.
-    fn remap(&self, v: V) -> V {
-        if !is_obj(v) {
-            return v;
+/// The same capability, its bounds and its address `delta` bytes further on:
+/// derived again from the root, with the same permissions and the same seal.
+fn slid(c: Cap, delta: u32) -> Cap {
+    let n = cap_to(c.base().wrapping_add(delta), c.len() as u32, c.perms())
+        .with_addr(c.addr.wrapping_add(delta));
+    n.seal(c.otype())
+}
+
+/// Rewrite every tagged capability in memory whose bounds lie in a block
+/// that moves, so that it names the block where it is going. One whose base
+/// lies in `lo..hi` but in no block would be a pointer to nothing, and is an
+/// error. One that reaches past its block names a region, not a block, and
+/// stays as it is.
+fn rewrite(h: &mut Heap, moves: &[Move], lo: u32, hi: u32) -> Result<(), String> {
+    for at in h.tagged() {
+        let c = h.ldc(at);
+        let b = c.base();
+        if b < lo || b >= hi {
+            continue;
         }
-        let b = v - 4;
-        if b < self.lo || b >= self.hi {
-            return v;
+        match mover(moves, b) {
+            Some(m) if m.to != m.from && c.top() as u64 <= (m.from + m.size) as u64 => {
+                let n = slid(c, m.to.wrapping_sub(m.from));
+                h.stc(at, n);
+            }
+            Some(_) => {}
+            None => {
+                return Err(format!(
+                    "the capability at {at:#x} names {b:#x}, which nothing occupies"
+                ))
+            }
         }
-        let i = self.idx(b);
-        if !self.live[i] {
-            return v;
-        }
-        self.fwd[i] + 4
     }
+    Ok(())
 }
 
-/// The tagged slots of a live object, by the rule the collector uses.
-fn tagged_slots(h: &Heap, block: u32) -> std::ops::Range<u32> {
-    let hdr = h.ld(block);
-    let len = hdr_len(hdr);
-    match hdr_type(hdr) {
-        T_SYMBOL => 0..SYM_SLOTS,
-        T_STRING | T_BYTES | T_FLOAT | T_BIGNUM => 0..0,
-        // Slots 0 and 1 are a raw entry address and a raw byte length.
-        T_CODE => CODE_NAME..len,
-        // Slot 0 is a raw entry address; following it would be a bug.
-        T_CLOSURE => 1..len,
-        _ => 0..len,
-    }
-}
-
-/// Every live block in object space, in address order.
-fn live_blocks(h: &Heap) -> Result<Vec<u32>, String> {
+/// Every live block in object space, in address order, with its size and the
+/// alignment its bounds need, as CRAM gives it. What a hole held is dead, and
+/// is blanked here, so that nothing in one is taken for a pointer.
+fn live_blocks(h: &mut Heap) -> Result<Vec<(u32, u32, u32)>, String> {
     let hi = h.g(LG_OBJ_PTR);
     let mut out = Vec::new();
     let mut p = OBJ_BASE;
     while p < hi {
         let hdr = h.ld(p);
         let sz = block_size(hdr);
+        // A zero-sized block would be a corrupt header and would spin here
+        // forever, so it is an error rather than a hang.
         if sz == 0 || p + sz > hi {
             return Err(format!("corrupt object header at {p:#x}: {hdr:#x}"));
         }
-        if hdr_type(hdr) != T_FREE {
-            out.push(p);
+        if hdr_type(hdr) == T_FREE {
+            for a in (p + HEADER_BYTES..p + sz).step_by(8) {
+                h.stc(a, Cap::NULL);
+            }
+        } else {
+            out.push((p, sz, cap::ram(payload_bytes(hdr))));
         }
         p += sz;
     }
     Ok(out)
 }
 
+/// Make `len` bytes at `at` a hole, and put it on its bin if it is big
+/// enough to say where the next one is. Answers the bytes freed.
+fn free_hole(h: &mut Heap, at: u32, len: u32) -> u32 {
+    let gran = len / 8;
+    h.hole(at, len);
+    if gran >= 2 {
+        let bin = OBJ_BINS + (if gran < OBJ_BIN_COUNT { gran } else { 0 }) * VALUE_BYTES;
+        let head = h.ldc(bin);
+        h.stc(at + HEADER_BYTES, head);
+        h.set_g(bin, at);
+    }
+    for a in (at + 2 * VALUE_BYTES..at + len).step_by(8) {
+        h.stc(a, Cap::NULL);
+    }
+    len
+}
+
 pub fn compact_objects(h: &mut Heap, verbose: bool) -> Result<Stats, String> {
     let lo = OBJ_BASE;
     let hi = h.g(LG_OBJ_PTR);
-    if hi <= lo {
-        return Ok(Stats { before: 0, after: 0, used: 0, moved: 0, pinned: 0 });
-    }
-    let n = ((hi - lo) / 8) as usize;
-    let mut plan = Plan { lo, hi, fwd: vec![0; n], live: vec![false; n] };
+    let blocks = live_blocks(h)?;
 
-    // Where the blocks are. A zero-sized block would be a corrupt header and
-    // would spin here forever, so it is an error rather than a hang.
-    let mut p = lo;
-    while p < hi {
-        let hdr = h.ld(p);
-        let sz = block_size(hdr);
-        if sz == 0 || p + sz > hi {
-            return Err(format!("corrupt object header at {p:#x}: {hdr:#x}"));
-        }
-        if hdr_type(hdr) != T_FREE {
-            let i = plan.idx(p);
-            plan.live[i] = true;
-        }
-        p += sz;
-    }
-
-    // Anything the Exec pool names must stay where it is: those words are raw,
-    // so a match may be a coincidence, and a coincidence must not be rewritten.
-    // The code registry is the exception: it is an array of object pointers,
-    // and it is rewritten exactly, below.
-    let reg = h.g(LG_CODEREG);
-    let reg_end = if reg != 0 { reg + h.g(LG_CODEREGN) * 4 } else { 0 };
-    let mut pinned = vec![false; n];
-    let mut npinned = 0;
-    let pool_hi = h.g(LG_POOLPTR).min(POOL_END);
-    let mut a = POOL_BASE;
-    while a < pool_hi {
-        if reg != 0 && a >= reg && a < reg_end {
-            a = reg_end;
-            continue;
-        }
-        let w = h.ld(a);
-        if is_obj(w) {
-            let b = w - 4;
-            if b >= lo && b < hi {
-                let i = plan.idx(b);
-                if plan.live[i] && !pinned[i] {
-                    pinned[i] = true;
-                    npinned += 1;
-                    if verbose {
-                        eprintln!(
-                            "  pinned {b:#x} (type {}) by pool word at {a:#x}",
-                            hdr_type(h.ld(b))
-                        );
-                    }
-                }
-            }
-        }
-        a += 4;
-    }
-
-    // Where everything lands. A pinned block stays put and pushes the free
-    // pointer past itself; everything else slides down to meet it.
+    // Where everything lands: as low as it will go with its payload aligned
+    // as it was, which keeps its bounds representable.
     let mut free = lo;
-    let mut p = lo;
-    let mut moved = 0;
     let mut used = 0;
-    // Where every live block lands, in ascending destination order, which is
-    // also ascending source order, because sliding cannot reorder anything.
-    let mut placed: Vec<(u32, u32)> = Vec::new();
-    while p < hi {
-        let sz = block_size(h.ld(p));
-        let i = plan.idx(p);
-        if plan.live[i] {
-            used += sz;
-            if pinned[i] {
-                plan.fwd[i] = p;
-                if p + sz > free {
-                    free = p + sz;
-                }
-            } else {
-                plan.fwd[i] = free;
-                if free != p {
-                    moved += 1;
-                }
-                free += sz;
-            }
-            placed.push((plan.fwd[i], sz));
-        }
-        p += sz;
+    let mut moves: Vec<Move> = Vec::with_capacity(blocks.len());
+    for &(from, size, mask) in &blocks {
+        let to = align_up(free + HEADER_BYTES, mask) - HEADER_BYTES;
+        moves.push(Move { from, size, to });
+        free = to + size;
+        used += size;
     }
 
-    // Rewrite every pointer before anything moves, exactly as the machine's
-    // own compactor does for pairs: after this pass the heap names where
-    // everything is going, and nothing may be dereferenced until it is there.
-    for g in TAGGED_GLOBALS {
-        let v = h.g(*g);
-        let w = plan.remap(v);
-        if w != v {
-            h.set_g(*g, w);
-        }
-    }
-    let cons_hi = h.g(LG_CONS_PTR);
-    let mut a = CONS_BASE;
-    while a < cons_hi {
-        let v = h.ld(a);
-        let w = plan.remap(v);
-        if w != v {
-            h.st(a, w);
-        }
-        a += 4;
-    }
-    let mut p = lo;
-    while p < hi {
-        let sz = block_size(h.ld(p));
-        if plan.live[plan.idx(p)] {
-            for s in tagged_slots(h, p) {
-                let at = p + 4 + s * 4;
-                let v = h.ld(at);
-                let w = plan.remap(v);
-                if w != v {
-                    h.st(at, w);
-                }
+    // Rewrite every pointer before anything moves: after this pass the heap
+    // names where everything is going, and nothing may be dereferenced until
+    // it is there.
+    rewrite(h, &moves, lo, hi)?;
+
+    // Slide, a granule at a time with its tag. Ascending, and every block
+    // moves down, so a block that overlaps its own destination copies
+    // correctly and never reaches the next one.
+    let mut moved = 0;
+    for m in &moves {
+        if m.to != m.from {
+            moved += 1;
+            for k in (0..m.size).step_by(8) {
+                let c = h.ldc(m.from + k);
+                h.stc(m.to + k, c);
             }
         }
-        p += sz;
-    }
-    // The code registry lives in the pool and holds tagged code objects. It is
-    // not a root (a code object is kept alive by the closure that names it),
-    // but it is read after every collection, so a stale entry here is a wild
-    // pointer at the next sweep.
-    let mut a = reg;
-    while a < reg_end {
-        let v = h.ld(a);
-        let w = plan.remap(v);
-        if w != v {
-            h.st(a, w);
-        }
-        a += 4;
     }
 
-    // Slide. Ascending, and every block moves down, so a block that overlaps
-    // its own destination copies correctly and never reaches the next one.
-    let mut p = lo;
-    while p < hi {
-        let sz = block_size(h.ld(p));
-        let i = plan.idx(p);
-        if plan.live[i] && plan.fwd[i] != p {
-            let to = plan.fwd[i];
-            let mut k = 0;
-            while k < sz {
-                let w = h.ld(p + k);
-                h.st(to + k, w);
-                k += 4;
-            }
-        }
-        p += sz;
-    }
-
-    // Whatever is not a live block is blanked, and the free lists are built
-    // again from the holes that are left. Blanking is what lets the image
-    // writer skip a page; the header on each hole is what lets the next
-    // collection walk object space at all, since it reads a run of zeroes as a
-    // block of size zero and stops with a corrupt heap.
-    //
-    // With no pins there is one hole, above everything, and it is the tail.
-    // With a pin holding the top up there are holes underneath it too, and
-    // they are blanked for the same reason.
+    // Whatever is not a live block is a hole, and the bins are built again
+    // from them. The header on each is what lets the next collection walk
+    // object space at all, and blanking the rest is what lets the image
+    // writer skip a page. The tail above the last block is not a hole on a
+    // bin but unclaimed ground the allocator bumps into, so it is only
+    // blanked.
     for b in 0..OBJ_BIN_COUNT {
-        h.st(OBJ_BINS + b * 4, 0);
+        h.set_g(OBJ_BINS + b * VALUE_BYTES, 0);
     }
-    let mut freed = 0u32;
-    let mut hole = |h: &mut Heap, start: u32, len: u32| {
-        if len < 8 {
-            return;
-        }
-        let mut a = start + 8;
-        while a < start + len {
-            h.st(a, 0);
-            a += 4;
-        }
-        let gran = len / 8;
-        let bin = OBJ_BINS + if gran < OBJ_BIN_COUNT { gran * 4 } else { 0 };
-        h.st(start, header(gran, T_FREE));
-        h.st(start + 4, h.ld(bin));
-        h.st(bin, start);
-        freed += len;
-    };
+    let mut freed = 0;
     let mut cursor = lo;
-    for (dest, sz) in &placed {
-        if *dest > cursor {
-            hole(h, cursor, *dest - cursor);
+    for m in &moves {
+        if m.to > cursor {
+            freed += free_hole(h, cursor, m.to - cursor);
         }
-        cursor = dest + sz;
+        cursor = m.to + m.size;
     }
-    // The tail is not a hole on a list, it is unclaimed ground: the allocator
-    // bumps into it, so it only has to be blank.
-    let mut a = free;
-    while a < hi {
-        h.st(a, 0);
-        a += 4;
+    for a in (free..hi).step_by(8) {
+        h.stc(a, Cap::NULL);
     }
     h.set_g(LG_OBJ_PTR, free);
     h.set_g(LG_OBJFREEN, freed);
 
-    let stats = Stats { before: hi - lo, after: free - lo, used, moved, pinned: npinned };
+    let stats = Stats { before: hi - lo, after: free - lo, used, moved };
     if verbose {
         eprintln!(
-            "compacted objects: {} KiB to {} KiB ({} KiB live), {} blocks moved, {} pinned by the pool",
+            "compacted objects: {} KiB to {} KiB ({} KiB live), {} blocks moved",
             stats.before / 1024,
             stats.after / 1024,
             stats.used / 1024,
-            stats.moved,
-            stats.pinned
+            stats.moved
         );
     }
     Ok(stats)
@@ -352,44 +210,38 @@ pub struct CodeStats {
 /// A fresh image's pool holds nothing a booting machine reads. Below the code
 /// registry is the forge's scratch (trap frames, the trap stack, the boot
 /// stack), which is written before it is read; and the registry is live only
-/// as far as its count. What is left in them is stale words from the machine
-/// that wrote the image, and a stale word that looks like a pointer pins an
-/// object where it is.
+/// as far as its count. What is left in them is stale values from the
+/// machine that wrote the image, and a stale capability keeps what it names
+/// alive and in the file.
 fn blank_fresh_pool(h: &mut Heap) {
     let reg = h.g(LG_CODEREG);
     if reg < POOL_BASE + 8 || reg >= POOL_END {
         return;
     }
     let block = reg - 8;
-    let mut a = POOL_BASE;
-    while a < block {
-        h.st(a, 0);
-        a += 4;
+    for a in (POOL_BASE..block).step_by(8) {
+        h.stc(a, Cap::NULL);
     }
     let end = (block + h.ld(block)).min(h.g(LG_POOLPTR)).min(POOL_END);
-    let mut a = reg + h.g(LG_CODEREGN) * 4;
-    while a < end {
-        h.st(a, 0);
-        a += 4;
+    for a in (reg + h.g(LG_CODEREGN) * VALUE_BYTES..end).step_by(8) {
+        h.stc(a, Cap::NULL);
     }
 }
 
 /// Slide code space down, for an image that boots through its kickstart.
 ///
 /// That is what makes it possible. Such an image resumes nothing, so no stack
-/// holds a return address into code; and compiled code names other code only
-/// through closures. A call to a function jumps through the entry word of its
-/// closure, a call to the refill stub through `lg-gchook`, and a jump within
-/// a function is relative to itself. So the bytes of a code object can go
-/// anywhere, and what has to change with them is two kinds of word: the entry
-/// in the code object, and the entry in every closure made from it.
+/// holds a return sentry into code; and compiled code names other code only
+/// through capabilities, a code object's entry and the closures made from
+/// it, while a jump within a function is relative to itself. So the bytes of
+/// a code object can go anywhere, and what has to change with them is every
+/// capability into them, which the tags find.
 ///
-/// An image from `(save-image)` resumes, with return addresses all over its
+/// An image from `(save-image)` resumes, with return sentries all over its
 /// stacks, and this must never be used on one.
 ///
 /// Two things stay exactly where they are: the reset stub at the base, and
-/// the refill and trap stubs, which the forge assembles one after the other
-/// and which are not objects at all. Everything else that is not a live code
+/// the trap stub at `lg-trap-entry`, which are not objects at all. Everything else that is not a live code
 /// object is garbage: dead code the collector freed, and the odd few bytes an
 /// allocation did not hand back.
 pub fn compact_code(h: &mut Heap, verbose: bool) -> Result<CodeStats, String> {
@@ -399,19 +251,22 @@ pub fn compact_code(h: &mut Heap, verbose: bool) -> Result<CodeStats, String> {
         let n = hi.saturating_sub(lo);
         return Ok(CodeStats { before: n, after: n, moved: 0 });
     }
-    let blocks = live_blocks(h)?;
+    if let Some(at) = h.tagged().into_iter().find(|a| (lo..hi).contains(a)) {
+        return Err(format!("code space holds a capability, at {at:#x}"));
+    }
 
-    // Every live code object whose bytes are in code space: where the bytes
-    // are, the room they take, and the object.
+    // Every live code object's machine code: where it is, the room it takes,
+    // and the alignment its bounds need.
     let mut code: Vec<(u32, u32, u32)> = Vec::new();
-    for &b in &blocks {
-        if hdr_type(h.ld(b)) == T_CODE {
-            let obj = b + 4;
-            let entry = h.slot(obj, CODE_ENTRY);
-            let len = h.slot(obj, CODE_LEN);
-            if entry >= lo && entry < hi && len > 0 {
-                code.push((entry, (len + 7) & !7, obj));
-            }
+    for (b, _, _) in live_blocks(h)? {
+        if hdr_type(h.ld(b)) != T_CODE {
+            continue;
+        }
+        let entry = h.ldc(b + HEADER_BYTES + CODE_ENTRY * VALUE_BYTES);
+        let start = entry.base();
+        if entry.tag && start >= lo && start < hi && entry.len() > 0 {
+            let len = entry.len() as u32;
+            code.push((start, round8(len), cap::ram(len)));
         }
     }
     code.sort();
@@ -421,8 +276,8 @@ pub fn compact_code(h: &mut Heap, verbose: bool) -> Result<CodeStats, String> {
         }
     }
 
-    // The stubs run from `stub-lo` to whatever comes next that is something
-    // else: a live code object, or a block on the free list.
+    // The trap stub runs from `lg-trap-entry` to whatever comes next that is
+    // something else: a live code object, or a block on the free list.
     let mut frees: Vec<u32> = Vec::new();
     let mut p = h.g(LG_CODEFREE);
     while p != 0 {
@@ -433,7 +288,7 @@ pub fn compact_code(h: &mut Heap, verbose: bool) -> Result<CodeStats, String> {
         p = h.ld(p + 4);
     }
     let mut pins: Vec<(u32, u32)> = vec![(lo, lo + RESET_RESERVE)];
-    let stub = h.g(LG_STUBLO) & !7;
+    let stub = h.g(LG_TRAPENTRY) & !7;
     if stub >= lo + RESET_RESERVE && stub < hi {
         let next = code
             .iter()
@@ -447,79 +302,62 @@ pub fn compact_code(h: &mut Heap, verbose: bool) -> Result<CodeStats, String> {
     pins.sort();
 
     // Every code object, in address order, into the first room past the last
-    // one placed that does not run into something pinned.
-    let mut placed: Vec<(u32, u32, u32, u32)> = Vec::with_capacity(code.len());
+    // one placed that is aligned for its bounds and does not run into
+    // something pinned.
+    let mut moves: Vec<Move> = Vec::with_capacity(code.len() + pins.len());
     let mut free = lo;
     let mut pi = 0;
-    for &(old, size, obj) in &code {
+    for &(from, size, mask) in &code {
+        let mut to = align_up(free, mask);
         loop {
-            while pi < pins.len() && pins[pi].1 <= free {
+            while pi < pins.len() && pins[pi].1 <= to {
                 pi += 1;
             }
-            if pi < pins.len() && free + size > pins[pi].0 {
-                free = pins[pi].1;
+            if pi < pins.len() && to + size > pins[pi].0 {
+                to = align_up(pins[pi].1, mask);
                 continue;
             }
             break;
         }
-        placed.push((old, free, size, obj));
-        free += size;
+        moves.push(Move { from, size, to });
+        free = to + size;
     }
     let new_hi = pins.iter().fold(free, |m, p| m.max(p.1));
+
+    // Capabilities into the pinned stubs stay as they are; every other one
+    // into code space must be into a code object.
+    let mut owners = moves.clone();
+    owners.extend(pins.iter().map(|&(s, e)| Move { from: s, size: e - s, to: s }));
+    owners.sort_by_key(|m| m.from);
+    rewrite(h, &owners, lo, hi)?;
 
     // Take every object's bytes out, blank everything that is not pinned, and
     // put the bytes back where they go. Copying out first is what lets an
     // object land anywhere, without a care for what it overlaps.
-    let saved: Vec<Vec<u32>> = placed
+    let saved: Vec<Vec<u32>> = moves
         .iter()
-        .map(|&(old, _, size, _)| (0..size / 4).map(|i| h.ld(old + i * 4)).collect())
+        .map(|m| (0..m.size / 4).map(|i| h.ld(m.from + i * 4)).collect())
         .collect();
     let pinned = |a: u32| pins.iter().any(|p| a >= p.0 && a < p.1);
-    let mut a = lo;
-    while a < hi.max(new_hi) {
+    for a in (lo..hi.max(new_hi)).step_by(4) {
         if !pinned(a) {
             h.st(a, 0);
         }
-        a += 4;
     }
     let mut moved = 0;
-    for (i, &(old, new, _, obj)) in placed.iter().enumerate() {
-        for (k, w) in saved[i].iter().enumerate() {
-            h.st(new + 4 * k as u32, *w);
+    for (m, words) in moves.iter().zip(&saved) {
+        for (k, w) in words.iter().enumerate() {
+            h.st(m.to + 4 * k as u32, *w);
         }
-        if new != old {
+        if m.to != m.from {
             moved += 1;
-        }
-        h.set_slot(obj, CODE_ENTRY, new);
-    }
-
-    // And every closure, by where its entry was.
-    for &b in &blocks {
-        if hdr_type(h.ld(b)) != T_CLOSURE {
-            continue;
-        }
-        let clo = b + 4;
-        let e = h.slot(clo, CLO_ENTRY);
-        if e < lo || e >= hi || pinned(e) {
-            continue;
-        }
-        let i = placed.partition_point(|p| p.0 <= e);
-        match if i > 0 { Some(placed[i - 1]) } else { None } {
-            Some((old, new, size, _)) if e < old + size => {
-                h.set_slot(clo, CLO_ENTRY, new + (e - old));
-            }
-            _ => {
-                return Err(format!(
-                    "the closure at {clo:#x} enters code nothing owns, at {e:#x}"
-                ))
-            }
         }
     }
 
     // The free list: every gap big enough to say how big it is, which is the
     // same rule the collector's sweep keeps to.
     let mut spans: Vec<(u32, u32)> = pins.clone();
-    spans.extend(placed.iter().map(|&(_, new, size, _)| (new, new + size)));
+    spans.extend(moves.iter().map(|m| (m.to, m.to + m.size)));
     spans.sort();
     let mut head = 0u32;
     let mut freen = 0u32;
@@ -544,7 +382,7 @@ pub fn compact_code(h: &mut Heap, verbose: bool) -> Result<CodeStats, String> {
             stats.before / 1024,
             stats.after / 1024,
             stats.moved,
-            placed.len()
+            moves.len()
         );
     }
     Ok(stats)
@@ -552,16 +390,10 @@ pub fn compact_code(h: &mut Heap, verbose: bool) -> Result<CodeStats, String> {
 
 /// Compact a saved image, without running it.
 ///
-/// The same pass the build uses, on an image that came off the disk. A live
-/// image is a harder case than a freshly built one: Exec is up, tasks have
-/// stacks, and the pool is full of words that might be pointers, so more of
-/// object space ends up pinned. It is still correct, and it is still most of
-/// the file.
-///
-/// A fresh image, which `rebuild` makes and which boots through its kickstart
-/// and resumes nothing, can have more done to it: the pool's scratch is
-/// blanked, so that nothing in it pins anything, and code space is slid down
-/// as well.
+/// The same pass the build uses, on an image that came off the disk. A fresh
+/// image, which `rebuild` makes and which boots through its kickstart and
+/// resumes nothing, can have more done to it: the pool's scratch is blanked,
+/// and code space is slid down as well.
 pub fn compact_image(from: &str, out: &str, verbose: bool, fresh: bool) -> i32 {
     let mut m = crate::mach::Machine::new();
     let loaded = match crate::image::load(&mut m, from) {
@@ -609,5 +441,56 @@ pub fn compact_image(from: &str, out: &str, verbose: bool, fresh: bool) -> i32 {
             eprintln!("lm: cannot write {out}: {e}");
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Holes close, what is live slides down keeping its alignment, and
+    /// every capability to a moved object, wherever it is and however it was
+    /// narrowed, follows it.
+    #[test]
+    fn sliding_keeps_every_pointer() {
+        let mut m = crate::mach::Machine::new();
+        let mut h = Heap::new(&mut m);
+        h.format();
+        let a = h.vector(&[fix(1), fix(2), fix(3)]);
+        let dead = h.bytes(&[1u8; 3000]);
+        let c = h.alloc_obj(T_VECTOR, 300);
+        let d = h.bytes(&[7u8; 5000]);
+        h.set_slot(c, 0, d);
+        h.set_slot(c, 299, a);
+        h.set_slot(a, 1, c);
+        let inner = d.inc(100).with_bounds(16).unwrap();
+        let l = h.list(&[a, c, d, inner]);
+        h.set_gv(LG_ROOTS, l);
+        // What the collector does to the dead object.
+        let at = dead.addr - HEADER_BYTES;
+        let size = block_size(h.ld(at));
+        h.hole(at, size);
+        let before = h.g(LG_OBJ_PTR);
+
+        let st = compact_objects(&mut h, false).unwrap();
+        assert_eq!(st.moved, 2);
+        assert!(h.g(LG_OBJ_PTR) < before);
+        let items = h.list_vec(h.gv(LG_ROOTS));
+        let (a, c, d, inner) = (items[0], items[1], items[2], items[3]);
+        assert_eq!(h.slot(a, 0), fix(1));
+        assert_eq!(h.slot(a, 1), c);
+        assert_eq!(h.slot(c, 0), d);
+        assert_eq!(h.slot(c, 299), a);
+        assert_eq!(h.olen(c), 300);
+        assert_eq!(h.olen(d), 5000);
+        assert_eq!(d.addr & !cap::ram(5000), 0);
+        assert_eq!(h.m.peek8(d.addr + 4999), 7);
+        assert_eq!(inner.base(), d.addr + 100);
+        assert_eq!(inner.len(), 16);
+        let mut p = OBJ_BASE;
+        while p < h.g(LG_OBJ_PTR) {
+            p += block_size(h.ld(p));
+        }
+        assert_eq!(p, h.g(LG_OBJ_PTR));
     }
 }

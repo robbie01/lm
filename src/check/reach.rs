@@ -16,22 +16,30 @@ use crate::mach::Machine;
 use crate::map::*;
 use std::collections::{HashMap, HashSet};
 
-/// A pair is two words. An object is its header and payload rounded to eight.
-/// A code object also counts the machine code it points at, which is how
-/// code space is attributed.
+/// A pair is its 16 bytes. An object is its block, header included. A code
+/// object also counts the machine code its entry covers, which is how code
+/// space is attributed.
 fn weight(h: &Heap, v: V) -> u32 {
     if is_cons(v) {
-        return 8;
+        return PAIR_BYTES;
     }
     let hdr = h.hdr(v);
-    let mut n = obj_size(hdr);
+    let mut n = block_size(hdr);
     if hdr_type(hdr) == T_CODE {
-        n += h.slot(v, CODE_LEN);
+        n += code_bytes(h, v);
     }
     n
 }
 
-/// The tagged words inside `v`, by the same rule the collector uses.
+/// The bytes of machine code a code object's entry covers.
+fn code_bytes(h: &Heap, code: V) -> u32 {
+    let entry = h.slot(code, CODE_ENTRY);
+    if entry.tag { entry.len() as u32 } else { 0 }
+}
+
+/// What `v` holds, by the rule the collector uses: every slot of a pair or
+/// of an object of a value type. Only the ones that name a pair or an object
+/// are followed.
 fn edges(h: &Heap, v: V, out: &mut Vec<V>) {
     if is_cons(v) {
         out.push(h.car(v));
@@ -39,17 +47,10 @@ fn edges(h: &Heap, v: V, out: &mut Vec<V>) {
         return;
     }
     let hdr = h.hdr(v);
-    let len = hdr_len(hdr);
-    let (from, to) = match hdr_type(hdr) {
-        T_SYMBOL => (0, SYM_SLOTS),
-        T_STRING | T_BYTES | T_FLOAT | T_BIGNUM => (0, 0),
-        // Slots 0 and 1 are a raw address and a raw length.
-        T_CODE => (CODE_NAME, len),
-        // Slot 0 is a raw entry address, not a tagged word.
-        T_CLOSURE => (1, len),
-        _ => (0, len),
-    };
-    for i in from..to {
+    if is_byte_type(hdr_type(hdr)) {
+        return;
+    }
+    for i in 0..hdr_len(hdr) {
         out.push(h.slot(v, i));
     }
 }
@@ -58,7 +59,7 @@ fn walkable(v: V) -> bool {
     is_cons(v) || is_obj(v)
 }
 
-/// Everything reachable from `roots`, as addresses.
+/// Everything reachable from `roots`.
 fn reach(h: &Heap, roots: &[V]) -> HashSet<V> {
     let mut seen: HashSet<V> = HashSet::new();
     let mut stack: Vec<V> = Vec::new();
@@ -95,7 +96,7 @@ pub fn run(path: &str, json: bool) -> i32 {
 
     let mut pkgs: Vec<Pkg> = Vec::new();
     let mut index: HashMap<V, usize> = HashMap::new();
-    let mut p = h.g(LG_PACKAGES);
+    let mut p = h.gv(LG_PACKAGES);
     while is_cons(p) {
         let rec = h.car(p);
         index.insert(rec, pkgs.len());
@@ -111,7 +112,7 @@ pub fn run(path: &str, json: bool) -> i32 {
     }
 
     let mut homeless = 0;
-    let mut p = h.g(LG_SYMLIST);
+    let mut p = h.gv(LG_SYMLIST);
     while is_cons(p) {
         let s = h.car(p);
         match index.get(&h.slot(s, SYM_PACKAGE)) {
@@ -134,31 +135,19 @@ pub fn run(path: &str, json: bool) -> i32 {
     }
 
     // Context: everything the collector would keep, and how much of object
-    // space is neither kept nor given back. Objects never move, so what the
-    // build discarded stays in the file as holes.
-    let root_slots = [
-        LG_SYMLIST,
-        LG_OBARRAY,
-        LG_PACKAGES,
-        LG_PACKAGE,
-        LG_BOOTLIST,
-        LG_ROOTS,
-        LG_TOPLEVEL,
-        LG_ERRHANDLER,
-        LG_TRAPHOOK,
-        LG_REFILL,
-        LG_STARTUP,
-    ];
-    let roots: Vec<V> = root_slots.iter().map(|a| h.g(*a)).collect();
+    // space is neither kept nor given back. The machine never moves an
+    // object, so what it discarded stays in the file as holes until the
+    // image is compacted.
+    let roots: Vec<V> = VALUE_GLOBALS.iter().map(|a| h.gv(*a)).collect();
     let (mut live_pairs, mut live_objs, mut live_code) = (0u64, 0u64, 0u64);
     for v in reach(&h, &roots) {
         if is_cons(v) {
-            live_pairs += 8;
+            live_pairs += PAIR_BYTES as u64;
         } else {
             let hdr = h.hdr(v);
-            live_objs += obj_size(hdr) as u64;
+            live_objs += block_size(hdr) as u64;
             if hdr_type(hdr) == T_CODE {
-                live_code += h.slot(v, CODE_LEN) as u64;
+                live_code += code_bytes(&h, v) as u64;
             }
         }
     }
@@ -177,8 +166,8 @@ pub fn run(path: &str, json: bool) -> i32 {
         if is_cons(v) {
             continue;
         }
-        let start = v - 4;
-        let end = start + obj_size(h.hdr(v));
+        let start = v.addr - HEADER_BYTES;
+        let end = start + block_size(h.hdr(v));
         let mut a = start;
         while a < end {
             let i = ((a - OBJ_BASE) / 4096) as usize;
@@ -199,8 +188,8 @@ pub fn run(path: &str, json: bool) -> i32 {
         if is_cons(v) {
             continue;
         }
-        let start = v - 4;
-        let end = start + obj_size(h.hdr(v));
+        let start = v.addr - HEADER_BYTES;
+        let end = start + block_size(h.hdr(v));
         let mut a = start;
         while a < end {
             let page = (a - OBJ_BASE) / 4096;

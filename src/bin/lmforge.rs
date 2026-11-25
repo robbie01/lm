@@ -73,7 +73,7 @@ enum Cmd {
         #[arg(short, long)]
         out: Option<String>,
 
-        /// Report what moved and what was pinned
+        /// Report what moved
         #[arg(short, long)]
         verbose: bool,
 

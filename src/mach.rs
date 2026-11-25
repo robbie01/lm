@@ -1,6 +1,7 @@
 //! The machine: register file, physical memory, CSRs, trap entry, and the
 //! outer scheduling loop that hands fuel to the token-threaded core.
 
+use crate::cap::Cap;
 use crate::dev::blit::Blitter;
 use crate::dev::disk::Disk;
 use crate::dev::gfx::Gfx;
@@ -98,13 +99,48 @@ pub enum Stop {
     Halt = 3,
 }
 
+/// The tag and the decoded-window flag of a register, above its metadata in
+/// `Machine::xm`.
+pub const XM_TAG: u64 = 1 << 32;
+pub const XM_READY: u64 = 1 << 33;
+
 pub struct Machine {
+    /// The register file. A register is a capability: its address in `x`,
+    /// its metadata and tag in `xm` (metadata in the low 32 bits, the tag at
+    /// `XM_TAG`). An integer result writes the address and zeroes `xm`, so
+    /// the integer instructions touch nothing else.
+    ///
+    /// `wb` and `wl` cache where a tagged register may load and store: the
+    /// base and length of its bounds clipped to RAM. They are valid while
+    /// `XM_READY` is set in `xm`; whatever writes a capability either copies
+    /// them or leaves the flag clear for the first access to fill in.
     pub x: [u32; 32],
+    pub xm: [u64; 32],
+    pub wb: [u32; 32],
+    pub wl: [u32; 32],
+    /// PCC is the address `pc` with `pcc_meta`, tagged by `pcc_tag`. Its
+    /// window is the same clipped bounds as a register's, empty unless PCC
+    /// may execute, so a fetch is one comparison.
     pub pc: u32,
+    pub pcc_meta: u32,
+    pub pcc_tag: bool,
+    pub pcc_wb: u32,
+    pub pcc_wl: u32,
+    /// The special capability registers.
+    pub ddc: Cap,
+    pub mtcc: Cap,
+    pub mtdc: Cap,
+    pub mscratchc: Cap,
+    pub mepcc: Cap,
     ram: Box<[u8]>,
     /// Raw view of `ram` so the hot path skips the slice length load.
     pub ramp: *mut u8,
     pub ramlen: u32,
+    /// One byte per 8-byte granule of RAM, 1 where the granule holds a
+    /// capability. Every data write clears the tags of the granules it
+    /// touches; only a capability store sets one.
+    tags: Box<[u8]>,
+    tagp: *mut u8,
 
     // --- control and status ---
     pub mstatus: u32,
@@ -202,12 +238,28 @@ impl Machine {
     pub fn new() -> Box<Machine> {
         let mut ram = vec![0u8; RAM_SIZE as usize].into_boxed_slice();
         let ramp = ram.as_mut_ptr();
-        Box::new(Machine {
+        let mut tags = vec![0u8; (RAM_SIZE / 8) as usize].into_boxed_slice();
+        let tagp = tags.as_mut_ptr();
+        let mut m = Box::new(Machine {
             x: [0; 32],
+            xm: [0; 32],
+            wb: [0; 32],
+            wl: [0; 32],
             pc: KICK_BASE,
+            pcc_meta: 0,
+            pcc_tag: false,
+            pcc_wb: 0,
+            pcc_wl: 0,
+            ddc: Cap::ROOT,
+            mtcc: Cap::ROOT,
+            mtdc: Cap::NULL,
+            mscratchc: Cap::NULL,
+            mepcc: Cap::NULL,
             ram,
             ramp,
             ramlen: RAM_SIZE,
+            tags,
+            tagp,
             mstatus: 0,
             mie: 0,
             mip: 0,
@@ -254,14 +306,106 @@ impl Machine {
             now: 0,
             rng: 0x2545_F491_4F6C_DD1D,
             trace_traps: false,
-        })
+        });
+        m.set_pcc(Cap::ROOT.with_addr(KICK_BASE));
+        m
     }
 
     pub fn ram(&self) -> &[u8] {
         &self.ram
     }
+    /// The bytes of RAM, for loading an image. Writing through this leaves
+    /// the tags as they are; `tags_mut` sets them to match.
     pub fn ram_mut(&mut self) -> &mut [u8] {
         &mut self.ram
+    }
+
+    /// The tag array: byte `a / 8` is 1 if the granule at `a` holds a
+    /// capability, else 0.
+    pub fn tags(&self) -> &[u8] {
+        &self.tags
+    }
+    pub fn tags_mut(&mut self) -> &mut [u8] {
+        &mut self.tags
+    }
+
+    // ------------------------------------------------------------- registers
+    #[inline(always)]
+    pub fn reg(&self, i: u32) -> Cap {
+        let i = (i & 31) as usize;
+        let h = self.xm[i];
+        Cap { addr: self.x[i], meta: h as u32, tag: h & XM_TAG != 0 }
+    }
+
+    /// Write a capability register. Writes to x0 are discarded.
+    #[inline(always)]
+    pub fn set_reg(&mut self, i: u32, c: Cap) {
+        let i = (i & 31) as usize;
+        self.x[i] = c.addr;
+        self.xm[i] = c.meta as u64 | if c.tag { XM_TAG } else { 0 };
+        self.x[0] = 0;
+        self.xm[0] = 0;
+    }
+
+    pub fn pcc(&self) -> Cap {
+        Cap { addr: self.pc, meta: self.pcc_meta, tag: self.pcc_tag }
+    }
+
+    /// Install a new PCC and the window fetch is checked against: its bounds
+    /// clipped to RAM if it may execute, and empty if not.
+    pub fn set_pcc(&mut self, c: Cap) {
+        self.pc = c.addr;
+        self.pcc_meta = c.meta;
+        self.pcc_tag = c.tag;
+        let exec = c.tag && !c.is_sealed() && c.has(crate::cap::P_EX);
+        let (b, l) = if exec { ram_window(c, self.ramlen) } else { (0, 0) };
+        self.pcc_wb = b;
+        self.pcc_wl = l;
+    }
+
+    // ----------------------------------------------------------- tagged memory
+    #[inline(always)]
+    pub fn tag_at(&self, a: u32) -> bool {
+        self.in_ram(a, 1) && unsafe { *self.tagp.add((a >> 3) as usize) } != 0
+    }
+
+    /// The capability in the granule at `a`, which is 8-byte aligned. Outside
+    /// RAM, NULL.
+    pub fn load_cap(&self, a: u32) -> Cap {
+        if a & 7 != 0 || !self.in_ram(a, 8) {
+            return Cap::NULL;
+        }
+        unsafe { self.rd_cap(a) }
+    }
+
+    /// Store a capability, tag and all, into the granule at `a`, which is
+    /// 8-byte aligned. Outside RAM, nothing.
+    pub fn store_cap(&mut self, a: u32, c: Cap) {
+        if a & 7 == 0 && self.in_ram(a, 8) {
+            unsafe { self.wr_cap(a, c) }
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn rd_cap(&self, a: u32) -> Cap {
+        let bits = (self.ramp.add(a as usize) as *const u64).read_unaligned();
+        Cap::from_bits(bits, *self.tagp.add((a >> 3) as usize) != 0)
+    }
+    #[inline(always)]
+    pub unsafe fn wr_cap(&mut self, a: u32, c: Cap) {
+        (self.ramp.add(a as usize) as *mut u64).write_unaligned(c.to_bits());
+        *self.tagp.add((a >> 3) as usize) = c.tag as u8;
+    }
+
+    /// Clear the tags of every granule `[a, a + n)` touches, within RAM.
+    pub fn clear_tags(&mut self, a: u32, n: u32) {
+        if n == 0 || a >= self.ramlen {
+            return;
+        }
+        let end = (a as u64 + n as u64).min(self.ramlen as u64);
+        let g0 = (a >> 3) as usize;
+        let g1 = ((end + 7) >> 3) as usize;
+        self.tags[g0..g1].fill(0);
     }
 
     // -------------------------------------------------------------- raw access
@@ -286,17 +430,25 @@ impl Machine {
     pub unsafe fn rd32(&self, a: u32) -> u32 {
         (self.ramp.add(a as usize) as *const u32).read_unaligned()
     }
+    /// The data writes. Each clears the tag of every granule it touches: the
+    /// first and the last, which are the same unless the write is unaligned
+    /// across a granule boundary.
     #[inline(always)]
     pub unsafe fn wr8(&mut self, a: u32, v: u8) {
         *self.ramp.add(a as usize) = v;
+        *self.tagp.add((a >> 3) as usize) = 0;
     }
     #[inline(always)]
     pub unsafe fn wr16(&mut self, a: u32, v: u16) {
         (self.ramp.add(a as usize) as *mut u16).write_unaligned(v);
+        *self.tagp.add((a >> 3) as usize) = 0;
+        *self.tagp.add(((a + 1) >> 3) as usize) = 0;
     }
     #[inline(always)]
     pub unsafe fn wr32(&mut self, a: u32, v: u32) {
         (self.ramp.add(a as usize) as *mut u32).write_unaligned(v);
+        *self.tagp.add((a >> 3) as usize) = 0;
+        *self.tagp.add(((a + 3) >> 3) as usize) = 0;
     }
 
     // Checked helpers for use outside the core: loaders, devices, debugger.
@@ -567,5 +719,18 @@ impl Machine {
     /// Number of instructions until the timer fires, saturating.
     pub fn fuel_to_timer(&self) -> u64 {
         self.mtimecmp.saturating_sub(self.cycles)
+    }
+}
+
+/// The part of a capability's bounds that lies in RAM, as a base and a
+/// length; the length is 0 if none does.
+#[inline]
+pub fn ram_window(c: Cap, ramlen: u32) -> (u32, u32) {
+    let (b, t) = c.bounds();
+    let t = t.min(ramlen as u64);
+    if (b as u64) < t {
+        (b, (t - b as u64) as u32)
+    } else {
+        (0, 0)
     }
 }
