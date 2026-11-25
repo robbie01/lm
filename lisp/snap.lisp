@@ -118,7 +118,7 @@
 ;; rather than a wrong one. Answers the blocks written, or minus the first
 ;; status that was not ok. Allocates nothing.
 (define (write-regions)
-  (put-region snap-header 0 0 4096)
+  (put-region snap-header 0 0 low-end)
   (put-region snap-header 1 pool-base (%- (%ld-word lg-poolptr) pool-base))
   (put-region snap-header 2 code-base (%- (%ld-word lg-code-ptr) code-base))
   (put-region snap-header 3 cons-base (%- (%ld-word lg-cons-ptr) cons-base))

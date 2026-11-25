@@ -42,7 +42,7 @@
 (export '(
   alloc-object *object-allocator* *collector* *pacer*
   ;; the generated layout: the names another package reads
-  code-base reset-reserve cons-base cons-limit obj-base obj-limit pool-base pool-limit gc-bitmap mmio-base
+  low-end code-base reset-reserve cons-base cons-limit obj-base obj-limit pool-base pool-limit gc-bitmap mmio-base
   snap-magic
   lg-bootlist lg-code-end lg-code-free lg-code-free-n lg-code-ptr lg-code-reg lg-code-reg-n
   lg-cons-free lg-cons-free-n lg-cons-ptr lg-errhandler lg-gccount lg-imgentry lg-obarray
@@ -65,7 +65,7 @@
   cause-barrier cause-stack
   capex-reg-shift capex-reg-pcc capex-reg-ddc capex-length capex-tag capex-seal capex-type
   capex-representable capex-execute capex-load capex-store capex-load-cap capex-store-cap
-  capex-sysreg capex-unseal
+  capex-soft-perm capex-seal-perm capex-sysreg capex-unseal
   irq-software irq-timer irq-external
   exit-ok exit-error exit-gc-stack exit-gc-corrupt exit-trap-spiral
   dev-sys dev-uart dev-timer dev-gfx dev-input dev-blit dev-disk

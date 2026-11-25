@@ -32,7 +32,6 @@
 
 ;; A node's tag says what kind of thing is on the list.
 (define (make-node tag) (make-record node-slots tag))
-(define (node-tag n) (record-tag n))
 
 ;; ---------------------------------------------------------------- List
 ;; A header owning two sentinel nodes, one before the first real node and one
@@ -147,13 +146,11 @@
   run-owed                       ; bytes of cons run handed to it, unpaid; see gc.lisp
   gen)                           ; which Exec it belongs to: see `task-alive?`
 
-(define ts-invalid 0)
 (define ts-added 1)
 (define ts-run 2)
 (define ts-ready 3)
 (define ts-wait 4)
-(define ts-except 5)
-(define ts-removed 6)
+(define ts-removed 5)
 
 ;; ---------------------------------------------------------------- the kernel
 (define *idle-task* nil)

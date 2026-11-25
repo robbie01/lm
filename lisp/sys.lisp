@@ -412,11 +412,6 @@
                              (%logand tval (%- (%lsh 1 capex-reg-shift) 1))
                              ctx))))
 
-;; Two codes the layout has no names for: a permission the authority lacks,
-;; which `cbuildcap` raises, and sealing with an authority that lacks SE.
-(define capex-perm #x08)
-(define capex-seal-perm #x17)
-
 ;; Whether the capability stores data at all.
 (define (stores-data? c) (%= perm-sd (%logand (%cap-perms c) perm-sd)))
 
@@ -458,7 +453,7 @@
             (write v) (emit-str " cannot be narrowed to those bounds exactly"))
            ((if (%= code capex-unseal) t (%= code capex-type))
             (write v) (emit-str " is not unsealed by that key"))
-           ((%= code capex-perm)
+           ((%= code capex-soft-perm)
             (write v) (emit-str " does not grant the permissions asked of it"))
            ((%= code capex-seal-perm)
             (write v) (emit-str " has no authority to seal"))
@@ -913,8 +908,6 @@
     (if m (%funcall m (%cdr form)) form)))
 
 ;; ---------------------------------------------------------------- repl
-(define *repl-depth* 0)
-
 ;; Where the bindings stand here is what an error unwinds to: the prompt's
 ;; own streams and package survive it, and whatever the form that failed had
 ;; bound on top of them does not. `then` runs when the prompt says goodbye,

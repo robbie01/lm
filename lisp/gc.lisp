@@ -42,8 +42,10 @@
 ;;; hold a pointer and every dead stretch of pairs, so an allocator's stores
 ;;; into a fresh block never meet an old pointer and never trip the barrier,
 ;;; and every tag inside an allocated block is a pointer to something that
-;;; exists. The one place a stale pointer can sit is a stack: a frame's slots
-;;; hold whatever an earlier call left there until its function writes them.
+;;; exists. Stale pointers sit in two places nothing reads them from: a dead
+;;; pair that shares its word of the mark map with a live one, which is not
+;;; handed out until the whole word is dead, and a frame's slots, which hold
+;;; whatever an earlier call left there until their function writes them.
 ;;; Such a slot is scanned with the rest, so an object's header is checked
 ;;; before it is believed, and a stale slot costs at most some floating
 ;;; garbage.
@@ -86,9 +88,6 @@
 (define gc-cons-words (%lsh (%- cons-limit cons-base) -8))
 ;; The rest of scratch memory, where the image writer builds its tag maps.
 (define gc-scratch (%+ gc-cons-prefix (%lsh gc-cons-words 2)))
-
-;; A run carries `perms-pair`, data and capabilities loaded and stored, and
-;; every pair cut from it inherits them; HD it never has.
 
 ;; A free block in object space carries t-free in its header with its size in
 ;; granules where a live object keeps its length, and the address of the next
@@ -931,12 +930,11 @@
 ;; The trap handler calls this when a task's run is used up: a length fault
 ;; on `gp`. It answers the task's next run, which the handler writes into the
 ;; saved `gp` and the live one before it retries the instruction. The
-;; collector gets its share of work first; then the run, with interrupts off.
-;; The share is for the run just used up, whatever its size: a sweep hole of
-;; a few pairs is not a chunk, and a task's first run is paid for when it
-;; asks for its second, so a fresh task is not stalled on its first cons by a
-;; collection in progress. Never allocates a pair: the run it would come from
-;; is the one that is used up.
+;; collector's share of work comes first, paid for the run just used up,
+;; whatever its size: a task's first run is paid for when it asks for its
+;; second, so a fresh task is not stalled on its first cons by a collection
+;; in progress. Never allocates a pair: the run it would come from is the
+;; one that is used up.
 (define (refill-cons-run)
   (pace (take-owed-run))
   (without-interrupts
