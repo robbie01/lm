@@ -48,14 +48,14 @@ fn census(h: &Heap) -> Census {
         if v == NIL {
             c.nils += 1;
         } else if is_obj(v) {
-            let hdr = v.addr.wrapping_sub(HEADER_BYTES);
+            let hdr = v.base() - HEADER_BYTES;
             let ok = (OBJ_BASE..obj_hi).contains(&hdr) && hdr_type(h.ld(hdr)) != T_FREE;
             if ok {
                 c.objects += 1;
             } else if (POOL_BASE..POOL_END).contains(&at) {
                 c.stale += 1;
             } else {
-                c.wrong.push((at, format!("an object capability to {:#x}, where no object is", v.addr)));
+                c.wrong.push((at, format!("an object capability to {:#x}, where no object is", v.base())));
             }
         } else if is_cons(v) {
             if v.addr < cons_hi {
@@ -83,21 +83,12 @@ fn owns(h: &Heap, v: V, at: u32) -> bool {
 
 /// Where the payload of every string and byte object lies, in address order.
 fn byte_object_spans(h: &Heap) -> Vec<(u32, u32)> {
-    let mut out = Vec::new();
-    let hi = h.g(LG_OBJ_PTR);
-    let mut p = OBJ_BASE;
-    while p < hi {
-        let hdr = h.ld(p);
-        let sz = block_size(hdr);
-        if sz == 0 {
-            break;
-        }
-        if is_byte_type(hdr_type(hdr)) {
-            out.push((p + HEADER_BYTES, p + sz));
-        }
-        p += sz;
-    }
-    out
+    let blocks = h.blocks().unwrap_or_else(|_| Vec::new());
+    blocks
+        .into_iter()
+        .filter(|&(_, hdr)| is_byte_type(hdr_type(hdr)))
+        .map(|(p, hdr)| (p + HEADER_BYTES, p + block_size(hdr)))
+        .collect()
 }
 
 /// The function whose code holds `at`, by its code object's entry.

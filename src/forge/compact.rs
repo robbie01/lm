@@ -100,17 +100,10 @@ fn rewrite(h: &mut Heap, moves: &[Move], lo: u32, hi: u32) -> Result<(), String>
 /// alignment its bounds need, as CRAM gives it. What a hole held is dead, and
 /// is blanked here, so that nothing in one is taken for a pointer.
 fn live_blocks(h: &mut Heap) -> Result<Vec<(u32, u32, u32)>, String> {
-    let hi = h.g(LG_OBJ_PTR);
+    let blocks = h.blocks().map_err(|p| format!("corrupt object header at {p:#x}: {:#x}", h.ld(p)))?;
     let mut out = Vec::new();
-    let mut p = OBJ_BASE;
-    while p < hi {
-        let hdr = h.ld(p);
+    for (p, hdr) in blocks {
         let sz = block_size(hdr);
-        // A zero-sized block would be a corrupt header and would spin here
-        // forever, so it is an error rather than a hang.
-        if sz == 0 || p + sz > hi {
-            return Err(format!("corrupt object header at {p:#x}: {hdr:#x}"));
-        }
         if hdr_type(hdr) == T_FREE {
             for a in (p + HEADER_BYTES..p + sz).step_by(8) {
                 h.stc(a, Cap::NULL);
@@ -118,7 +111,6 @@ fn live_blocks(h: &mut Heap) -> Result<Vec<(u32, u32, u32)>, String> {
         } else {
             out.push((p, sz, cap::ram(payload_bytes(hdr))));
         }
-        p += sz;
     }
     Ok(out)
 }
@@ -506,10 +498,6 @@ mod tests {
         assert_eq!(h.m.peek8(d.addr + 4999), 7);
         assert_eq!(inner.base(), d.addr + 100);
         assert_eq!(inner.len(), 16);
-        let mut p = OBJ_BASE;
-        while p < h.g(LG_OBJ_PTR) {
-            p += block_size(h.ld(p));
-        }
-        assert_eq!(p, h.g(LG_OBJ_PTR));
+        assert!(h.blocks().is_ok());
     }
 }
