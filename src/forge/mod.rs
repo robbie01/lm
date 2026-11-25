@@ -190,7 +190,7 @@ pub fn write_layout() {
     def!("chip-size", CHIP_SIZE);
     def!("nil-cell", NIL_CELL);
     def!("lg-base", LG_BASE);
-    def!("trap-base", TRAP_BASE);
+    def!("low-end", LOW_END);
     def!("pool-base", POOL_BASE);
     def!("pool-limit", POOL_END);
     def!("code-base", CODE_BASE);
@@ -232,10 +232,10 @@ pub fn write_layout() {
     def!("kind-eof", IMM_EOF);
     def!("kind-void", IMM_VOID);
     def!("kind-default", IMM_DEFAULT);
-    def!("kind-nil", VK_NIL);
-    def!("kind-pair", VK_PAIR);
-    def!("kind-cap", VK_CAP);
-    def!("kind-object", VK_OBJECT);
+    def!("kind-nil", KIND_NIL);
+    def!("kind-pair", KIND_PAIR);
+    def!("kind-cap", KIND_CAP);
+    def!("kind-object", KIND_OBJECT);
 
     // Permissions in the positions `cgetperm` answers and `candperm` takes,
     // and the sets the allocators hand out.
@@ -355,12 +355,14 @@ pub fn write_layout() {
     def!("capex-tag", CAPEX_TAG);
     def!("capex-seal", CAPEX_SEAL);
     def!("capex-type", CAPEX_TYPE);
+    def!("capex-soft-perm", CAPEX_SOFT_PERM);
     def!("capex-representable", CAPEX_REPRESENTABLE);
     def!("capex-execute", CAPEX_EXECUTE);
     def!("capex-load", CAPEX_LOAD);
     def!("capex-store", CAPEX_STORE);
     def!("capex-load-cap", CAPEX_LOAD_CAP);
     def!("capex-store-cap", CAPEX_STORE_CAP);
+    def!("capex-seal-perm", CAPEX_SEAL_PERM);
     def!("capex-sysreg", CAPEX_SYSREG);
     def!("capex-unseal", CAPEX_UNSEAL);
 
@@ -408,28 +410,35 @@ pub fn write_layout() {
     {
         use crate::dev::disk::*;
         def!("disk-busy", STATUS_BUSY);
+        def!("disk-refused", STATUS_REFUSED);
         def!("disk-cmd-read", CMD_READ);
         def!("disk-cmd-write", CMD_WRITE);
         def!("disk-cmd-flush", CMD_FLUSH);
     }
 
-    // The blitter takes its command from a block of fourteen words; this is
-    // that block's layout, and the three registers the Lisp side names.
-    s.push_str("\n;; ---- blitter command block ----\n");
+    // The blitter takes its command from a descriptor in memory; this is the
+    // descriptor's layout, its done words, and the three registers the Lisp
+    // side names.
+    s.push_str("\n;; ---- blitter descriptor ----\n");
     {
         use crate::dev::blit::*;
         def!("blit-list-reg", B_LIST);
         def!("blit-status-reg", B_STATUS);
         def!("blit-ctrl-reg", B_CTRL);
-        def!("blit-list-size", LIST_WORDS * 4);
-        for (i, name) in ["src", "dst", "w", "h", "smod", "dmod",
-                          "val", "op", "x0", "y0", "x1", "y1",
-                          "status", "next"]
-            .iter()
-            .enumerate()
+        def!("blit-status-busy", STATUS_BUSY);
+        def!("blit-status-refused", STATUS_REFUSED);
+        def!("blit-list-size", LIST_BYTES);
+        for (name, off) in [("src", L_SRC), ("dst", L_DST), ("next", L_NEXT),
+                            ("w", L_W), ("h", L_H), ("smod", L_SMOD), ("dmod", L_DMOD),
+                            ("val", L_VAL), ("op", L_OP), ("x0", L_X0), ("y0", L_Y0),
+                            ("x1", L_X1), ("y1", L_Y1), ("status", L_STATUS)]
         {
-            def!(format!("bl-{name}"), (i as u32) * 4);
+            def!(format!("bl-{name}"), off);
         }
+        def!("blit-done", DONE);
+        def!("blit-pending", DONE_PENDING);
+        def!("blit-refused-src", REFUSED_SRC);
+        def!("blit-refused-dst", REFUSED_DST);
         def!("op-copy", OP_COPY);
         def!("op-fill", OP_FILL);
         def!("op-xor", OP_XOR);
@@ -496,7 +505,7 @@ pub fn write_layout() {
     }
     {
         use crate::dev::disk::*;
-        def!("dsk-addr", D_ADDR);
+        def!("dsk-buf", D_BUF);
         def!("dsk-block", D_BLOCK);
         def!("dsk-count", D_COUNT);
         def!("dsk-cmd", D_CMD);

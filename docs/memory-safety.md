@@ -35,6 +35,28 @@ bounds, so a header that lied could not reach past the object either.
 Narrowing is the only direction: `csetbounds` refuses a region outside the
 capability it starts from.
 
+**And by the chips.** The two chips that move memory are handed
+capabilities, not numbers, and check them as the processor would. A
+blitter descriptor's source, destination and link are capability slots and
+the list register a capability register; the disk's buffer register is
+one too. A transfer is made only if its capability is tagged, unsealed,
+holds the permission (LD to read memory, SD to write it) and covers every
+byte the transfer touches, a rectangle's rows and stride included.
+Otherwise the chip moves nothing: a blit's done word says which capability
+refused it and why, and the blitter's status keeps a bit until it is
+cleared; a disk command answers `disk-refused`. What either chip writes is
+data, its tags cleared.
+
+**And in time.** A capability a chip holds for a transfer it has not
+finished keeps its object alive. The blitter clears a descriptor's
+capability slots as it finishes it, so the tagged granules of the tasks'
+descriptor rings are exactly what blits in flight hold, and the collector
+takes them as roots: a bitmap dropped while a blit into it is still running
+is freed by a later collection, after the blit has landed. The disk takes
+its buffer out of the register when a command starts and drops it when the
+command ends, and the command's caller is blocked holding the buffer
+throughout.
+
 **Unforgeability, by tags.** A granule's tag is out of band, and only a
 capability store from a tagged register sets it. Integer instructions write
 untagged results, data stores clear the tags they touch, and a capability
@@ -90,24 +112,28 @@ compiler and the processor.
 | `open-closure` | a closure unsealed with the root | its free variables and entry |
 | `%set-context!` `%set-stack-limit!` `%set-gc-mode!` `%ecall` `%disable` `%enable` `%cons-run` `%set-cons-run!` `%set-this-task!` `%halt` | the machine's own state | arbitrary machine state |
 | `alloc-pool` `free-pool` | pool memory, by number | a freed block reused under a holder; never traced |
-| `dev-page` `dev-ld` `dev-st!` `disk-go` `blit-descriptor` `blit-go` | a device; DMA | a transfer anywhere in RAM |
+| `dev-page` `dev-ld` `dev-st!` | any register of a device the task may use | a register it should not have written |
+| `blit-descriptor` `blit-go` | a descriptor: pool memory that holds capabilities | a descriptor written after it was linked, under the chip |
 | `alloc-code`, `register-code`, `refill-cons-run` in gc | code space, the collector's tables | the collector's invariants |
 
 What left the list with the port: `%addr-of` is safe, because a number is
 no authority; the operations on a capability already held, `%cap-ld`,
 `%cap-st!`, the field readers, narrowing, dropping permissions and sealing,
 are safe, because they cannot reach past it; `%ld-fixnum` and `%st-fixnum!`
-are gone, a word being a fixnum.
+are gone, a word being a fixnum. `disk-go` and the disk driver's transfers
+left it when the controller came to take a capability: a transfer reaches
+only what the buffer it is handed covers.
 
 Where it is said: the collector, the kernel, the chips, the trap handler,
 the image writer, the core runtime, the bignums and the compiler are unsafe
 files. Outside those there are about forty sites, each inside an `unsafe`
 form: the printer and the explorer walking objects by slot and opening
-closures, the console's raw line and its wait, the disk driver handing a
-buffer's address to the controller, the assembler copying code into code
-space, and the suites that exercise raw memory on purpose. The UI stack, wb,
-ui, platinum, eyes and the fonts, has none: glyphs and plots store into a
-bitmap's pixels through their byte object, which is the design working.
+closures, the console's raw line and its wait, the assembler copying code
+into code space, and the suites that exercise raw memory on purpose. The UI
+stack, wb, ui, platinum, eyes and the fonts, has none: glyphs and plots
+store into a bitmap's pixels through their byte object, which is the design
+working. Neither has the disk driver: it hands the controller the byte
+object it was given.
 
 ## What remains unchecked
 
@@ -121,13 +147,7 @@ used through DDC, reaches whatever the block holds next. There is no
 revocation. `alloc-pool` zeroes the block it hands out, so the new owner
 never sees the old one's data, but the old owner can see the new one's.
 
-**DMA by address.** The blitter and the disk controller follow numbers, not
-capabilities: a descriptor's source and destination and a disk request's
-buffer are addresses that privileged code writes. The rectangle calls take
-bitmaps and the disk driver takes byte objects and checks the blocks fit,
-so the addresses come from objects; nothing in the chips checks it.
-`LM_BLIT_GUARD` checks every transfer against the block it named, and is
-off by default.
+**The display.** The display chip reads a bitmap by number, and only reads.
 
 **Inside `unsafe`.** Code with SR has the root, and the root reaches
 everything: an object's header, the nil cell, a sealed closure's slots, code
@@ -159,12 +179,14 @@ the pair compactor's walk over memory already does. The cost is a walk of
 the roots and the heap per free, most of them task stacks at task end;
 batching frees into the sweep is the shape to measure.
 
-**3. Make the blitter's guard the chip's behaviour. OPEN.** As before:
-`LM_BLIT_GUARD` as the default, refusing the transfer and setting a status
-bit, turns a wrong descriptor into a reported failure. Capabilities do not
-reach the chips, so this is still the only check there could be. The disk
-engine checks its extent against RAM in 64 bits, and could check that the
-address is inside a byte object, since that is all the driver hands it.
+**3. Make the blitter's guard the chip's behaviour. CLOSED**, by handing
+the chips capabilities. The blitter's descriptors and the disk's buffer
+register hold capabilities, written with capability stores, and both chips
+refuse a transfer their capability does not cover and report it, which is
+what the old debugging guard checked for, now for every transfer and
+against the object itself rather than a guess at its block. The guard is
+gone. Building a descriptor names no memory by number, and the disk driver
+has no `unsafe` left.
 
 **4. Audit `%from-addr`. RESOLVED.** It reads DDC and sets an address, so
 it faults in code without SR, and the compiler refuses its name outside

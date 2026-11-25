@@ -1,6 +1,9 @@
 //! Custom chips. Every device is a 4 KiB page in the MMIO window and every
-//! register is a naturally-aligned 32-bit word, so the Lisp side can talk to
-//! hardware with plain `poke`/`peek` and no bit-fiddling in the compiler.
+//! register is a naturally-aligned 32-bit word, but for the two capability
+//! registers: the blitter's list register and the disk's buffer register,
+//! each 8 bytes, written with a capability store. A chip that moves memory
+//! is handed capabilities, never numbers, and refuses a transfer its
+//! capability does not cover.
 
 pub mod blit;
 pub mod boxfilter;
@@ -10,7 +13,8 @@ pub mod input;
 pub mod uart;
 pub mod win;
 
-use crate::mach::Machine;
+use crate::cap::*;
+use crate::mach::*;
 use crate::map::*;
 
 // ------------------------------------------------------------- SYS registers
@@ -144,6 +148,65 @@ pub fn write(m: &mut Machine, a: u32, f: u32, v: u32) {
         DEV_DISK => disk::command(m, reg, v),
         _ => {}
     }
+}
+
+/// Whether the register at `a` is a capability register. A capability store
+/// to any other faults.
+pub fn takes_cap(a: u32) -> bool {
+    let reg = a & 0xfff;
+    match dev_of(a) {
+        DEV_BLIT => reg == blit::B_LIST,
+        DEV_DISK => reg == disk::D_BUF,
+        _ => false,
+    }
+}
+
+/// A capability store to a capability register.
+pub fn write_cap(m: &mut Machine, a: u32, c: Cap) {
+    match dev_of(a) {
+        DEV_BLIT => blit::start_chain(m, c),
+        DEV_DISK => m.disk.buf = c,
+        _ => {}
+    }
+}
+
+/// The capability in the granule at `a` as a chip loads it through `auth`,
+/// the way `lc` does: without LC in `auth` the tag is dropped, and without
+/// LM a tagged, unsealed capability loses SD, SC and LM.
+pub fn load_through(m: &Machine, auth: Cap, a: u32) -> Cap {
+    let c = m.load_cap(a);
+    if !c.tag {
+        c
+    } else if !auth.has(P_LC) {
+        c.without_tag()
+    } else if !auth.has(P_LM) && !c.is_sealed() {
+        c.strip(P_SD | P_SC | P_LM)
+    } else {
+        c
+    }
+}
+
+/// Why a chip may not move the `len` bytes from `at` through `c`, as the
+/// capability fault the processor would take: `c` must be tagged, unsealed
+/// and hold every permission in `perms` (each with the code its absence is
+/// reported as), and the bytes must lie inside its bounds and in RAM. None if
+/// `c` allows it.
+pub fn refusal(m: &Machine, c: Cap, perms: &[(u32, u32)], at: u64, len: u64) -> Option<u32> {
+    if !c.tag {
+        return Some(CAPEX_TAG);
+    }
+    if c.is_sealed() {
+        return Some(CAPEX_SEAL);
+    }
+    if let Some(&(_, code)) = perms.iter().find(|&&(p, _)| !c.has(p)) {
+        return Some(code);
+    }
+    let (base, top) = c.bounds();
+    let end = at.saturating_add(len);
+    if at < base as u64 || end > top || end > m.ramlen as u64 {
+        return Some(CAPEX_LENGTH);
+    }
+    None
 }
 
 /// Finish whatever the asynchronous chips (the blitter and the disk) have

@@ -127,6 +127,23 @@ fn pair(m: &mut Machine, at: u32, car: Cap, cdr: Cap) -> Cap {
     region(at, 16, DATA)
 }
 
+/// Lay down a blitter descriptor at `d`, pending: `op` over `w` by `h` with
+/// rows `w` apart, from `src` to `dst`, with 0xAB for its value, linked to
+/// `next`.
+#[allow(clippy::too_many_arguments)]
+fn put_descriptor(m: &mut Machine, d: u32, op: u32, dst: Cap, src: Cap, w: u32, h: u32, next: Cap) {
+    use crate::dev::blit::*;
+    for i in (0..LIST_BYTES).step_by(4) {
+        m.poke32(d + i, 0);
+    }
+    m.store_cap(d + L_SRC, src);
+    m.store_cap(d + L_DST, dst);
+    m.store_cap(d + L_NEXT, next);
+    for (at, v) in [(L_W, w), (L_H, h), (L_SMOD, w), (L_DMOD, w), (L_VAL, 0xAB), (L_OP, op), (L_STATUS, DONE_PENDING)] {
+        m.poke32(d + at, v);
+    }
+}
+
 pub fn run_all() -> bool {
     let mut checks: Vec<(String, bool)> = Vec::new();
     let mut ok = |name: &str, v: bool| checks.push((name.to_string(), v));
@@ -597,6 +614,10 @@ pub fn run_all() -> bool {
         li32(&mut c6, A2, P_ALL & !P_SE);
         c6.extend([candperm(A1, ROOT, A2), addi(A3, ZERO, 5), csetaddr(A3, A1, A3), cseal(A4, ROOT, A3)]);
         ok("cseal needs SE", go(&c6).took(C_CAP, (A3 << 5) | CAPEX_SEAL_PERM));
+        let mut c7 = code[..6].to_vec();
+        li32(&mut c7, A2, P_ALL & !P_SE);
+        c7.extend([candperm(A1, A3, A2), cunseal(A6, A4, A1)]);
+        ok("cunseal needs SE", go(&c7).took(C_CAP, (A1 << 5) | CAPEX_UNSEAL));
     }
 
     // ---- capability loads and stores, and tags in memory ----
@@ -692,6 +713,8 @@ pub fn run_all() -> bool {
     {
         let o = go(&[addi(A0, ZERO, 77), sw(A0, ZERO, 0x100), lw(A1, ZERO, 0x100)]);
         ok("x0-based addressing reaches DDC", o.x(A1) == 77 && o.m.peek32(0x100) == 77);
+        let o = go(&[sc(ROOT, ZERO, 0x108), lc(A1, ZERO, 0x108)]);
+        ok("...for capabilities too", o.c(A1) == Cap::ROOT && o.m.load_cap(0x108) == Cap::ROOT);
         let mut v = vec![];
         li32(&mut v, A2, 0x5000);
         v.extend([addi(A0, ZERO, -2), sw_ddc(A0, A2), lw_ddc(A1, A2), lbu_ddc(A3, A2), lh_ddc(A4, A2)]);
@@ -763,6 +786,16 @@ pub fn run_all() -> bool {
         });
         ok("a jal out of PCC's bounds faults at the jal", o.took(C_CAP, (CAPEX_REG_PCC << 5) | CAPEX_LENGTH));
         ok("...with mepc at the jal", o.trap().map(|t| t.2) == Some(BASE + 0x104) && o.x(A0) == 1);
+        // A taken branch out of PCC's bounds faults at the branch too.
+        for (name, br) in [("beq", beq(ZERO, ZERO, 8)), ("beqx", beqx(ZERO, ZERO, 8)), ("c.beqz", c_beqz(S0, 8))] {
+            let o = go_with(&v, |m| {
+                emit(m, BASE + 0x100, &[addi(A0, ZERO, 1), br]);
+            });
+            ok(
+                &format!("a {name} out of PCC's bounds faults at the branch"),
+                o.took(C_CAP, (CAPEX_REG_PCC << 5) | CAPEX_LENGTH) && o.trap().map(|t| t.2) == Some(BASE + 0x104),
+            );
+        }
         let o = go_with(&v, |m| {
             emit(m, BASE + 0x100, &[addi(A0, ZERO, 1), addi(A0, ZERO, 2)]);
         });
@@ -1079,50 +1112,50 @@ pub fn run_all() -> bool {
         ok("a device holds no capabilities", go(&c2).took(C_LFAULT, MMIO_BASE + (DEV_UART << 12)));
     }
     {
-        // The blitter fills, and what it writes is data.
-        let b = MMIO_BASE + (DEV_BLIT << 12);
-        let mut code = vec![];
-        li32(&mut code, A0, b + 0x04);
-        li32(&mut code, A1, 0x4000);
-        code.push(sw_ddc(A1, A0)); // dst
-        for (reg, v) in [(0x08, 16), (0x0c, 4), (0x14, 16), (0x18, 0xAB), (0x1c, 1)] {
-            li32(&mut code, A0, b + reg);
-            li32(&mut code, A1, v);
-            code.push(sw_ddc(A1, A0));
-        }
-        code.push(jal(ZERO, 0));
+        // The blitter is handed a descriptor's capability with a capability
+        // store to its list register, fills, and what it writes is data.
+        use crate::dev::blit::*;
+        let blit = MMIO_BASE + (DEV_BLIT << 12);
+        let d = 0x6000u32;
         let mut m = Machine::new();
-        emit(&mut m, KICK_BASE, &code);
+        put_descriptor(&mut m, d, OP_FILL, region(0x4000, 64, P_SD), Cap::NULL, 16, 4, Cap::NULL);
         m.store_cap(0x4008, Cap::ROOT);
         m.store_cap(0x4100, Cap::ROOT);
+        m.set_reg(A1, region(d, LIST_BYTES, DATA));
+        let mut code = vec![];
+        li32(&mut code, A0, blit + B_LIST);
+        code.push(sc_ddc(A1, A0));
+        code.push(jal(ZERO, 0));
+        emit(&mut m, KICK_BASE, &code);
         m.mtimecmp = u64::MAX;
         m.gfx.next_vbl = u64::MAX;
         run::run(&mut m, 400);
         let filled = (0..64).all(|i| m.peek8(0x4000 + i) == 0xAB) && m.peek8(0x4040) == 0;
         ok("blitter fill", filled);
         ok("the blitter clears the tags it writes", !m.tag_at(0x4008) && m.tag_at(0x4100));
+        ok(
+            "a finished descriptor is done and holds no capability",
+            m.peek32(d + L_STATUS) == DONE && !m.tag_at(d + L_DST) && m.blit.read(B_STATUS) == 0,
+        );
     }
     {
-        // The blitter walks a chain of descriptors.
+        // The blitter walks a chain of descriptors, each link a capability.
+        use crate::dev::blit::*;
         let mut m = Machine::new();
         let (a, b) = (0x6000u32, 0x6100u32);
-        let put = |m: &mut Machine, d: u32, dst: u32, val: u32, next: u32| {
-            let words = [0, dst, 16, 4, 0, 16, val, 1, 0, 0, 0, 0, 1, next];
-            for (i, w) in words.iter().enumerate() {
-                m.poke32(d + 4 * i as u32, *w);
-            }
-        };
-        put(&mut m, a, 0x4000, 0xAB, b);
-        put(&mut m, b, 0x5000, 0xCD, 0);
+        let desc = |at: u32| region(at, LIST_BYTES, DATA);
+        put_descriptor(&mut m, a, OP_FILL, region(0x4000, 64, P_SD), Cap::NULL, 16, 4, desc(b));
+        put_descriptor(&mut m, b, OP_FILL, region(0x5000, 64, P_SD), Cap::NULL, 16, 4, Cap::NULL);
+        m.poke32(b + L_VAL, 0xCD);
+        m.set_reg(A1, desc(a));
         let blit = MMIO_BASE + (DEV_BLIT << 12);
         let mut code = vec![];
-        li32(&mut code, A0, blit + 0x34);
-        code.push(addi(A1, ZERO, 1));
-        code.push(sw_ddc(A1, A0));
-        li32(&mut code, A0, blit + 0x38);
-        li32(&mut code, A1, a);
-        code.push(sw_ddc(A1, A0));
-        li32(&mut code, A0, blit + 0x20);
+        li32(&mut code, A0, blit + B_CTRL);
+        code.push(addi(A2, ZERO, CTRL_DRAINED as i32));
+        code.push(sw_ddc(A2, A0));
+        li32(&mut code, A0, blit + B_LIST);
+        code.push(sc_ddc(A1, A0));
+        li32(&mut code, A0, blit + B_STATUS);
         code.push(lw_ddc(A2, A0));
         code.push(jal(ZERO, 0));
         emit(&mut m, KICK_BASE, &code);
@@ -1131,63 +1164,146 @@ pub fn run_all() -> bool {
         run::run(&mut m, 2000);
         let filled = |m: &Machine, at: u32, v: u8| (0..64).all(|i| m.peek8(at + i) == v);
         ok("blitter chain: both ran", filled(&m, 0x4000, 0xAB) && filled(&m, 0x5000, 0xCD));
-        ok("blitter chain: each marked done", m.peek32(a + 48) == 0 && m.peek32(b + 48) == 0);
-        ok("blitter chain: busy while it runs", m.x[A2 as usize] & 1 == 1);
+        ok("blitter chain: each marked done", m.peek32(a + L_STATUS) == DONE && m.peek32(b + L_STATUS) == DONE);
+        ok("blitter chain: busy while it runs", m.x[A2 as usize] & STATUS_BUSY != 0);
         ok("blitter chain: one interrupt at the end", m.intreq & (1 << INT_BLIT) != 0);
     }
     {
-        // The disk completes asynchronously, and a read clears the tags of
-        // what it fills.
+        // The blitter refuses what its capabilities do not cover: the
+        // transfer is not made, its done word says why, the chain goes on,
+        // and the status register keeps a bit until it is cleared.
+        use crate::dev::blit::*;
+        let mut m = Machine::new();
+        let (a, b, c) = (0x6000u32, 0x6100u32, 0x6200u32);
+        let desc = |at: u32| region(at, LIST_BYTES, DATA);
+        // 16 by 4 with rows 16 apart is 64 bytes, into 63.
+        put_descriptor(&mut m, a, OP_FILL, region(0x4000, 63, P_SD), Cap::NULL, 16, 4, desc(b));
+        // A copy from a source that may not be read.
+        put_descriptor(&mut m, b, OP_COPY, region(0x4000, 64, P_SD), region(0x5000, 64, P_SD), 16, 4, desc(c));
+        put_descriptor(&mut m, c, OP_FILL, region(0x7000, 64, P_SD), Cap::NULL, 16, 4, Cap::NULL);
+        for i in 0..64 {
+            m.poke8(0x5000 + i, 0x11);
+        }
+        m.set_reg(A1, desc(a));
+        let blit = MMIO_BASE + (DEV_BLIT << 12);
+        let mut code = vec![];
+        li32(&mut code, A0, blit + B_LIST);
+        code.push(sc_ddc(A1, A0));
+        // Wait for the chain, then read the status, clear its refused bit,
+        // and read it again.
+        li32(&mut code, A0, blit + B_STATUS);
+        code.push(lw_ddc(A2, A0));
+        code.push(andi(A3, A2, STATUS_BUSY as i32));
+        code.push(bne(A3, ZERO, -8));
+        code.push(addi(A3, ZERO, STATUS_REFUSED as i32));
+        code.push(sw_ddc(A3, A0));
+        code.push(lw_ddc(A4, A0));
+        // A number written to the list register is no capability.
+        li32(&mut code, A5, blit + B_LIST);
+        li32(&mut code, A6, a);
+        code.push(sw_ddc(A6, A5));
+        code.push(lw_ddc(A7, A0));
+        code.push(jal(ZERO, 0));
+        emit(&mut m, KICK_BASE, &code);
+        m.mtimecmp = u64::MAX;
+        m.gfx.next_vbl = u64::MAX;
+        run::run(&mut m, 5000);
+        let r = |x: u32| m.x[x as usize];
+        let untouched = (0..64).all(|i| m.peek8(0x4000 + i) == 0);
+        ok("a destination too small is refused", m.peek32(a + L_STATUS) == REFUSED_DST | CAPEX_LENGTH);
+        ok("a source without LD is refused", m.peek32(b + L_STATUS) == REFUSED_SRC | CAPEX_LOAD);
+        ok("a refused transfer moves nothing", untouched);
+        ok("the chain goes on past a refusal", m.peek32(c + L_STATUS) == DONE && m.peek8(0x7000) == 0xAB);
+        ok("the status says something was refused", r(A2) == STATUS_REFUSED && r(A4) == 0);
+        ok("a number is no descriptor", r(A7) == STATUS_REFUSED);
+    }
+    {
+        // Only a capability register takes a capability, and no register
+        // hands one out.
+        use crate::dev::blit::*;
+        let blit = MMIO_BASE + (DEV_BLIT << 12);
+        let mut code = vec![];
+        capr(&mut code, A0, blit);
+        code.push(sc(ROOT, A0, B_STATUS as i32));
+        ok("a capability store to a word register faults", go(&code).took(C_SFAULT, blit + B_STATUS));
+        let mut code = vec![];
+        capr(&mut code, A0, blit);
+        code.push(lc(A1, A0, B_LIST as i32));
+        ok("a capability register reads back no capability", go(&code).took(C_LFAULT, blit + B_LIST));
+    }
+    {
+        // The disk is handed its buffer as a capability, completes
+        // asynchronously, and a read clears the tags of what it fills. A
+        // transfer the buffer does not cover is refused and moves nothing.
+        use crate::dev::disk::*;
         let path = std::env::temp_dir().join(format!("lm-check-disk-{}.img", std::process::id()));
         let mut m = Machine::new();
         let attached = m.disk.attach(path.to_str().unwrap()).is_ok();
         for i in 0..512u32 {
             m.poke8(0x4000 + i, (i * 7 + 3) as u8);
+            m.poke8(0x6000 + i, 0x5a);
         }
         m.store_cap(0x5100, Cap::ROOT);
+        m.set_reg(S2, region(0x4000, 512, P_LD));
+        m.set_reg(S3, region(0x5000, 512, P_SD));
+        m.set_reg(S4, region(0x6000, 248, P_SD));
         let d = MMIO_BASE + (DEV_DISK << 12);
         let reg = |code: &mut Vec<u32>, r: u32, v: u32| {
             li32(code, A0, d + r);
             li32(code, A1, v);
             code.push(sw_ddc(A1, A0));
         };
+        let buf = |code: &mut Vec<u32>, c: u32| {
+            li32(code, A0, d + D_BUF);
+            code.push(sc_ddc(c, A0));
+        };
+        let wait = |code: &mut Vec<u32>, first: u32, last: u32| {
+            li32(code, A0, d + D_STATUS);
+            code.push(lw_ddc(first, A0));
+            code.push(lw_ddc(last, A0));
+            code.push(beq(last, T0, -4));
+        };
         let mut code = vec![];
-        li32(&mut code, T0, crate::dev::disk::STATUS_BUSY);
-        reg(&mut code, 0x00, 0x4000);
-        reg(&mut code, 0x04, 3);
-        reg(&mut code, 0x08, 1);
-        reg(&mut code, 0x0c, 2); // write
-        li32(&mut code, A0, d + 0x10);
-        code.push(lw_ddc(A2, A0));
-        code.push(lw_ddc(A3, A0));
-        code.push(beq(A3, T0, -4));
-        reg(&mut code, 0x00, 0x5000);
-        reg(&mut code, 0x18, 1);
-        reg(&mut code, 0x0c, 1); // read
-        li32(&mut code, A0, d + 0x10);
-        code.push(lw_ddc(A4, A0));
-        code.push(lw_ddc(A7, A0));
-        code.push(beq(A7, T0, -4));
+        li32(&mut code, T0, STATUS_BUSY);
+        buf(&mut code, S2);
+        reg(&mut code, D_BLOCK, 3);
+        reg(&mut code, D_COUNT, 1);
+        reg(&mut code, D_CMD, CMD_WRITE);
+        wait(&mut code, A2, A3);
+        buf(&mut code, S3);
+        reg(&mut code, D_CTRL, 1);
+        reg(&mut code, D_CMD, CMD_READ);
+        wait(&mut code, A4, A7);
         li32(&mut code, A6, 0x5000);
         code.push(lbu_ddc(T1, A6));
         code.push(addi(A6, A6, 1));
         code.push(lbu_ddc(T2, A6));
+        // A block into 248 bytes, and a block into a number.
+        buf(&mut code, S4);
+        reg(&mut code, D_CMD, CMD_READ);
+        wait(&mut code, S5, S6);
+        reg(&mut code, D_BUF, 0x6000);
+        reg(&mut code, D_CMD, CMD_READ);
+        wait(&mut code, S7, S8);
         code.push(jal(ZERO, 0));
         emit(&mut m, KICK_BASE, &code);
         m.mtimecmp = u64::MAX;
         m.gfx.next_vbl = u64::MAX;
-        run::run(&mut m, 50_000);
+        run::run(&mut m, 100_000);
         let r = |x: u32| m.x[x as usize];
         let on_host = std::fs::read(&path)
             .map(|b| b.len() == 4 * 512 && (0..512).all(|i| b[3 * 512 + i] == (i * 7 + 3) as u8))
             .unwrap_or(false);
         let _ = std::fs::remove_file(&path);
         ok("disk attaches a host file", attached);
-        ok("disk busy straight after a command", r(A2) == 0x80 && r(A4) == 0x80);
-        ok("disk write lands on the host", r(A3) == 0 && on_host);
-        ok("disk read brings the bytes", r(A7) == 0 && r(T1) == 3 && r(T2) == 10);
+        ok("disk busy straight after a command", r(A2) == STATUS_BUSY && r(A4) == STATUS_BUSY);
+        ok("disk write lands on the host", r(A3) == STATUS_OK && on_host);
+        ok("disk read brings the bytes", r(A7) == STATUS_OK && r(T1) == 3 && r(T2) == 10);
         ok("disk read clears the tags it fills", !m.tag_at(0x5100));
         ok("disk completion raises its interrupt", m.intreq & (1 << INT_DISK) != 0);
+        ok("a disk read into a buffer too small is refused", r(S6) == STATUS_REFUSED);
+        ok("a disk read into a number is refused", r(S8) == STATUS_REFUSED);
+        ok("a refused read moves nothing", (0..512).all(|i| m.peek8(0x6000 + i) == 0x5a));
     }
 
     let fail = checks.iter().filter(|(_, v)| !v).count();

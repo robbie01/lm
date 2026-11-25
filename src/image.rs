@@ -29,7 +29,7 @@ pub const PAGE_TAG_BYTES: usize = (PAGE / 8 / 8) as usize;
 fn regions(m: &Machine) -> Vec<(u32, u32)> {
     let g = |off: u32| m.load_cap(off).addr;
     vec![
-        (0, TRAP_BASE), // nil cell, globals, object bins
+        (0, LOW_END), // nil cell, globals, object bins
         (POOL_BASE, g(LG_POOLPTR)),
         (CODE_BASE, g(LG_CODE_PTR)),
         (CONS_BASE, g(LG_CONS_PTR)),

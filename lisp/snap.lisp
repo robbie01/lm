@@ -45,6 +45,11 @@
   (poke (region-field hdr i 1) len)
   nil)
 
+;; What the controller is handed to write n blocks from `base`: the root
+;; narrowed to those blocks and to loading data.
+(define (blocks-at base n)
+  (%cap-and-perms (%cap-bounds (%from-addr base) (%lsh n 9)) perm-ld))
+
 ;; The first thing that went wrong, or 0 if nothing has.
 (define (first-bad bad status) (if (%= bad 0) status bad))
 
@@ -126,14 +131,14 @@
              (m (tag-map base (%+ base len) snap-tag-map)))
         (poke (region-field snap-header i 2) k)
         (poke (region-field snap-header i 3) (%+ k n))
-        (set! bad (first-bad bad (disk:write-raw base k n)))
-        (set! bad (first-bad bad (disk:write-raw snap-tag-map (%+ k n) m)))
+        (set! bad (first-bad bad (disk:write-raw (blocks-at base n) k n)))
+        (set! bad (first-bad bad (disk:write-raw (blocks-at snap-tag-map m) (%+ k n) m)))
         (set! k (%+ k (%+ n m))))
       (set! i (%+ i 1)))
     (poke snap-header snap-magic)
     (poke (%+ snap-header 4) (%ld-word lg-imgentry))
     (poke (%+ snap-header 8) snap-regions)
-    (set! bad (first-bad bad (disk:write-raw snap-header 0 1)))
+    (set! bad (first-bad bad (disk:write-raw (blocks-at snap-header 1) 0 1)))
     (if (%= bad 0) k (%- 0 bad))))
 
 (define (report-save result)

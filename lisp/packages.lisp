@@ -70,9 +70,10 @@
   exit-ok exit-error exit-gc-stack exit-gc-corrupt exit-trap-spiral
   dev-sys dev-uart dev-timer dev-gfx dev-input dev-blit dev-disk
   int-uart int-vblank int-input int-blit int-disk int-soft
-  disk-busy disk-cmd-read disk-cmd-write disk-cmd-flush
-  blit-list-reg blit-status-reg blit-ctrl-reg blit-list-size
-  bl-src bl-dst bl-w bl-h bl-smod bl-dmod bl-val bl-op bl-x0 bl-y0 bl-x1 bl-y1 bl-status bl-next
+  disk-busy disk-refused disk-cmd-read disk-cmd-write disk-cmd-flush
+  blit-list-reg blit-status-reg blit-ctrl-reg blit-status-busy blit-status-refused blit-list-size
+  bl-src bl-dst bl-next bl-w bl-h bl-smod bl-dmod bl-val bl-op bl-x0 bl-y0 bl-x1 bl-y1 bl-status
+  blit-done blit-pending blit-refused-src blit-refused-dst
   op-copy op-fill op-line
   ;; the primitives
   %* %+ %- %/ %< %<= %= %> %>= %addr-of %alloc-code %alloc-pool %apply %ash
@@ -189,7 +190,8 @@
   make-device device? device-owner device-name device-usable? dev-page dev-ld dev-st!
   claim-device claim-device-for release-device release-devices-of release-all-devices
   *disk* disk-go disk-status disk-busy? disk-blocks disk-interrupts!
-  *blit-ring* *gc-blit-ring* *in-interrupt* blit-descriptor gc-blit-descriptor blit-go
+  *blit-ring* *gc-blit-ring* *blit-rings* blit-ring-bytes *in-interrupt*
+  blit-descriptor gc-blit-descriptor blit-go
   *screen* alloc-pool bm-blit-rect bm-fill-rect
   bm-plot bm-point bm-index bm-w bm-h
   make-bitmap-rastport make-rastport-on rp-bitmap
@@ -213,7 +215,7 @@
   timer-never timer-set-in
   *gfx* gfx-show gfx-colour! gfx-vblank-irq! gfx-present!
   *serial* serial-interrupts!
-  blit-irq-each! blit-done? set-blit-sleep! interrupts-on?
+  blit-irq-each! blit-done? blit-refused? blit-clear-refused! set-blit-sleep! interrupts-on?
 ))
 
 (in-package asm)

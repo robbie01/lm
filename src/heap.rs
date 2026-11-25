@@ -372,7 +372,7 @@ impl<'a> Heap<'a> {
     /// Lay out the empty heap. Everything after this is allocation.
     pub fn format(&mut self) {
         // The nil cell, the global block and the object bins.
-        for a in (0..TRAP_BASE).step_by(8) {
+        for a in (0..LOW_END).step_by(8) {
             self.stc(a, Cap::NULL);
         }
         self.stc(NIL_CELL, NIL);

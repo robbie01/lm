@@ -164,8 +164,7 @@ pub fn ram(len: u32) -> u32 {
     if bounds & IE_BIT == 0 {
         return u32::MAX;
     }
-    let e = ((((bounds >> 10) & 7) << 3) | (bounds & 7)).min(MAX_E);
-    u32::MAX << (e + 3)
+    u32::MAX << (fields(bounds).0 + 3)
 }
 
 /// `CRRL`: `len` rounded up to the next length that can be exact.
@@ -261,13 +260,12 @@ impl Cap {
 
     /// The same, refusing a region that would need rounding.
     pub fn with_bounds_exact(self, len: u32) -> Option<Cap> {
-        match self.set_bounds(len) {
-            Some((c, true)) => Some(c),
-            _ => None,
-        }
+        self.set_bounds(len).and_then(|(c, exact)| exact.then_some(c))
     }
 
-    fn set_bounds(self, len: u32) -> Option<(Cap, bool)> {
+    /// Bounds from the address for `len` bytes, rounded outward, and whether
+    /// they are exact; None as `with_bounds` says.
+    pub fn set_bounds(self, len: u32) -> Option<(Cap, bool)> {
         let top = self.addr as u64 + len as u64;
         if !self.tag || self.is_sealed() || !self.covers(self.addr, len) {
             return None;

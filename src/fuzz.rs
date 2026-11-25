@@ -146,7 +146,7 @@ impl Rng {
 
 /// Addresses worth handing random code: each region, its edges, the chips.
 const PLACES: &[u32] = &[
-    0, 4, 8, LG_BASE, OBJ_BINS, TRAP_BASE, POOL_BASE, POOL_END - 4, CODE_BASE, CODE_END - 4,
+    0, 4, 8, LG_BASE, OBJ_BINS, LOW_END, POOL_BASE, POOL_END - 4, CODE_BASE, CODE_END - 4,
     CONS_BASE, CONS_END - 4, OBJ_BASE, OBJ_END - 4, FAST_BASE, RAM_SIZE - 4, RAM_SIZE,
     MMIO_BASE, MMIO_BASE + 0x1000, MMIO_BASE + 0x2000, MMIO_BASE + 0x3000,
     MMIO_BASE + 0x4000, MMIO_BASE + 0x5000, MMIO_BASE + 0x6000, MMIO_END - 4,
