@@ -1345,12 +1345,14 @@
     (fire-deadlines)
     (switch-tasks))
    ((%= n irq-external)
-    ;; Ask the chips which line it was, run every server on it, then
-    ;; acknowledge. Servers run with interrupts off.
+    ;; Ask the chips which line it was, acknowledge it, then run every
+    ;; server on it. Servers run with interrupts off, but the chips do not
+    ;; stop: a line raised again while its servers run stays raised and they
+    ;; run again, where an acknowledgement after them would wipe it out.
     (let ((line (int-pending)))
       (while (%>= line 0)
-        (run-int-servers line)
         (int-ack line)
+        (run-int-servers line)
         (set! line (int-pending))))
     ;; A server that woke a task of higher priority than the one it
     ;; interrupted hands the processor over now rather than at the next tick.
