@@ -499,9 +499,12 @@
 ;; ---------------------------------------------------------------- shells
 ;; A shell keeps characters, not pixels: a grid it can redraw from. `edit`
 ;; is the line being typed, latest character first; `pending` is what has
-;; been finished and not yet read.
+;; been finished and not yet read. The grid's rows are a ring: row 0 on the
+;; screen is the grid's row `top`, so scrolling moves `top` and blanks one
+;; row rather than moving every character up.
 (defrecord (shell sh) cols rows grid col row edit pending
-  dirty-row dirty-c0 dirty-c1)      ; cells drawn and not yet handed over, or row -1
+  dirty-row dirty-c0 dirty-c1       ; cells drawn and not yet handed over, or row -1
+  top)
 
 (define (shell-clear sh)
   (let ((g (sh-grid sh)) (i 0))
@@ -510,7 +513,13 @@
       (set! i (%+ i 1)))
     (set-sh-col! sh 0)
     (set-sh-row! sh 0)
+    (set-sh-top! sh 0)
     nil))
+
+;; Where the cell at row and col of the screen is in the grid.
+(define (shell-cell sh row col)
+  (let ((r (%+ row (sh-top sh))))
+    (%+ (%* (if (%>= r (sh-rows sh)) (%- r (sh-rows sh)) r) (sh-cols sh)) col)))
 
 (define (make-shell cols rows)
   (let ((v (sh-alloc)))
@@ -533,14 +542,13 @@
   (let* ((g (sh-grid sh))
          (cols (sh-cols sh))
          (rows (sh-rows sh))
-         (n (%* cols (%- rows 1)))
-         (i 0))
+         (i (shell-cell sh 0 0))
+         (n (%+ i cols)))
+    ;; The row going off the top is the one coming in at the bottom.
     (while (%< i n)
-      (bytes-set! g i (bytes-ref g (%+ i cols)))
-      (set! i (%+ i 1)))
-    (while (%< i (%* cols rows))
       (bytes-set! g i 32)
       (set! i (%+ i 1)))
+    (set-sh-top! sh (if (%>= (%+ (sh-top sh) 1) rows) 0 (%+ (sh-top sh) 1)))
     (blit-rect rp (win-inner-x win) (%+ (win-inner-y win) mono-height)
                (win-inner-x win) (win-inner-y win)
                (win-inner-w win) (%- (win-inner-h win) mono-height))
@@ -561,10 +569,7 @@
       nil))
 
 (define (shell-poke sh c)
-  (bytes-set! (sh-grid sh)
-              (%+ (%* (sh-row sh) (sh-cols sh))
-                  (sh-col sh))
-              c))
+  (bytes-set! (sh-grid sh) (shell-cell sh (sh-row sh) (sh-col sh)) c))
 
 ;; Aimed at the window it was given: a shell stream writes into the window
 ;; it belongs to whatever task is holding it. What changes is handed over as
@@ -637,7 +642,7 @@
     (while (%< r rows)
       (let ((c 0))
         (while (%< c cols)
-          (let ((ch (bytes-ref g (%+ (%* r cols) c))))
+          (let ((ch (bytes-ref g (shell-cell sh r c))))
             (if (%= ch 32)
                 nil
                 (draw-mono-char rp (shell-cell-x win c) (shell-cell-y win r)
