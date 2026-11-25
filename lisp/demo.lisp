@@ -745,7 +745,9 @@
       (while (= gc::*phase* gc::phase-marking) (gc::step))
       (gc)
       (blit-sync)
-      (num-check 'and-the-fill-landed-in-it (unsafe (%ld-byte (+ a (* 1024 767)))) hw::blit-ring-size)))
+      (num-check 'and-the-fill-landed-in-it
+                 (unsafe (%ld-byte (+ a (* 1024 767))))
+                 hw::blit-ring-size)))
   (princ "blitting: done (nothing above = all correct)")
   (newline))
 

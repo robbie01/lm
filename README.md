@@ -557,10 +557,11 @@ texts, which hold none, and stacks and contexts, whose slots in use the
 roots have scanned and whose other slots hold whatever an earlier call or a
 long-dead register left there. A stack or a context is kept by what holds
 it, a task, a low global, a frame pointer into it, like any object, and
-freed with its task. Nothing is guessed, so nothing is pinned. What the port to capabilities took away: the
-allocator's mask of live registers, the conservative scan of a suspended
-task's registers and the pins it left, and the rule that kept every word
-between `sp` and the closure slot a tagged value.
+freed with its task. Nothing is guessed, so nothing is pinned. What the
+port to capabilities took away: the allocator's mask of live registers, the
+conservative scan of a suspended task's registers and the pins it left, and
+the rule that kept every word between `sp` and the closure slot a tagged
+value.
 
 A tagged capability keeps alive the block its base lies in, whatever its
 length: based in cons space without HD, the pair at its base rounded down to

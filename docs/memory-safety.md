@@ -95,8 +95,8 @@ header, that the index is a fixnum, and the bound; a call checks for a
 closure and the prologue the arity; fixnum arithmetic checks both operands
 and widens on overflow; the stack limit stops a frame before it is built;
 and the write barrier watches every store, raw or checked, while a
-collection is marking, but one into a stack or a register context, which
-the collector scanned whole when marking began.
+collection is marking, but one through a stack's or a register context's
+own capability, which the collector scanned whole when marking began.
 
 `(capabilities)` checks each of these at the prompt.
 
@@ -170,9 +170,9 @@ names the block it was made for. What a capability cannot vouch for:
 **Inside `unsafe`.** Code with SR has the root, and the root reaches
 everything: an object's header, the nil cell, a sealed closure's slots, a
 function's text, another task's stack. The write barrier still sees a raw
-store into the heap, but one into a stack or a context, so a pointer cannot
-be lost during a mark, but a raw store can still corrupt one. Headers are
-written only by the allocators and the collector, through DDC.
+store, so a pointer cannot be lost during a mark, but a raw store can still
+corrupt one. Headers are written only by the allocators and the collector,
+through DDC.
 
 **Stale frame slots.** A frame's local slots are not cleared on entry, so a
 slot an earlier call left tagged is a root until it is written. The

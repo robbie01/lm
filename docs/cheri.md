@@ -193,8 +193,8 @@ text, and its entry is kept in `lg-trap-entry`.
 **Stacks and contexts** are objects. The collector marks one as it marks
 any object, by what holds it, a task's record, a frame pointer into it or a
 low global, and never traces it: what is live in a stack runs from its
-stack pointer to its top, and the roots scan exactly that, and of every
-context in use. The write barrier lets a store into one through.
+stack pointer to its top, which the roots scan, as they scan every context
+in use. The write barrier lets a store through one's own capability.
 
 ## Authority
 
@@ -503,9 +503,9 @@ it into the saved `gp` and the live one, and returns to the instruction. A
 run is the front of a hole the sweep left or fresh ground, never past a
 256 KiB boundary, its base rounded up and its length down to what `cram`
 makes exact; a task's first is 4 KiB and each after it twice the last, up
-to 256 KiB. The empty run is `perms-pair` bounded to no bytes at `CONS_BASE`: the
-reset stub, every new task and every task whose run a collection gave up
-start on it, and their first pair asks for a real one. It is not sixteen
+to 256 KiB. The empty run is `perms-pair` bounded to no bytes at
+`CONS_BASE`: the reset stub, every new task and every task whose run a
+collection gave up start on it, and their first pair asks for a real one. It is not sixteen
 bytes long, so it is never taken for a pair.
 
 ## The Lisp vocabulary
