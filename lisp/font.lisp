@@ -186,25 +186,35 @@
 ;; A glyph, straight into the bitmap: going through the blitter for each run
 ;; would cost more in setup than the pixels are worth. One wait for the
 ;; blitter per glyph, after the background fill has been issued, and then
-;; plain stores. Clipped to the rastport's region and to the bitmap.
+;; plain stores. Clipped to the rastport's region and to the bitmap, by
+;; working out once which rows and columns of the glyph fall inside.
 (define (glyph-rows i ox py ink fg bmp x0 y0 x1 y1)
+  (let ((c0 (max2 0 (%- x0 ox)))
+        (c1 (min2 ink (%- x1 ox)))
+        (r0 (max2 0 (%- y0 py)))
+        (r1 (min2 font-height (%- y1 py))))
+    (if (if (%< c0 c1) (%< r0 r1) nil)
+        (glyph-paint *font* (%+ (%* i font-height) r0) (%+ (%* i font-height) r1)
+                     (unsafe (bm-at bmp ox (%+ py r0))) (bm-w bmp) c0 c1 fg)
+        nil)))
+
+;; The glyph rows k up to end of the font v, columns c0 up to c1 of each,
+;; stored from addr down a row of pitch bytes at a time. A leaf: everything
+;; it works with is in registers. A row with no ink costs a test.
+(define (glyph-paint v k end addr pitch c0 c1 fg)
   (unsafe
-  (let ((row 0))
-    (while (%< row font-height)
-      (let ((gy (%+ py row)))
-        (if (if (%>= gy y0) (%< gy y1) nil)
-            (let ((bits (font-bits i row)) (col 0) (addr (bm-at bmp ox gy)))
-              (while (%< col ink)
-                (let ((gx (%+ ox col)))
-                  (if (if (%>= gx x0) (%< gx x1) nil)
-                      (if (%= 1 (%logand (%lsh bits (%- col 15)) 1))
-                          (%st-byte! (%+ addr col) fg)
-                          nil)
-                      nil))
-                (set! col (%+ col 1))))
-            nil))
-      (set! row (%+ row 1)))
-    nil)))
+  (while (%< k end)
+    (let ((bits (%vector-ref v k)))
+      (if (%= bits 0)
+          nil
+          (let ((col c0) (mask (%lsh #x8000 (%- 0 c0))))
+            (while (%< col c1)
+              (if (%= 0 (%logand bits mask)) nil (%st-byte! (%+ addr col) fg))
+              (set! mask (%lsh mask -1))
+              (set! col (%+ col 1))))))
+    (set! addr (%+ addr pitch))
+    (set! k (%+ k 1)))
+  nil))
 
 ;; `bg` is a colour to fill the cell with first, or nil to leave what is
 ;; there, which is what drawing over pinstripes needs. Answers the advance.
@@ -213,23 +223,36 @@
   (let ((i (font-index ch)))
     (if (%< i 0)
         0
-        (let ((bmp (rp-bitmap rp))
-              (px (%+ x (rp-origin-x rp)))
-              (py (%+ y (rp-origin-y rp))))
+        (begin
           (if bg (fill-rect rp x y (font-adv-of i) font-height bg) nil)
           (blit-sync)
-          (let ((ink (font-ink-of i))
-                (ox (%+ px (font-left-of i))))
-            (dolist (cr (rp-region rp))
-              (glyph-rows i ox py ink fg bmp
-                          (max2 (rect-x cr) 0) (max2 (rect-y cr) 0)
-                          (min2 (rect-x2 cr) (bm-w bmp)) (min2 (rect-y2 cr) (bm-h bmp)))))
-          (font-adv-of i)))))
+          (glyph rp x y i fg)))))
 
+;; Glyph i at x y, once the blitter has finished with the pixels under it.
+;; Answers the advance.
+(define (glyph rp x y i fg)
+  (let ((bmp (rp-bitmap rp))
+        (ox (%+ (%+ x (rp-origin-x rp)) (font-left-of i)))
+        (py (%+ y (rp-origin-y rp)))
+        (ink (font-ink-of i)))
+    (dolist (cr (rp-region rp))
+      (glyph-rows i ox py ink fg bmp
+                  (max2 (rect-x cr) 0) (max2 (rect-y cr) 0)
+                  (min2 (rect-x2 cr) (bm-w bmp)) (min2 (rect-y2 cr) (bm-h bmp))))
+    (font-adv-of i)))
+
+;; With no background to fill, nothing between one glyph and the next uses
+;; the blitter, so one wait does for the whole string.
 (define (draw-text rp x y s fg bg)
   (let ((i 0) (n (string-length s)) (px x))
+    (if bg
+        nil
+        (begin (check-colour fg) (blit-sync)))
     (while (%< i n)
-      (set! px (%+ px (draw-char rp px y (string-ref s i) fg bg)))
+      (set! px (%+ px (if bg
+                          (draw-char rp px y (string-ref s i) fg bg)
+                          (let ((g (font-index (string-ref s i))))
+                            (if (%< g 0) 0 (glyph rp px y g fg))))))
       (set! i (%+ i 1)))
     px))
 
