@@ -1,5 +1,5 @@
-//! RV32IMC instruction encoders, with the capability-mode forms of CHERI and
-//! the Xlm instructions. Used to build test programs and as the reference
+//! RV32IMC instruction encoders, with RVY's capability instructions and the
+//! Xlm instructions. Used to build test programs and as the reference
 //! the Lisp assembler is differential-tested against.
 
 pub const ZERO: u32 = 0;
@@ -227,176 +227,129 @@ pub fn czeronez(rd: u32, rs1: u32, rs2: u32) -> u32 {
 }
 
 
-// ---- loads and stores of capabilities: the RV64 ld and sd encodings ----
-pub fn lc(rd: u32, rs1: u32, o: i32) -> u32 {
-    i_type(o, rs1, 3, rd, 0x03)
+// ---- RVY-A, opcode 0x7b: the capability instructions ----
+fn ry(f7: u32, rs2: u32, rs1: u32, rd: u32) -> u32 {
+    r_type(f7, rs2, rs1, 0, rd, 0x7b)
 }
-pub fn sc(rs2: u32, rs1: u32, o: i32) -> u32 {
-    s_type(o, rs2, rs1, 3, 0x23)
+pub fn ly(cd: u32, cs1: u32, o: i32) -> u32 {
+    i_type(o, cs1, 1, cd, 0x7b)
 }
-
-// ---- CHERI, opcode 0x5b ----
-fn ch(f7: u32, rs2: u32, rs1: u32, rd: u32) -> u32 {
-    r_type(f7, rs2, rs1, 0, rd, 0x5b)
+pub fn sy(cs2: u32, cs1: u32, o: i32) -> u32 {
+    s_type(o, cs2, cs1, 2, 0x7b)
 }
-/// `scr` is the special capability register's number; `cs1` = 0 only reads.
-pub fn cspecialrw(cd: u32, scr: u32, cs1: u32) -> u32 {
-    ch(0x01, scr, cs1, cd)
+pub fn yaddi(cd: u32, cs1: u32, imm: i32) -> u32 {
+    i_type(imm, cs1, 4, cd, 0x7b)
 }
-pub fn csetbounds(cd: u32, cs1: u32, rs2: u32) -> u32 {
-    ch(0x08, rs2, cs1, cd)
+/// The length is encoded as `YBNDSWI` takes it: 1 to 255, 256 to 504 by
+/// eight, 512 to 4080 by sixteen, or 4096.
+pub fn ybndswi(cd: u32, cs1: u32, len: u32) -> u32 {
+    let imm = match len {
+        4096 => 0,
+        1..=255 => len,
+        256..=504 if len % 8 == 0 => 0x100 | ((len >> 4) & 0xf) | (((len >> 3) & 1) << 4),
+        512..=4080 if len % 16 == 0 => 0x100 | (len >> 4),
+        _ => panic!("ybndswi: {len} has no encoding"),
+    };
+    i_type((0xe00 | imm) as i32, cs1, 5, cd, 0x7b)
 }
-pub fn csetboundsexact(cd: u32, cs1: u32, rs2: u32) -> u32 {
-    ch(0x09, rs2, cs1, cd)
+pub fn yhiw(cd: u32, rs1: u32, rs2: u32) -> u32 {
+    ry(0x01, rs2, rs1, cd)
 }
-pub fn cseal(cd: u32, cs1: u32, cs2: u32) -> u32 {
-    ch(0x0b, cs2, cs1, cd)
+/// `rs2` must not be x0, which makes it `ymv`.
+pub fn yadd(cd: u32, cs1: u32, rs2: u32) -> u32 {
+    ry(0x03, rs2, cs1, cd)
 }
-pub fn cunseal(cd: u32, cs1: u32, cs2: u32) -> u32 {
-    ch(0x0c, cs2, cs1, cd)
+pub fn ymv(cd: u32, cs1: u32) -> u32 {
+    ry(0x03, 0, cs1, cd)
 }
-pub fn candperm(cd: u32, cs1: u32, rs2: u32) -> u32 {
-    ch(0x0d, rs2, cs1, cd)
+pub fn ysh1add(cd: u32, rs1: u32, cs2: u32) -> u32 {
+    ry(0x05, cs2, rs1, cd)
 }
-pub fn csetaddr(cd: u32, cs1: u32, rs2: u32) -> u32 {
-    ch(0x10, rs2, cs1, cd)
+pub fn ysh2add(cd: u32, rs1: u32, cs2: u32) -> u32 {
+    ry(0x0d, cs2, rs1, cd)
 }
-pub fn cincoffset(cd: u32, cs1: u32, rs2: u32) -> u32 {
-    ch(0x11, rs2, cs1, cd)
+pub fn ysh3add(cd: u32, rs1: u32, cs2: u32) -> u32 {
+    ry(0x15, cs2, rs1, cd)
 }
-pub fn csub(rd: u32, cs1: u32, cs2: u32) -> u32 {
-    ch(0x14, cs2, cs1, rd)
+pub fn yeq(rd: u32, cs1: u32, cs2: u32) -> u32 {
+    ry(0x06, cs2, cs1, rd)
 }
-pub fn csethigh(cd: u32, cs1: u32, rs2: u32) -> u32 {
-    ch(0x16, rs2, cs1, cd)
+pub fn yunseals(cd: u32, cs1: u32, cs2: u32) -> u32 {
+    ry(0x07, cs2, cs1, cd)
 }
-pub fn cbuildcap(cd: u32, cs1: u32, cs2: u32) -> u32 {
-    ch(0x1d, cs2, cs1, cd)
+pub fn yaddrw(cd: u32, cs1: u32, rs2: u32) -> u32 {
+    ry(0x0b, rs2, cs1, cd)
 }
-pub fn ctestsubset(rd: u32, cs1: u32, cs2: u32) -> u32 {
-    ch(0x20, cs2, cs1, rd)
+pub fn yss(rd: u32, cs1: u32, cs2: u32) -> u32 {
+    ry(0x0e, cs2, cs1, rd)
 }
-pub fn cseqx(rd: u32, cs1: u32, cs2: u32) -> u32 {
-    ch(0x21, cs2, cs1, rd)
+pub fn ybld(cd: u32, cs1: u32, cs2: u32) -> u32 {
+    ry(0x0f, cs2, cs1, cd)
 }
-pub fn cgetperm(rd: u32, cs1: u32) -> u32 {
-    ch(0x7f, 0x00, cs1, rd)
+/// `rs2` is a mask of the permissions to clear.
+pub fn ypermc(cd: u32, cs1: u32, rs2: u32) -> u32 {
+    ry(0x13, rs2, cs1, cd)
 }
-pub fn cgettype(rd: u32, cs1: u32) -> u32 {
-    ch(0x7f, 0x01, cs1, rd)
+pub fn yseale(cd: u32, cs2: u32) -> u32 {
+    ry(0x17, cs2, 0, cd)
 }
-pub fn cgetbase(rd: u32, cs1: u32) -> u32 {
-    ch(0x7f, 0x02, cs1, rd)
+/// `cs1` is the authority, `cs2` what is sealed.
+pub fn ysealt(cd: u32, cs1: u32, cs2: u32) -> u32 {
+    ry(0x17, cs2, cs1, cd)
 }
-pub fn cgetlen(rd: u32, cs1: u32) -> u32 {
-    ch(0x7f, 0x03, cs1, rd)
+pub fn yunsealt(cd: u32, cs1: u32, cs2: u32) -> u32 {
+    ry(0x1f, cs2, cs1, cd)
 }
-pub fn cgettag(rd: u32, cs1: u32) -> u32 {
-    ch(0x7f, 0x04, cs1, rd)
+/// Exact bounds.
+pub fn ybndsw(cd: u32, cs1: u32, rs2: u32) -> u32 {
+    ry(0x1b, rs2, cs1, cd)
 }
-pub fn cgetsealed(rd: u32, cs1: u32) -> u32 {
-    ch(0x7f, 0x05, cs1, rd)
+/// Bounds rounded outward.
+pub fn ybndsrw(cd: u32, cs1: u32, rs2: u32) -> u32 {
+    ry(0x23, rs2, cs1, cd)
 }
-pub fn cgetoffset(rd: u32, cs1: u32) -> u32 {
-    ch(0x7f, 0x06, cs1, rd)
+pub fn yamask(rd: u32, rs1: u32) -> u32 {
+    ry(0x78, 0, rs1, rd)
 }
-pub fn crrl(rd: u32, rs1: u32) -> u32 {
-    ch(0x7f, 0x08, rs1, rd)
+pub fn ybaser(rd: u32, cs1: u32) -> u32 {
+    ry(0x7a, 0, cs1, rd)
 }
-pub fn cram(rd: u32, rs1: u32) -> u32 {
-    ch(0x7f, 0x09, rs1, rd)
+pub fn ypermr(rd: u32, cs1: u32) -> u32 {
+    ry(0x7a, 1, cs1, rd)
 }
-pub fn cmove(cd: u32, cs1: u32) -> u32 {
-    ch(0x7f, 0x0a, cs1, cd)
+pub fn ytopr(rd: u32, cs1: u32) -> u32 {
+    ry(0x7a, 2, cs1, rd)
 }
-pub fn ccleartag(cd: u32, cs1: u32) -> u32 {
-    ch(0x7f, 0x0b, cs1, cd)
+pub fn ylenr(rd: u32, cs1: u32) -> u32 {
+    ry(0x7a, 3, cs1, rd)
 }
-pub fn cjalr(cd: u32, cs1: u32) -> u32 {
-    ch(0x7f, 0x0c, cs1, cd)
+pub fn ytagr(rd: u32, cs1: u32) -> u32 {
+    ry(0x7a, 4, cs1, rd)
 }
-pub fn cgetaddr(rd: u32, cs1: u32) -> u32 {
-    ch(0x7f, 0x0f, cs1, rd)
+pub fn ytyper(rd: u32, cs1: u32) -> u32 {
+    ry(0x7a, 5, cs1, rd)
 }
-pub fn csealentry(cd: u32, cs1: u32) -> u32 {
-    ch(0x7f, 0x11, cs1, cd)
-}
-pub fn cgethigh(rd: u32, cs1: u32) -> u32 {
-    ch(0x7f, 0x17, cs1, rd)
-}
-pub fn cgettop(rd: u32, cs1: u32) -> u32 {
-    ch(0x7f, 0x18, cs1, rd)
-}
-/// Xlm: seal a headed closure object as a closure.
-pub fn csealclo(cd: u32, cs1: u32) -> u32 {
-    ch(0x7f, 0x1c, cs1, cd)
-}
-pub fn cincoffsetimm(cd: u32, cs1: u32, imm: i32) -> u32 {
-    i_type(imm, cs1, 1, cd, 0x5b)
-}
-pub fn csetboundsimm(cd: u32, cs1: u32, imm: u32) -> u32 {
-    i_type(imm as i32, cs1, 2, cd, 0x5b)
-}
-/// Loads and stores through DDC: `rs1` is an integer address. The loads
-/// select their width in the rs2 field, the stores in the rd field.
-pub fn lb_ddc(rd: u32, rs1: u32) -> u32 {
-    ch(0x7d, 0, rs1, rd)
-}
-pub fn lh_ddc(rd: u32, rs1: u32) -> u32 {
-    ch(0x7d, 1, rs1, rd)
-}
-pub fn lw_ddc(rd: u32, rs1: u32) -> u32 {
-    ch(0x7d, 2, rs1, rd)
-}
-pub fn lc_ddc(rd: u32, rs1: u32) -> u32 {
-    ch(0x7d, 3, rs1, rd)
-}
-pub fn lbu_ddc(rd: u32, rs1: u32) -> u32 {
-    ch(0x7d, 4, rs1, rd)
-}
-pub fn lhu_ddc(rd: u32, rs1: u32) -> u32 {
-    ch(0x7d, 5, rs1, rd)
-}
-pub fn sb_ddc(rs2: u32, rs1: u32) -> u32 {
-    ch(0x7c, rs2, rs1, 0)
-}
-pub fn sh_ddc(rs2: u32, rs1: u32) -> u32 {
-    ch(0x7c, rs2, rs1, 1)
-}
-pub fn sw_ddc(rs2: u32, rs1: u32) -> u32 {
-    ch(0x7c, rs2, rs1, 2)
-}
-pub fn sc_ddc(rs2: u32, rs1: u32) -> u32 {
-    ch(0x7c, rs2, rs1, 3)
+pub fn yhir(rd: u32, cs1: u32) -> u32 {
+    ry(0x7a, 7, cs1, rd)
 }
 
-// ---- Xlm custom-0: references ----
+// ---- Xlm, custom-0 ----
 /// The capability at `off(rs1)`, `rs1` a pair.
 pub fn lref(rd: u32, rs1: u32, off: i32) -> u32 {
     i_type(off, rs1, 0, rd, 0x0b)
 }
-pub fn vkind(rd: u32, rs1: u32) -> u32 {
-    i_type(0, rs1, 1, rd, 0x0b)
+pub fn sref(rs2: u32, rs1: u32, off: i32) -> u32 {
+    s_type(off, rs2, rs1, 1, 0x0b)
 }
 /// A symbol's slot, refusing the unbound marker.
 pub fn lvar(rd: u32, rs1: u32, off: i32) -> u32 {
     i_type(off, rs1, 2, rd, 0x0b)
 }
-pub fn jcl(rd: u32, rs1: u32) -> u32 {
-    i_type(0, rs1, 3, rd, 0x0b)
-}
-pub fn sref(rs2: u32, rs1: u32, off: i32) -> u32 {
-    s_type(off, rs2, rs1, 4, 0x0b)
-}
-/// The length of an object of header type `ty`, or of any object for 0.
-pub fn lhdr(rd: u32, rs1: u32, ty: u32) -> u32 {
-    i_type(ty as i32, rs1, 5, rd, 0x0b)
-}
 pub fn beqx(a: u32, b: u32, o: i32) -> u32 {
-    b_type(o, b, a, 6, 0x0b)
+    b_type(o, b, a, 3, 0x0b)
 }
 pub fn bnex(a: u32, b: u32, o: i32) -> u32 {
-    b_type(o, b, a, 7, 0x0b)
+    b_type(o, b, a, 4, 0x0b)
 }
 pub fn car(rd: u32, rs1: u32) -> u32 {
     lref(rd, rs1, 0)
@@ -410,59 +363,57 @@ pub fn setcar(rs2: u32, rs1: u32) -> u32 {
 pub fn setcdr(rs2: u32, rs1: u32) -> u32 {
     sref(rs2, rs1, 8)
 }
-
-// ---- Xlm custom-1: indexed access, checked ----
-/// `ty` is the object type the access requires, or 0 for any object.
-pub fn ldx(rd: u32, rs1: u32, rs2: u32, ty: u32) -> u32 {
-    r_type(ty, rs2, rs1, 0, rd, 0x2b)
+/// The fixnum immediates: the operation in imm[11:10], a ten-bit signed
+/// immediate below it.
+fn fixi(op: u32, rd: u32, rs1: u32, imm: i32) -> u32 {
+    assert!((-512..512).contains(&imm), "fixnum immediate {imm} is not ten bits");
+    i_type(((op << 10) | (imm as u32 & 0x3ff)) as i32, rs1, 5, rd, 0x0b)
 }
-pub fn stx(rs3: u32, rs1: u32, rs2: u32, ty: u32) -> u32 {
-    r_type(ty, rs2, rs1, 1, rs3, 0x2b)
-}
-pub fn ldxb(rd: u32, rs1: u32, rs2: u32, ty: u32) -> u32 {
-    r_type(ty, rs2, rs1, 2, rd, 0x2b)
-}
-pub fn stxb(rs3: u32, rs1: u32, rs2: u32, ty: u32) -> u32 {
-    r_type(ty, rs2, rs1, 3, rs3, 0x2b)
-}
-/// The same four, with the index as a five-bit immediate in the rs2 field.
-pub fn ldxi(rd: u32, rs1: u32, i: u32, ty: u32) -> u32 {
-    r_type(ty, i, rs1, 4, rd, 0x2b)
-}
-pub fn stxi(rs3: u32, rs1: u32, i: u32, ty: u32) -> u32 {
-    r_type(ty, i, rs1, 5, rs3, 0x2b)
-}
-pub fn ldxbi(rd: u32, rs1: u32, i: u32, ty: u32) -> u32 {
-    r_type(ty, i, rs1, 6, rd, 0x2b)
-}
-pub fn stxbi(rs3: u32, rs1: u32, i: u32, ty: u32) -> u32 {
-    r_type(ty, i, rs1, 7, rs3, 0x2b)
-}
-
-// ---- Xlm custom-3: fixnums ----
 pub fn faddi(rd: u32, rs1: u32, imm: i32) -> u32 {
-    i_type(imm, rs1, 0, rd, 0x7b)
+    fixi(0, rd, rs1, imm)
 }
 pub fn faddio(rd: u32, rs1: u32, imm: i32) -> u32 {
-    i_type(imm, rs1, 1, rd, 0x7b)
+    fixi(1, rd, rs1, imm)
 }
 pub fn fandi(rd: u32, rs1: u32, imm: i32) -> u32 {
-    i_type(imm, rs1, 2, rd, 0x7b)
+    fixi(2, rd, rs1, imm)
 }
 pub fn fori(rd: u32, rs1: u32, imm: i32) -> u32 {
-    i_type(imm, rs1, 3, rd, 0x7b)
+    fixi(3, rd, rs1, imm)
+}
+/// The R-type group, funct7 the operation.
+fn xr(f7: u32, rs2: u32, rs1: u32, rd: u32) -> u32 {
+    r_type(f7, rs2, rs1, 6, rd, 0x0b)
 }
 /// kind: 0 shift left, 1 shift right logical, 2 shift right arithmetic.
 pub fn fshi(rd: u32, rs1: u32, kind: u32, sh: u32) -> u32 {
-    i_type(((kind << 5) | sh) as i32, rs1, 4, rd, 0x7b)
+    xr(0x18 + kind, sh, rs1, rd)
 }
-/// `rs1` must be untagged of kind `from` (63 for any); `rd` gets its address
-/// with metadata `to`.
+pub fn jcl(rd: u32, rs1: u32) -> u32 {
+    xr(0x20, 0, rs1, rd)
+}
+pub fn vkind(rd: u32, rs1: u32) -> u32 {
+    xr(0x21, 0, rs1, rd)
+}
+/// The length of an object of header type `ty`, or of any object for 0.
+pub fn lhdr(rd: u32, rs1: u32, ty: u32) -> u32 {
+    xr(0x22, ty, rs1, rd)
+}
+/// Seal a headed closure object as a closure.
+pub fn sealcl(cd: u32, cs1: u32) -> u32 {
+    xr(0x23, 0, cs1, cd)
+}
+/// The next pair of the cons run in `cs1`.
+pub fn npair(cd: u32, cs1: u32) -> u32 {
+    xr(0x24, 0, cs1, cd)
+}
+/// `rs1` must be untagged of kind `from` (31 for any); `rd` gets its
+/// address with metadata `to`.
 pub fn retag(rd: u32, rs1: u32, from: u32, to: u32) -> u32 {
-    i_type(((from << 6) | to) as i32, rs1, 7, rd, 0x7b)
+    xr(0x40 | from, to, rs1, rd)
 }
 fn fop(f7: u32, rd: u32, rs1: u32, rs2: u32) -> u32 {
-    r_type(f7, rs2, rs1, 5, rd, 0x7b)
+    xr(f7, rs2, rs1, rd)
 }
 pub fn fadd(rd: u32, rs1: u32, rs2: u32) -> u32 {
     fop(0x00, rd, rs1, rs2)
@@ -515,6 +466,69 @@ pub fn fltu(rd: u32, rs1: u32, rs2: u32) -> u32 {
 }
 pub fn feq(rd: u32, rs1: u32, rs2: u32) -> u32 {
     fop(0x15, rd, rs1, rs2)
+}
+/// Loads and stores through DDC: `rs1` is an integer address. The loads
+/// select their width in the rs2 field, the stores in the rd field, as
+/// LOAD's funct3 numbers widths, with 3 for a capability.
+pub fn lb_ddc(rd: u32, rs1: u32) -> u32 {
+    xr(0x7d, 0, rs1, rd)
+}
+pub fn lh_ddc(rd: u32, rs1: u32) -> u32 {
+    xr(0x7d, 1, rs1, rd)
+}
+pub fn lw_ddc(rd: u32, rs1: u32) -> u32 {
+    xr(0x7d, 2, rs1, rd)
+}
+pub fn ly_ddc(rd: u32, rs1: u32) -> u32 {
+    xr(0x7d, 3, rs1, rd)
+}
+pub fn lbu_ddc(rd: u32, rs1: u32) -> u32 {
+    xr(0x7d, 4, rs1, rd)
+}
+pub fn lhu_ddc(rd: u32, rs1: u32) -> u32 {
+    xr(0x7d, 5, rs1, rd)
+}
+pub fn sb_ddc(rs2: u32, rs1: u32) -> u32 {
+    xr(0x7c, rs2, rs1, 0)
+}
+pub fn sh_ddc(rs2: u32, rs1: u32) -> u32 {
+    xr(0x7c, rs2, rs1, 1)
+}
+pub fn sw_ddc(rs2: u32, rs1: u32) -> u32 {
+    xr(0x7c, rs2, rs1, 2)
+}
+pub fn sy_ddc(rs2: u32, rs1: u32) -> u32 {
+    xr(0x7c, rs2, rs1, 3)
+}
+/// Indexed access: funct7 the form << 4 | `ty`, the object type the access
+/// requires, or 0 for any object.
+fn ix(form: u32, ty: u32, rs2: u32, rs1: u32, rd: u32) -> u32 {
+    r_type((form << 4) | ty, rs2, rs1, 7, rd, 0x0b)
+}
+pub fn ldx(rd: u32, rs1: u32, rs2: u32, ty: u32) -> u32 {
+    ix(0, ty, rs2, rs1, rd)
+}
+pub fn stx(rs3: u32, rs1: u32, rs2: u32, ty: u32) -> u32 {
+    ix(1, ty, rs2, rs1, rs3)
+}
+pub fn ldxb(rd: u32, rs1: u32, rs2: u32, ty: u32) -> u32 {
+    ix(2, ty, rs2, rs1, rd)
+}
+pub fn stxb(rs3: u32, rs1: u32, rs2: u32, ty: u32) -> u32 {
+    ix(3, ty, rs2, rs1, rs3)
+}
+/// The same four, with the index as a five-bit immediate in the rs2 field.
+pub fn ldxi(rd: u32, rs1: u32, i: u32, ty: u32) -> u32 {
+    ix(4, ty, i, rs1, rd)
+}
+pub fn stxi(rs3: u32, rs1: u32, i: u32, ty: u32) -> u32 {
+    ix(5, ty, i, rs1, rs3)
+}
+pub fn ldxbi(rd: u32, rs1: u32, i: u32, ty: u32) -> u32 {
+    ix(6, ty, i, rs1, rd)
+}
+pub fn stxbi(rs3: u32, rs1: u32, i: u32, ty: u32) -> u32 {
+    ix(7, ty, i, rs1, rs3)
 }
 
 pub fn addi(rd: u32, rs1: u32, i: i32) -> u32 {
@@ -680,28 +694,28 @@ pub fn compress(w: u32) -> u32 {
                 w
             }
         }
-        0x03 if f3 == 3 => {
+        0x7b if f3 == 1 => {
             if rs1 == SP && rd != 0 && coff(imm_i, 512) {
-                c_lcsp(rd, imm_i as u32)
+                c_lysp(rd, imm_i as u32)
             } else if creg(rd) && creg(rs1) && coff(imm_i, 256) {
-                c_lc(rd, rs1, imm_i as u32)
+                c_ly(rd, rs1, imm_i as u32)
             } else {
                 w
             }
         }
-        0x23 if f3 == 3 => {
+        0x7b if f3 == 2 => {
             if rs1 == SP && coff(imm_s, 512) {
-                c_scsp(rs2, imm_s as u32)
+                c_sysp(rs2, imm_s as u32)
             } else if creg(rs2) && creg(rs1) && coff(imm_s, 256) {
-                c_sc(rs2, rs1, imm_s as u32)
+                c_sy(rs2, rs1, imm_s as u32)
             } else {
                 w
             }
         }
-        // cmove is c.mv; addi never is, since it makes an integer.
-        0x5b if f3 == 0 && (w >> 25) == 0x7f && rs2 == 0x0a && rd != 0 && rs1 != 0 => c_mv(rd, rs1),
-        // cincoffsetimm on csp.
-        0x5b if f3 == 1 && rs1 == SP => {
+        // ymv is c.mv; addi never is, since it makes an integer.
+        0x7b if f3 == 0 && (w >> 25) == 0x03 && rs2 == 0 && rd != 0 && rs1 != 0 => c_mv(rd, rs1),
+        // yaddi on csp.
+        0x7b if f3 == 4 && rs1 == SP => {
             if rd == SP && imm_i != 0 && (-512..512).contains(&imm_i) && imm_i % 16 == 0 {
                 c_addi16sp(imm_i)
             } else if creg(rd) && imm_i > 0 && imm_i < 1024 && imm_i % 4 == 0 {
@@ -858,17 +872,18 @@ pub fn li32(out: &mut Vec<u32>, rd: u32, v: u32) {
 }
 
 
-/// rd' and rs1' are x8..x15; the offset is a multiple of 8 below 256.
-pub fn c_lc(rd: u32, rs1: u32, off: u32) -> u32 {
+/// `c.ly` and `c.sy`: rd' and rs1' are x8..x15; the offset is a multiple of
+/// 8 below 256.
+pub fn c_ly(rd: u32, rs1: u32, off: u32) -> u32 {
     0x6000 | ((rd - 8) << 2) | ((rs1 - 8) << 7) | ((off & 0x38) << 7) | ((off & 0xc0) >> 1)
 }
-pub fn c_sc(rs2: u32, rs1: u32, off: u32) -> u32 {
+pub fn c_sy(rs2: u32, rs1: u32, off: u32) -> u32 {
     0xe000 | ((rs2 - 8) << 2) | ((rs1 - 8) << 7) | ((off & 0x38) << 7) | ((off & 0xc0) >> 1)
 }
-/// Off csp: a multiple of 8 below 512.
-pub fn c_lcsp(rd: u32, off: u32) -> u32 {
+/// `c.lysp` and `c.sysp`, off csp: a multiple of 8 below 512.
+pub fn c_lysp(rd: u32, off: u32) -> u32 {
     0x6002 | (rd << 7) | ((off & 0x20) << 7) | ((off & 0x18) << 2) | ((off & 0x1c0) >> 4)
 }
-pub fn c_scsp(rs: u32, off: u32) -> u32 {
+pub fn c_sysp(rs: u32, off: u32) -> u32 {
     0xe002 | (rs << 2) | ((off & 0x38) << 7) | ((off & 0x1c0) << 1)
 }

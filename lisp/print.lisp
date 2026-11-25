@@ -131,7 +131,7 @@
   (emit-str ",0x")
   (emit-str (cap-top-hex x))
   (emit-str ") ")
-  (emit-perms (%cap-perms x)))
+  (emit-perms (%logand (%cap-perms x) perms-all)))
 
 ;; `%cap-top` saturates, so a top of 2^32, the root's, reads as 0xffffffff.
 ;; A capability that really ends there is shorter than 256 bytes, because a

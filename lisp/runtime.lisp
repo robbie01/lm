@@ -40,11 +40,11 @@
     (%set-slot! c clo-code code)
     c))
 
-;; A sealed closure opened through the escape hatch: the root, at the closure
-;; otype, is authority to unseal it. For the printer, the explorer and the
-;; kernel, which start a context in a closure by hand.
+;; A sealed closure opened through the escape hatch: the root holds every
+;; capability, so it unseals any sealed one. For the printer, the explorer
+;; and the kernel, which start a context in a closure by hand.
 (define (open-closure f)
-  (%cap-unseal f (%cap-set-addr (%root) otype-closure)))
+  (%cap-unseal-within f (%root)))
 
 ;; A fresh vector already holds nil in every slot.
 (define (make-vector-n n fill)

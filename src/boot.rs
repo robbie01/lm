@@ -40,12 +40,13 @@ impl Default for Options {
     }
 }
 
-/// The reset state for an image whose entry is `entry`: PCC, DDC and MTCC
-/// the root, PCC at the entry. Every general register is NULL already.
+/// The reset state for an image whose entry is `entry`: PCC, DDC and
+/// `mtvec` the root, PCC at the entry. Every general register is NULL
+/// already.
 pub fn reset(m: &mut Machine, entry: u32) {
     m.set_pcc(Cap::ROOT.with_addr(entry));
     m.set_ddc(Cap::ROOT);
-    m.mtcc = Cap::ROOT;
+    m.mtvec = Cap::ROOT;
 }
 
 /// Boot and run headless.

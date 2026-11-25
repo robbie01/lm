@@ -49,22 +49,20 @@
   lg-roots lg-boot-stack lg-trap-stack lg-trap-nest lg-startup lg-symlist lg-task-exit
   lg-toplevel lg-trapdepth lg-trap-entry lg-traphook lg-trapsave lg-traptmp lg-traptmp2
   value-bytes kind-fixnum kind-char kind-unbound kind-pair kind-object
-  perm-ld perm-sd perm-lc perm-sc perm-lm perm-ex perm-sr perm-se perm-hd perms-pair perms-object perms-nil
+  perm-ld perm-sd perm-lc perm-sc perm-lm perm-ex perm-sr perm-se perm-hd perms-all perms-pair perms-object
+  perms-nil
   otype-sentry otype-closure
   obj-bins obj-bin-count t-free t-symbol t-string t-vector t-bytes t-closure t-record t-float
   t-port t-bignum t-code t-text t-stack t-context code-entry code-name code-lits clo-entry clo-code clo-free
   sym-name sym-value sym-function sym-plist sym-flags sym-package sym-macro sym-constant sym-detached pkg-tag
   ctx-slots ctx-bytes reg-pc reg-ra reg-sp reg-gp reg-tp reg-t0 reg-t1 reg-t3 reg-s0 reg-s1 reg-s2
   reg-a0 reg-a7
-  scr-ddc scr-mtcc scr-mscratchc scr-mepcc
   ecall-arity ecall-oom ecall-error ecall-reschedule ecall-record
   cause-misaligned-fetch cause-fetch-fault cause-illegal cause-breakpoint
   cause-misaligned-load cause-load-fault cause-misaligned-store cause-store-fault
-  cause-ecall cause-wrong-type cause-range cause-overflow cause-divzero cause-capability
-  cause-barrier cause-stack
-  capex-reg-shift capex-reg-pcc capex-reg-ddc capex-length capex-tag capex-seal capex-type
-  capex-representable capex-execute capex-load capex-store capex-load-cap capex-store-cap
-  capex-soft-perm capex-seal-perm capex-sysreg capex-unseal
+  cause-ecall cause-wrong-type cause-range cause-overflow cause-divzero cause-run
+  cause-barrier cause-stack cause-cap-fetch cause-cap-load cause-cap-store
+  refuse-length refuse-tag refuse-seal refuse-load refuse-store
   irq-software irq-timer irq-external
   exit-ok exit-error exit-gc-stack exit-gc-corrupt exit-trap-spiral
   dev-sys dev-uart dev-timer dev-gfx dev-input dev-blit dev-disk
@@ -100,7 +98,8 @@
   %root %cap-ld %cap-st! %cap-ld-word %cap-st-word! %cap-ld-byte %cap-st-byte!
   %cap-base %cap-len %cap-top %cap-perms %cap-otype %cap-offset %cap-tag? %cap-sealed? %cap-high
   %cap-set-addr %cap-inc %cap-bounds %cap-bounds-exact %cap-and-perms %cap-clear-tag %cap-seal-entry
-  %cap-seal-closure %cap-seal %cap-unseal %cap-set-high %cap=? %cap-subset? %rrl %ram
+  %cap-seal-closure %cap-seal %cap-unseal %cap-unseal-within %cap-set-high %cap=? %cap-subset?
+  %rrl %ram
   ;; the language and the library
   &optional &rest * *gensym-count* *in*
   *out* %unbound *await* + - / /= 1+ 1- < <= = > >= abs add2 alist->table
@@ -226,39 +225,37 @@
   asm-privileged set-asm-len! set-asm-origin! set-asm-privileged!
   label label-offset gensym-label literal literal-offset place place-at code-object
   ;; CSRs, and the opcodes a trap handler decodes
-  csr-cycle csr-cycleh csr-gcmode csr-mcause csr-mepc csr-mie csr-mip
-  csr-mscratch csr-mstatus csr-mtval csr-mtvec csr-stklim
-  op-load op-store op-jal op-jalr op-sys op-cheri op-fixnum op-index op-ref
+  csr-cycle csr-cycleh csr-ddc csr-gcmode csr-mcause csr-mepc csr-mie csr-mip
+  csr-mscratch csr-mstatus csr-mtidc csr-mtval csr-mtvec csr-stklim csr-utidc
+  op-load op-store op-jal op-jalr op-sys op-rvy op-xlm
   ;; RV32IMC
   i-add i-addi i-addi-w i-and i-andi i-auipc i-beq i-beqz i-bge i-bgeu i-bgt
   i-ble i-blt i-bltu i-bne i-bnez i-branch i-call-reg i-csrrc i-csrrci
   i-csrrs i-csrrsi i-csrrw i-csrrwi i-div i-divu i-ebreak i-ecall i-j i-jal
-  i-jalr i-jr i-la i-lb i-lbu i-lc i-lh i-lhu i-li i-lui i-lw i-mret i-mul
+  i-jalr i-jr i-la i-lb i-lbu i-lh i-lhu i-li i-lui i-lw i-mret i-mul
   i-mulh i-mulhsu i-mulhu i-mv i-neg i-nop i-not i-or i-ori i-rem i-remu
-  i-ret i-sb i-sc i-seqz i-sh i-sll i-slli i-slt i-slti i-sltiu i-sltu i-snez
+  i-ret i-sb i-seqz i-sh i-sll i-slli i-slt i-slti i-sltiu i-sltu i-snez
   i-sra i-srai i-srl i-srli i-sub i-sw i-wfi i-xor i-xori
-  i-lc-abs i-lw-abs i-sc-abs i-sw-abs
+  i-lw-abs i-ly-abs i-sw-abs i-sy-abs
   ;; the B extension and Zicond
   i-andn i-bclr i-bclri i-bext i-bexti i-binv i-binvi i-bset i-bseti
   i-clz i-cpop i-ctz i-czero-eqz i-czero-nez i-max i-maxu i-min i-minu
   i-orcb i-orn i-rev8 i-rol i-ror i-rori i-sextb i-sexth i-sh1add i-sh2add
   i-sh3add i-xnor i-zexth
-  ;; CHERI
-  i-candperm i-cbuildcap i-ccleartag i-cgetaddr i-cgetbase i-cgethigh
-  i-cgetlen i-cgetoffset i-cgetperm i-cgetsealed i-cgettag i-cgettop
-  i-cgettype i-cincoffset i-cincoffsetimm i-cincoffsetimm-w i-cjalr i-cmove
-  i-cram i-crrl i-cseal i-csealclo i-csealentry i-cseqx i-csetaddr
-  i-csetbounds i-csetboundsexact i-csetboundsimm i-csethigh i-cspecialrw
-  i-csub i-ctestsubset i-cunseal
-  i-lb-ddc i-lbu-ddc i-lc-ddc i-lh-ddc i-lhu-ddc i-lw-ddc
-  i-sb-ddc i-sc-ddc i-sh-ddc i-sw-ddc
-  ;; Xlm: references, indexed access, fixnums
-  i-beqx i-bnex i-car i-cdr i-jcl i-lhdr i-lref i-lvar i-set-car i-set-cdr
-  i-sref i-vkind
+  ;; RVY
+  i-ly i-sy i-yadd i-yaddi i-yaddi-w i-yaddrw i-yamask i-ybaser i-ybld
+  i-ybndsrw i-ybndsw i-ybndswi i-yeq i-yhir i-yhiw i-ylenr i-ymv i-ypermc
+  i-ypermr i-yseale i-ysealt i-ysh1add i-ysh2add i-ysh3add i-yss i-ytagr
+  i-ytopr i-ytyper i-yunseals i-yunsealt
+  ;; Xlm
+  i-beqx i-bnex i-car i-cdr i-jcl i-lhdr i-lref i-lvar i-npair i-sealcl
+  i-set-car i-set-cdr i-sref i-vkind
   i-ldx i-ldxb i-ldxbi i-ldxi i-stx i-stxb i-stxbi i-stxi
   i-fadd i-faddi i-faddio i-faddo i-fand i-fandi i-fdiv i-feq i-flt i-fltu
   i-fmul i-fmulo i-for i-fori i-frem i-fshi i-fsll i-fsra i-fsrl i-fsub
   i-fsubo i-fxor i-retag
+  i-lb-ddc i-lbu-ddc i-lh-ddc i-lhu-ddc i-lw-ddc i-ly-ddc
+  i-sb-ddc i-sh-ddc i-sw-ddc i-sy-ddc
 ))
 
 (in-package compiler)

@@ -13,7 +13,7 @@
 //! is the newer data. A driver that does not wait sees wrong data.
 
 use crate::cap::*;
-use crate::dev::{refusal, TIMER_HZ};
+use crate::dev::{refusal, REFUSE_LOAD, REFUSE_STORE, TIMER_HZ};
 use crate::mach::*;
 use crate::map::INT_DISK;
 use std::fs::{File, OpenOptions};
@@ -197,8 +197,8 @@ fn perform(m: &mut Machine, c: Cmd) -> u32 {
     // count comes from the guest, and a large one wraps a 32-bit extent back
     // into range.
     let need: &[(u32, u32)] = match c.op {
-        CMD_READ => &[(P_SD, CAPEX_STORE)],
-        CMD_WRITE => &[(P_LD, CAPEX_LOAD)],
+        CMD_READ => &[(P_SD, REFUSE_STORE)],
+        CMD_WRITE => &[(P_LD, REFUSE_LOAD)],
         _ => &[],
     };
     let addr = c.buf.addr;

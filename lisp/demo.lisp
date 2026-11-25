@@ -708,18 +708,18 @@
       (blit-clear-refused!)
       (num-check 'a-short-destination-is-refused
                  (blit-probe op-fill (%cap-bounds-exact v 16) src 8 4)
-                 (logior blit-refused-dst capex-length))
+                 (logior blit-refused-dst refuse-length))
       (num-check 'and-the-chip-says-so (blit-refused?) t)
       (num-check 'and-nothing-moved (list (all-bytes? v 0 16 0) (bytes-ref v 20)) (list t 7))
       (num-check 'a-number-is-no-destination
                  (blit-probe op-fill (%addr-of v) src 8 4)
-                 (logior blit-refused-dst capex-tag))
+                 (logior blit-refused-dst refuse-tag))
       (num-check 'a-read-only-destination-is-refused
                  (blit-probe op-fill (%cap-and-perms v perm-ld) src 8 4)
-                 (logior blit-refused-dst capex-store))
+                 (logior blit-refused-dst refuse-store))
       (num-check 'a-short-source-is-refused
                  (blit-probe op-copy v (%cap-bounds-exact src 8) 8 4)
-                 (logior blit-refused-src capex-length))
+                 (logior blit-refused-src refuse-length))
       (num-check 'and-still-nothing-moved (list (all-bytes? v 0 16 0) (bytes-ref v 20)) (list t 7))
       (blit-clear-refused!)
       (num-check 'the-status-clears (blit-refused?) nil)
@@ -814,11 +814,11 @@
         (disk (unsafe (device-page dev-disk)))
         (task (server-task disk:*driver*)))
     ;; A page is the device and no more, and only the chips with a
-    ;; capability register get SC.
+    ;; capability register get LC and SC.
     (num-check 'a-page-is-the-device
-               (list (%cap-len sys) (%cap-perms sys) (%cap-perms disk))
+               (list (%cap-len sys) (logand (%cap-perms sys) perms-all) (logand (%cap-perms disk) perms-all))
                (list device-page-bytes (logior perm-ld perm-sd)
-                     (logior perm-ld perm-sd perm-sc)))
+                     (logior perm-ld perm-sd perm-lc perm-sc)))
     (num-check 'reading-a-register-through-it (> (%cap-ld-word sys hw::sys-ramsize) 0) t)
     ;; Making one is unsafe, and a number is no authority.
     (num-check 'the-compiler-will-not-make-a-page
@@ -1106,7 +1106,7 @@
                (list 8 0))
     (num-check 'narrowed (list (%cap-base narrow) (%cap-len narrow)) (list (%addr-of b) 4))
     (num-check 'a-device-is-its-page
-               (list (%cap-len page) (%cap-perms page))
+               (list (%cap-len page) (logand (%cap-perms page) perms-all))
                (list device-page-bytes (logior perm-ld perm-sd)))
     (num-check 'inside-the-bounds-reads (%cap-ld-word b 4) 0)
     ;; A closure is sealed: calling it is the only way in, unless the escape
@@ -1119,12 +1119,17 @@
     ;; A pointer cannot be made from its bits.
     (let ((forged (%cap-set-high (%addr-of v) (%cap-high v))))
       (num-check 'bits-are-not-a-pointer (list (%cap-tag? forged) (eq? forged v)) (list nil nil)))
-    ;; A capability store keeps the tag, and any other store clears it.
+    ;; A capability store keeps the tag, and any other store clears it, as
+    ;; does a capability store through a capability without SC.
     (let ((m (make-vector 1 nil)))
       (%cap-st! m 0 v)
       (num-check 'a-capability-store-keeps-the-tag (eq? (%cap-ld m 0) v) t)
       (%cap-st-word! m 0 (%addr-of v))
-      (num-check 'a-word-store-clears-it (%cap-tag? (%cap-ld m 0)) nil))
+      (num-check 'a-word-store-clears-it (%cap-tag? (%cap-ld m 0)) nil)
+      (%cap-st! (%cap-and-perms m (lognot perm-sc)) 0 v)
+      (num-check 'without-sc-the-tag-stays-behind
+                 (list (%cap-tag? (%cap-ld m 0)) (%addr-of (%cap-ld m 0)))
+                 (list nil (%addr-of v))))
     (princ "capabilities: the errors below are on purpose")
     (newline)
     (num-check 'storing-into-nil-is-refused (refused? (lambda () (set-car! nil 1))) t)
@@ -1138,16 +1143,14 @@
     (num-check 'past-a-device-page-is-refused
                (refused? (lambda () (%cap-ld-word page device-page-bytes))) t)
     (num-check 'a-device-hands-out-no-capability (refused? (lambda () (%cap-ld page 0))) t)
-    (num-check 'a-page-without-sc-takes-none
-               (refused? (lambda () (%cap-st! page hw::sys-ramsize v)))
-               t)
-    (num-check 'and-only-a-capability-register-takes-one
-               (refused? (lambda () (%cap-st! blit blit-status-reg v)))
-               t)
+    (num-check 'only-a-capability-register-takes-one
+               (list (refused? (lambda () (%cap-st! page hw::sys-ramsize v)))
+                     (refused? (lambda () (%cap-st! blit blit-status-reg v))))
+               (list t t))
     ;; A chip is handed capabilities, not numbers.
     (num-check 'a-chip-refuses-a-number
                (blit-probe op-fill (%addr-of b) b 8 1)
-               (logior blit-refused-dst capex-tag))
+               (logior blit-refused-dst refuse-tag))
     (blit-clear-refused!)
     (num-check 'the-compiler-will-not-open-a-closure
                (refused? (lambda () (eval '(lambda (g) (%slot g 1)))))

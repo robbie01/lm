@@ -18,8 +18,8 @@
 
 ;; ---------------------------------------------------------------- devices
 ;; A device's page: the root narrowed to it, to loading and storing data,
-;; and, for the two chips with a capability register, to storing
-;; capabilities. Holding it is owning the device. Nothing records who holds
+;; and, for the two chips with a capability register, to capabilities as
+;; well, since storing them goes with loading them. Holding it is owning the device. Nothing records who holds
 ;; one, and nothing needs to: the name is unsafe, so taking a page is a
 ;; privilege, and a driver takes its page once, when it starts, and keeps it
 ;; in its own closures, which are sealed. No global, record field or message
@@ -32,7 +32,7 @@
   (%cap-and-perms (%cap-bounds-exact (%from-addr (%+ mmio-base (%* dev device-page-bytes)))
                                      device-page-bytes)
                   (if (if (%= dev dev-blit) t (%= dev dev-disk))
-                      (%logior perm-ld (%logior perm-sd perm-sc))
+                      (%logior (%logior perm-ld perm-sd) (%logior perm-lc perm-sc))
                       (%logior perm-ld perm-sd))))
 
 ;; ---------------------------------------------------------------- words

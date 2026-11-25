@@ -1,5 +1,5 @@
-//! End to end compiler tests: compile a Lisp expression to RISC-V with
-//! CHERI, run it on the machine, and compare what it printed.
+//! End to end compiler tests: compile a Lisp expression to RISC-V, RVY and
+//! Xlm, run it on the machine, and compare what it printed.
 //!
 //! This test covers the whole chain: reader, macro expander, compiler,
 //! assembler, object memory and processor. The answer is printed on the
@@ -10,7 +10,7 @@ use crate::cap::Cap;
 use crate::forge::hostlisp::Lisp;
 use crate::forge::{boot_host, write_layout};
 use crate::heap::{NIL, PERMS_PAIR, T_STACK, T_TEXT};
-use crate::mach::{Machine, Stop, C_ECALL, C_RANGE, C_TYPE};
+use crate::mach::{Machine, Stop, C_CAP_FETCH, C_CAP_LOAD, C_CAP_STORE, C_ECALL, C_RANGE, C_TYPE};
 use crate::map::*;
 use crate::run;
 use crate::rvenc::*;
@@ -20,24 +20,12 @@ const ENTRY: u32 = 0x0000_0C00;
 /// The task stack: an object of this many bytes, made once and kept as the
 /// boot stack, entered at the top.
 const STACK_BYTES: u32 = 1 << 20;
-/// Cause 28, a capability fault: mtval is (register << 5) | code.
-const CAUSE_CAP: u32 = 28;
 
 /// Assemble words at an address.
 fn put(m: &mut Machine, at: u32, code: &[u32]) {
     for (i, &w) in code.iter().enumerate() {
         m.poke32(at + 4 * i as u32, w);
     }
-}
-
-/// `jcl rd, rs1`: enter the closure in rs1.
-fn jcl(rd: u32, rs1: u32) -> u32 {
-    (rs1 << 15) | (3 << 12) | (rd << 7) | 0x0b
-}
-
-/// `sw.ddc rs2, (rs1)`: a word stored at the integer address in rs1.
-fn sw_ddc(rs2: u32, rs1: u32) -> u32 {
-    (0x7c << 25) | (rs2 << 20) | (rs1 << 15) | (2 << 7) | 0x5b
 }
 
 /// Stop the machine with an exit code: the system device's first register,
@@ -137,7 +125,7 @@ fn cases() -> Vec<Case> {
         // A capability with a permission dropped is a different value, and
         // still reads the same pair.
         Case(
-            "(let ((p (%cons 1 2))) (list (%eq? p (%cap-and-perms p 511))              (%eq? p (%cap-and-perms p 383)) (%car (%cap-and-perms p 383))))",
+            "(let ((p (%cons 1 2))) (list (%eq? p (%cap-and-perms p perms-all))              (%eq? p (%cap-and-perms p (%logxor perms-all perm-sd))) (%car (%cap-and-perms p (%logxor perms-all perm-sd)))))",
             "(t nil 1)",
         ),
         // ---- comparison, fused into a branch ----
@@ -171,18 +159,18 @@ fn cases() -> Vec<Case> {
         // by kind, and its capability has no store permission.
         Case("(%set-car! nil 1)", "TRAP: wrong type: 0xa"),
         Case("(set-cdr! nil 1)", "TRAP: wrong type: 0xa"),
-        Case("(%cap-st! nil 0 1)", "TRAP: capability fault: reg 7"),
+        Case("(%cap-st! nil 0 1)", "TRAP: capability store fault"),
         // ---- a constant is read-only all the way down ----
         // SD and SC are gone from the literal and from every pair, vector,
         // string and byte object inside it; LM stays.
-        Case("(%cap-perms '(1 2))", "336"),
-        Case("(%set-car! '(1 2) 3)", "TRAP: capability fault: reg 10 code 0x13"),
-        Case("(%set-cdr! (%cdr '(1 2 3)) 9)", "TRAP: capability fault: reg 10 code 0x13"),
-        Case("(%set-car! (%car '((1) 2)) 9)", "TRAP: capability fault: reg 10 code 0x13"),
-        Case("(string-set! \"abc\" 0 #\\z)", "TRAP: capability fault: reg 10 code 0x13"),
-        Case("(string-set! (%car '(\"abc\")) 0 #\\z)", "TRAP: capability fault: reg 10 code 0x13"),
-        Case("(vector-set! '#(1 2) 0 5)", "TRAP: capability fault: reg 10 code 0x13"),
-        Case("(vector-set! (vector-ref '#(#(1)) 0) 0 5)", "TRAP: capability fault: reg 10 code 0x13"),
+        Case("(%logand (%cap-perms '(1 2)) perms-all)", "262178"),
+        Case("(%set-car! '(1 2) 3)", "TRAP: capability store fault"),
+        Case("(%set-cdr! (%cdr '(1 2 3)) 9)", "TRAP: capability store fault"),
+        Case("(%set-car! (%car '((1) 2)) 9)", "TRAP: capability store fault"),
+        Case("(string-set! \"abc\" 0 #\\z)", "TRAP: capability store fault"),
+        Case("(string-set! (%car '(\"abc\")) 0 #\\z)", "TRAP: capability store fault"),
+        Case("(vector-set! '#(1 2) 0 5)", "TRAP: capability store fault"),
+        Case("(vector-set! (vector-ref '#(#(1)) 0) 0 5)", "TRAP: capability store fault"),
         // Reading one is unchanged, and a copy is the program's own.
         Case("(%car (%cdr '(1 (2 3))))", "(2 3)"),
         Case("(let ((l (append '(1 2) nil))) (%set-car! l 3) l)", "(3 2)"),
@@ -190,7 +178,7 @@ fn cases() -> Vec<Case> {
         // holds through a literal, and so does a global assigned through one.
         Case("(%eq? (%car '(a)) 'a)", "t"),
         Case("(%eq? (vector-ref '#(a) 0) 'a)", "t"),
-        Case("(%cap-perms (%car '(a)))", "497"),
+        Case("(%logand (%cap-perms (%car '(a))) perms-all)", "262371"),
         Case("(begin (%set-symbol-value! (%car '(lit-sym)) 2) (%symbol-value 'lit-sym))", "2"),
         // One constant is one capability, however often its quote runs.
         Case("(define (k) '(1 2)) (%eq? (k) (k))", "t"),
@@ -386,7 +374,7 @@ fn cases() -> Vec<Case> {
         Case("(%closure? car)", "t"),
         Case("(%obj-type car)", "5"),
         Case("(%obj-type 5)", "TRAP: wrong type: 0xa"),
-        Case("(%cap-ld (lambda () 1) 16)", "TRAP: capability fault: reg 10"),
+        Case("(%cap-ld (lambda () 1) 16)", "TRAP: capability load fault"),
         // a captured variable that is also assigned has to be boxed
         Case(
             "(let ((n 0)) (let ((bump (lambda () (set! n (%+ n 1))))) (bump) (bump) n))",
@@ -482,15 +470,14 @@ fn cases() -> Vec<Case> {
         Case("(let ((s (make-bytes 4))) (%cap-st-byte! s 2 7) (%bytes-ref s 2))", "7"),
         // Narrowing one, and what the narrowed one can no longer reach.
         Case("(%cap-len (%cap-bounds (make-string 10) 4))", "4"),
-        // (%cap-subset? a b) asks what `ctestsubset` asks: whether b lies
-        // within a.
+        // (%cap-subset? a b) asks what `yss` asks: whether b lies within a.
         Case(
             "(let ((s (make-string 8))) (list (%cap-subset? s (%cap-bounds s 4))              (%cap-subset? (%cap-bounds s 4) s)))",
             "(t nil)",
         ),
         Case(
             "(%cap-ld-byte (%cap-bounds \"abcdef\" 2) 3)",
-            "TRAP: capability fault: reg 10 code 0x1",
+            "TRAP: capability load fault",
         ),
         Case("(%rrl 100)", "100"),
     ]
@@ -552,7 +539,7 @@ pub fn run_one(l: &mut Lisp, src: &str) -> String {
     m.set_reg(S2, Cap::NIL);
     m.set_reg(T0, closure);
     m.set_reg(T1, Cap::int(0));
-    m.mtcc = root.with_addr(trap);
+    m.mtvec = root.with_addr(trap);
     m.set_pcc(root.with_addr(tramp));
     m.halted = false;
     m.exit_code = 0;
@@ -562,22 +549,22 @@ pub fn run_one(l: &mut Lisp, src: &str) -> String {
     let st = run::run(m, 400_000_000);
 
     if m.exit_code == 9 {
-        let (cause, epc, tval) = (m.mcause, m.mepcc.addr, m.mtval);
+        let (cause, epc, tval) = (m.mcause, m.mepc.addr, m.mtval);
         let a7 = m.reg(A7).addr;
         if std::env::var_os("LM_CTEST_TRACE").is_some() {
             eprintln!("trap {cause} at {epc:#x} mtval {tval:#x}: {}", crate::cpu::watch_backtrace(m));
         }
         // A wrong-type, range or capability trap is reported without the pc,
-        // so a test can state the register exactly.
+        // so a test can state the register, or the kind of fault, exactly.
         if cause == C_TYPE {
             return format!("TRAP: wrong type: {tval:#x}");
         }
         if cause == C_RANGE {
             return format!("TRAP: out of range: {tval:#x}");
         }
-        if cause == CAUSE_CAP {
-            let (reg, code) = (tval >> 5, tval & 31);
-            return format!("TRAP: capability fault: reg {reg} code {code:#x}");
+        let kinds = [(C_CAP_FETCH, "fetch"), (C_CAP_LOAD, "load"), (C_CAP_STORE, "store")];
+        if let Some((_, kind)) = kinds.iter().find(|(c, _)| *c == cause) {
+            return format!("TRAP: capability {kind} fault");
         }
         use crate::mach::{E_ARITY, E_OOM, E_RECORD};
         let what = match (cause, a7) {

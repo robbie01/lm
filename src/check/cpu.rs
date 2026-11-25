@@ -42,7 +42,7 @@ fn emit(m: &mut Machine, at: u32, code: &[u32]) -> u32 {
 /// A capability to `addr` in `rd`, made from the root in s11.
 fn capr(out: &mut Vec<u32>, rd: u32, addr: u32) {
     li32(out, rd, addr);
-    out.push(csetaddr(rd, ROOT, rd));
+    out.push(yaddrw(rd, ROOT, rd));
 }
 
 /// A finished run: the machine, and the address just past the test body,
@@ -61,7 +61,7 @@ impl Out {
     }
     /// The trap the run ended in, as (cause, mtval, epc), if it did.
     fn trap(&self) -> Option<(u32, u32, u32)> {
-        (self.m.exit_code == 1).then(|| (self.m.mcause, self.m.mtval, self.m.mepcc.addr))
+        (self.m.exit_code == 1).then(|| (self.m.mcause, self.m.mtval, self.m.mepc.addr))
     }
     fn clean(&self) -> bool {
         self.m.halted && self.m.exit_code == 0
@@ -84,14 +84,14 @@ fn go_with(code: &[u32], setup: impl FnOnce(&mut Machine)) -> Out {
     tail.push(sw_ddc(ZERO, T0));
     emit(&mut m, end, &tail);
     // The handler halts with exit code 1, through a DDC it takes back from
-    // MTDC, since a test may have narrowed DDC.
-    let mut stub = vec![cspecialrw(T1, SCR_MTDC, ZERO), cspecialrw(ZERO, SCR_DDC, T1)];
+    // `mtidc`, since a test may have narrowed DDC.
+    let mut stub = vec![csrrs(T1, CSR_MTIDC, ZERO), csrrw(ZERO, CSR_DDC, T1)];
     li32(&mut stub, T0, MMIO_BASE);
     stub.push(addi(T1, ZERO, 1));
     stub.push(sw_ddc(T1, T0));
     emit(&mut m, HANDLER, &stub);
-    m.mtcc = Cap::ROOT.with_addr(HANDLER);
-    m.mtdc = Cap::ROOT;
+    m.mtvec = Cap::ROOT.with_addr(HANDLER);
+    m.mtidc = Cap::ROOT;
     m.set_pcc(Cap::ROOT.with_addr(BASE));
     m.mtimecmp = u64::MAX;
     m.gfx.next_vbl = u64::MAX;
@@ -250,15 +250,15 @@ pub fn run_all() -> bool {
     c(
         &mut ok,
         "jalr clears bit 0",
-        vec![auipc(A1, 0), cincoffsetimm(A1, A1, 13), jalr(RA, A1, 0), addi(A0, ZERO, 1), addi(A0, ZERO, 7)],
+        vec![auipc(A1, 0), yaddi(A1, A1, 13), jalr(RA, A1, 0), addi(A0, ZERO, 1), addi(A0, ZERO, 7)],
         A0,
         7,
     );
-    c(&mut ok, "auipcc", vec![auipc(A0, 1)], A0, BASE + 0x1000);
+    c(&mut ok, "auipc", vec![auipc(A0, 1)], A0, BASE + 0x1000);
     c(
         &mut ok,
         "c.jr",
-        vec![auipc(A1, 0), cincoffsetimm(A1, A1, 12), c_jr(A1), c_li(A0, 1), c_li(A0, 9)],
+        vec![auipc(A1, 0), yaddi(A1, A1, 12), c_jr(A1), c_li(A0, 1), c_li(A0, 9)],
         A0,
         9,
     );
@@ -312,7 +312,7 @@ pub fn run_all() -> bool {
         capr(&mut code, SP, 0x3000);
         code.extend([c_li(A0, 31), c_swsp(A0, 8), c_lwsp(A1, 8), c_addi4spn(S0, 8), c_lw(S1, S0, 0)]);
         c(&mut ok, "c.swsp/c.lwsp", code.clone(), A1, 31);
-        c(&mut ok, "c.addi4spn is cincoffset", code, S1, 31);
+        c(&mut ok, "c.addi4spn is yaddi", code, S1, 31);
     }
     {
         let mut code = vec![];
@@ -321,7 +321,7 @@ pub fn run_all() -> bool {
         c(&mut ok, "c.sw/c.lw", code, S1, 21);
     }
 
-    // ---- CSRs; mscratch is MScratchC's address ----
+    // ---- CSRs; mscratch holds a capability, here an integer ----
     c(&mut ok, "csrrw", vec![addi(A0, ZERO, 0x123), csrrw(ZERO, 0x340, A0), csrrs(A1, 0x340, ZERO)], A1, 0x123);
     c(
         &mut ok,
@@ -351,7 +351,7 @@ pub fn run_all() -> bool {
     );
     c(&mut ok, "csrrwi", vec![csrrwi(ZERO, 0x340, 21), csrrs(A1, 0x340, ZERO)], A1, 21);
 
-    // ---- Xlm custom-3: fixnums are machine integers ----
+    // ---- Xlm: fixnums are machine integers ----
     let two = |x: i32, y: i32, op: fn(u32, u32, u32) -> u32| -> Vec<u32> {
         let mut v = vec![];
         li32(&mut v, A1, x as u32);
@@ -391,7 +391,7 @@ pub fn run_all() -> bool {
         ok("retag char->integer", o.c(A2) == Cap::int(65));
         let o = go(&[addi(A1, ZERO, 65), retag(A0, A1, IMM_CHAR, 0)]);
         ok("retag refuses the wrong kind", o.took(C_TYPE, A1));
-        let o = go(&[addi(A1, ZERO, 65), retag(A0, A1, 0, IMM_CHAR), retag(A2, A0, 63, IMM_EOF)]);
+        let o = go(&[addi(A1, ZERO, 65), retag(A0, A1, 0, IMM_CHAR), retag(A2, A0, 31, IMM_EOF)]);
         ok("retag of any kind", o.c(A2) == Cap::imm(IMM_EOF, 65));
     }
     {
@@ -408,49 +408,49 @@ pub fn run_all() -> bool {
         ok("fdiv by zero", go(&two(1, 0, fdiv)).took(C_DIVZERO, 0));
         ok("frem by zero", go(&two(1, 0, frem)).took(C_DIVZERO, 0));
         // An operand that is not a fixnum names its register.
-        let o = go(&[addi(A2, ZERO, 1), cmove(A1, ROOT), fadd(A0, A1, A2)]);
+        let o = go(&[addi(A2, ZERO, 1), ymv(A1, ROOT), fadd(A0, A1, A2)]);
         ok("fop refuses a capability in rs1", o.took(C_TYPE, A1));
         let o = go(&[addi(A1, ZERO, 1), retag(A2, A1, 0, IMM_CHAR), fadd(A0, A1, A2)]);
         ok("fop refuses a character in rs2", o.took(C_TYPE, A2));
-        let o = go(&[cmove(A1, ROOT), faddi(A0, A1, 1)]);
+        let o = go(&[ymv(A1, ROOT), faddi(A0, A1, 1)]);
         ok("faddi refuses a capability", o.took(C_TYPE, A1));
     }
 
     // ---- capability inspection and manipulation ----
     {
         let o = go(&[
-            cgetperm(A0, ROOT),
-            cgettag(A1, ROOT),
-            cgetlen(A2, ROOT),
-            cgettop(A3, ROOT),
-            cgetbase(A4, ROOT),
-            cgettype(A5, ROOT),
-            cgetsealed(A6, ROOT),
+            ypermr(A0, ROOT),
+            ytagr(A1, ROOT),
+            ylenr(A2, ROOT),
+            ytopr(A3, ROOT),
+            ybaser(A4, ROOT),
+            ytyper(A5, ROOT),
         ]);
-        ok("root: every permission", o.x(A0) == P_ALL);
+        ok("root: every permission", o.x(A0) == AP_ALL | AP_ONES);
         ok("root: tagged", o.x(A1) == 1);
         ok("root: length saturates", o.x(A2) == u32::MAX);
         ok("root: top saturates", o.x(A3) == u32::MAX);
-        ok("root: base 0, unsealed", o.x(A4) == 0 && o.x(A5) == 0 && o.x(A6) == 0);
+        ok("root: base 0, unsealed", o.x(A4) == 0 && o.x(A5) == 0);
         ok("integer results are untagged", o.c(A0).meta == 0 && !o.c(A0).tag);
+        ok("NULL has no permissions", go(&[ypermr(A0, ZERO)]).x(A0) == AP_ONES);
     }
     {
         let mut code = vec![];
         capr(&mut code, A1, 0x4010);
         code.extend([
             addi(A2, ZERO, 100),
-            csetbounds(A0, A1, A2),
-            cgetbase(A3, A0),
-            cgetlen(A4, A0),
-            cgetoffset(A5, A0),
-            cgetaddr(A6, A0),
-            cincoffsetimm(A7, A0, 4),
-            cgetoffset(S2, A7),
+            ybndsrw(A0, A1, A2),
+            ybaser(A3, A0),
+            ylenr(A4, A0),
+            addi(A6, A0, 0),
+            yaddi(A7, A0, 4),
+            ybaser(S2, A7),
+            sub(S2, A7, S2),
         ]);
         let o = go(&code);
-        ok("csetbounds exact", o.x(A3) == 0x4010 && o.x(A4) == 100 && o.x(A5) == 0);
-        ok("cgetaddr", o.x(A6) == 0x4010);
-        ok("cincoffsetimm moves the offset", o.x(S2) == 4 && o.c(A7).tag);
+        ok("ybndsrw exact", o.x(A3) == 0x4010 && o.x(A4) == 100 && o.c(A0).tag);
+        ok("an integer instruction reads the address", o.x(A6) == 0x4010 && !o.c(A6).tag);
+        ok("yaddi moves the address", o.x(S2) == 4 && o.c(A7).tag);
     }
     {
         // A length that cannot be exact is rounded out, and the result is
@@ -459,44 +459,60 @@ pub fn run_all() -> bool {
         capr(&mut code, A1, 0x0012_3457);
         li32(&mut code, A2, 0x0001_2345);
         code.extend([
-            csetbounds(A0, A1, A2),
-            cgetbase(A3, A0),
-            cgetlen(A4, A0),
-            ctestsubset(A5, ROOT, A0),
-            ctestsubset(A6, A0, ROOT),
-            crrl(A7, A2),
-            cram(S2, A2),
+            ybndsrw(A0, A1, A2),
+            ybaser(A3, A0),
+            ylenr(A4, A0),
+            yss(A5, ROOT, A0),
+            yss(A6, A0, ROOT),
+            yamask(S2, A2),
+            ybndsw(A7, A1, A2),
+            ytagr(S3, A7),
         ]);
         let o = go(&code);
-        ok("csetbounds rounds the base down", o.x(A3) < 0x0012_3457 && o.x(A3) & 7 == 0);
+        ok("ybndsrw rounds the base down", o.x(A3) < 0x0012_3457 && o.x(A3) & 7 == 0 && o.c(A0).tag);
         ok("...and the length up", o.x(A4) as u64 + o.x(A3) as u64 >= 0x0012_3457 + 0x1_2345);
-        ok("ctestsubset", o.x(A5) == 1 && o.x(A6) == 0);
-        ok("crrl", o.x(A7) == rrl(0x1_2345) && o.x(A7) > 0x1_2345);
-        ok("cram", o.x(S2) == ram(0x1_2345));
-        let mut exact = vec![];
-        capr(&mut exact, A1, 0x0012_3457);
-        li32(&mut exact, A2, 0x0001_2345);
-        exact.push(csetboundsexact(A0, A1, A2));
-        ok("csetboundsexact refuses rounding", go(&exact).took(C_CAP, (A1 << 5) | CAPEX_REPRESENTABLE));
+        ok("yss", o.x(A5) == 1 && o.x(A6) == 0);
+        ok("yamask", o.x(S2) == ram(0x1_2345));
+        ok("ybndsw of bounds that would round is untagged", o.x(S3) == 0 && o.c(A7).bounds() == o.c(A0).bounds());
     }
     {
         let mut code = vec![];
         capr(&mut code, A1, 0x4000);
-        code.extend([csetboundsimm(A0, A1, 16), addi(A2, ZERO, 17), csetbounds(A3, A0, A2)]);
-        ok("csetbounds past the bounds faults", go(&code).took(C_CAP, (A0 << 5) | CAPEX_LENGTH));
-        ok(
-            "csetbounds of an integer faults",
-            go(&[addi(A1, ZERO, 64), csetboundsimm(A0, A1, 8)]).took(C_CAP, (A1 << 5) | CAPEX_TAG),
-        );
-    }
-    {
-        let mut code = vec![];
-        capr(&mut code, A1, 0x4000);
-        li32(&mut code, A2, P_ALL & !P_SD);
-        code.extend([candperm(A0, A1, A2), cgetperm(A3, A0), lw(A4, A0, 0), sw(A4, A0, 0)]);
+        code.extend([ybndswi(A0, A1, 16), addi(A2, ZERO, 17), ybndsrw(A3, A0, A2), ytagr(A4, A3)]);
+        code.extend([addi(A1, ZERO, 64), ybndswi(A5, A1, 8), ytagr(A6, A5)]);
         let o = go(&code);
-        ok("candperm", o.x(A3) == P_ALL & !P_SD);
-        ok("a store without SD faults", o.took(C_CAP, (A0 << 5) | CAPEX_STORE));
+        ok("bounds past the authority's are untagged", o.clean() && o.x(A4) == 0);
+        ok("bounds of an integer are untagged", o.x(A6) == 0);
+        for len in [1, 255, 256, 264, 504, 512, 528, 4032, 4096] {
+            let mut code = vec![];
+            capr(&mut code, A1, 0x10_0000);
+            code.extend([ybndswi(A0, A1, len), ylenr(A2, A0), ytagr(A3, A0)]);
+            let o = go(&code);
+            ok(&format!("ybndswi {len}"), o.x(A2) == len && o.x(A3) == 1);
+        }
+    }
+    {
+        let mut code = vec![];
+        capr(&mut code, A1, 0x4000);
+        li32(&mut code, A2, AP_W);
+        code.extend([ypermc(A0, A1, A2), ypermr(A3, A0), lw(A4, A0, 0), sw(A4, A0, 0)]);
+        let o = go(&code);
+        ok("ypermc", o.x(A3) == ap_of(P_ALL & !P_SD) | AP_ONES);
+        ok("a store without SD faults", o.took(C_CAP_STORE, 0x4000));
+        // What depends on a permission goes with it: C takes SC and LM, R
+        // takes LM, X takes ASR, and the bits no permission occupies stay.
+        let perms = |mask: u32| {
+            let mut code = vec![];
+            li32(&mut code, A2, mask);
+            code.extend([ypermc(A0, ROOT, A2), ypermr(A1, A0)]);
+            go(&code).x(A1)
+        };
+        ok("clearing C clears SC and LM", perms(AP_C) == ap_of(P_ALL & !(P_LC | P_SC | P_LM)) | AP_ONES);
+        ok("clearing R clears LM", perms(AP_R) == ap_of(P_ALL & !(P_LD | P_LM)) | AP_ONES);
+        ok("clearing X clears ASR", perms(AP_X) == ap_of(P_ALL & !(P_EX | P_SR)) | AP_ONES);
+        ok("clearing S or U clears SE", perms(AP_U) == ap_of(P_ALL & !P_SE) | AP_ONES);
+        ok("clearing SC clears only SC", perms(AP_SC) == ap_of(P_ALL & !P_SC) | AP_ONES);
+        ok("clearing a reserved bit clears nothing", perms(AP_ONES) == AP_ALL | AP_ONES);
     }
     {
         // An address far outside a small capability's representable region
@@ -505,75 +521,91 @@ pub fn run_all() -> bool {
         capr(&mut code, A1, 0x4000);
         li32(&mut code, A2, 0x0800_0000);
         code.extend([
-            csetboundsimm(A0, A1, 64),
-            csetaddr(A3, A0, A2),
-            cgettag(A4, A3),
+            ybndswi(A0, A1, 64),
+            yaddrw(A3, A0, A2),
+            ytagr(A4, A3),
             addi(A2, ZERO, 0x40),
-            cincoffset(A5, A0, A2),
-            cgettag(A6, A5),
-            csub(A7, A5, A0),
+            yadd(A5, A0, A2),
+            ytagr(A6, A5),
+            addi(A7, ZERO, 3),
+            ysh3add(S2, A7, A0),
+            ybaser(S3, S2),
+            sub(S3, S2, S3),
         ]);
         let o = go(&code);
-        ok("csetaddr out of range clears the tag", o.x(A4) == 0);
-        ok("cincoffset to the end keeps it", o.x(A6) == 1);
-        ok("csub", o.x(A7) == 0x40);
+        ok("yaddrw out of range clears the tag", o.x(A4) == 0);
+        ok("yadd to the end keeps it", o.x(A6) == 1);
+        ok("ysh3add", o.x(S3) == 24 && o.c(S2).tag);
     }
     {
         let mut code = vec![];
         li32(&mut code, A1, 0x1234);
         li32(&mut code, A2, 0xA000_4000);
-        code.extend([csethigh(A0, A1, A2), cgethigh(A3, A0), cgettag(A4, A0)]);
+        code.extend([yhiw(A0, A1, A2), yhir(A3, A0), ytagr(A4, A0)]);
         let o = go(&code);
-        ok("csethigh makes an untagged capability", o.x(A3) == 0xA000_4000 && o.x(A4) == 0);
-        // cbuildcap re-tags what root could have made, and nothing else.
+        ok("yhiw makes an untagged capability", o.x(A3) == 0xA000_4000 && o.x(A4) == 0 && o.x(A0) == 0x1234);
+        // ybld re-tags what root could have made, and nothing else.
         let mut code = vec![];
         capr(&mut code, A1, 0x4000);
         code.extend([
-            csetboundsimm(A1, A1, 32),
-            ccleartag(A2, A1),
-            cbuildcap(A3, ROOT, A2),
-            cseqx(A4, A3, A1),
-            cseqx(A5, A2, A1),
+            ybndswi(A1, A1, 32),
+            yhir(A2, A1),
+            yhiw(A2, A1, A2),
+            ybld(A3, ROOT, A2),
+            yeq(A4, A3, A1),
+            yeq(A5, A2, A1),
         ]);
         let o = go(&code);
-        ok("cbuildcap re-tags", o.x(A4) == 1 && o.c(A3).tag);
-        ok("cseqx sees the tag", o.x(A5) == 0);
+        ok("ybld re-tags", o.x(A4) == 1 && o.c(A3).tag);
+        ok("yeq sees the tag", o.x(A5) == 0);
         let mut code = vec![];
         capr(&mut code, A1, 0x4000);
-        li32(&mut code, A2, P_LD);
-        code.extend([csetboundsimm(A1, A1, 32), candperm(A3, A1, A2), ccleartag(A4, ROOT), cbuildcap(A5, A3, A4)]);
-        ok("cbuildcap refuses more than its authority", go(&code).took(C_CAP, (A3 << 5) | CAPEX_LENGTH));
-        // cbuildcap under a headed object keeps HD only where csetbounds
-        // would: at the object's own base.
+        li32(&mut code, A2, AP_ALL & !AP_R);
+        code.extend([ybndswi(A1, A1, 32), ypermc(A3, A1, A2), yhir(A4, ROOT), yhiw(A4, ROOT, A4), ybld(A5, A3, A4)]);
+        let o = go(&code);
+        ok("ybld of more than its authority is untagged", o.clean() && !o.c(A5).tag);
+        // ybld under a headed object keeps HD only where the bounds
+        // instructions would: at the object's own base.
         let obj = region(OBJ, 64, DATA | P_HD);
         let build = |bits: Cap| {
             let mut code = vec![];
             li32(&mut code, A4, bits.addr);
             li32(&mut code, A5, bits.meta);
-            code.extend([csethigh(A2, A4, A5), cbuildcap(A3, A1, A2)]);
+            code.extend([yhiw(A2, A4, A5), ybld(A3, A1, A2)]);
             go_with(&code, |m| m.set_reg(A1, obj))
         };
         let head = obj.with_bounds_exact(16).unwrap();
         let o = build(head.without_tag());
-        ok("cbuildcap keeps HD at the object's base", o.clean() && o.c(A3) == head);
+        ok("ybld keeps HD at the object's base", o.clean() && o.c(A3) == head);
         let slot = obj.with_addr(OBJ + 16).with_bounds_exact(16).unwrap();
         let forged = Cap { meta: slot.meta | (P_HD << PERM_SHIFT), ..slot }.without_tag();
-        ok("cbuildcap refuses HD at a slot", build(forged).took(C_CAP, (A1 << 5) | CAPEX_SOFT_PERM));
-        // cbuildcap refuses bits that are not the encoding of their bounds:
-        // the root's with an exponent of 25, which reads as no bounds.
+        ok("ybld of HD at a slot is untagged", !build(forged).c(A3).tag);
+        // ybld refuses bits that are not the encoding of their bounds: the
+        // root's with an exponent of 25, which reads as no bounds.
         let mut code = vec![];
         li32(&mut code, A5, Cap::ROOT.meta + 1);
-        code.extend([csethigh(A2, ZERO, A5), cbuildcap(A3, ROOT, A2)]);
-        ok("cbuildcap refuses a malformed exponent", go(&code).took(C_CAP, (A2 << 5) | CAPEX_REPRESENTABLE));
+        code.extend([yhiw(A2, ZERO, A5), ybld(A3, ROOT, A2)]);
+        ok("ybld of a malformed exponent is untagged", !go(&code).c(A3).tag);
+        // An otype no one may seal without an authority is cleared, a
+        // sentry's and a closure's are kept.
+        for (ot, kept) in [(OT_SENTRY, true), (OT_CLOSURE, true), (3, false), (4, false)] {
+            let bits = region(0x4000, 32, DATA).seal(ot).without_tag();
+            let mut code = vec![];
+            li32(&mut code, A4, bits.addr);
+            li32(&mut code, A5, bits.meta);
+            code.extend([yhiw(A2, A4, A5), ybld(A3, ROOT, A2), ytyper(A6, A3)]);
+            let o = go(&code);
+            ok(&format!("ybld of otype {ot}"), o.c(A3).tag && o.x(A6) == if kept { ot } else { 0 });
+        }
     }
     {
         // Two capabilities to the same bytes with different permissions are
         // not identical, and beqx says so where beq does not.
         let mut code = vec![];
-        li32(&mut code, A2, P_ALL & !P_SE);
+        li32(&mut code, A2, AP_S);
         code.extend([
-            candperm(A1, ROOT, A2),
-            cseqx(A0, A1, ROOT),
+            ypermc(A1, ROOT, A2),
+            yeq(A0, A1, ROOT),
             addi(A3, ZERO, 1),
             beqx(A1, ROOT, 8),
             addi(A3, ZERO, 2),
@@ -585,7 +617,7 @@ pub fn run_all() -> bool {
             addi(A5, ZERO, 2),
         ]);
         let o = go(&code);
-        ok("cseqx", o.x(A0) == 0);
+        ok("yeq", o.x(A0) == 0);
         ok("beqx not taken on different metadata", o.x(A3) == 2);
         ok("bnex taken", o.x(A4) == 1);
         ok("beq compares addresses only", o.x(A5) == 1);
@@ -593,125 +625,146 @@ pub fn run_all() -> bool {
         ok("a fixnum and a character are not identical", o.x(A3) == 2);
     }
     {
-        let o = go(&[cmove(A0, ROOT), c_mv(A1, ROOT), addi(A2, ROOT, 0)]);
-        ok("cmove keeps the tag", o.c(A0) == Cap::ROOT);
-        ok("c.mv is cmove", o.c(A1) == Cap::ROOT);
+        let o = go(&[ymv(A0, ROOT), c_mv(A1, ROOT), addi(A2, ROOT, 0)]);
+        ok("ymv keeps the tag", o.c(A0) == Cap::ROOT);
+        ok("c.mv is ymv", o.c(A1) == Cap::ROOT);
         ok("addi is integer", !o.c(A2).tag && o.c(A2).meta == 0);
+        // Every Zca HINT is a nop, as RVY has them: the register keeps its
+        // capability.
+        let o = go(&[ymv(A1, ROOT), c_addi(A1, 0), ymv(S0, ROOT), c_srli(S0, 0), c_srai(S0, 0), ymv(A2, ROOT), c_slli(A2, 0)]);
+        ok("c.addi by nothing is a nop", o.c(A1) == Cap::ROOT);
+        ok("c.srli and c.srai by nothing are nops", o.c(S0) == Cap::ROOT);
+        ok("c.slli by nothing is a nop", o.c(A2) == Cap::ROOT);
+        ok("c.lui of x0 is a nop", go(&[c_lui(ZERO, 1), addi(A0, ZERO, 7)]).x(A0) == 7);
     }
 
     // ---- sealing ----
     {
         let mut code = vec![];
         code.extend([
-            csealentry(A0, ROOT),
-            cgettype(A1, A0),
-            cgetsealed(A2, A0),
+            yseale(A0, ROOT),
+            ytyper(A1, A0),
             addi(A3, ZERO, 5),
-            csetaddr(A3, ROOT, A3),
-            cseal(A4, ROOT, A3),
-            cgettype(A5, A4),
-            cunseal(A6, A4, A3),
-            cseqx(A7, A6, ROOT),
+            yaddrw(A3, ROOT, A3),
+            ysealt(A4, A3, ROOT),
+            ytyper(A5, A4),
+            yunsealt(A6, A3, A4),
+            yeq(A7, A6, ROOT),
         ]);
         let o = go(&code);
-        ok("csealentry", o.x(A1) == OT_SENTRY && o.x(A2) == 1);
-        ok("cseal with an SE authority", o.x(A5) == 5);
-        ok("cunseal undoes it", o.x(A7) == 1);
+        ok("yseale", o.x(A1) == OT_SENTRY && o.c(A0).tag);
+        ok("ysealt with an SE key", o.x(A5) == 5 && o.c(A4).tag);
+        ok("yunsealt undoes it", o.x(A7) == 1);
         let mut c2 = code.clone();
         c2.push(lw(T2, A4, 0));
-        ok("a sealed capability cannot be loaded through", go(&c2).took(C_CAP, (A4 << 5) | CAPEX_SEAL));
-        let mut c3 = code[..6].to_vec();
-        c3.extend([addi(T2, ZERO, 6), csetaddr(T2, ROOT, T2), cunseal(A6, A4, T2)]);
-        ok("cunseal needs the matching otype", go(&c3).took(C_CAP, (T2 << 5) | CAPEX_TYPE));
-        let mut c4 = code[..6].to_vec();
-        c4.push(cincoffsetimm(A6, A4, 8));
-        c4.push(cgettag(A7, A6));
+        ok("a sealed capability cannot be loaded through", go(&c2).took(C_CAP_LOAD, 0));
+        let mut c3 = code[..5].to_vec();
+        c3.extend([addi(T2, ZERO, 6), yaddrw(T2, ROOT, T2), yunsealt(A6, T2, A4)]);
+        let o = go(&c3);
+        ok("yunsealt by the wrong otype is untagged", o.clean() && !o.c(A6).tag);
+        let mut c4 = code[..5].to_vec();
+        c4.push(yaddi(A6, A4, 8));
+        c4.push(ytagr(A7, A6));
         ok("moving a sealed capability clears its tag", go(&c4).x(A7) == 0);
-        // candperm changes a sealed capability's permissions only by
-        // untagging it; a mask that clears nothing it has changes nothing.
+        let o = go(&[yseale(A0, ROOT), yseale(A1, A0)]);
+        ok("yseale of a sealed capability is untagged", o.clean() && !o.c(A1).tag);
+        // ypermc changes a sealed capability's permissions only by untagging
+        // it; a mask that clears nothing it has changes nothing.
         let mut c8 = vec![];
-        li32(&mut c8, A2, P_ALL);
-        li32(&mut c8, A3, P_ALL & !P_SE);
-        c8.extend([csealentry(A0, ROOT), candperm(A1, A0, A2), cseqx(A4, A1, A0), candperm(A5, A0, A3), cgettag(A6, A5)]);
+        li32(&mut c8, A3, AP_S);
+        c8.extend([yseale(A0, ROOT), ypermc(A1, A0, ZERO), yeq(A4, A1, A0), ypermc(A5, A0, A3), ytagr(A6, A5)]);
         let o = go(&c8);
-        ok("candperm of a sealed capability by every permission keeps it", o.x(A4) == 1);
-        ok("...and by fewer untags it", o.x(A6) == 0);
-        // cincoffset by x0 is cmove, as RVY's YADD with x0 is YMV, so it
-        // keeps a sealed capability; by a register holding 0 it does not.
-        let o = go(&[csealentry(A0, ROOT), cincoffset(A1, A0, ZERO), cseqx(A2, A1, A0), cincoffset(A3, A0, A4), cgettag(A5, A3)]);
-        ok("cincoffset by x0 is cmove", o.x(A2) == 1);
+        ok("ypermc of a sealed capability by nothing keeps it", o.x(A4) == 1);
+        ok("...and by a permission untags it", o.x(A6) == 0);
+        // yadd by x0 is ymv, so it keeps a sealed capability; by a register
+        // holding 0 it does not.
+        let o = go(&[yseale(A0, ROOT), yadd(A1, A0, ZERO), yeq(A2, A1, A0), yadd(A3, A0, A4), ytagr(A5, A3)]);
+        ok("yadd by x0 is ymv", o.x(A2) == 1);
         ok("...and by a register untags a sealed capability", o.x(A5) == 0);
-        // The escape hatch: an SE authority at otype 2 opens a closure.
-        let mut c5 = vec![addi(A3, ZERO, 2), csetaddr(A3, ROOT, A3), cseal(A4, ROOT, A3), cgettype(A5, A4)];
-        c5.extend([cunseal(A6, A4, A3), cgettype(A7, A6)]);
+        // A key at otype 2 opens a closure, and so does the root, by
+        // superset.
+        let mut c5 = vec![addi(A3, ZERO, 2), yaddrw(A3, ROOT, A3), ysealt(A4, A3, ROOT), ytyper(A5, A4)];
+        c5.extend([yunsealt(A6, A3, A4), ytyper(A7, A6), yunseals(S2, ROOT, A4), yeq(S3, S2, ROOT)]);
         let o = go(&c5);
-        ok("cseal and cunseal reach otype 2", o.x(A5) == OT_CLOSURE && o.x(A7) == 0);
+        ok("ysealt and yunsealt reach otype 2", o.x(A5) == OT_CLOSURE && o.x(A7) == 0 && o.c(A6).tag);
+        ok("yunseals by the root opens it", o.x(S3) == 1);
+        let mut c9 = vec![];
+        capr(&mut c9, A1, 0x4000);
+        c9.extend([ybndswi(A1, A1, 16), yseale(A2, ROOT), yunseals(A3, A1, A2), yunseals(A4, ROOT, ROOT)]);
+        let o = go(&c9);
+        ok("yunseals needs a superset", !o.c(A3).tag);
+        ok("...and a sealed capability", !o.c(A4).tag);
         let mut c6 = vec![];
-        li32(&mut c6, A2, P_ALL & !P_SE);
-        c6.extend([candperm(A1, ROOT, A2), addi(A3, ZERO, 5), csetaddr(A3, A1, A3), cseal(A4, ROOT, A3)]);
-        ok("cseal needs SE", go(&c6).took(C_CAP, (A3 << 5) | CAPEX_SEAL_PERM));
-        let mut c7 = code[..6].to_vec();
-        li32(&mut c7, A2, P_ALL & !P_SE);
-        c7.extend([candperm(A1, A3, A2), cunseal(A6, A4, A1)]);
-        ok("cunseal needs SE", go(&c7).took(C_CAP, (A1 << 5) | CAPEX_UNSEAL));
+        li32(&mut c6, A2, AP_S);
+        c6.extend([ypermc(A1, ROOT, A2), addi(A3, ZERO, 5), yaddrw(A3, A1, A3), ysealt(A4, A3, ROOT)]);
+        ok("ysealt needs SE", !go(&c6).c(A4).tag);
+        let mut c7 = code[..5].to_vec();
+        li32(&mut c7, A2, AP_U);
+        c7.extend([ypermc(A1, A3, A2), yunsealt(A6, A1, A4)]);
+        ok("yunsealt needs SE", !go(&c7).c(A6).tag);
+        let mut c10 = vec![addi(A3, ZERO, 16), yaddrw(A3, ROOT, A3), ysealt(A4, A3, ROOT)];
+        c10.push(ytagr(A5, A4));
+        ok("ysealt to an otype the format cannot hold is untagged", go(&c10).x(A5) == 0);
     }
 
     // ---- capability loads and stores, and tags in memory ----
     {
         let mut code = vec![];
         capr(&mut code, A1, 0x5000);
-        code.extend([sc(ROOT, A1, 8), lc(A0, A1, 8), cgettag(A2, A0), lw(A3, A1, 12)]);
+        code.extend([sy(ROOT, A1, 8), ly(A0, A1, 8), ytagr(A2, A0), lw(A3, A1, 12)]);
         let o = go(&code);
-        ok("sc then lc keeps the tag", o.c(A0) == Cap::ROOT && o.x(A2) == 1);
+        ok("sy then ly keeps the tag", o.c(A0) == Cap::ROOT && o.x(A2) == 1);
         ok("the metadata is the high word", o.x(A3) == Cap::ROOT.meta);
         ok("memory holds the tag", o.m.tag_at(0x5008) && o.m.load_cap(0x5008) == Cap::ROOT);
         for (name, st) in [("sw", sw(ZERO, A1, 12)), ("sb", sb(ZERO, A1, 9)), ("sh", sh(ZERO, A1, 14))] {
             let mut c2 = code[..code.len() - 2].to_vec();
-            c2.extend([st, lc(A0, A1, 8), cgettag(A2, A0)]);
+            c2.extend([st, ly(A0, A1, 8), ytagr(A2, A0)]);
             let o = go(&c2);
             ok(&format!("{name} into the granule clears its tag"), o.x(A2) == 0 && !o.m.tag_at(0x5008));
         }
         let mut c3 = code[..code.len() - 2].to_vec();
-        c3.extend([sw(ZERO, A1, 4), lc(A0, A1, 8), cgettag(A2, A0)]);
+        c3.extend([sw(ZERO, A1, 4), ly(A0, A1, 8), ytagr(A2, A0)]);
         ok("a store next door leaves the tag", go(&c3).x(A2) == 1);
         let mut c4 = vec![];
         capr(&mut c4, A1, 0x5000);
-        c4.push(lc(A0, A1, 4));
+        c4.push(ly(A0, A1, 4));
         // A capability split across two granules has no tag to take, so no
         // handler could emulate the access: it is an access fault.
-        ok("a misaligned lc is a load access fault", go(&c4).took(C_LFAULT, 0x5004));
+        ok("a misaligned ly is a load access fault", go(&c4).took(C_LFAULT, 0x5004));
         let mut c5 = vec![];
         capr(&mut c5, A1, 0x5000);
-        c5.push(sc(ROOT, A1, 2));
-        ok("a misaligned sc is a store access fault", go(&c5).took(C_SFAULT, 0x5002));
+        c5.push(sy(ROOT, A1, 2));
+        ok("a misaligned sy is a store access fault", go(&c5).took(C_SFAULT, 0x5002));
         // The capability checks come first.
         let mut c6 = vec![];
         capr(&mut c6, A1, 0x5000);
-        c6.extend([csetboundsimm(A1, A1, 16), lc(A0, A1, 12)]);
-        ok("a misaligned lc past the bounds is a length fault", go(&c6).took(C_CAP, (A1 << 5) | CAPEX_LENGTH));
+        c6.extend([ybndswi(A1, A1, 16), ly(A0, A1, 12)]);
+        ok("a misaligned ly past the bounds is a capability fault", go(&c6).took(C_CAP_LOAD, 0x500c));
+        ok("ld is no instruction", go(&[0x0000_3003]).took(C_ILLEGAL, 0x0000_3003));
+        ok("custom-2 is RVY's", go(&[0x0000_005b]).took(C_ILLEGAL, 0x0000_005b));
     }
     {
-        // Through an authority without SC a tagged store faults; without LC
-        // the tag is dropped; without LM a loaded capability loses SD, SC
-        // and LM.
+        // Through an authority without SC a tagged store stores the tag as 0;
+        // without LC a load drops it; without LM a loaded capability loses
+        // SD, SC and LM.
         let mut base = vec![];
         capr(&mut base, A1, 0x5000);
-        base.push(sc(ROOT, A1, 0));
-        let without = |p: u32, tail: &[u32]| -> Out {
+        base.push(sy(ROOT, A1, 0));
+        let without = |ap: u32, tail: &[u32]| -> Out {
             let mut v = base.clone();
-            li32(&mut v, A2, P_ALL & !p);
-            v.push(candperm(A3, A1, A2));
+            li32(&mut v, A2, ap);
+            v.push(ypermc(A3, A1, A2));
             v.extend_from_slice(tail);
             go(&v)
         };
-        ok("sc of a tagged value needs SC", without(P_SC, &[sc(ROOT, A3, 8)]).took(C_CAP, (A3 << 5) | CAPEX_STORE_CAP));
-        ok("sc of an integer does not", without(P_SC, &[sc(ZERO, A3, 8)]).clean());
-        let o = without(P_LC, &[lc(A0, A3, 0)]);
-        ok("lc without LC drops the tag", !o.c(A0).tag && o.c(A0).meta == Cap::ROOT.meta);
-        let o = without(P_LM, &[lc(A0, A3, 0), cgetperm(A4, A0)]);
-        ok("lc without LM drops SD, SC and LM", o.x(A4) == P_ALL & !(P_SD | P_SC | P_LM) && o.c(A0).tag);
-        let o = without(P_LD, &[lw(A0, A3, 0)]);
-        ok("a load without LD faults", o.took(C_CAP, (A3 << 5) | CAPEX_LOAD));
+        let o = without(AP_SC, &[sy(ROOT, A3, 8), ly(A0, A1, 8)]);
+        ok("sy without SC stores the tag as 0", o.clean() && !o.c(A0).tag && o.c(A0).meta == Cap::ROOT.meta);
+        let o = without(AP_C, &[ly(A0, A3, 0)]);
+        ok("ly without LC drops the tag", !o.c(A0).tag && o.c(A0).meta == Cap::ROOT.meta);
+        let o = without(AP_LM, &[ly(A0, A3, 0), ypermr(A4, A0)]);
+        ok("ly without LM drops SD, SC and LM", o.x(A4) == ap_of(P_ALL & !(P_SD | P_SC | P_LM)) | AP_ONES && o.c(A0).tag);
+        let o = without(AP_R, &[lw(A0, A3, 0)]);
+        ok("a load without LD faults", o.took(C_CAP_LOAD, 0x5000));
     }
     {
         // Compressed capability loads and stores, and the cap-mode stack
@@ -719,87 +772,97 @@ pub fn run_all() -> bool {
         let mut code = vec![];
         capr(&mut code, SP, 0x6000);
         code.extend([
-            c_scsp(ROOT, 8),
-            c_lcsp(A0, 8),
+            c_sysp(ROOT, 8),
+            c_lysp(A0, 8),
             c_addi4spn(S0, 16),
-            c_sc(A0, S0, 8),
-            c_lc(S1, S0, 8),
-            cgetoffset(A1, S1),
+            c_sy(A0, S0, 8),
+            c_ly(S1, S0, 8),
             c_addi16sp(-32),
-            cgettag(A2, SP),
-            cgetaddr(A3, SP),
+            ytagr(A2, SP),
+            addi(A3, SP, 0),
         ]);
         let o = go(&code);
-        ok("c.scsp/c.lcsp", o.c(A0) == Cap::ROOT);
-        ok("c.sc/c.lc", o.c(S1) == Cap::ROOT);
+        ok("c.sysp/c.lysp", o.c(A0) == Cap::ROOT);
+        ok("c.sy/c.ly", o.c(S1) == Cap::ROOT);
         ok("c.addi4spn makes a capability", o.c(S0).tag && o.x(S0) == 0x6010);
         ok("c.addi16sp moves csp", o.x(A2) == 1 && o.x(A3) == 0x6000 - 32);
     }
 
-    // ---- bounds, and faults that name the register ----
+    // ---- bounds, and faults that name the address ----
     {
         let mut code = vec![];
         capr(&mut code, A1, 0x4000);
-        code.extend([csetboundsimm(A1, A1, 16), lw(A0, A1, 12)]);
+        code.extend([ybndswi(A1, A1, 16), lw(A0, A1, 12)]);
         ok("a load at the end is inside", go(&code).clean());
         let mut c2 = code.clone();
         c2.push(lw(A0, A1, 13));
-        ok("a load across the end faults", go(&c2).took(C_CAP, (A1 << 5) | CAPEX_LENGTH));
+        ok("a load across the end faults", go(&c2).took(C_CAP_LOAD, 0x400d));
         let mut c3 = code.clone();
         c3.push(sb(ZERO, A1, -1));
-        ok("a store below the base faults", go(&c3).took(C_CAP, (A1 << 5) | CAPEX_LENGTH));
+        ok("a store below the base faults", go(&c3).took(C_CAP_STORE, 0x3fff));
         let o = go(&[addi(A1, ZERO, 0x400), lw(A0, A1, 0)]);
-        ok("an integer is no authority", o.took(C_CAP, (A1 << 5) | CAPEX_TAG));
+        ok("an integer is no authority", o.took(C_CAP_LOAD, 0x400));
     }
 
     // ---- integer addressing through DDC, and SR ----
     {
         let o = go(&[addi(A0, ZERO, 77), sw(A0, ZERO, 0x100), lw(A1, ZERO, 0x100)]);
         ok("x0-based addressing reaches DDC", o.x(A1) == 77 && o.m.peek32(0x100) == 77);
-        let o = go(&[sc(ROOT, ZERO, 0x108), lc(A1, ZERO, 0x108)]);
+        let o = go(&[sy(ROOT, ZERO, 0x108), ly(A1, ZERO, 0x108)]);
         ok("...for capabilities too", o.c(A1) == Cap::ROOT && o.m.load_cap(0x108) == Cap::ROOT);
         let mut v = vec![];
         li32(&mut v, A2, 0x5000);
         v.extend([addi(A0, ZERO, -2), sw_ddc(A0, A2), lw_ddc(A1, A2), lbu_ddc(A3, A2), lh_ddc(A4, A2)]);
         v.extend([sb_ddc(ZERO, A2), lb_ddc(A5, A2), lw_ddc(S2, A2), sh_ddc(ZERO, A2), lhu_ddc(A6, A2), lw_ddc(S3, A2)]);
-        v.extend([sc_ddc(ROOT, A2), lc_ddc(A7, A2)]);
+        v.extend([sy_ddc(ROOT, A2), ly_ddc(A7, A2)]);
         let o = go(&v);
         ok("lw.ddc/sw.ddc", o.x(A1) == 0xffff_fffe && o.x(A3) == 0xfe && o.x(A4) == 0xffff_fffe);
         ok("sb.ddc/lb.ddc", o.x(A5) == 0 && o.x(S2) == 0xffff_ff00);
         ok("sh.ddc/lhu.ddc", o.x(A6) == 0 && o.x(S3) == 0xffff_0000);
-        ok("sc.ddc/lc.ddc", o.c(A7) == Cap::ROOT);
+        ok("sy.ddc/ly.ddc", o.c(A7) == Cap::ROOT);
+        // Without SR every privileged act is an illegal instruction, as RVY
+        // has it without ASR.
         let nosr = |m: &mut Machine| m.set_pcc(Cap::ROOT.and_perms(P_ALL & !P_SR).with_addr(BASE));
-        let sysreg = (CAPEX_REG_PCC << 5) | CAPEX_SYSREG;
-        ok("x0-based addressing needs SR", go_with(&[lw(A1, ZERO, 0x100)], nosr).took(C_CAP, sysreg));
-        ok("lw.ddc needs SR", go_with(&[lw_ddc(A1, A2)], nosr).took(C_CAP, sysreg));
-        ok("writing a CSR needs SR", go_with(&[csrrw(ZERO, 0x340, A0)], nosr).took(C_CAP, sysreg));
-        ok("reading mstatus needs SR", go_with(&[csrrs(A0, 0x300, ZERO)], nosr).took(C_CAP, sysreg));
-        ok("reading gcmode needs SR", go_with(&[csrrs(A0, CSR_GCMODE, ZERO)], nosr).took(C_CAP, sysreg));
-        ok("mret needs SR", go_with(&[mret()], nosr).took(C_CAP, sysreg));
-        ok("wfi needs SR", go_with(&[wfi()], nosr).took(C_CAP, sysreg));
-        ok("cspecialrw needs SR", go_with(&[cspecialrw(A0, SCR_DDC, ZERO)], nosr).took(C_CAP, sysreg));
-        // The counters are anyone's; this run ends at the halt, which needs SR.
-        let o = go_with(&[addi(A1, ZERO, 1), csrrs(A0, 0xc00, ZERO)], nosr);
-        ok("the cycle counter needs nothing", matches!(o.trap(), Some((C_CAP, t, e)) if t == sysreg && e == o.end + 4));
+        let refused = |w: u32| go_with(&[w], nosr).took(C_ILLEGAL, w);
+        ok("x0-based addressing needs SR", refused(lw(A1, ZERO, 0x100)));
+        ok("lw.ddc needs SR", refused(lw_ddc(A1, A2)));
+        ok("writing a CSR needs SR", refused(csrrw(ZERO, 0x340, A0)));
+        ok("reading mstatus needs SR", refused(csrrs(A0, 0x300, ZERO)));
+        ok("reading gcmode needs SR", refused(csrrs(A0, CSR_GCMODE, ZERO)));
+        ok("reading DDC needs SR", refused(csrrs(A0, CSR_DDC, ZERO)));
+        ok("writing utidc needs SR", refused(csrrw(ZERO, CSR_UTIDC, A0)));
+        ok("mret needs SR", refused(mret()));
+        ok("writing the cycle counter is illegal", go(&[csrrw(ZERO, 0xc00, A0)]).took(C_ILLEGAL, csrrw(ZERO, 0xc00, A0)));
+        // The counters, utidc and mtidc are anyone's to read; this run ends
+        // at the halt, which needs SR.
+        let o = go_with(&[addi(A1, ZERO, 1), csrrs(A0, 0xc00, ZERO), csrrs(A3, CSR_UTIDC, ZERO), csrrs(A4, CSR_MTIDC, ZERO)], nosr);
+        ok("the cycle counter and the thread IDs need nothing", matches!(o.trap(), Some((C_ILLEGAL, _, e)) if e == o.end + 4));
         ok("ecall needs nothing", go_with(&[ecall()], nosr).took(C_ECALL, 0));
         // A DDC narrowed to a page bounds integer addressing.
         let small = |m: &mut Machine| m.set_ddc(region(0x5000, 0x1000, DATA));
         let mut v = vec![];
         li32(&mut v, A2, 0x6000);
         v.push(lw_ddc(A1, A2));
-        ok("DDC's bounds hold", go_with(&v, small).took(C_CAP, (CAPEX_REG_DDC << 5) | CAPEX_LENGTH));
+        ok("DDC's bounds hold", go_with(&v, small).took(C_CAP_LOAD, 0x6000));
     }
     {
-        // The special capability registers.
-        let mut code = vec![cspecialrw(A0, SCR_DDC, ZERO), cspecialrw(A1, SCR_PCC, ZERO)];
+        // The capability-wide CSRs, and PCC read with auipc.
+        let mut code = vec![csrrs(A0, CSR_DDC, ZERO), auipc(A1, 0)];
         capr(&mut code, A2, 0x7000);
-        code.extend([cspecialrw(ZERO, SCR_MTDC, A2), cspecialrw(A3, SCR_MTDC, ZERO)]);
-        code.extend([cspecialrw(ZERO, SCR_MSCRATCHC, A2), csrrs(A4, 0x340, ZERO)]);
+        code.extend([csrrw(ZERO, CSR_UTIDC, A2), csrrs(A3, CSR_UTIDC, ZERO)]);
+        code.extend([csrrw(ZERO, CSR_MSCRATCH, A2), csrrs(A4, CSR_MSCRATCH, ZERO)]);
+        code.extend([addi(A5, ZERO, 0x40), csrrs(ZERO, CSR_MSCRATCH, A5), csrrs(A6, CSR_MSCRATCH, ZERO)]);
         let o = go(&code);
-        ok("cspecialrw reads DDC", o.c(A0) == Cap::ROOT);
-        ok("...and PCC", o.c(A1).tag && o.c(A1).has(P_EX) && o.x(A1) == BASE + 4);
-        ok("...writes MTDC", o.c(A3) == o.c(A2));
-        ok("mscratch is MScratchC's address", o.x(A4) == 0x7000);
+        ok("csrrs reads DDC whole", o.c(A0) == Cap::ROOT);
+        ok("auipc reads PCC", o.c(A1).tag && o.c(A1).has(P_EX) && o.x(A1) == BASE + 4);
+        ok("csrrw writes a capability whole", o.c(A3) == o.c(A2));
+        ok("mscratch holds a capability", o.c(A4) == o.c(A2));
+        ok("csrrs writes its address", o.c(A6) == o.c(A2).with_addr(0x7040));
+        let mut code = vec![yseale(A1, ROOT), csrrw(ZERO, CSR_MTVEC, A1), csrrs(A2, CSR_MTVEC, ZERO)];
+        code.extend([auipc(A3, 0), yaddi(A3, A3, 1), csrrw(ZERO, CSR_MEPC, A3), csrrs(A4, CSR_MEPC, ZERO)]);
+        let o = go(&code);
+        ok("a sealed mtvec reads back untagged", !o.c(A2).tag && o.c(A2).otype() == OT_SENTRY);
+        ok("an odd mepc is untagged", !o.c(A4).tag);
     }
 
     // ---- jumps through capabilities: sentries and bounds ----
@@ -810,30 +873,30 @@ pub fn run_all() -> bool {
         ok("jal leaves a sentry", o.c(RA).tag && o.c(RA).otype() == OT_SENTRY);
         ok("a return through it", o.x(A0) == 11);
         let o = go(&[jal(RA, 8), jal(ZERO, 8), jalr(ZERO, RA, 4)]);
-        ok("a sentry is entered only at its address", o.took(C_CAP, (RA << 5) | CAPEX_SEAL));
+        ok("a sentry is entered only at its address", o.took(C_CAP_FETCH, BASE + 8));
         // A sentry at an odd address has no address a jump can name, so it
         // stays sealed; the jump would otherwise land on BASE + 16.
-        for (name, j) in [("jalr", jalr(ZERO, A1, 0)), ("cjalr", cjalr(ZERO, A1))] {
-            let o = go(&[auipc(A1, 0), cincoffsetimm(A1, A1, 17), csealentry(A1, A1), j]);
-            ok(&format!("{name} leaves an odd sentry sealed"), o.took(C_CAP, (A1 << 5) | CAPEX_SEAL));
+        for (name, j) in [("jalr", jalr(ZERO, A1, 0)), ("c.jr", c_jr(A1))] {
+            let o = go(&[auipc(A1, 0), yaddi(A1, A1, 17), yseale(A1, A1), j]);
+            ok(&format!("{name} leaves an odd sentry sealed"), o.took(C_CAP_FETCH, BASE + 16));
         }
-        let o = go(&[jal(RA, 8), jal(ZERO, 8), cgettype(A0, RA), lw(A1, RA, 0)]);
-        ok("nor read through", o.took(C_CAP, (RA << 5) | CAPEX_SEAL));
+        let o = go(&[jal(RA, 8), jal(ZERO, 8), ytyper(A0, RA), lw(A1, RA, 0)]);
+        ok("nor read through", o.took(C_CAP_LOAD, BASE + 4));
         // A jump to a capability without EX.
         let mut v = vec![];
-        li32(&mut v, A2, P_ALL & !P_EX);
-        v.extend([auipc(A1, 0), candperm(A1, A1, A2), jalr(ZERO, A1, 16)]);
-        ok("jalr needs EX", go(&v).took(C_CAP, (A1 << 5) | CAPEX_EXECUTE));
-        ok("jalr through an integer faults", go(&[addi(A1, ZERO, 64), jalr(ZERO, A1, 0)]).took(C_CAP, (A1 << 5) | CAPEX_TAG));
+        li32(&mut v, A2, AP_X);
+        v.extend([auipc(A1, 0), ypermc(A1, A1, A2), jalr(ZERO, A1, 16)]);
+        ok("jalr needs EX", go(&v).took(C_CAP_FETCH, BASE + 4 + 16));
+        ok("jalr through an integer faults", go(&[addi(A1, ZERO, 64), jalr(ZERO, A1, 0)]).took(C_CAP_FETCH, 64));
         // Code bounded to itself: jumping or running off the end faults.
         let mut v = vec![];
         capr(&mut v, A1, BASE + 0x100);
-        v.extend([csetboundsimm(A1, A1, 8), jalr(RA, A1, 0)]);
+        v.extend([ybndswi(A1, A1, 8), jalr(RA, A1, 0)]);
         let target = [addi(A0, ZERO, 1), jal(ZERO, 8)];
         let o = go_with(&v, |m| {
             emit(m, BASE + 0x100, &target);
         });
-        ok("a jal out of PCC's bounds faults at the jal", o.took(C_CAP, (CAPEX_REG_PCC << 5) | CAPEX_LENGTH));
+        ok("a jal out of PCC's bounds faults at the jal", o.took(C_CAP_FETCH, BASE + 0x10c));
         ok("...with mepc at the jal", o.trap().map(|t| t.2) == Some(BASE + 0x104) && o.x(A0) == 1);
         // A taken branch out of PCC's bounds faults at the branch too.
         for (name, br) in [("beq", beq(ZERO, ZERO, 8)), ("beqx", beqx(ZERO, ZERO, 8)), ("c.beqz", c_beqz(S0, 8))] {
@@ -842,36 +905,37 @@ pub fn run_all() -> bool {
             });
             ok(
                 &format!("a {name} out of PCC's bounds faults at the branch"),
-                o.took(C_CAP, (CAPEX_REG_PCC << 5) | CAPEX_LENGTH) && o.trap().map(|t| t.2) == Some(BASE + 0x104),
+                o.took(C_CAP_FETCH, BASE + 0x10c) && o.trap().map(|t| t.2) == Some(BASE + 0x104),
             );
         }
         let o = go_with(&v, |m| {
             emit(m, BASE + 0x100, &[addi(A0, ZERO, 1), addi(A0, ZERO, 2)]);
         });
-        ok("running off the end of PCC faults", o.took(C_CAP, (CAPEX_REG_PCC << 5) | CAPEX_LENGTH) && o.x(A0) == 2);
+        ok("running off the end of PCC faults", o.took(C_CAP_FETCH, BASE + 0x108) && o.x(A0) == 2);
         let mut v2 = vec![];
         capr(&mut v2, A1, BASE + 0x100);
-        v2.extend([csetboundsimm(A1, A1, 8), jalr(RA, A1, 8)]);
-        ok("jalr past the bounds faults", go(&v2).took(C_CAP, (A1 << 5) | CAPEX_LENGTH));
-        let o = go(&[cjalr(RA, ROOT)]);
-        ok("cjalr to address 0 runs nil's cell", o.trap().is_some());
+        v2.extend([ybndswi(A1, A1, 8), jalr(RA, A1, 8)]);
+        ok("jalr past the bounds faults", go(&v2).took(C_CAP_FETCH, BASE + 0x108));
+        let o = go(&[jalr(RA, ROOT, 0)]);
+        ok("jalr to address 0 runs nil's cell", o.trap().is_some());
     }
 
     // ---- traps ----
     {
         let o = go(&[addi(A0, ZERO, 1), 0xffff_ffff]);
-        ok("illegal traps to MTCC", o.took(C_ILLEGAL, 0xffff_ffff));
-        ok("MEPCC is PCC at the fault", o.m.mepcc.tag && o.m.mepcc.addr == BASE + 4 && o.m.mepcc.has(P_EX));
-        // MTCC goes into PCC as it is, as RVY's mtvec does: a sentry is not
-        // unsealed, so PCC is untagged and the handler is never reached.
-        let o = go_with(&[0xffff_ffff], |m| m.mtcc = m.mtcc.seal(OT_SENTRY));
-        ok("a trap does not unseal MTCC", !o.m.halted && o.m.mcause == C_CAP && o.m.mtval == (CAPEX_REG_PCC << 5) | CAPEX_TAG);
-        // ecall, then mret resumes after it.
+        ok("illegal traps to mtvec", o.took(C_ILLEGAL, 0xffff_ffff));
+        ok("mepc is PCC at the fault", o.m.mepc.tag && o.m.mepc.addr == BASE + 4 && o.m.mepc.has(P_EX));
+        // mtvec goes into PCC as it is: a sentry is not unsealed, so PCC is
+        // untagged and the handler is never reached.
+        let o = go_with(&[0xffff_ffff], |m| m.mtvec = m.mtvec.seal(OT_SENTRY));
+        ok("a trap does not unseal mtvec", !o.m.halted && o.m.mcause == C_CAP_FETCH && o.m.mtval == HANDLER);
+        // ecall, then mret resumes after it: mepc is a capability, moved on
+        // with yaddi and written back whole.
         let code = [ecall(), addi(A2, ZERO, 77)];
-        let handler = [csrrs(A1, 0x341, ZERO), addi(A1, A1, 4), csrrw(ZERO, 0x341, A1), mret()];
+        let handler = [csrrs(A1, CSR_MEPC, ZERO), yaddi(A1, A1, 4), csrrw(ZERO, CSR_MEPC, A1), mret()];
         let o = go_with(&code, |m| {
             emit(m, 0x2100, &handler);
-            m.mtcc = Cap::ROOT.with_addr(0x2100);
+            m.mtvec = Cap::ROOT.with_addr(0x2100);
         });
         ok("ecall and mret resume", o.x(A2) == 77 && o.clean());
         // A timer interrupt preempts a spin.
@@ -882,7 +946,7 @@ pub fn run_all() -> bool {
         code.push(jal(ZERO, 0));
         let o = go_with(&code, |m| {
             emit(m, 0x2100, &[addi(A2, ZERO, 55), jal(ZERO, 0)]);
-            m.mtcc = Cap::ROOT.with_addr(0x2100);
+            m.mtvec = Cap::ROOT.with_addr(0x2100);
             m.mtimecmp = 40;
         });
         ok("timer interrupt", o.x(A2) == 55 && o.m.mcause == 0x8000_0000 | IRQ_TIMER);
@@ -916,7 +980,7 @@ pub fn run_all() -> bool {
             m.set_reg(A1, v);
         });
         ok("car of an object", o.took(C_TYPE, A1));
-        ok("lref past the pair", go_with(&[lref(A0, A1, 16)], setup).took(C_CAP, (A1 << 5) | CAPEX_LENGTH));
+        ok("lref past the pair", go_with(&[lref(A0, A1, 16)], setup).took(C_CAP_LOAD, PAIR + 16));
         ok("a misaligned lref is a load access fault", go_with(&[lref(A0, A1, 4)], setup).took(C_LFAULT, PAIR + 4));
         ok("a misaligned sref is a store access fault", go_with(&[sref(A1, A1, 4)], setup).took(C_SFAULT, PAIR + 4));
         // A pair read through a capability without LM is read only, and so
@@ -927,10 +991,10 @@ pub fn run_all() -> bool {
             m.set_reg(A1, outer.and_perms(DATA & !P_LM));
         };
         let o = go_with(&[car(A2, A1), addi(A3, ZERO, 7), setcar(A3, A2)], ro);
-        ok("a read-only list hands out read-only tails", o.took(C_CAP, (A2 << 5) | CAPEX_STORE));
+        ok("a read-only list hands out read-only tails", o.took(C_CAP_STORE, PAIR + 16));
         // cons, as the compiler writes it, from a run in gp.
         let run = |m: &mut Machine| m.set_reg(GP, region(PAIR, 32, DATA));
-        let cons = |a: u32| [csetboundsimm(a, GP, 16), cincoffsetimm(GP, GP, 16), sc(A2, a, 0), sc(A3, a, 8)];
+        let cons = |a: u32| [npair(a, GP), yaddi(GP, GP, 16), sy(A2, a, 0), sy(A3, a, 8)];
         let mut v = vec![addi(A2, ZERO, 1), addi(A3, ZERO, 2)];
         v.extend(cons(A0));
         v.extend([vkind(A4, A0), cdr(A5, A0)]);
@@ -940,7 +1004,8 @@ pub fn run_all() -> bool {
         for _ in 0..3 {
             v.extend(cons(A0));
         }
-        ok("a used-up run is a length fault on gp", go_with(&v, run).took(C_CAP, (GP << 5) | CAPEX_LENGTH));
+        ok("a used-up run traps naming gp", go_with(&v, run).took(C_RUN, GP));
+        ok("an integer is no run", go(&[addi(A1, ZERO, 64), npair(A0, A1)]).took(C_RUN, A1));
     }
 
     // ---- Xlm: kinds, symbols, headers ----
@@ -1009,22 +1074,22 @@ pub fn run_all() -> bool {
             m.set_reg(T2, k);
             emit(m, target, &[ldxi(A0, T0, 1, T_CLOSURE), jalr(ZERO, RA, 0)]);
         };
-        let o = go_with(&[csealclo(T0, T2), cgettype(A2, T0), jcl(RA, T0), cgettype(A3, T0)], setup);
-        ok("csealclo seals a closure", o.x(A2) == OT_CLOSURE);
+        let o = go_with(&[sealcl(T0, T2), ytyper(A2, T0), jcl(RA, T0), ytyper(A3, T0)], setup);
+        ok("sealcl seals a closure", o.x(A2) == OT_CLOSURE);
         ok("jcl enters slot 0 with the closure open", o.c(A0) == Cap::int(7) && o.x(A3) == 0);
         ok("...and returns through its sentry", o.clean() && o.c(RA).otype() == OT_SENTRY);
         ok("jcl of an open closure is a wrong type", go_with(&[jcl(RA, T2)], setup).took(C_TYPE, T2));
         ok("jcl of a fixnum", go(&[addi(T0, ZERO, 3), jcl(RA, T0)]).took(C_TYPE, T0));
-        ok("csealclo of a vector", go_with(&[csealclo(T0, A1)], |m| {
+        ok("sealcl of a vector", go_with(&[sealcl(T0, A1)], |m| {
             let v = object(m, OBJ, T_VECTOR, 3);
             m.set_reg(A1, v);
-        }).took(C_CAP, (A1 << 5) | CAPEX_TYPE));
+        }).took(C_TYPE, A1));
         let bad = move |m: &mut Machine| {
             let k = object(m, OBJ, T_CLOSURE, 3);
             m.store_cap(OBJ, Cap::ROOT.with_addr(target).and_perms(DATA));
             m.set_reg(T0, k.seal(OT_CLOSURE));
         };
-        ok("jcl needs an executable entry", go_with(&[jcl(RA, T0)], bad).took(C_CAP, (T0 << 5) | CAPEX_EXECUTE));
+        ok("jcl needs an executable entry", go_with(&[jcl(RA, T0)], bad).took(C_CAP_FETCH, target));
         let odd = move |m: &mut Machine| {
             setup(m);
             m.store_cap(OBJ, Cap::ROOT.with_addr(target + 1).seal(OT_SENTRY));
@@ -1034,20 +1099,20 @@ pub fn run_all() -> bool {
             let k = m.reg(T2).with_addr(OBJ + 4);
             m.set_reg(T2, k);
         };
-        let o = go_with(&[csealclo(T0, T2), jcl(RA, T0)], askew);
+        let o = go_with(&[sealcl(T0, T2), jcl(RA, T0)], askew);
         ok("jcl of a misaligned closure is a load access fault", o.took(C_LFAULT, OBJ + 4));
-        let o = go_with(&[csealclo(T0, T2), jcl(RA, T0)], odd);
-        ok("jcl refuses an entry that is an odd sentry", o.took(C_CAP, (T0 << 5) | CAPEX_SEAL));
+        let o = go_with(&[sealcl(T0, T2), jcl(RA, T0)], odd);
+        ok("jcl refuses an entry that is an odd sentry", o.took(C_CAP_FETCH, target));
         // jcl loads the entry through the closure, so the closure needs LD
         // and LC as a capability load would.
-        for (name, p, code) in [("LD", P_LD, CAPEX_LOAD), ("LC", P_LC, CAPEX_LOAD_CAP)] {
+        for (name, p) in [("LD", P_LD), ("LC", P_LC)] {
             let without = move |m: &mut Machine| {
                 let k = object(m, OBJ, T_CLOSURE, 3);
                 m.store_cap(OBJ, Cap::ROOT.with_addr(target));
                 emit(m, target, &[jalr(ZERO, RA, 0)]);
                 m.set_reg(T0, k.and_perms(P_ALL & !p).seal(OT_CLOSURE));
             };
-            ok(&format!("jcl needs {name} in the closure"), go_with(&[jcl(RA, T0)], without).took(C_CAP, (T0 << 5) | code));
+            ok(&format!("jcl needs {name} in the closure"), go_with(&[jcl(RA, T0)], without).took(C_CAP_LOAD, OBJ));
         }
     }
 
@@ -1098,7 +1163,7 @@ pub fn run_all() -> bool {
             let v = m.reg(A1).and_perms(P_LD | P_LC | P_HD);
             m.set_reg(A1, v);
         });
-        ok("stx needs SD", o.took(C_CAP, (A1 << 5) | CAPEX_STORE));
+        ok("stx needs SD", o.took(C_CAP_STORE, OBJ));
     }
 
     // ---- the write barrier ----
@@ -1124,7 +1189,7 @@ pub fn run_all() -> bool {
         ok("...and not on a marked one", go_with(&store, setup(true)).clean());
         ok("...nor over a fixnum", go_with(&[addi(A3, ZERO, 9), setcdr(A3, A1)], setup(false)).clean());
         ok("a byte store traps too", go_with(&[sb(ZERO, A1, 3)], setup(false)).took(C_BARRIER, PAIR));
-        ok("a capability store too", go_with(&[sc(ZERO, A1, 0)], setup(false)).took(C_BARRIER, PAIR));
+        ok("a capability store too", go_with(&[sy(ZERO, A1, 0)], setup(false)).took(C_BARRIER, PAIR));
         let objs = |m: &mut Machine| {
             setup(false)(m);
             let v = object(m, OBJ, T_VECTOR, 2);
@@ -1152,7 +1217,7 @@ pub fn run_all() -> bool {
                 m.set_reg(A2, s);
             }
         };
-        let over = [sc(ZERO, A2, 16)];
+        let over = [sy(ZERO, A2, 16)];
         ok("a stack is not watched", go_with(&over, state(T_STACK)).clean());
         ok("...nor a context", go_with(&over, state(T_CONTEXT)).clean());
         ok("...but a vector is", go_with(&over, state(T_VECTOR)).took(C_BARRIER, STATE + 16));
@@ -1214,7 +1279,7 @@ pub fn run_all() -> bool {
             code.push(csrrw(ZERO, CSR_STKLIM, A0));
             capr(&mut code, SP, 0x9100);
             code.push(csrrwi(ZERO, 0x300, if mie { 8 } else { 0 }));
-            code.push(cincoffsetimm(SP, SP, drop));
+            code.push(yaddi(SP, SP, drop));
             code.push(addi(A2, ZERO, 1));
             go(&code)
         };
@@ -1243,11 +1308,11 @@ pub fn run_all() -> bool {
         // A device capability reaches its page and nothing else.
         let mut code = vec![];
         capr(&mut code, A0, MMIO_BASE + (DEV_UART << 12));
-        code.extend([csetboundsimm(A0, A0, 0x100), lw(A1, A0, 0)]);
+        code.extend([ybndswi(A0, A0, 0x100), lw(A1, A0, 0)]);
         let o = go_with(&code, |m| m.uart.feed(b"Q"));
         ok("a load through a device capability", o.x(A1) == b'Q' as u32);
         let mut c2 = code[..code.len() - 1].to_vec();
-        c2.push(lc(A1, A0, 0));
+        c2.push(ly(A1, A0, 0));
         ok("a device holds no capabilities", go(&c2).took(C_LFAULT, MMIO_BASE + (DEV_UART << 12)));
     }
     {
@@ -1263,7 +1328,7 @@ pub fn run_all() -> bool {
         m.set_reg(A1, region(d, LIST_BYTES, DATA));
         let mut code = vec![];
         li32(&mut code, A0, blit + B_LIST);
-        code.push(sc_ddc(A1, A0));
+        code.push(sy_ddc(A1, A0));
         code.push(jal(ZERO, 0));
         emit(&mut m, RESET_VECTOR, &code);
         m.mtimecmp = u64::MAX;
@@ -1293,7 +1358,7 @@ pub fn run_all() -> bool {
         code.push(addi(A2, ZERO, CTRL_DRAINED as i32));
         code.push(sw_ddc(A2, A0));
         li32(&mut code, A0, blit + B_LIST);
-        code.push(sc_ddc(A1, A0));
+        code.push(sy_ddc(A1, A0));
         li32(&mut code, A0, blit + B_STATUS);
         code.push(lw_ddc(A2, A0));
         code.push(jal(ZERO, 0));
@@ -1327,7 +1392,7 @@ pub fn run_all() -> bool {
         let blit = MMIO_BASE + (DEV_BLIT << 12);
         let mut code = vec![];
         li32(&mut code, A0, blit + B_LIST);
-        code.push(sc_ddc(A1, A0));
+        code.push(sy_ddc(A1, A0));
         // Wait for the chain, then read the status, clear its refused bit,
         // and read it again.
         li32(&mut code, A0, blit + B_STATUS);
@@ -1349,8 +1414,8 @@ pub fn run_all() -> bool {
         run::run(&mut m, 5000);
         let r = |x: u32| m.x[x as usize];
         let untouched = (0..64).all(|i| m.peek8(0x4000 + i) == 0);
-        ok("a destination too small is refused", m.peek32(a + L_STATUS) == REFUSED_DST | CAPEX_LENGTH);
-        ok("a source without LD is refused", m.peek32(b + L_STATUS) == REFUSED_SRC | CAPEX_LOAD);
+        ok("a destination too small is refused", m.peek32(a + L_STATUS) == REFUSED_DST | crate::dev::REFUSE_LENGTH);
+        ok("a source without LD is refused", m.peek32(b + L_STATUS) == REFUSED_SRC | crate::dev::REFUSE_LOAD);
         ok("a refused transfer moves nothing", untouched);
         ok("the chain goes on past a refusal", m.peek32(c + L_STATUS) == DONE && m.peek8(0x7000) == 0xAB);
         ok("the status says something was refused", r(A2) == STATUS_REFUSED && r(A4) == 0);
@@ -1363,11 +1428,11 @@ pub fn run_all() -> bool {
         let blit = MMIO_BASE + (DEV_BLIT << 12);
         let mut code = vec![];
         capr(&mut code, A0, blit);
-        code.push(sc(ROOT, A0, B_STATUS as i32));
+        code.push(sy(ROOT, A0, B_STATUS as i32));
         ok("a capability store to a word register faults", go(&code).took(C_SFAULT, blit + B_STATUS));
         let mut code = vec![];
         capr(&mut code, A0, blit);
-        code.push(lc(A1, A0, B_LIST as i32));
+        code.push(ly(A1, A0, B_LIST as i32));
         ok("a capability register reads back no capability", go(&code).took(C_LFAULT, blit + B_LIST));
     }
     {
@@ -1394,7 +1459,7 @@ pub fn run_all() -> bool {
         };
         let buf = |code: &mut Vec<u32>, c: u32| {
             li32(code, A0, d + D_BUF);
-            code.push(sc_ddc(c, A0));
+            code.push(sy_ddc(c, A0));
         };
         let wait = |code: &mut Vec<u32>, first: u32, last: u32| {
             li32(code, A0, d + D_STATUS);
@@ -1460,7 +1525,7 @@ const T_RECORD_TYPE: u32 = crate::heap::T_RECORD;
 
 /// Two loops, timed. The first is the integer mix the core was always
 /// measured with, through a data capability; the second is what compiled
-/// Lisp does most: frame slots through lc and sc, car and cdr, fixnum
+/// Lisp does most: frame slots through ly and sy, car and cdr, fixnum
 /// arithmetic and a call and return.
 pub fn bench() {
     let time = |name: &str, code: Vec<u32>, iters: u64, per: u64, setup: &dyn Fn(&mut Machine)| {
@@ -1478,7 +1543,7 @@ pub fn bench() {
         println!("{name}: {} instructions in {el:.3}s = {:.1} MIPS", m.cycles, m.cycles as f64 / el / 1e6);
         // A loop that trapped would be timing the trap handler.
         if m.mcause != 0 {
-            println!("  {name} trapped: cause {} at {:#x}", m.mcause, m.mepcc.addr);
+            println!("  {name} trapped: cause {} at {:#x}", m.mcause, m.mepc.addr);
         }
     };
 
@@ -1503,16 +1568,16 @@ pub fn bench() {
     // The Lisp-shaped loop: a frame in s0, a list in a1, a leaf call.
     let mut code = vec![];
     li32(&mut code, A1, 20_000_000);
-    code.push(sc(A1, S0, -40));
+    code.push(sy(A1, S0, -40));
     let top = code.len();
     code.extend([
-        lc(A2, S0, -40),     // a local
+        ly(A2, S0, -40),     // a local
         car(A3, S1),         // car of a list
         cdr(A4, S1),         // and its cdr
         fadd(A0, A3, A0),    // fixnum arithmetic
         jal(RA, 0),          // patched below: call the leaf
         faddi(A2, A2, -1),
-        sc(A2, S0, -40),
+        sy(A2, S0, -40),
         bne(A2, ZERO, 0),    // patched below
     ]);
     let n = code.len();

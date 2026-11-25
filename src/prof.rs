@@ -4,7 +4,7 @@
 //! not which ones run; a prologue is emitted once per function and executed
 //! once per call. This module keeps one counter per dispatch slot, plus
 //! slots for breakdowns a token alone cannot give: which Xlm form, which
-//! CHERI instruction, which standard bit-manipulation extension, where the
+//! RVY instruction, which standard bit-manipulation extension, where the
 //! memory traffic went, and how many activations called nothing.
 //!
 //! Counting is enabled at run time by `--isaprof`, which installs the
@@ -19,44 +19,48 @@
 use crate::mach::Machine;
 
 // Slots past the 64 dispatch tokens.
-/// custom-0 by funct3: lref vkind lvar jcl sref lhdr beqx bnex.
-pub const REF0: usize = 64;
-/// custom-1 by funct3: ldx stx ldxb stxb and the immediate four.
-pub const INDEX0: usize = 72;
-/// custom-3 by funct3: faddi faddio fandi fori fshi fop - retag.
-pub const FIX0: usize = 80;
-/// fop by operation, in `FOPS` order.
-pub const FOP0: usize = 88;
-const FOPS: [u32; 17] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15];
-/// The CHERI instructions with two operands or an immediate, in `CHERIS`
-/// order, and the one-operand ones by their rs2 selector.
-pub const CH0: usize = 105;
-const CHERIS: [u32; 15] = [0x01, 0x08, 0x09, 0x0b, 0x0c, 0x0d, 0x10, 0x11, 0x14, 0x16, 0x1d, 0x20, 0x21, 0x7c, 0x7d];
-pub const CH_INCI: usize = CH0 + 15;
-pub const CH_BOUNDSI: usize = CH0 + 16;
-pub const CH1: usize = 122;
-pub const ZBA: usize = 154;
-pub const ZBB: usize = 155;
-pub const ZBS: usize = 156;
-pub const ZICOND: usize = 157;
+/// Xlm by funct3: lref sref lvar beqx bnex, the fixnum immediates, the
+/// R-type group and indexed access.
+pub const XLM0: usize = 64;
+/// The fixnum immediates by operation: faddi faddio fandi fori.
+pub const FIXI0: usize = 72;
+/// The Xlm R-type group by funct7, in `XLM_RS` order.
+pub const XLMR0: usize = 76;
+const XLM_RS: [u32; 28] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x18, 0x19, 0x1a, 0x20, 0x21, 0x22,
+    0x23, 0x24, 0x7c, 0x7d, 0x40,
+];
+/// Indexed access by form: ldx stx ldxb stxb and the immediate four.
+pub const INDEX0: usize = 104;
+/// RVY-A by funct3, and its R-type instructions by funct7 in `RVY_RS`
+/// order, the two-operand ones by their rs2 selector.
+pub const RVY0: usize = 112;
+pub const RVYR0: usize = 120;
+const RVY_RS: [u32; 15] = [0x01, 0x03, 0x05, 0x06, 0x07, 0x0b, 0x0d, 0x0e, 0x0f, 0x13, 0x15, 0x17, 0x1b, 0x1f, 0x23];
+pub const RVY1: usize = 135;
+pub const YAMASK: usize = 143;
+pub const ZBA: usize = 144;
+pub const ZBB: usize = 145;
+pub const ZBS: usize = 146;
+pub const ZICOND: usize = 147;
 /// Where a load or a store went. Frame slots and spills hold values the
 /// machine had in a register and wrote to memory so the collector can find
 /// them; their count measures what a register allocator would save.
-pub const LD_FRAME: usize = 158;
-pub const LD_SPILL: usize = 159;
-pub const LD_LIT: usize = 160;
-pub const LD_OTHER: usize = 161;
-pub const ST_FRAME: usize = 162;
-pub const ST_SPILL: usize = 163;
-pub const ST_OTHER: usize = 164;
+pub const LD_FRAME: usize = 148;
+pub const LD_SPILL: usize = 149;
+pub const LD_LIT: usize = 150;
+pub const LD_OTHER: usize = 151;
+pub const ST_FRAME: usize = 152;
+pub const ST_SPILL: usize = 153;
+pub const ST_OTHER: usize = 154;
 /// Activations, and the ones that returned without calling anything.
-pub const CALLS: usize = 165;
-pub const LEAF_CALLS: usize = 166;
-pub const LEAF_INS: usize = 167;
+pub const CALLS: usize = 155;
+pub const LEAF_CALLS: usize = 156;
+pub const LEAF_INS: usize = 157;
 /// A running count of everything, kept so that charging instructions to an
 /// activation does not have to add up sixty-four slots per call.
-pub const TOTAL: usize = 168;
-pub const SLOTS: usize = 169;
+pub const TOTAL: usize = 158;
+pub const SLOTS: usize = 159;
 
 /// A shadow call stack, for the leaf count.
 pub struct Watch {
@@ -131,27 +135,36 @@ pub fn count(m: &mut Machine, w: u32, pc: u32) {
     if w & 3 == 3 {
         match w & 0x7f {
             0x0b => {
-                slot = Some(REF0 + f3);
-                if f3 == 3 && rd == 1 {
-                    let entry = m.load_cap(m.x[rs1 as usize]).addr;
-                    call(m, entry);
-                }
-            }
-            0x2b => slot = Some(INDEX0 + f3),
-            0x7b => {
-                slot = Some(FIX0 + f3);
-                if f3 == 5 {
-                    if let Some(i) = FOPS.iter().position(|&o| o == f7) {
-                        m.prof[FOP0 + i] += 1;
+                slot = Some(XLM0 + f3);
+                match f3 {
+                    5 => m.prof[FIXI0 + (w >> 30) as usize] += 1,
+                    6 => {
+                        let k = if f7 & 0x60 == 0x40 { 0x40 } else { f7 };
+                        if let Some(i) = XLM_RS.iter().position(|&o| o == k) {
+                            m.prof[XLMR0 + i] += 1;
+                        }
+                        if f7 == 0x20 && rd == 1 {
+                            let entry = m.load_cap(m.x[rs1 as usize]).addr;
+                            call(m, entry);
+                        }
                     }
+                    7 => m.prof[INDEX0 + (f7 >> 4) as usize] += 1,
+                    _ => {}
                 }
             }
-            0x5b => {
-                slot = match f3 {
-                    1 => Some(CH_INCI),
-                    2 => Some(CH_BOUNDSI),
-                    _ if f7 == 0x7f => Some(CH1 + rs2 as usize),
-                    _ => CHERIS.iter().position(|&o| o == f7).map(|i| CH0 + i),
+            0x7b => {
+                slot = Some(RVY0 + f3);
+                match f3 {
+                    0 if f7 == 0x7a => m.prof[RVY1 + rs2 as usize] += 1,
+                    0 if f7 == 0x78 => m.prof[YAMASK] += 1,
+                    0 => {
+                        if let Some(i) = RVY_RS.iter().position(|&o| o == f7) {
+                            m.prof[RVYR0 + i] += 1;
+                        }
+                    }
+                    1 => m.prof[mem_slot(rs1, false)] += 1,
+                    2 => m.prof[mem_slot(rs1, true)] += 1,
+                    _ => {}
                 }
             }
             0x03 => slot = Some(mem_slot(rs1, false)),
@@ -221,47 +234,46 @@ fn ret(m: &mut Machine) {
 
 const TOKENS: [&str; 64] = [
     // ---- quadrant 0 ----
-    "c.addi4spn", "c.fld", "c.lw", "c.lc", "-", "c.fsd", "c.sw", "c.sc",
+    "c.addi4spn", "c.fld", "c.lw", "c.ly", "-", "c.fsd", "c.sw", "c.sy",
     // ---- quadrant 1 ----
     "c.addi", "c.jal", "c.li", "c.lui", "c.alu", "c.j", "c.beqz", "c.bnez",
     // ---- quadrant 2 ----
-    "c.slli", "c.fldsp", "c.lwsp", "c.lcsp", "c.jr/mv", "c.fsdsp", "c.swsp", "c.scsp",
+    "c.slli", "c.fldsp", "c.lwsp", "c.lysp", "c.jr/mv", "c.fsdsp", "c.swsp", "c.sysp",
     // ---- unreachable ----
     "-", "-", "-", "-", "-", "-", "-", "-",
     // ---- 32-bit, by opcode[6:2] ----
-    "load", "load-fp", "xlm ref", "fence", "op-imm", "auipcc", "-", "-",
-    "store", "store-fp", "xlm index", "amo", "op-reg", "lui", "-", "-",
-    "madd", "msub", "nmsub", "nmadd", "op-fp", "-", "cheri", "-",
-    "branch", "jalr", "-", "jal", "system", "-", "xlm fixnum", "-",
+    "load", "load-fp", "xlm", "fence", "op-imm", "auipc", "-", "-",
+    "store", "store-fp", "rvy-c", "amo", "op-reg", "lui", "-", "-",
+    "madd", "msub", "nmsub", "nmadd", "op-fp", "-", "rvy-b", "-",
+    "branch", "jalr", "-", "jal", "system", "-", "rvy-a", "-",
 ];
-const REFS: [&str; 8] = ["lref", "vkind", "lvar", "jcl", "sref", "lhdr", "beqx", "bnex"];
+const XLMS: [&str; 8] = ["lref", "sref", "lvar", "beqx", "bnex", "xlm fixnum imm", "xlm r-type", "xlm index"];
+const FIXIS: [&str; 4] = ["faddi", "faddio", "fandi", "fori"];
+const XLMR_NAMES: [&str; 28] = [
+    "fadd", "fsub", "fmul", "fdiv", "frem", "fand", "for", "fxor", "faddo", "fsubo", "fmulo", "fsll", "fsrl", "fsra",
+    "flt", "fltu", "feq", "fshi sll", "fshi srl", "fshi sra", "jcl", "vkind", "lhdr", "sealcl", "npair", "store.ddc",
+    "load.ddc", "retag",
+];
 const INDEXES: [&str; 8] = ["ldx", "stx", "ldxb", "stxb", "ldxi", "stxi", "ldxbi", "stxbi"];
-const FIXES: [&str; 8] = ["faddi", "faddio", "fandi", "fori", "fshi", "fop", "?6", "retag"];
-const FOP_NAMES: [&str; 17] = [
-    "add", "sub", "mul", "div", "rem", "and", "or", "xor", "addo", "subo", "mulo", "sll", "srl", "sra", "lt",
-    "ltu", "eq",
+const RVYS: [&str; 8] = ["rvy r-type", "ly", "sy", "?3", "yaddi", "ybndswi", "?6", "?7"];
+const RVYR_NAMES: [&str; 15] = [
+    "yhiw", "yadd/ymv", "ysh1add", "yeq", "yunseals", "yaddrw", "ysh2add", "yss", "ybld", "ypermc", "ysh3add",
+    "yseale/ysealt", "ybndsw", "yunsealt", "ybndsrw",
 ];
-const CHERI_NAMES: [&str; 17] = [
-    "cspecialrw", "csetbounds", "csetboundsexact", "cseal", "cunseal", "candperm", "csetaddr", "cincoffset",
-    "csub", "csethigh", "cbuildcap", "ctestsubset", "cseqx", "store.ddc", "load.ddc", "cincoffsetimm",
-    "csetboundsimm",
-];
-const ONE_NAMES: [&str; 32] = [
-    "cgetperm", "cgettype", "cgetbase", "cgetlen", "cgettag", "cgetsealed", "cgetoffset", "?07", "crrl",
-    "cram", "cmove", "ccleartag", "cjalr", "?0d", "?0e", "cgetaddr", "?10", "csealentry", "?12", "?13", "?14",
-    "?15", "?16", "cgethigh", "cgettop", "?19", "?1a", "?1b", "csealclo", "?1d", "?1e", "?1f",
-];
+const RVY1_NAMES: [&str; 8] = ["ybaser", "ypermr", "ytopr", "ylenr", "ytagr", "ytyper", "?6", "yhir"];
 
 /// The name of a slot.
 pub fn name(slot: usize) -> &'static str {
     match slot {
         0..=63 => TOKENS[slot],
-        REF0..=71 => REFS[slot - REF0],
-        INDEX0..=79 => INDEXES[slot - INDEX0],
-        FIX0..=87 => FIXES[slot - FIX0],
-        FOP0..=104 => FOP_NAMES[slot - FOP0],
-        CH0..=121 => CHERI_NAMES[slot - CH0],
-        CH1..=153 => ONE_NAMES[slot - CH1],
+        XLM0..=71 => XLMS[slot - XLM0],
+        FIXI0..=75 => FIXIS[slot - FIXI0],
+        XLMR0..=103 => XLMR_NAMES[slot - XLMR0],
+        INDEX0..=111 => INDEXES[slot - INDEX0],
+        RVY0..=119 => RVYS[slot - RVY0],
+        RVYR0..=134 => RVYR_NAMES[slot - RVYR0],
+        RVY1..=142 => RVY1_NAMES[slot - RVY1],
+        YAMASK => "yamask",
         ZBA => "Zba (sh*add)",
         ZBB => "Zbb",
         ZBS => "Zbs (b*)",
@@ -343,10 +355,8 @@ pub fn report(prof: &[u64; SLOTS]) -> String {
         line(&mut out, "", i);
         // A token's breakdown immediately under it.
         let subs: &[std::ops::Range<usize>] = match i {
-            34 => &[REF0..REF0 + 8],
-            42 => &[INDEX0..INDEX0 + 8],
-            62 => &[FIX0..FIX0 + 8, FOP0..FOP0 + 17],
-            54 => &[CH0..CH0 + 17, CH1..CH1 + 32],
+            34 => &[XLM0..XLM0 + 8, FIXI0..FIXI0 + 4, XLMR0..XLMR0 + 28, INDEX0..INDEX0 + 8],
+            62 => &[RVY0..RVY0 + 8, RVYR0..RVYR0 + 15, RVY1..RVY1 + 8, YAMASK..YAMASK + 1],
             _ => &[],
         };
         for range in subs {

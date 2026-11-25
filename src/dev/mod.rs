@@ -171,7 +171,7 @@ pub fn write_cap(m: &mut Machine, a: u32, c: Cap) {
 }
 
 /// The capability in the granule at `a` as a chip loads it through `auth`,
-/// the way `lc` does: without LC in `auth` the tag is dropped, and without
+/// the way `LY` does: without LC in `auth` the tag is dropped, and without
 /// LM a tagged, unsealed capability loses SD, SC and LM.
 pub fn load_through(m: &Machine, auth: Cap, a: u32) -> Cap {
     let c = m.load_cap(a);
@@ -186,17 +186,24 @@ pub fn load_through(m: &Machine, auth: Cap, a: u32) -> Cap {
     }
 }
 
-/// Why a chip may not move the `len` bytes from `at` through `c`, as the
-/// capability fault the processor would take: `c` must be tagged, unsealed
-/// and hold every permission in `perms` (each with the code its absence is
-/// reported as), and the bytes must lie inside its bounds and in RAM. None if
-/// `c` allows it.
+/// Why a chip refused a transfer: the check a capability failed, numbered
+/// as ISAv9 numbers its capability faults. A chip says which in its status.
+pub const REFUSE_LENGTH: u32 = 0x01;
+pub const REFUSE_TAG: u32 = 0x02;
+pub const REFUSE_SEAL: u32 = 0x03;
+pub const REFUSE_LOAD: u32 = 0x12;
+pub const REFUSE_STORE: u32 = 0x13;
+
+/// Why a chip may not move the `len` bytes from `at` through `c`, as a
+/// `REFUSE_*` code: `c` must be tagged, unsealed and hold every permission
+/// in `perms` (each with the code its absence is reported as), and the
+/// bytes must lie inside its bounds and in RAM. None if `c` allows it.
 pub fn refusal(m: &Machine, c: Cap, perms: &[(u32, u32)], at: u64, len: u64) -> Option<u32> {
     if !c.tag {
-        return Some(CAPEX_TAG);
+        return Some(REFUSE_TAG);
     }
     if c.is_sealed() {
-        return Some(CAPEX_SEAL);
+        return Some(REFUSE_SEAL);
     }
     if let Some(&(_, code)) = perms.iter().find(|&&(p, _)| !c.has(p)) {
         return Some(code);
@@ -204,7 +211,7 @@ pub fn refusal(m: &Machine, c: Cap, perms: &[(u32, u32)], at: u64, len: u64) -> 
     let (base, top) = c.bounds();
     let end = at.saturating_add(len);
     if at < base as u64 || end > top || end > m.ramlen as u64 {
-        return Some(CAPEX_LENGTH);
+        return Some(REFUSE_LENGTH);
     }
     None
 }

@@ -67,9 +67,12 @@
         ((%= c cause-range) "index out of range")
         ((%= c cause-overflow) "fixnum overflow")
         ((%= c cause-divzero) "division by zero")
-        ((%= c cause-capability) "capability fault")
+        ((%= c cause-run) "cons run used up")
         ((%= c cause-barrier) "write barrier")
         ((%= c cause-stack) "stack overflow")
+        ((%= c cause-cap-fetch) "capability fault on the pc")
+        ((%= c cause-cap-load) "capability fault on a load")
+        ((%= c cause-cap-store) "capability fault on a store")
         (else "trap")))
 
 ;; The stub hands over mcause as it is: the interrupt flag is bit 31, which
@@ -96,7 +99,7 @@
 ;; to the frame it saved the registers into.
 (define (handle-trap cause epc tval ctx)
   (if (%>= (%ld-word lg-trapdepth) trap-nest-limit) (trap-spiral cause epc tval) nil)
-  (if (cons-refill? cause epc tval)
+  (if (cons-refill? cause tval)
       (refill-run ctx)
       (begin
         (if (interrupt? cause)
@@ -112,24 +115,20 @@
                   ((%= cause cause-overflow)
                    (if (try-widen epc ctx) nil (check-trap cause epc tval ctx)))
                   ((%= cause cause-divzero) (check-trap cause epc tval ctx))
-                  ((%= cause cause-capability) (capability-trap epc tval ctx))
+                  ((%= cause cause-run) (check-trap cause epc tval ctx))
+                  ((if (%>= cause cause-cap-fetch) (%<= cause cause-cap-store) nil)
+                   (capability-trap cause epc tval ctx))
+                  ((%= cause cause-illegal) (illegal-trap epc tval ctx))
                   (else (fatal-trap cause epc tval ctx))))
         (keep-cons-run ctx))))
 
 ;; ---------------------------------------------------------------- the cons run
-;; The inline allocator narrows gp to the next pair with `csetboundsimm`, and
-;; when the run is used up that is a length fault on gp. It is the refill, not
-;; an error, and it is dealt with before anything here conses: every pair the
-;; handler made would come out of the run that has just run out.
-(define (cons-refill? cause epc tval)
-  (if (%= cause cause-capability)
-      (if (%= tval (%logior (%lsh reg-gp capex-reg-shift) capex-length))
-          (let ((w (insn-at epc)))
-            (if (%= (insn-op w) op-cheri)
-                (if (%= (insn-f3 w) 2) (%= (insn-rs1 w) reg-gp) nil)
-                nil))
-          nil)
-      nil))
+;; The inline allocator carves the next pair out of gp with `npair`, and when
+;; the run is used up that traps naming gp. It is the refill, not an error,
+;; and it is dealt with before anything here conses: every pair the handler
+;; made would come out of the run that has just run out.
+(define (cons-refill? cause tval)
+  (if (%= cause cause-run) (%= tval reg-gp) nil))
 
 ;; The collector hands over a fresh run, collecting first if it has to, and
 ;; takes no pair to do it. The run goes into the saved gp, which the stub
@@ -145,7 +144,7 @@
 ;; stub restores the gp it saved on the way in. So the run goes back into the
 ;; frame as the handler left it, or the task would hand out the handler's
 ;; pairs a second time. That frame is `ctx` whatever else happened here: a
-;; task switch points MScratchC at the next task's frame and leaves this one
+;; task switch points `mscratch` at the next task's frame and leaves this one
 ;; to be resumed later, with this run.
 (define (keep-cons-run ctx)
   (ctx-set! ctx reg-gp (%cons-run))
@@ -176,6 +175,15 @@
 (define (insn-imm-i w) (%ash w -20))
 (define (insn-imm-s w) (%logior (%lsh (%ash w -25) 5) (%logand (%lsh w -7) 31)))
 
+;; Xlm's fixnum immediates: the operation in imm[11:10], and a ten-bit
+;; signed immediate below it.
+(define (fixi-op w) (%logand (%lsh w -30) 3))
+(define (fixi-imm w) (%ash (%lsh w 2) -22))
+
+;; Whether an instruction is Xlm's, in its R-type group, and if so its
+;; funct7.
+(define (xlm-r? w) (if (%= (insn-op w) op-xlm) (%= (insn-f3 w) 6) nil))
+
 ;; The value a fault names by its register. Register 0 is x0, which reads as
 ;; NULL, the integer 0; its slot in the context holds the pc.
 (define (fault-value ctx reg)
@@ -183,7 +191,7 @@
 
 ;; ------------------------- naming the operation
 (define (pair-op-name w)
-  (if (%= (insn-f3 w) 4)
+  (if (%= (insn-f3 w) 1)
       (if (%= (insn-imm-s w) 0) "set-car!" "set-cdr!")
       (if (%= (insn-imm-i w) 0) "car" "cdr")))
 
@@ -193,28 +201,21 @@
         ((%= ty t-bytes) "bytes-length")
         (else "length")))
 
-;; custom-0, by funct3: lref, vkind, lvar, jcl, sref, lhdr, and the two
-;; branches. car and cdr are offsets 0 and 8 of `lref`, their setters the
-;; same offsets of `sref`.
-(define (ref-op-name w)
-  (let ((f (insn-f3 w)))
-    (cond ((%= f 2) "variable")
-          ((%= f 3) "call")
-          ((%= f 5) (length-op-name (insn-imm-i w)))
-          ((if (%= f 0) t (%= f 4)) (pair-op-name w))
-          (else "compare"))))
+;; Indexed access: funct7 is the form, store, byte and immediate, above the
+;; type the object must be.
+(define (index-type w) (%logand (insn-f7 w) 15))
+(define (index-form w) (%lsh (insn-f7 w) -4))
 
-;; custom-1: funct7 is the type the object must be, funct3 bit 0 a store.
 (define (index-op-name w)
-  (let ((ty (insn-f7 w))
-        (store (%= 1 (%logand (insn-f3 w) 1))))
+  (let ((ty (index-type w))
+        (store (%= 1 (%logand (index-form w) 1))))
     (cond ((%= ty t-vector) (if store "vector-set!" "vector-ref"))
           ((%= ty t-string) (if store "string-set!" "string-ref"))
           ((%= ty t-bytes) (if store "bytes-set!" "bytes-ref"))
           (else (if store "set-slot!" "slot")))))
 
-;; custom-3 `fop`, by funct7: the eight operations, their trapping forms 8
-;; above them, then the shifts and the comparisons.
+;; `fop`, by funct7: the eight operations, their trapping forms 8 above
+;; them, then the shifts and the comparisons.
 (define (arith-op-name k)
   (cond ((%= k 0) "+") ((%= k 1) "-") ((%= k 2) "*") ((%= k 3) "/")
         ((%= k 4) "rem") ((%= k 5) "logand") ((%= k 6) "logior")
@@ -226,33 +227,50 @@
         ((%>= f7 8) (arith-op-name (%- f7 8)))
         (else (arith-op-name f7))))
 
-;; `retag`'s immediate is read unsigned: the kind the operand must be in its
-;; top six bits, the metadata it is given in the low six.
-(define (retag-from w) (%logand (%lsh w -26) 63))
-(define (retag-to w) (%logand (%lsh w -20) 63))
+;; `retag`: the kind the operand must be in funct7's low five bits, the
+;; metadata it is given in the rs2 field.
+(define (retag? w) (if (xlm-r? w) (%= (%logand (insn-f7 w) #x60) #x40) nil))
+(define (retag-from w) (%logand (insn-f7 w) 31))
+(define (retag-to w) (insn-rs2 w))
 
 (define (retag-name w)
   (cond ((if (%= (retag-from w) 1) (%= (retag-to w) 0) nil) "char->integer")
         ((if (%= (retag-from w) 0) (%= (retag-to w) 1) nil) "integer->char")
         (else "retag")))
 
-;; custom-3 by funct3: faddi, faddio, fandi, fori, fshi, fop, and retag.
-(define (fixnum-op-name w)
-  (let ((f (insn-f3 w)))
-    (cond ((%= f 5) (fop-name (insn-f7 w)))
-          ((%= f 4) (if (%= (%logand (%lsh (insn-imm-i w) -5) 3) 1) "lsh" "ash"))
-          ((%= f 2) "logand")
-          ((%= f 3) "logior")
-          ((%= f 7) (retag-name w))
-          (else "+"))))
-
-(define (cheri-op-name w)
-  (let ((f (insn-f3 w)) (f7 (insn-f7 w)))
-    (cond ((%= f 1) "capability offset")
-          ((%= f 2) "capability bounds")
+;; The R-type group by funct7: fop, fshi, jcl, vkind, lhdr, sealcl, npair,
+;; retag and the loads and stores through DDC.
+(define (xlm-r-op-name w)
+  (let ((f7 (insn-f7 w)))
+    (cond ((%< f7 #x18) (fop-name f7))
+          ((%< f7 #x1b) (if (%= f7 #x19) "lsh" "ash"))
+          ((%= f7 #x20) "call")
+          ((%= f7 #x22) (length-op-name (insn-rs2 w)))
+          ((%= f7 #x23) "make-closure")
+          ((%= f7 #x24) "cons")
+          ((retag? w) (retag-name w))
           ((%= f7 #x7c) "store")
           ((%= f7 #x7d) "load")
-          ((%= f7 #x01) "special register access")
+          (else "instruction"))))
+
+;; Xlm by funct3: lref, sref, lvar, beqx, bnex, the fixnum immediates, the
+;; R-type group and indexed access.
+(define (xlm-op-name w)
+  (let ((f (insn-f3 w)))
+    (cond ((%< f 2) (pair-op-name w))
+          ((%= f 2) "variable")
+          ((%< f 5) "compare")
+          ((%= f 5) (cond ((%= (fixi-op w) 2) "logand") ((%= (fixi-op w) 3) "logior") (else "+")))
+          ((%= f 6) (xlm-r-op-name w))
+          (else (index-op-name w)))))
+
+;; RVY's own, by funct3.
+(define (rvy-op-name w)
+  (let ((f (insn-f3 w)))
+    (cond ((%= f 1) "load")
+          ((%= f 2) "store")
+          ((%= f 4) "capability offset")
+          ((%= f 5) "capability bounds")
           (else "capability operation"))))
 
 ;; Quadrants 0 and 2 hold the compressed loads and stores, funct3 2 and 3
@@ -271,10 +289,8 @@
   (if (compressed? w)
       (compressed-op-name w)
       (let ((op (insn-op w)))
-        (cond ((%= op op-ref) (ref-op-name w))
-              ((%= op op-index) (index-op-name w))
-              ((%= op op-fixnum) (fixnum-op-name w))
-              ((%= op op-cheri) (cheri-op-name w))
+        (cond ((%= op op-xlm) (xlm-op-name w))
+              ((%= op op-rvy) (rvy-op-name w))
               ((%= op op-load) "load")
               ((%= op op-store) "store")
               ((if (%= op op-jalr) t (%= op op-jal)) "jump")
@@ -308,43 +324,46 @@
         (else "an object")))
 
 ;; ------------------------- wrong type, out of range, arithmetic
-;; custom-0 checks its operand as it uses it. `lref` takes nil, which reads as
-;; a pair of nils; `sref` refuses it, because nil has no cell to write. `lvar`
-;; traps on the unbound marker naming the symbol's register, and `jcl` on
-;; anything that is not a closure.
+;; An Xlm instruction checks its operand as it uses it. `lref` takes nil,
+;; which reads as a pair of nils; `sref` refuses it, because nil has no cell
+;; to write. `lvar` traps on the unbound marker naming the symbol's
+;; register, `jcl` on anything that is not a closure, and `npair` on
+;; anything that is not a cons run with a pair left in it.
 (define (emit-ref-fault w v)
-  (let ((f (insn-f3 w)))
+  (let ((f (insn-f3 w)) (f7 (insn-f7 w)))
     (cond
      ((%= f 2)
       (if (%symbol? v)
           (begin (emit-str "unbound variable: ") (emit-str (%symbol-name v)))
           (begin (emit-str "variable: expected a symbol, got ") (write v))))
-     ((%= f 3)
+     ((%< f 2)
+      (emit-str (pair-op-name w))
+      (cond ((%null? v) (emit-str ": nil has no cell"))
+            ((%cons? v)
+             (emit-str (if (%= f 1) ": the pair is read-only" ": the pair cannot be read")))
+            (else (emit-str ": expected a pair, got ") (write v))))
+     ((%= f7 #x20)
       (emit-str "call: ")
       ;; A name nothing was ever stored in holds the unbound marker.
       (if (%eq? v (%unbound))
           (emit-str "undefined function")
           (begin (emit-str "expected a function, got ") (write v))))
-     ((%= f 5)
-      (emit-str (length-op-name (insn-imm-i w)))
+     ((%= f7 #x22)
+      (emit-str (length-op-name (insn-rs2 w)))
       (emit-str ": expected ")
-      (emit-str (type-name (insn-imm-i w)))
+      (emit-str (type-name (insn-rs2 w)))
       (emit-str ", got ")
       (write v))
-     (else
-      (emit-str (pair-op-name w))
-      (cond ((%null? v) (emit-str ": nil has no cell"))
-            ((%cons? v)
-             (emit-str (if (%= f 4) ": the pair is read-only" ": the pair cannot be read")))
-            (else (emit-str ": expected a pair, got ") (write v)))))))
+     ((%= f7 #x24) (emit-str "cons: no pair is left in ") (write v))
+     (else (emit-str (op-name w)) (emit-str ": expected a closure object, got ") (write v)))))
 
 ;; Both operands are still in the registers the instruction named, so the
 ;; report can say what was indexed as well as what with. The immediate form
 ;; keeps the index in the rs2 field, and a wrong type there can only be the
 ;; object's.
 (define (emit-index-fault w cause tval ctx)
-  (let* ((ty (insn-f7 w))
-         (f (insn-f3 w))
+  (let* ((ty (index-type w))
+         (f (index-form w))
          (imm (%= 4 (%logand f 4)))
          (obj (ctx-ref ctx (insn-rs1 w)))
          (idx (if imm (insn-rs2 w) (ctx-ref ctx (insn-rs2 w))))
@@ -363,94 +382,145 @@
      (else
       (emit-str ": index is not a number, it is ") (write idx)))))
 
+;; Whether an Xlm instruction is a fixnum operation: the immediates, `fop`,
+;; `fshi` and `retag`.
+(define (fixnum-op? w)
+  (if (%= (insn-op w) op-xlm)
+      (cond ((%= (insn-f3 w) 5) t)
+            ((%= (insn-f3 w) 6) (if (%< (insn-f7 w) #x1b) t (retag? w)))
+            (else nil))
+      nil))
+
 ;; `try-widen` has already had its chance, so a bignum reaching here means
 ;; this operator has no bignum form, not that the operand was the wrong kind
 ;; of thing.
 (define (emit-arith-fault w cause v)
-  (emit-str (fixnum-op-name w))
+  (emit-str (op-name w))
   (cond
    ((%= cause cause-divzero) (emit-str ": division by zero"))
    ((%= cause cause-overflow) (emit-str ": the result does not fit in a fixnum"))
-   ((%= (insn-f3 w) 7)
+   ((retag? w)
     (emit-str (if (%= (retag-from w) 1) ": expected a character, got " ": expected a number, got "))
     (write v))
    ((%bignum? v) (emit-str ": no bignum form, given ") (write v))
    (else (emit-str ": expected a number, got ") (write v))))
 
-;; Causes 24 to 27. A wrong type or an index out of range names the register
-;; that held the offending value, and the instruction at the pc says what the
-;; value was for.
+;; Causes 24 to 28. A wrong type, an index out of range or a cons run with
+;; nothing left names the register that held the offending value, and the
+;; instruction at the pc says what the value was for.
 (define (check-trap cause epc tval ctx)
   (fault-report epc ctx
     (lambda ()
-      (let* ((w (insn-at epc))
-             (op (insn-op w)))
-        (cond ((%= op op-index) (emit-index-fault w cause tval ctx))
-              ((%= op op-fixnum) (emit-arith-fault w cause (fault-value ctx tval)))
-              ((if (%= op op-ref) (%= cause cause-wrong-type) nil)
+      (let ((w (insn-at epc)))
+        (cond ((if (%= (insn-op w) op-xlm) (%= (insn-f3 w) 7) nil) (emit-index-fault w cause tval ctx))
+              ((fixnum-op? w) (emit-arith-fault w cause (fault-value ctx tval)))
+              ((if (%= (insn-op w) op-xlm) (if (%= cause cause-wrong-type) t (%= cause cause-run)) nil)
                (emit-ref-fault w (fault-value ctx tval)))
               (else (emit-str (op-name w)) (emit-str ": ") (emit-str (cause-name cause))))))))
 
 ;; ------------------------- capability faults
-;; Cause 28 says which register held the capability and what it refused: the
-;; ISAv9 fault code, one of `capex-*`, in the low bits of mtval, and above
-;; them the register, with PCC and DDC numbered past the general registers.
-(define (capability-trap epc tval ctx)
+;; Causes 32, 33 and 34 say that a check on the pc, on a load's authority or
+;; on a store's refused, and `mtval` says the address it refused. Which
+;; capability that was is the instruction's to say, and why is that
+;; capability's: asked about the access, it is untagged, sealed, missing
+;; the permission, or not wide enough.
+
+;; The register a load or a store takes as its authority: the base, or the
+;; object of an Xlm access, or nil for DDC, which integer addressing goes
+;; through.
+(define (access-authority w)
+  (cond ((compressed? w) (if (%= (%logand w 3) 2) reg-sp (%+ 8 (%logand (%lsh w -7) 7))))
+        ((xlm-r? w) (if (%>= (insn-f7 w) #x7c) nil (insn-rs1 w)))
+        ((%= (insn-rs1 w) 0) nil)
+        (else (insn-rs1 w))))
+
+;; The register a jump takes its target from, or nil for one relative to the
+;; pc: `jalr`, and `c.jr` and `c.jalr`, which name it where rd would be.
+(define (jump-register w)
+  (cond ((compressed? w)
+         (if (%= (%logand w 3) 2) (if (%= (%logand (%lsh w -13) 7) 4) (insn-rd w) nil) nil))
+        ((%= (insn-op w) op-jalr) (insn-rs1 w))
+        (else nil)))
+
+(define (capability-trap cause epc tval ctx)
   (fault-report epc ctx
     (lambda ()
-      (emit-capability-fault (insn-at epc)
-                             (%lsh tval (%- 0 capex-reg-shift))
-                             (%logand tval (%- (%lsh 1 capex-reg-shift) 1))
-                             ctx))))
+      (let ((w (insn-at epc)))
+        (if (%= cause cause-cap-fetch)
+            (emit-fetch-fault w epc tval ctx)
+            (emit-access-fault w (access-authority w) (%= cause cause-cap-store) tval ctx))))))
 
-;; Whether the capability stores data at all.
+;; Whether the capability stores data, or loads it, at all.
 (define (stores-data? c) (%= perm-sd (%logand (%cap-perms c) perm-sd)))
+(define (loads-data? c) (%= perm-ld (%logand (%cap-perms c) perm-ld)))
+(define (executes? c) (%= perm-ex (%logand (%cap-perms c) perm-ex)))
 
 (define (emit-sealed v)
   (cond ((%= (%cap-otype v) otype-closure) (emit-str " is a sealed function: only calling it opens it"))
         ((%= (%cap-otype v) otype-sentry) (emit-str " is a sealed entry: only jumping to it opens it"))
         (else (emit-str " is sealed"))))
 
-(define (emit-pc-fault code)
-  (emit-str (cond ((%= code capex-length) "the pc has run off the end of its code")
-                  ((%= code capex-execute) "the pc is not in code")
-                  (else "the pc's capability refuses it"))))
-
-(define (emit-capability-fault w reg code ctx)
-  (let ((v (fault-value ctx reg)))
-    (if (if (%= reg reg-sp) (%= code capex-length) nil)
-        ;; `sp` is bounded to its task's stack, so writing below the bottom
-        ;; is a bounds fault even where the stack limit has not caught it.
+;; `sp` is bounded to its task's stack, so writing below the bottom is a
+;; capability fault even where the stack limit has not caught it.
+(define (emit-access-fault w reg store a ctx)
+  (let ((v (if reg (fault-value ctx reg) (%root))))
+    (if (if (if reg (%= reg reg-sp) nil) (if (%cap-tag? v) (%< a (%cap-base v)) nil) nil)
         (emit-str "stack overflow: below the bottom of the stack")
         (begin
           (emit-str (op-name w))
           (emit-str ": ")
           (cond
-           ((%= code capex-sysreg) (emit-str "privileged operation in code compiled without unsafe"))
-           ((%= reg capex-reg-pcc) (emit-pc-fault code))
-           ((%= reg capex-reg-ddc) (emit-str "integer addressing refused by the default data capability"))
-           ((%= code capex-tag) (write v) (emit-str " is not a pointer"))
-           ((%= code capex-seal) (write v) (emit-sealed v))
-           ((if (%= code capex-store) t (%= code capex-store-cap))
-            (cond ((%null? v) (emit-str "nil has no cell"))
-                  ((if (%= code capex-store-cap) (stores-data? v) nil)
-                   (write v) (emit-str " cannot hold pointers"))
-                  (else (write v) (emit-str " is read-only"))))
-           ((%= code capex-length) (emit-str "outside the bounds of ") (write v))
-           ((%= code capex-execute) (write v) (emit-str " is not code"))
-           ((if (%= code capex-load) t (%= code capex-load-cap))
-            (write v) (emit-str " cannot be read"))
-           ((%= code capex-representable)
-            (write v) (emit-str " cannot be narrowed to those bounds exactly"))
-           ((if (%= code capex-unseal) t (%= code capex-type))
-            (write v) (emit-str " is not unsealed by that key"))
-           ((%= code capex-soft-perm)
-            (write v) (emit-str " does not grant the permissions asked of it"))
-           ((%= code capex-seal-perm)
-            (write v) (emit-str " has no authority to seal"))
-           (else
-            (emit-str "capability fault ") (emit-str (number->hex code))
-            (emit-str " on ") (write v)))))))
+           ((%null? reg) (emit-str "integer addressing refused by the default data capability"))
+           ((not (%cap-tag? v)) (write v) (emit-str " is not a pointer"))
+           ((%cap-sealed? v) (write v) (emit-sealed v))
+           ((if store (not (stores-data? v)) nil)
+            (if (%null? v) (emit-str "nil has no cell") (begin (write v) (emit-str " is read-only"))))
+           ((if store nil (not (loads-data? v))) (write v) (emit-str " cannot be read"))
+           (else (emit-str "outside the bounds of ") (write v)))))))
+
+;; What refused a jump's target: the capability it was to run under.
+(define (emit-entry-refusal v)
+  (cond ((not (%cap-tag? v)) (write v) (emit-str " is not a pointer"))
+        ((%cap-sealed? v) (write v) (emit-sealed v))
+        ((not (executes? v)) (write v) (emit-str " is not code"))
+        (else (emit-str "outside the bounds of ") (write v))))
+
+;; The pc itself refused at the fetch, a jump or a branch out of its code,
+;; or a jump or a call to a capability that cannot run there.
+(define (emit-fetch-fault w epc t ctx)
+  (let ((reg (if (%= t epc) nil (jump-register w))))
+    (cond
+     ((%= t epc)
+      (emit-str (if (executes? (ctx-ref ctx reg-pc))
+                    "the pc has run off the end of its code"
+                    "the pc is not in code")))
+     (reg (emit-str "jump: ") (emit-entry-refusal (fault-value ctx reg)))
+     ((if (xlm-r? w) (%= (insn-f7 w) #x20) nil)
+      (emit-str "call: the entry of ")
+      (write (fault-value ctx (insn-rs1 w)))
+      (emit-str " cannot run: ")
+      (emit-entry-refusal (%cap-ld (open-closure (fault-value ctx (insn-rs1 w))) 0)))
+     (else (emit-str (op-name w)) (emit-str ": the target is outside the code")))))
+
+;; An illegal instruction. Without SR in the pc the privileged instructions
+;; are illegal: a CSR or `mret`, and integer addressing, a load or store
+;; whose base is x0 or one of Xlm's through DDC.
+(define (privileged-insn? w)
+  (cond ((compressed? w) nil)
+        ((%= (insn-op w) op-sys) t)
+        ((xlm-r? w) (%>= (insn-f7 w) #x7c))
+        ((if (%= (insn-op w) op-load) t (%= (insn-op w) op-store)) (%= (insn-rs1 w) 0))
+        ((%= (insn-op w) op-rvy)
+         (if (if (%= (insn-f3 w) 1) t (%= (insn-f3 w) 2)) (%= (insn-rs1 w) 0) nil))
+        (else nil)))
+
+(define (illegal-trap epc tval ctx)
+  (if (if (privileged-insn? tval) (not (%= perm-sr (%logand (%cap-perms (ctx-ref ctx reg-pc)) perm-sr))) nil)
+      (fault-report epc ctx
+        (lambda ()
+          (emit-str (op-name tval))
+          (emit-str ": privileged operation in code compiled without unsafe")))
+      (fatal-trap cause-illegal epc tval ctx)))
 
 ;; ---------------------------------------------------------------- widening
 ;; Overflow and mixed-mode arithmetic both arrive as traps, and neither is an
@@ -485,14 +555,17 @@
 ;; `faddi` and `faddio` add their immediate; `fop` takes both operands from
 ;; registers.
 (define (widened w ctx)
-  (let* ((f (insn-f3 w))
-         (x (ctx-operand ctx (insn-rs1 w)))
-         (y (if (%= f 5) (ctx-operand ctx (insn-rs2 w)) (insn-imm-i w))))
-    (if (if (widenable? x) (widenable? y) nil)
-        (cond ((%< f 2) (generic-add x y))
-              ((%= f 5) (widened-op (insn-f7 w) x y))
-              (else nil))
-        nil)))
+  (let ((f (insn-f3 w))
+        (x (ctx-operand ctx (insn-rs1 w))))
+    (cond ((%= f 5)
+           (let ((y (fixi-imm w)))
+             (if (if (%< (fixi-op w) 2) (widenable? x) nil) (generic-add x y) nil)))
+          ((%= f 6)
+           (let ((y (ctx-operand ctx (insn-rs2 w))))
+             (if (if (%<= (insn-f7 w) #x15) (if (widenable? x) (widenable? y) nil) nil)
+                 (widened-op (insn-f7 w) x y)
+                 nil)))
+          (else nil))))
 
 ;; Slot zero of the context is the saved pc, not register x0, so an
 ;; instruction that writes x0 has nowhere to put an answer. The compiler
@@ -500,7 +573,7 @@
 ;; scribbling on the pc.
 (define (try-widen epc ctx)
   (let ((w (insn-at epc)))
-    (if (if (%= (insn-op w) op-fixnum) (%> (insn-rd w) 0) nil)
+    (if (if (%= (insn-op w) op-xlm) (if (%> (insn-rd w) 0) (%>= (insn-f3 w) 5) nil) nil)
         (let ((v (widened w ctx)))
           (if v
               (begin (ctx-set! ctx (insn-rd w) v) (step-past ctx 4) t)
@@ -510,7 +583,7 @@
 ;; ---------------------------------------------------------------- ecalls
 ;; The compiler emits `ecall` for the conditions it detects inline, with the
 ;; reason in a7. The saved pc is stepped over the instruction first: the stub
-;; reloads MEPCC from the context on its way out.
+;; reloads `mepc` from the context on its way out.
 (define (handle-ecall epc ctx)
   (step-past ctx 4)
   (let ((code (ctx-ref ctx reg-a7)))

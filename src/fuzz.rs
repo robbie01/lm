@@ -61,12 +61,12 @@ pub fn exec(data: &[u8]) {
     m.ram_mut()[at..at + code.len()].copy_from_slice(code);
     let pcc = if tags & 1 != 0 { Cap::ROOT.and_perms(P_ALL & !P_SR) } else { Cap::ROOT };
     m.set_pcc(pcc.with_addr(CODE_AT));
-    m.mtcc = Cap::ROOT.with_addr(CODE_AT | (m.x[31] & 1));
+    m.mtvec = Cap::ROOT.with_addr(CODE_AT | (m.x[31] & 1));
     m.mstatus = m.x[30] & (MSTATUS_MIE | MSTATUS_MPIE);
     m.mie = m.x[29] & 0x888;
     m.gcmode = m.x[28] & 1;
     m.stklim = m.x[27];
-    m.mscratchc = m.reg(26);
+    m.mscratch = m.reg(26);
     m.mtimecmp = (m.x[25] as u64) << 4;
     m.uart.mute = true;
     let _ = crate::run::run(&mut m, EXEC_BUDGET);
@@ -154,8 +154,8 @@ const PLACES: &[u32] = &[
     0xFFFF_FFFF, 0xFFFF_FFFC, 0x8000_0000,
 ];
 
-/// Opcodes with something to check behind them: the custom spaces, loads,
-/// stores, branches, jumps, system.
+/// Opcodes with something to check behind them: Xlm, RVY and the spaces
+/// RVY reserves, loads, stores, branches, jumps, system.
 const OPCODES: &[u32] = &[0x0b, 0x2b, 0x5b, 0x7b, 0x03, 0x23, 0x63, 0x6f, 0x67, 0x73, 0x0f, 0x33, 0x13];
 
 /// A word worth putting in an image: a small number, an address near the

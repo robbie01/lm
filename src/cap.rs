@@ -8,7 +8,7 @@
 //! 29  LC   load capabilities         25  SR   system registers
 //! 28  SC   store capabilities        24  SE   seal and unseal
 //!                                    23  HD   headed: a Lisp object
-//! 22..19  otype   0 unsealed, 1 sentry, 2 closure, 3..15 by an SE authority
+//! 22..19  otype   0 unsealed, 1 sentry, 2 closure, 3..15 by an SE key
 //! 18      IE      internal exponent
 //! 17..10  T[7:0]  top mantissa
 //! 9..0    B[9:0]  base mantissa
@@ -33,6 +33,11 @@
 //! which T = 0x100 is a top of 2^32; a larger one is malformed, and its
 //! bounds are empty.
 //!
+//! This is LM's RV32 capability encoding, one RVY allows a platform to
+//! define: nine independent permissions and a four-bit otype in the place of
+//! RV32LYA's compressed permissions and one-bit type, beside bounds of the
+//! same family as RV32LYA's.
+//!
 //! Every value in the machine is one of these: a pointer is a tagged
 //! capability, a number an untagged one with metadata 0. The processor, the
 //! forge and the bench all build and read capabilities through this module.
@@ -42,8 +47,9 @@ pub const MW: u32 = 10;
 /// The largest exponent: a top of 2^32 is T = 0x100 shifted by it.
 pub const MAX_E: u32 = 24;
 
-/// The permissions, in the positions `cgetperm` returns them and `candperm`
-/// takes them. In the metadata they sit 23 bits higher.
+/// The permissions as the format holds them: nine independent bits, which
+/// sit 23 bits higher in the metadata. The instructions read and take them
+/// in RVY's bit field instead (`AP_*` below).
 pub const P_LD: u32 = 1 << 8;
 pub const P_SD: u32 = 1 << 7;
 pub const P_LC: u32 = 1 << 6;
@@ -54,6 +60,53 @@ pub const P_SR: u32 = 1 << 2;
 pub const P_SE: u32 = 1 << 1;
 pub const P_HD: u32 = 1 << 0;
 pub const P_ALL: u32 = 0x1ff;
+
+/// The permissions in RVY's bit field, as `YPERMR` reports them and
+/// `YPERMC` takes a mask of them to clear. R, W, C, LM, X and ASR are RVY's
+/// and S and U Zyseal's; LD is R, SD is W, LC is C, EX is X, SR is ASR, and
+/// SE is S and U at once. SC and HD are Xlm's, in two of the bits RVY
+/// reserves for extensions: SC is the half of C that stores capabilities,
+/// so clearing C clears it too.
+pub const AP_W: u32 = 1 << 0;
+pub const AP_LM: u32 = 1 << 1;
+pub const AP_C: u32 = 1 << 5;
+pub const AP_SC: u32 = 1 << 6;
+pub const AP_HD: u32 = 1 << 7;
+pub const AP_ASR: u32 = 1 << 16;
+pub const AP_X: u32 = 1 << 17;
+pub const AP_R: u32 = 1 << 18;
+pub const AP_S: u32 = 1 << 24;
+pub const AP_U: u32 = 1 << 25;
+/// Every bit the format implements.
+pub const AP_ALL: u32 = AP_W | AP_LM | AP_C | AP_SC | AP_HD | AP_ASR | AP_X | AP_R | AP_S | AP_U;
+/// The bits of `[23:0]` that no implemented permission occupies, which
+/// `YPERMR` reports as 1, as RVY has every reserved or unimplemented bit
+/// there read.
+pub const AP_ONES: u32 = 0x00ff_ffff & !AP_ALL;
+
+/// Each permission of the format and its bit in RVY's field.
+const AP_MAP: [(u32, u32); 9] = [
+    (P_LD, AP_R),
+    (P_SD, AP_W),
+    (P_LC, AP_C),
+    (P_SC, AP_SC),
+    (P_LM, AP_LM),
+    (P_EX, AP_X),
+    (P_SR, AP_ASR),
+    (P_SE, AP_S | AP_U),
+    (P_HD, AP_HD),
+];
+
+/// The format's permissions `p` in RVY's bit field.
+pub fn ap_of(p: u32) -> u32 {
+    AP_MAP.iter().filter(|&&(f, _)| p & f != 0).fold(0, |a, &(_, b)| a | b)
+}
+
+/// The format's permissions a mask in RVY's bit field names: any of a
+/// permission's bits names it.
+pub fn perms_of_ap(ap: u32) -> u32 {
+    AP_MAP.iter().filter(|&&(_, b)| ap & b != 0).fold(0, |a, &(f, _)| a | f)
+}
 
 /// Where the fields sit in the metadata word.
 pub const PERM_SHIFT: u32 = 23;
@@ -294,25 +347,69 @@ impl Cap {
         Some((Cap { addr: self.addr, meta: (meta & !BOUNDS_MASK) | bounds, tag: true }, exact))
     }
 
+    /// `YBNDSW` and `YBNDSRW`: bounds from the address for `len` bytes,
+    /// exact or rounded outward. The result is tagged only if this is
+    /// tagged and unsealed, the new bounds lie inside its own and, asked to
+    /// be exact, need no rounding; it keeps HD as `heads_at` says.
+    pub fn bounded(self, len: u32, exact: bool) -> Cap {
+        let top = (self.addr as u64 + len as u64).min(1 << 32);
+        let (bounds, is_exact) = encode(self.addr, top);
+        let meta = if self.heads_at(self.addr) { self.meta } else { self.meta & !(P_HD << PERM_SHIFT) };
+        let meta = (meta & !BOUNDS_MASK) | bounds;
+        let (b, t) = self.bounds();
+        let (nb, nt) = decode(meta, self.addr);
+        let inside = self.covers(self.addr, len) && nb >= b && nt <= t;
+        Cap { addr: self.addr, meta, tag: self.tag && !self.is_sealed() && inside && (is_exact || !exact) }
+    }
+
     /// Whether a capability derived from this one with its base at `base`
     /// may keep HD. HD says the base is an object's payload with its header
     /// below it, so it survives at this capability's own base, and from one
     /// that spans the whole address space, which is how the root mints it;
-    /// a new base anywhere else has left the object. `csetbounds` drops HD
-    /// where this says no, and `cbuildcap` refuses it.
+    /// a new base anywhere else has left the object. `YBNDS*` drop HD where
+    /// this says no, and `YBLD` leaves such bits untagged.
     #[inline]
     pub fn heads_at(&self, base: u32) -> bool {
         let (b, t) = self.bounds();
         b == base || (b == 0 && t == 1 << 32)
     }
 
-    /// Keep only the permissions in `mask`. A sealed capability whose
-    /// permissions this changes loses its tag; one the mask leaves as it
-    /// was keeps it, as RVY's `YPERMC` does.
+    /// Keep only the permissions in `mask`, in the format's positions. A
+    /// sealed capability whose permissions this changes loses its tag; one
+    /// the mask leaves as it was keeps it.
     #[inline]
     pub fn and_perms(self, mask: u32) -> Cap {
         let meta = self.meta & !(((!mask) & P_ALL) << PERM_SHIFT);
         Cap { addr: self.addr, meta, tag: self.tag && (!self.is_sealed() || meta == self.meta) }
+    }
+
+    /// `YPERMR`: the permissions in RVY's bit field, with the bits no
+    /// permission occupies reading as 1.
+    #[inline]
+    pub fn perm_bits(&self) -> u32 {
+        ap_of(self.perms()) | AP_ONES
+    }
+
+    /// `YPERMC`: clear the permissions `mask` names in RVY's bit field, and
+    /// then each that depends on one now gone, by the rules in order: C
+    /// needs R or W, LM needs C and R, ASR needs X (RVY's base rules), and
+    /// SC needs C (Xlm's). A sealed capability whose permissions this
+    /// changes loses its tag, as `and_perms` says.
+    pub fn clear_perms(self, mask: u32) -> Cap {
+        let mut p = self.perms() & !perms_of_ap(mask);
+        if p & (P_LD | P_SD) == 0 {
+            p &= !P_LC;
+        }
+        if p & (P_LC | P_LD) != P_LC | P_LD {
+            p &= !P_LM;
+        }
+        if p & P_EX == 0 {
+            p &= !P_SR;
+        }
+        if p & P_LC == 0 {
+            p &= !P_SC;
+        }
+        self.and_perms(p)
     }
 
     /// Clear permissions, sealed or not; the tag is kept. This is what a
@@ -331,6 +428,59 @@ impl Cap {
     #[inline]
     pub fn unseal(self) -> Cap {
         self.seal(OT_UNSEALED)
+    }
+
+    /// `YSEALE`: sealed as a sentry, untagged if it was sealed already.
+    pub fn sealed_entry(self) -> Cap {
+        Cap { tag: self.tag && !self.is_sealed(), ..self.seal(OT_SENTRY) }
+    }
+
+    /// `YSEALT` with `key` as the authority: sealed with the otype that is
+    /// the key's address. The result is tagged only if this was tagged and
+    /// unsealed and the key is tagged, has SE, holds its address inside its
+    /// bounds, and that address is an otype the format holds, 1 to 15.
+    pub fn sealed_by(self, key: &Cap) -> Cap {
+        let ot = key.addr;
+        let ok = key.tag && key.has(P_SE) && key.covers(ot, 1) && (1..=15).contains(&ot);
+        let c = if ok { self.seal(ot) } else { self };
+        Cap { tag: c.tag && ok && !self.is_sealed(), ..c }
+    }
+
+    /// `YUNSEALT` with `key` as the authority: unsealed, and tagged only if
+    /// the key is tagged, has SE and holds inside its bounds an address that
+    /// is this capability's otype.
+    pub fn unsealed_by(self, key: &Cap) -> Cap {
+        let ok = key.tag && key.has(P_SE) && key.covers(key.addr, 1) && key.addr == self.otype();
+        Cap { tag: self.tag && ok, ..self.unseal() }
+    }
+
+    /// `YUNSEALS`: unsealed, and tagged only if this was tagged and sealed
+    /// and lies inside `outer`, which must be tagged and unsealed. The root
+    /// unseals anything this way.
+    pub fn unsealed_within(self, outer: &Cap) -> Cap {
+        let ok = outer.tag && !outer.is_sealed() && self.tag && self.is_sealed() && self.is_subset_of(outer);
+        Cap { tag: ok, ..self.unseal() }
+    }
+
+    /// `YBLD` with `auth` as the authority: these bits tagged, if `auth` is
+    /// tagged and unsealed and could have made them: the bits must be the
+    /// encoding of their own bounds, the bounds inside `auth`'s, the
+    /// permissions among `auth`'s, and HD where `heads_at` allows it. An
+    /// otype no one may seal without an authority, anything past the
+    /// closure, is cleared, as RVY's `YBLD` clears every type that is not
+    /// ambient.
+    pub fn built_by(self, auth: &Cap) -> Cap {
+        let c = if self.otype() > OT_CLOSURE { self.unseal() } else { self };
+        let (b, t) = c.bounds();
+        let (ab, at) = auth.bounds();
+        let ok = auth.tag
+            && !auth.is_sealed()
+            && c.canonical()
+            && b >= ab
+            && t <= at
+            && c.perms() & !auth.perms() == 0
+            && (!c.has(P_HD) || auth.heads_at(b));
+        Cap { tag: ok, ..c }
     }
 
     pub fn without_tag(self) -> Cap {

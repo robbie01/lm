@@ -428,7 +428,7 @@
     (scan-stack (%ld-cap (%+ a (%lsh reg-sp 3))))))
 
 ;; Inside a trap, the code the trap interrupted is neither running nor on a
-;; list: its registers are in the context MScratchC names, and a nested trap's
+;; list: its registers are in the context `mscratch` names, and a nested trap's
 ;; context links to the one it interrupted, just past the registers. `fn` is
 ;; called on each.
 (define (each-trap-context fn)

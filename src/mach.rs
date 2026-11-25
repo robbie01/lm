@@ -1,5 +1,5 @@
-//! The machine: register file, tagged memory, CSRs and special capability
-//! registers, trap entry, and the state the outer loop hands the
+//! The machine: register file, tagged memory, CSRs, the capability-wide
+//! ones among them, trap entry, and the state the outer loop hands the
 //! token-threaded core.
 
 use crate::cap::*;
@@ -33,9 +33,10 @@ pub const C_RANGE: u32 = 25;
 pub const C_OVER: u32 = 26;
 /// Division by zero in a fixnum instruction.
 pub const C_DIVZERO: u32 = 27;
-/// A capability check failed. `mtval` is `(register << 5) | code`, the
-/// register 32 for PCC and 33 for DDC, the code one of `CAPEX_*`.
-pub const C_CAP: u32 = 28;
+/// `npair` of a cons run with no pair left in it, or of something that is
+/// no run. `mtval` is the number of the register; the handler hands the
+/// task a fresh run and the instruction runs again.
+pub const C_RUN: u32 = 28;
 /// The write barrier. With bit 0 of `gcmode` set, a store of any width that
 /// would overwrite a tagged granule in cons or object space whose capability
 /// points at an unmarked heap object traps before writing, unless the
@@ -50,56 +51,24 @@ pub const C_BARRIER: u32 = 29;
 /// A capability offset moved sp below `stklim` with interrupts on. `mtval`
 /// is where it would have gone; sp is left as it was.
 pub const C_STACK: u32 = 30;
+/// RVY's capability faults: a check on PCC, at a fetch or at the jump or
+/// branch that would leave its bounds; a check on a load's authority; and
+/// on a store's. `mtval` is the address the check refused: the
+/// instruction's, the jump's target, or the lowest byte of the access.
+pub const C_CAP_FETCH: u32 = 32;
+pub const C_CAP_LOAD: u32 = 33;
+pub const C_CAP_STORE: u32 = 34;
 
-// The capability fault codes, as ISAv9 numbers them: what a capability
-// fault's `mtval` carries below the register.
-
-/// An access outside the bounds, or bounds outside the authority's.
-pub const CAPEX_LENGTH: u32 = 0x01;
-/// An untagged capability used as one.
-pub const CAPEX_TAG: u32 = 0x02;
-/// A sealed capability used, or one entered other than as its seal allows.
-pub const CAPEX_SEAL: u32 = 0x03;
-/// The wrong otype, or for `csealclo` an object that is not a closure.
-pub const CAPEX_TYPE: u32 = 0x04;
-/// ISAv9's software-defined permission violation, which `cbuildcap` raises
-/// for bits asking for a permission its authority lacks, or for HD at a base
-/// where its authority could not have kept it.
-pub const CAPEX_SOFT_PERM: u32 = 0x08;
-/// `csetboundsexact` of bounds that would round, and `cbuildcap` of bits
-/// that are not the encoding of their own bounds.
-pub const CAPEX_REPRESENTABLE: u32 = 0x0a;
-/// The missing permission: EX, LD, SD, LC, SC.
-pub const CAPEX_EXECUTE: u32 = 0x11;
-pub const CAPEX_LOAD: u32 = 0x12;
-pub const CAPEX_STORE: u32 = 0x13;
-pub const CAPEX_LOAD_CAP: u32 = 0x14;
-pub const CAPEX_STORE_CAP: u32 = 0x15;
-/// `cseal` through an authority without SE.
-pub const CAPEX_SEAL_PERM: u32 = 0x17;
-/// SR, missing from PCC for a privileged act.
-pub const CAPEX_SYSREG: u32 = 0x18;
-/// `cunseal` through an authority without SE.
-pub const CAPEX_UNSEAL: u32 = 0x1b;
-
-/// Where the register sits in a capability fault's mtval, above the code.
-pub const CAPEX_REG_SHIFT: u32 = 5;
-/// The register numbers a capability fault names beyond the 32 general ones.
-pub const CAPEX_REG_PCC: u32 = 32;
-pub const CAPEX_REG_DDC: u32 = 33;
 /// What a range fault names for an immediate index.
 pub const RANGE_IMM: u32 = 32;
+/// What the write barrier names as the authority of a store through DDC.
+pub const WHO_DDC: u32 = 32;
 
-/// The special capability registers, as `cspecialrw` numbers them.
-pub const SCR_PCC: u32 = 0;
-pub const SCR_DDC: u32 = 1;
-pub const SCR_MTCC: u32 = 28;
-pub const SCR_MTDC: u32 = 29;
-pub const SCR_MSCRATCHC: u32 = 30;
-pub const SCR_MEPCC: u32 = 31;
-
-/// The machine CSRs by number. `mtvec`, `mepc` and `mscratch` read and write
-/// the addresses of MTCC, MEPCC and MScratchC.
+/// The CSRs by number. `mtvec`, `mscratch` and `mepc` are capabilities, as
+/// RVY widens them, and so are the thread identifiers RVY adds and DDC,
+/// which Xlm keeps in a custom CSR: the one capability integer addressing
+/// goes through.
+pub const CSR_UTIDC: u32 = 0x07f;
 pub const CSR_MSTATUS: u32 = 0x300;
 pub const CSR_MIE: u32 = 0x304;
 pub const CSR_MTVEC: u32 = 0x305;
@@ -108,15 +77,18 @@ pub const CSR_MEPC: u32 = 0x341;
 pub const CSR_MCAUSE: u32 = 0x342;
 pub const CSR_MTVAL: u32 = 0x343;
 pub const CSR_MIP: u32 = 0x344;
+pub const CSR_MTIDC: u32 = 0x37f;
 /// A custom CSR: the lowest address sp may be moved down to with interrupts
 /// on. Zero means no limit.
 pub const CSR_STKLIM: u32 = 0x7c0;
 /// A custom CSR: bit 0 turns the write barrier on. The mark bits it consults
 /// are one per eight bytes of heap, from `CONS_BASE`, at `GC_BITMAP`.
 pub const CSR_GCMODE: u32 = 0x7c1;
+/// A custom CSR: DDC, the default data capability.
+pub const CSR_DDC: u32 = 0x7c2;
 
 /// A task's register save area, which is also a trap frame: 32 capability
-/// slots, slot 0 the pc (MEPCC) and slot i the register x_i.
+/// slots, slot 0 the pc (`mepc`) and slot i the register x_i.
 pub const CTX_SLOTS: u32 = 32;
 pub const CTX_SLOT_BYTES: u32 = 8;
 pub const CTX_BYTES: u32 = CTX_SLOTS * CTX_SLOT_BYTES;
@@ -217,11 +189,12 @@ pub struct Machine {
     pub ddc_wb: u32,
     pub ddc_wl: u32,
     pub ddc_perms: u32,
-    /// The other special capability registers.
-    pub mtcc: Cap,
-    pub mtdc: Cap,
-    pub mscratchc: Cap,
-    pub mepcc: Cap,
+    /// The other capability-wide CSRs.
+    pub mtvec: Cap,
+    pub mscratch: Cap,
+    pub mepc: Cap,
+    pub mtidc: Cap,
+    pub utidc: Cap,
     /// The windows of capabilities decoded in full, keyed by the
     /// capability's bits: the entries `jcl` jumps through, and the return
     /// addresses, frames and code objects a return loads back. A window is a
@@ -341,8 +314,8 @@ pub fn ram_window(c: Cap, ramlen: u32) -> (u32, u32) {
 }
 
 impl Machine {
-    /// A machine at reset: PCC, DDC and MTCC the root, every general register
-    /// NULL, PCC at the reset vector.
+    /// A machine at reset: PCC, DDC and `mtvec` the root, every general
+    /// register NULL, PCC at the reset vector.
     pub fn new() -> Box<Machine> {
         let mut ram = vec![0u8; RAM_SIZE as usize].into_boxed_slice();
         let ramp = ram.as_mut_ptr();
@@ -362,10 +335,11 @@ impl Machine {
             ddc_wb: 0,
             ddc_wl: 0,
             ddc_perms: 0,
-            mtcc: Cap::ROOT,
-            mtdc: Cap::NULL,
-            mscratchc: Cap::NULL,
-            mepcc: Cap::NULL,
+            mtvec: Cap::ROOT,
+            mscratch: Cap::NULL,
+            mepc: Cap::NULL,
+            mtidc: Cap::NULL,
+            utidc: Cap::NULL,
             wcache: Box::new([(0, 0, 0); WCACHE]),
             ram,
             ramp,
@@ -535,27 +509,41 @@ impl Machine {
         self.ddc_perms = if live { c.perms() } else { 0 };
     }
 
-    /// Read a special capability register; None if there is no such one.
-    pub fn scr_read(&self, n: u32) -> Option<Cap> {
+    /// A capability-wide CSR, if `n` is one.
+    pub fn csr_cap(&self, n: u32) -> Option<Cap> {
         Some(match n {
-            SCR_PCC => self.pcc(),
-            SCR_DDC => self.ddc,
-            SCR_MTCC => self.mtcc,
-            SCR_MTDC => self.mtdc,
-            SCR_MSCRATCHC => self.mscratchc,
-            SCR_MEPCC => self.mepcc,
+            CSR_MTVEC => self.mtvec,
+            CSR_MSCRATCH => self.mscratch,
+            CSR_MEPC => self.mepc,
+            CSR_MTIDC => self.mtidc,
+            CSR_UTIDC => self.utidc,
+            CSR_DDC => self.ddc,
             _ => return None,
         })
     }
 
-    /// Write one. PCC is read only here; a jump writes it.
-    pub fn scr_write(&mut self, n: u32, c: Cap) {
+    /// Write a capability-wide CSR. A whole capability is written as it
+    /// is, as `csrrw` writes one, except that `mtvec` takes it through
+    /// `YADDRW`'s rule, so a sealed one reads back untagged, and `mepc`
+    /// refuses one at an odd address. An address alone, as the other CSR
+    /// instructions write, is set with `YADDRW`'s rule; `mepc`'s bit 0
+    /// always reads 0.
+    pub fn csr_cap_write(&mut self, n: u32, c: Cap, whole: bool) {
+        let old = self.csr_cap(n).unwrap_or(Cap::NULL);
+        let c = match (n, whole) {
+            (CSR_MTVEC, true) => c.with_addr(c.addr),
+            (CSR_MEPC, true) if c.addr & 1 != 0 => c.without_tag(),
+            (CSR_MEPC, false) => old.with_addr(c.addr & !1),
+            (_, true) => c,
+            (_, false) => old.with_addr(c.addr),
+        };
         match n {
-            SCR_DDC => self.set_ddc(c),
-            SCR_MTCC => self.mtcc = c,
-            SCR_MTDC => self.mtdc = c,
-            SCR_MSCRATCHC => self.mscratchc = c,
-            SCR_MEPCC => self.mepcc = c,
+            CSR_MTVEC => self.mtvec = c,
+            CSR_MSCRATCH => self.mscratch = c,
+            CSR_MEPC => self.mepc = c,
+            CSR_MTIDC => self.mtidc = c,
+            CSR_UTIDC => self.utidc = c,
+            CSR_DDC => self.set_ddc(c),
             _ => {}
         }
     }
@@ -712,21 +700,26 @@ impl Machine {
     }
 
     // ------------------------------------------------------------------ CSRs
-    /// Whether code without SR may read CSR `n`: everything but the machine
-    /// registers, which leaves the counters.
+    /// Whether code without SR may read CSR `n`: an unprivileged one, as
+    /// its number's bits 9 and 8 say, or `mtidc`, which RVY lets machine
+    /// mode read without ASR. Every other access, and every write, needs SR,
+    /// since the one unprivileged CSR that may be written, `utidc`, needs it
+    /// too.
     pub fn csr_public(n: u32) -> bool {
-        !(0x300..=0x3ff).contains(&n) && (n < 0x7c0 || (0xc00..=0xc9f).contains(&n))
+        (n >> 8) & 3 == 0 || n == CSR_MTIDC
+    }
+
+    /// Whether CSR `n` is read only, as its number's top two bits say.
+    pub fn csr_read_only(n: u32) -> bool {
+        n >> 10 == 3
     }
 
     pub fn csr_read(&mut self, n: u32) -> u32 {
         match n {
             CSR_MSTATUS => self.mstatus,
             CSR_MIE => self.mie,
-            CSR_MTVEC => self.mtcc.addr,
-            CSR_MSCRATCH => self.mscratchc.addr,
             CSR_STKLIM => self.stklim,
             CSR_GCMODE => self.gcmode,
-            CSR_MEPC => self.mepcc.addr,
             CSR_MCAUSE => self.mcause,
             CSR_MTVAL => self.mtval,
             CSR_MIP => {
@@ -751,11 +744,8 @@ impl Machine {
                 self.note_mie(now);
             }
             CSR_MIE => self.mie = v & (MIE_MSIE | MIE_MTIE | MIE_MEIE),
-            CSR_MTVEC => self.mtcc = self.mtcc.with_addr(v),
-            CSR_MSCRATCH => self.mscratchc = self.mscratchc.with_addr(v),
             CSR_STKLIM => self.stklim = v,
             CSR_GCMODE => self.gcmode = v & 1,
-            CSR_MEPC => self.mepcc = self.mepcc.with_addr(v & !1),
             CSR_MCAUSE => self.mcause = v,
             CSR_MTVAL => self.mtval = v,
             // Only the software-interrupt bit is writable by software.
@@ -797,19 +787,19 @@ impl Machine {
         sp >= self.stklim || self.mstatus & MSTATUS_MIE == 0
     }
 
-    /// Take a trap: MEPCC becomes PCC at the faulting address, and PCC
-    /// becomes MTCC, at an offset of four bytes per cause for an interrupt
-    /// when mtvec's mode is vectored. Interrupt causes carry the top bit.
-    /// MTCC is not unsealed, as RVY's mtvec is not: a sealed one leaves
-    /// PCC untagged, and the handler's first fetch faults.
+    /// Take a trap: `mepc` becomes PCC at the faulting address, and PCC
+    /// becomes `mtvec`, at an offset of four bytes per cause for an
+    /// interrupt when its mode is vectored. Interrupt causes carry the top
+    /// bit. `mtvec` is not unsealed: a sealed one leaves PCC untagged, and
+    /// the handler's first fetch faults.
     pub fn enter_trap(&mut self, cause: u32, tval: u32, epc: u32) {
         if self.trace_traps {
             eprintln!(
                 "[trap cause={cause:#x} epc={epc:#x} mtval={tval:#x} mtvec={:#x} mscratch={:#x} sp={:#x} cycles={}]",
-                self.mtcc.addr, self.mscratchc.addr, self.x[2], self.cycles
+                self.mtvec.addr, self.mscratch.addr, self.x[2], self.cycles
             );
         }
-        self.mepcc = self.pcc().with_addr(epc);
+        self.mepc = self.pcc().with_addr(epc);
         self.mcause = cause;
         self.mtval = tval;
         let was_enabled = (self.mstatus & MSTATUS_MIE) != 0;
@@ -820,17 +810,18 @@ impl Machine {
             self.note_mie(now);
         }
         self.mstatus |= 3 << 11; // MPP = machine
-        let tv = self.mtcc.addr;
+        let tv = self.mtvec.addr;
         let base = tv & !3;
         let target = if tv & 3 == 1 && cause & 0x8000_0000 != 0 {
             base.wrapping_add(4 * (cause & 0x7fff_ffff))
         } else {
             base
         };
-        self.set_pcc(self.mtcc.with_addr(target));
+        self.set_pcc(self.mtvec.with_addr(target));
     }
 
-    /// `mret`: interrupts as they were, and PCC from MEPCC.
+    /// `mret`: interrupts as they were, and PCC from `mepc`, unsealed if it
+    /// is a sentry.
     pub fn trap_return(&mut self) {
         let mpie = (self.mstatus & MSTATUS_MPIE) != 0;
         self.mstatus &= !MSTATUS_MIE;
@@ -840,7 +831,7 @@ impl Machine {
         self.mstatus |= MSTATUS_MPIE;
         let now = self.now;
         self.note_mie(now);
-        let c = self.mepcc;
+        let c = self.mepc;
         self.set_pcc(if c.otype() == OT_SENTRY { c.unseal() } else { c });
     }
 
@@ -916,7 +907,7 @@ impl Machine {
     }
 
     /// The write barrier's question for a store of `sz` bytes at `a` through
-    /// register `who`, or DDC, asked only while it is on: the address of a
+    /// register `who`, or DDC as `WHO_DDC`, asked only while it is on: the address of a
     /// granule the store touches that holds a capability to an unmarked heap
     /// object, if there is one and the store is not into a stack or a
     /// context. That is asked first, being two loads, where finding the
@@ -951,7 +942,7 @@ impl Machine {
     /// granule below the base must be an object start, a header the
     /// allocator wrote, and not a slot that happens to hold its number.
     fn in_state(&self, g: u32, who: u32) -> bool {
-        let base = if who == CAPEX_REG_DDC {
+        let base = if who == WHO_DDC {
             self.ddc.base()
         } else if self.xm[who as usize] & XM_READY != 0 {
             self.wb[who as usize]

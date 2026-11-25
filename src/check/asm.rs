@@ -2,12 +2,12 @@
 //!
 //! The same instruction sequence is written twice, once in Lisp and once with
 //! the Rust encoders, and the two byte streams must match exactly. The two
-//! encoders are independent readings of the RISC-V manual, the CHERI ISAv9
-//! specification and docs/cheri.md.
+//! encoders are independent readings of the RISC-V manual, the RISC-V CHERI
+//! specification (RVY), and docs/cheri.md for Xlm.
 
 use crate::forge::boot_host;
 use crate::forge::hostlisp::Lisp;
-use crate::mach::Machine;
+use crate::mach::{Machine, CSR_DDC, CSR_MEPC, CSR_MSCRATCH, CSR_MTVEC};
 use crate::rvenc::*;
 
 /// The Lisp half. Leaves the buffer in the global `*asm-buf*` and the length
@@ -61,16 +61,16 @@ const LISP_SIDE: &str = r#"
 (i-sw a $a2 $t0 8)
 (i-sb a $a2 $sp -44)
 (i-sh a $a2 $sp 2047)
-(i-lc a $a0 $a1 -96)
-(i-lc a $a0 $a1 248)
-(i-lc a $a0 $sp 504)
-(i-lc a $a0 $sp 4)
-(i-lc a $t0 $s1 16)
-(i-sc a $a2 $t0 16)
-(i-sc a $a2 $a3 8)
-(i-sc a $a2 $sp 0)
-(i-sc a $zero $sp 496)
-(i-sc a $a2 $a3 256)
+(i-ly a $a0 $a1 -96)
+(i-ly a $a0 $a1 248)
+(i-ly a $a0 $sp 504)
+(i-ly a $a0 $sp 4)
+(i-ly a $t0 $s1 16)
+(i-sy a $a2 $t0 16)
+(i-sy a $a2 $a3 8)
+(i-sy a $a2 $sp 0)
+(i-sy a $zero $sp 496)
+(i-sy a $a2 $a3 256)
 (i-jalr a $ra $a0 16)
 (i-jalr a $zero $a0 0)
 (i-call-reg a $t1)
@@ -87,68 +87,72 @@ const LISP_SIDE: &str = r#"
 (i-mv a $a0 $a1)
 (i-mv a $sp $t0)
 (i-mv a $a0 $zero)
-(i-cmove a $t0 $t1)
-(i-cincoffsetimm a $sp $sp -64)
-(i-cincoffsetimm a $sp $sp 496)
-(i-cincoffsetimm a $sp $sp -512)
-(i-cincoffsetimm a $sp $sp 8)
-(i-cincoffsetimm a $s0 $sp 32)
-(i-cincoffsetimm a $a5 $sp 1020)
-(i-cincoffsetimm a $t0 $sp 16)
-(i-cincoffsetimm a $a0 $a1 -2048)
-(i-cincoffsetimm-w a $sp $sp -16)
-(i-cincoffset a $a0 $a1 $a2)
-(i-csetboundsimm a $a0 $gp 16)
-(i-csetboundsimm a $a0 $a1 4095)
-(i-csetbounds a $a0 $a1 $a2)
-(i-csetboundsexact a $a0 $a1 $a2)
-(i-cseal a $a0 $a1 $a2)
-(i-cunseal a $a0 $a1 $a2)
-(i-candperm a $a0 $a1 $a2)
-(i-csetaddr a $a0 $a1 $a2)
-(i-csub a $a0 $a1 $a2)
-(i-csethigh a $a0 $a1 $a2)
-(i-cbuildcap a $a0 $a1 $a2)
-(i-ctestsubset a $a0 $a1 $a2)
-(i-cseqx a $a0 $a1 $a2)
-(i-cspecialrw a $t0 scr-ddc $zero)
-(i-cspecialrw a $zero scr-mtcc $t1)
-(i-cspecialrw a $t0 scr-mscratchc $t0)
-(i-cspecialrw a $a0 scr-mepcc $zero)
-(i-cgetperm a $a0 $a1)
-(i-cgettype a $a0 $a1)
-(i-cgetbase a $a0 $a1)
-(i-cgetlen a $a0 $a1)
-(i-cgettag a $a0 $a1)
-(i-cgetsealed a $a0 $a1)
-(i-cgetoffset a $a0 $a1)
-(i-cgetaddr a $a0 $a1)
-(i-cgethigh a $a0 $a1)
-(i-cgettop a $a0 $a1)
-(i-crrl a $a0 $a1)
-(i-cram a $a0 $a1)
-(i-ccleartag a $a0 $a1)
-(i-csealentry a $a0 $a1)
-(i-csealclo a $a0 $a1)
-(i-cjalr a $ra $t2)
+(i-ymv a $t0 $t1)
+(i-yaddi a $sp $sp -64)
+(i-yaddi a $sp $sp 496)
+(i-yaddi a $sp $sp -512)
+(i-yaddi a $sp $sp 8)
+(i-yaddi a $s0 $sp 32)
+(i-yaddi a $a5 $sp 1020)
+(i-yaddi a $t0 $sp 16)
+(i-yaddi a $a0 $a1 -2048)
+(i-yaddi-w a $sp $sp -16)
+(i-yadd a $a0 $a1 $a2)
+(i-ybndswi a $a0 $gp 16)
+(i-ybndswi a $a0 $a1 255)
+(i-ybndswi a $a0 $a1 256)
+(i-ybndswi a $a0 $a1 264)
+(i-ybndswi a $a0 $a1 504)
+(i-ybndswi a $a0 $a1 512)
+(i-ybndswi a $a0 $a1 4080)
+(i-ybndswi a $a0 $a1 4096)
+(i-ybndsrw a $a0 $a1 $a2)
+(i-ybndsw a $a0 $a1 $a2)
+(i-ysealt a $a0 $a1 $a2)
+(i-yunsealt a $a0 $a1 $a2)
+(i-yunseals a $a0 $a1 $a2)
+(i-ypermc a $a0 $a1 $a2)
+(i-yaddrw a $a0 $a1 $a2)
+(i-yhiw a $a0 $a1 $a2)
+(i-ybld a $a0 $a1 $a2)
+(i-yss a $a0 $a1 $a2)
+(i-yeq a $a0 $a1 $a2)
+(i-ysh1add a $a0 $a1 $a2)
+(i-ysh2add a $a0 $a1 $a2)
+(i-ysh3add a $a0 $a1 $a2)
+(i-csrrs a $t0 csr-ddc $zero)
+(i-csrrw a $zero csr-mtvec $t1)
+(i-csrrw a $t0 csr-mscratch $t0)
+(i-csrrs a $a0 csr-mepc $zero)
+(i-ypermr a $a0 $a1)
+(i-ytyper a $a0 $a1)
+(i-ybaser a $a0 $a1)
+(i-ylenr a $a0 $a1)
+(i-ytagr a $a0 $a1)
+(i-yhir a $a0 $a1)
+(i-ytopr a $a0 $a1)
+(i-yamask a $a0 $a1)
+(i-yseale a $a0 $a1)
+(i-sealcl a $a0 $a1)
+(i-npair a $a0 $gp)
 (i-lb-ddc a $a0 $a1)
 (i-lh-ddc a $a0 $a1)
 (i-lw-ddc a $a0 $a1)
-(i-lc-ddc a $a0 $a1)
+(i-ly-ddc a $a0 $a1)
 (i-lbu-ddc a $a0 $a1)
 (i-lhu-ddc a $a0 $a1)
 (i-sb-ddc a $a2 $a1)
 (i-sh-ddc a $a2 $a1)
 (i-sw-ddc a $a2 $a1)
-(i-sc-ddc a $a2 $a1)
+(i-sy-ddc a $a2 $a1)
 (i-lw-abs a $a0 #x108)
 (i-lw-abs a $a0 #x12345678)
-(i-lc-abs a $a1 #x110)
-(i-lc-abs a $a1 mmio-base)
+(i-ly-abs a $a1 #x110)
+(i-ly-abs a $a1 mmio-base)
 (i-sw-abs a $a2 #x100 $t0)
 (i-sw-abs a $a2 #x20000 $t0)
-(i-sc-abs a $a2 #x1f8 $t0)
-(i-sc-abs a $a2 #x4000 $t0)
+(i-sy-abs a $a2 #x1f8 $t0)
+(i-sy-abs a $a2 #x4000 $t0)
 (i-car a $a0 $a1)
 (i-cdr a $t0 $s1)
 (i-set-car a $a2 $a3)
@@ -170,9 +174,9 @@ const LISP_SIDE: &str = r#"
 (i-ldxbi a $t0 $s1 7 2)
 (i-stxbi a $t0 $s1 12 4)
 (i-faddi a $a0 $a1 -7)
-(i-faddio a $a0 $a1 2047)
-(i-fandi a $a0 $a1 2047)
-(i-fori a $a0 $a1 -2048)
+(i-faddio a $a0 $a1 511)
+(i-fandi a $a0 $a1 255)
+(i-fori a $a0 $a1 -512)
 (i-fshi a $a0 $a1 0 31)
 (i-fshi a $a0 $a1 1 3)
 (i-fshi a $a0 $a1 2 17)
@@ -195,7 +199,7 @@ const LISP_SIDE: &str = r#"
 (i-feq a $a3 $a4 $a5)
 (i-retag a $a0 $a1 1 0)
 (i-retag a $a0 $a1 0 1)
-(i-retag a $t0 $t1 63 2)
+(i-retag a $t0 $t1 31 2)
 (i-sh1add a $a0 $a1 $a2)
 (i-sh2add a $a0 $a1 $a2)
 (i-sh3add a $a0 $a1 $a2)
@@ -259,7 +263,7 @@ const LISP_SIDE: &str = r#"
 fn rust_side() -> Vec<u8> {
     let mut w: Vec<u32> = Vec::new();
     // Instructions the Lisp side emits wide although a shorter form exists:
-    // the `-w` emitters, and `cmove` itself, which `mv` is the short form of.
+    // the `-w` emitters, and `ymv` itself, which `mv` is the short form of.
     let mut wide: Vec<usize> = Vec::new();
     w.push(addi(A0, A1, -5));
     w.push(addi(A0, A1, 2047));
@@ -307,16 +311,16 @@ fn rust_side() -> Vec<u8> {
     w.push(sw(A2, T0, 8));
     w.push(sb(A2, SP, -44));
     w.push(sh(A2, SP, 2047));
-    w.push(lc(A0, A1, -96));
-    w.push(lc(A0, A1, 248));
-    w.push(lc(A0, SP, 504));
-    w.push(lc(A0, SP, 4));
-    w.push(lc(T0, S1, 16));
-    w.push(sc(A2, T0, 16));
-    w.push(sc(A2, A3, 8));
-    w.push(sc(A2, SP, 0));
-    w.push(sc(ZERO, SP, 496));
-    w.push(sc(A2, A3, 256));
+    w.push(ly(A0, A1, -96));
+    w.push(ly(A0, A1, 248));
+    w.push(ly(A0, SP, 504));
+    w.push(ly(A0, SP, 4));
+    w.push(ly(T0, S1, 16));
+    w.push(sy(A2, T0, 16));
+    w.push(sy(A2, A3, 8));
+    w.push(sy(A2, SP, 0));
+    w.push(sy(ZERO, SP, 496));
+    w.push(sy(A2, A3, 256));
     w.push(jalr(RA, A0, 16));
     w.push(jalr(ZERO, A0, 0));
     w.push(jalr(RA, T1, 0));
@@ -330,79 +334,78 @@ fn rust_side() -> Vec<u8> {
     w.push(csrrwi(ZERO, 0x300, 8));
     w.push(csrrsi(ZERO, 0x300, 8));
     w.push(csrrci(ZERO, 0x300, 8));
-    w.push(cmove(A0, A1));
-    w.push(cmove(SP, T0));
-    w.push(cmove(A0, ZERO));
+    w.push(ymv(A0, A1));
+    w.push(ymv(SP, T0));
+    w.push(ymv(A0, ZERO));
     wide.push(w.len());
-    w.push(cmove(T0, T1));
-    w.push(cincoffsetimm(SP, SP, -64));
-    w.push(cincoffsetimm(SP, SP, 496));
-    w.push(cincoffsetimm(SP, SP, -512));
-    w.push(cincoffsetimm(SP, SP, 8));
-    w.push(cincoffsetimm(S0, SP, 32));
-    w.push(cincoffsetimm(A5, SP, 1020));
-    w.push(cincoffsetimm(T0, SP, 16));
-    w.push(cincoffsetimm(A0, A1, -2048));
+    w.push(ymv(T0, T1));
+    w.push(yaddi(SP, SP, -64));
+    w.push(yaddi(SP, SP, 496));
+    w.push(yaddi(SP, SP, -512));
+    w.push(yaddi(SP, SP, 8));
+    w.push(yaddi(S0, SP, 32));
+    w.push(yaddi(A5, SP, 1020));
+    w.push(yaddi(T0, SP, 16));
+    w.push(yaddi(A0, A1, -2048));
     wide.push(w.len());
-    w.push(cincoffsetimm(SP, SP, -16));
-    w.push(cincoffset(A0, A1, A2));
-    w.push(csetboundsimm(A0, GP, 16));
-    w.push(csetboundsimm(A0, A1, 4095));
-    w.push(csetbounds(A0, A1, A2));
-    w.push(csetboundsexact(A0, A1, A2));
-    w.push(cseal(A0, A1, A2));
-    w.push(cunseal(A0, A1, A2));
-    w.push(candperm(A0, A1, A2));
-    w.push(csetaddr(A0, A1, A2));
-    w.push(csub(A0, A1, A2));
-    w.push(csethigh(A0, A1, A2));
-    w.push(cbuildcap(A0, A1, A2));
-    w.push(ctestsubset(A0, A1, A2));
-    w.push(cseqx(A0, A1, A2));
-    w.push(cspecialrw(T0, 1, ZERO));
-    w.push(cspecialrw(ZERO, 28, T1));
-    w.push(cspecialrw(T0, 30, T0));
-    w.push(cspecialrw(A0, 31, ZERO));
-    w.push(cgetperm(A0, A1));
-    w.push(cgettype(A0, A1));
-    w.push(cgetbase(A0, A1));
-    w.push(cgetlen(A0, A1));
-    w.push(cgettag(A0, A1));
-    w.push(cgetsealed(A0, A1));
-    w.push(cgetoffset(A0, A1));
-    w.push(cgetaddr(A0, A1));
-    w.push(cgethigh(A0, A1));
-    w.push(cgettop(A0, A1));
-    w.push(crrl(A0, A1));
-    w.push(cram(A0, A1));
-    w.push(ccleartag(A0, A1));
-    w.push(csealentry(A0, A1));
-    w.push(csealclo(A0, A1));
-    w.push(cjalr(RA, T2));
+    w.push(yaddi(SP, SP, -16));
+    w.push(yadd(A0, A1, A2));
+    for len in [16, 255, 256, 264, 504, 512, 4080, 4096] {
+        w.push(ybndswi(A0, if len == 16 { GP } else { A1 }, len));
+    }
+    w.push(ybndsrw(A0, A1, A2));
+    w.push(ybndsw(A0, A1, A2));
+    w.push(ysealt(A0, A1, A2));
+    w.push(yunsealt(A0, A1, A2));
+    w.push(yunseals(A0, A1, A2));
+    w.push(ypermc(A0, A1, A2));
+    w.push(yaddrw(A0, A1, A2));
+    w.push(yhiw(A0, A1, A2));
+    w.push(ybld(A0, A1, A2));
+    w.push(yss(A0, A1, A2));
+    w.push(yeq(A0, A1, A2));
+    w.push(ysh1add(A0, A1, A2));
+    w.push(ysh2add(A0, A1, A2));
+    w.push(ysh3add(A0, A1, A2));
+    w.push(csrrs(T0, CSR_DDC, ZERO));
+    w.push(csrrw(ZERO, CSR_MTVEC, T1));
+    w.push(csrrw(T0, CSR_MSCRATCH, T0));
+    w.push(csrrs(A0, CSR_MEPC, ZERO));
+    w.push(ypermr(A0, A1));
+    w.push(ytyper(A0, A1));
+    w.push(ybaser(A0, A1));
+    w.push(ylenr(A0, A1));
+    w.push(ytagr(A0, A1));
+    w.push(yhir(A0, A1));
+    w.push(ytopr(A0, A1));
+    w.push(yamask(A0, A1));
+    w.push(yseale(A0, A1));
+    w.push(sealcl(A0, A1));
+    w.push(npair(A0, GP));
     w.push(lb_ddc(A0, A1));
     w.push(lh_ddc(A0, A1));
     w.push(lw_ddc(A0, A1));
-    w.push(lc_ddc(A0, A1));
+    w.push(ly_ddc(A0, A1));
     w.push(lbu_ddc(A0, A1));
     w.push(lhu_ddc(A0, A1));
     w.push(sb_ddc(A2, A1));
     w.push(sh_ddc(A2, A1));
     w.push(sw_ddc(A2, A1));
-    w.push(sc_ddc(A2, A1));
+    w.push(sy_ddc(A2, A1));
     // Absolute addresses: base x0 is DDC with the offset as the address, and
     // anything out of its reach is formed in a register for the DDC form.
     w.push(lw(A0, ZERO, 0x108));
     li32(&mut w, A0, 0x1234_5678);
     w.push(lw_ddc(A0, A0));
-    w.push(lc(A1, ZERO, 0x110));
+    w.push(ly(A1, ZERO, 0x110));
     li32(&mut w, A1, 0xF000_0000);
-    w.push(lc_ddc(A1, A1));
+    w.push(ly_ddc(A1, A1));
     w.push(sw(A2, ZERO, 0x100));
     li32(&mut w, T0, 0x20000);
     w.push(sw_ddc(A2, T0));
-    w.push(sc(A2, ZERO, 0x1f8));
+    w.push(sy(A2, ZERO, 0x1f8));
     li32(&mut w, T0, 0x4000);
-    w.push(sc_ddc(A2, T0));
+    w.push(sy_ddc(A2, T0));
     w.push(car(A0, A1));
     w.push(cdr(T0, S1));
     w.push(setcar(A2, A3));
@@ -424,9 +427,9 @@ fn rust_side() -> Vec<u8> {
     w.push(ldxbi(T0, S1, 7, 2));
     w.push(stxbi(T0, S1, 12, 4));
     w.push(faddi(A0, A1, -7));
-    w.push(faddio(A0, A1, 2047));
-    w.push(fandi(A0, A1, 2047));
-    w.push(fori(A0, A1, -2048));
+    w.push(faddio(A0, A1, 511));
+    w.push(fandi(A0, A1, 255));
+    w.push(fori(A0, A1, -512));
     w.push(fshi(A0, A1, 0, 31));
     w.push(fshi(A0, A1, 1, 3));
     w.push(fshi(A0, A1, 2, 17));
@@ -449,7 +452,7 @@ fn rust_side() -> Vec<u8> {
     w.push(feq(A3, A4, A5));
     w.push(retag(A0, A1, 1, 0));
     w.push(retag(A0, A1, 0, 1));
-    w.push(retag(T0, T1, 63, 2));
+    w.push(retag(T0, T1, 31, 2));
     w.push(sh1add(A0, A1, A2));
     w.push(sh2add(A0, A1, A2));
     w.push(sh3add(A0, A1, A2));
@@ -510,15 +513,15 @@ fn rust_side() -> Vec<u8> {
     w.push(bnex(A1, A2, off(here + 7, back)));
     w.push(jal(ZERO, off(here + 8, fwd)));
     w.push(jal(RA, off(here + 9, back)));
-    // la is auipcc and cincoffsetimm, with the usual +0x800 rounding, and
-    // stays wide because it is patched after placement.
+    // la is auipc and yaddi, with the usual +0x800 rounding, and stays wide
+    // because it is patched after placement.
     let d = off(here + 10, fwd);
     let lo = d & 0xfff;
     let lo = if lo >= 2048 { lo - 4096 } else { lo };
     let hi = ((d - lo) >> 12) & 0xfffff;
     w.push(auipc(A0, hi as u32));
     wide.push(w.len());
-    w.push(cincoffsetimm(A0, A0, lo));
+    w.push(yaddi(A0, A0, lo));
     w.push(addi(ZERO, ZERO, 0)); // nop
     w.push(jalr(ZERO, RA, 0)); // fwd: ret
 

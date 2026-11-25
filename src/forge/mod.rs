@@ -139,8 +139,8 @@ pub fn rebuild(from: &str, out: &str, verbose: bool, check: bool) -> i32 {
 }
 
 /// Write lisp/layout.lisp: the memory map, the value and object layouts,
-/// the permissions and otypes, the trap frame, the trap causes and fault
-/// codes, the ecall and exit codes and the device registers, as Lisp
+/// the permissions and otypes, the trap frame, the trap causes and the
+/// chips' refusal codes, the ecall and exit codes and the device registers, as Lisp
 /// constants. The Rust definitions are the only source, and the file is
 /// regenerated on every build, so the two sides cannot drift apart.
 pub fn write_layout() {
@@ -218,24 +218,24 @@ pub fn write_layout() {
     def!("kind-cap", KIND_CAP);
     def!("kind-object", KIND_OBJECT);
 
-    // Permissions in the positions `cgetperm` answers and `candperm` takes,
-    // and the sets the allocators hand out.
+    // Permissions in RVY's bit field, as `YPERMR` answers them and `YPERMC`
+    // takes a mask of them, and the sets the allocators hand out.
     s.push_str("\n;; ---- permissions and otypes ----\n");
-    def!("perm-ld", cap::P_LD);
-    def!("perm-sd", cap::P_SD);
-    def!("perm-lc", cap::P_LC);
-    def!("perm-sc", cap::P_SC);
-    def!("perm-lm", cap::P_LM);
-    def!("perm-ex", cap::P_EX);
-    def!("perm-sr", cap::P_SR);
-    def!("perm-se", cap::P_SE);
-    def!("perm-hd", cap::P_HD);
-    def!("perms-all", cap::P_ALL);
-    def!("perms-pair", PERMS_PAIR);
-    def!("perms-object", PERMS_OBJECT);
-    def!("perms-bytes", PERMS_BYTES);
-    def!("perms-nil", PERMS_NIL);
-    def!("perms-code", PERMS_CODE);
+    def!("perm-ld", cap::ap_of(cap::P_LD));
+    def!("perm-sd", cap::ap_of(cap::P_SD));
+    def!("perm-lc", cap::ap_of(cap::P_LC));
+    def!("perm-sc", cap::ap_of(cap::P_SC));
+    def!("perm-lm", cap::ap_of(cap::P_LM));
+    def!("perm-ex", cap::ap_of(cap::P_EX));
+    def!("perm-sr", cap::ap_of(cap::P_SR));
+    def!("perm-se", cap::ap_of(cap::P_SE));
+    def!("perm-hd", cap::ap_of(cap::P_HD));
+    def!("perms-all", cap::AP_ALL);
+    def!("perms-pair", cap::ap_of(PERMS_PAIR));
+    def!("perms-object", cap::ap_of(PERMS_OBJECT));
+    def!("perms-bytes", cap::ap_of(PERMS_BYTES));
+    def!("perms-nil", cap::ap_of(PERMS_NIL));
+    def!("perms-code", cap::ap_of(PERMS_CODE));
     def!("otype-unsealed", cap::OT_UNSEALED);
     def!("otype-sentry", cap::OT_SENTRY);
     def!("otype-closure", cap::OT_CLOSURE);
@@ -299,14 +299,6 @@ pub fn write_layout() {
         def!(format!("reg-{name}"), i as u32);
     }
 
-    s.push_str("\n;; ---- special capability registers ----\n");
-    def!("scr-pcc", SCR_PCC);
-    def!("scr-ddc", SCR_DDC);
-    def!("scr-mtcc", SCR_MTCC);
-    def!("scr-mtdc", SCR_MTDC);
-    def!("scr-mscratchc", SCR_MSCRATCHC);
-    def!("scr-mepcc", SCR_MEPCC);
-
     s.push_str("\n;; ---- ecall codes: what a7 carries when compiled code raises one ----\n");
     def!("ecall-arity", E_ARITY);
     def!("ecall-oom", E_OOM);
@@ -328,30 +320,20 @@ pub fn write_layout() {
     def!("cause-range", C_RANGE);
     def!("cause-overflow", C_OVER);
     def!("cause-divzero", C_DIVZERO);
-    def!("cause-capability", C_CAP);
+    def!("cause-run", C_RUN);
     def!("cause-barrier", C_BARRIER);
     def!("cause-stack", C_STACK);
+    def!("cause-cap-fetch", C_CAP_FETCH);
+    def!("cause-cap-load", C_CAP_LOAD);
+    def!("cause-cap-store", C_CAP_STORE);
 
-    // A capability fault's mtval is the register's number shifted up past
-    // the code, with PCC and DDC numbered after the general registers.
-    s.push_str("\n;; ---- capability faults ----\n");
-    def!("capex-reg-shift", CAPEX_REG_SHIFT);
-    def!("capex-reg-pcc", CAPEX_REG_PCC);
-    def!("capex-reg-ddc", CAPEX_REG_DDC);
-    def!("capex-length", CAPEX_LENGTH);
-    def!("capex-tag", CAPEX_TAG);
-    def!("capex-seal", CAPEX_SEAL);
-    def!("capex-type", CAPEX_TYPE);
-    def!("capex-soft-perm", CAPEX_SOFT_PERM);
-    def!("capex-representable", CAPEX_REPRESENTABLE);
-    def!("capex-execute", CAPEX_EXECUTE);
-    def!("capex-load", CAPEX_LOAD);
-    def!("capex-store", CAPEX_STORE);
-    def!("capex-load-cap", CAPEX_LOAD_CAP);
-    def!("capex-store-cap", CAPEX_STORE_CAP);
-    def!("capex-seal-perm", CAPEX_SEAL_PERM);
-    def!("capex-sysreg", CAPEX_SYSREG);
-    def!("capex-unseal", CAPEX_UNSEAL);
+    // Why a chip refused a transfer, as its status says.
+    s.push_str("\n;; ---- the chips' refusals ----\n");
+    def!("refuse-length", crate::dev::REFUSE_LENGTH);
+    def!("refuse-tag", crate::dev::REFUSE_TAG);
+    def!("refuse-seal", crate::dev::REFUSE_SEAL);
+    def!("refuse-load", crate::dev::REFUSE_LOAD);
+    def!("refuse-store", crate::dev::REFUSE_STORE);
 
     s.push_str("\n;; ---- interrupt numbers, as mcause carries them ----\n");
     def!("irq-software", IRQ_SOFT);
@@ -850,8 +832,8 @@ fn call_on_machine(l: &mut Lisp, name: &str, back: u32) -> Option<V> {
     m.set_reg(T0, closure.unseal());
     m.set_reg(T1, fix(0));
     m.set_reg(RA, ret);
-    m.mtcc = trap;
-    m.mscratchc = frame;
+    m.mtvec = trap;
+    m.mscratch = frame;
     m.set_pcc(entry);
     m.halted = false;
     m.mstatus = 0;

@@ -13,9 +13,9 @@
 ;;; or owned by one task and reached through its port, and the kernel's own
 ;;; few-instruction sections turn interrupts off.
 ;;;
-;;; The context switch is one special register write. The trap stub saves all
-;;; 32 registers into the block MScratchC names and restores from there on the
-;;; way out, so switching tasks is pointing MScratchC at a different task's
+;;; The context switch is one CSR write. The trap stub saves all 32
+;;; registers into the block `mscratch` names and restores from there on the
+;;; way out, so switching tasks is pointing `mscratch` at a different task's
 ;;; context.
 
 (in-package exec)
@@ -139,7 +139,7 @@
 (defrecord (task tc) (include node)
   state sigalloc sigwait sigrecvd
   stack                          ; the whole stack, standing at its top
-  context                        ; the register block MScratchC names
+  context                        ; the register block `mscratch` names
   fn                             ; the closure the task runs
   result switches
   binds                          ; this task's fluid bindings, innermost first
@@ -283,7 +283,7 @@
   (set-tc-state! task ts-ready)
   (enqueue (ready-list) task))
 
-;; Choose the next task and point MScratchC at its context. Called only from
+;; Choose the next task and point `mscratch` at its context. Called only from
 ;; inside the trap handler, with the outgoing task's registers already saved.
 (define (switch-tasks)
   (let* ((cur (this-task))
@@ -742,7 +742,7 @@
   (let ((a (make-assembler)))
     (set-asm-privileged! a t)
     (i-li a $t1 0)
-    (i-lc a $t0 $zero lg-task-exit)
+    (i-ly a $t0 $zero lg-task-exit)
     (i-jcl a $ra $t0)
     (%st-cap! lg-task-exit (%symbol-value 'task-finished))
     (set! *task-exit-stub* (%cap-seal-entry (place a)))

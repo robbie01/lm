@@ -13,7 +13,7 @@
 //! somewhere else.
 
 use crate::cap::*;
-use crate::dev::{load_through, refusal};
+use crate::dev::{load_through, refusal, REFUSE_LOAD, REFUSE_STORE};
 use crate::mach::*;
 use crate::map::INT_BLIT;
 
@@ -47,7 +47,7 @@ pub const CTRL_EACH: u32 = 2;
 ///    104 status
 /// ```
 ///
-/// The chip loads each slot the way `lc` would through the descriptor's own
+/// The chip loads each slot the way `LY` would through the descriptor's own
 /// capability. `src` and `dst` carry the address of the first pixel; `smod`
 /// and `dmod` are the strides in bytes.
 ///
@@ -78,9 +78,8 @@ pub const L_STATUS: u32 = 104;
 pub const LIST_BYTES: u32 = 112;
 
 /// The done word. A refusal is `REFUSED_SRC` or `REFUSED_DST` for the
-/// capability that refused it, with the capability fault the processor would
-/// have taken in the low byte: `CAPEX_TAG`, `CAPEX_SEAL`, `CAPEX_LOAD`,
-/// `CAPEX_STORE` or `CAPEX_LENGTH`.
+/// capability that refused it, with the check it failed in the low byte:
+/// one of the `REFUSE_*` codes in `dev`.
 pub const DONE: u32 = 0;
 pub const DONE_PENDING: u32 = 1;
 pub const REFUSED_SRC: u32 = 0x100;
@@ -223,10 +222,10 @@ pub fn start_chain(m: &mut Machine, d: Cap) {
 
 /// What a descriptor's own capability needs: to be read, slots and all, and
 /// written back.
-const DESCRIPTOR: &[(u32, u32)] = &[(P_LD, CAPEX_LOAD), (P_SD, CAPEX_STORE)];
-const SOURCE: &[(u32, u32)] = &[(P_LD, CAPEX_LOAD)];
-const DEST: &[(u32, u32)] = &[(P_SD, CAPEX_STORE)];
-const DEST_READ: &[(u32, u32)] = &[(P_LD, CAPEX_LOAD), (P_SD, CAPEX_STORE)];
+const DESCRIPTOR: &[(u32, u32)] = &[(P_LD, REFUSE_LOAD), (P_SD, REFUSE_STORE)];
+const SOURCE: &[(u32, u32)] = &[(P_LD, REFUSE_LOAD)];
+const DEST: &[(u32, u32)] = &[(P_SD, REFUSE_STORE)];
+const DEST_READ: &[(u32, u32)] = &[(P_LD, REFUSE_LOAD), (P_SD, REFUSE_STORE)];
 
 /// Fetch the descriptor `d` names and start it at cycle `at`. A capability
 /// that is not an aligned descriptor the chip may read and write starts

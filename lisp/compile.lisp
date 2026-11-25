@@ -1,4 +1,4 @@
-;;; compile.lisp - Lisp to native RISC-V with CHERI.
+;;; compile.lisp - Lisp to native RISC-V: RVY and Xlm.
 ;;;
 ;;; The same source runs twice. At build time the forge's interpreter runs it
 ;;; to compile the whole system, this file included, into the image. The
@@ -33,7 +33,7 @@
 ;;;   sp            below all of that; temporaries are pushed under it
 ;;;
 ;;; sp and s0 are capabilities to the task's stack, so every move of either
-;;; is a `cincoffset`, and every slot is loaded and stored with `lc` and `sc`.
+;;; is a `yaddi`, and every slot is loaded and stored with `ly` and `sy`.
 ;;; Only one instruction in the prologue depends on the frame size, so the
 ;;; frame is sized after the body is emitted and that instruction is patched.
 ;;;
@@ -42,8 +42,8 @@
 ;;; to be disguised.
 ;;;
 ;;; Pairs
-;;;   car, cdr, set-car! and set-cdr! are single instructions in the custom-0
-;;;   opcode space. The processor checks that the base is a pair as it forms
+;;;   car, cdr, set-car! and set-cdr! are single Xlm instructions, in the
+;;;   custom-0 opcode space. The processor checks that the base is a pair as it forms
 ;;;   the address, and anything else traps with the register in mtval, which
 ;;;   sys.lisp turns into a sentence naming the value. nil is a pair of nils
 ;;;   to read, and its capability refuses a write.
@@ -335,7 +335,7 @@
     (if (%>= off 2048)
         (error "compile: too many literals in" (cx-name c))
         nil)
-    (i-lc a reg $s1 off)))
+    (i-ly a reg $s1 off)))
 
 ;; ---------------------------------------------------------------- records
 ;; The shape of a record and its accessor functions come from macros.lisp,
@@ -407,12 +407,12 @@
 (define (load-local c n reg)
   (if (cx-leaf c)
       (i-mv (cx-asm c) reg (local-reg n))
-      (i-lc (cx-asm c) reg $s0 (local-off n))))
+      (i-ly (cx-asm c) reg $s0 (local-off n))))
 
 (define (store-local c n reg)
   (if (cx-leaf c)
       (i-mv (cx-asm c) (local-reg n) reg)
-      (i-sc (cx-asm c) reg $s0 (local-off n))))
+      (i-sy (cx-asm c) reg $s0 (local-off n))))
 
 ;; Where this function's closure is, unsealed. A framed function saved it at
 ;; s0-24; a leaf still has it in t0, because a leaf calls nothing and nothing
@@ -420,10 +420,10 @@
 (define (closure-reg c scratch)
   (if (cx-leaf c)
       $t0
-      (begin (i-lc (cx-asm c) scratch $s0 clo-slot) scratch)))
+      (begin (i-ly (cx-asm c) scratch $s0 clo-slot) scratch)))
 
 ;; A free variable is a slot of the unsealed closure, read and written with
-;; `lc` and `sc` at its offset: the closure's own capability bounds the
+;; `ly` and `sy` at its offset: the closure's own capability bounds the
 ;; access, and nothing but its own code holds that capability unsealed.
 (define (free-off i) (slot-off (%+ clo-free i)))
 
@@ -435,9 +435,9 @@
       (load-local c (cadr loc) reg)
       (i-car a reg reg))
      ((%eq? kind 'free)
-      (i-lc a reg (closure-reg c $t6) (free-off (cadr loc))))
+      (i-ly a reg (closure-reg c $t6) (free-off (cadr loc))))
      ((%eq? kind 'boxed-free)
-      (i-lc a reg (closure-reg c $t6) (free-off (cadr loc)))
+      (i-ly a reg (closure-reg c $t6) (free-off (cadr loc)))
       (i-car a reg reg))
      ((%eq? kind 'constant) (emit-const c (%symbol-value (cadr loc)) reg))
      ;; A global's value cell, through the load that refuses the unbound
@@ -471,7 +471,7 @@
     (cond
      ((memq kind '(local boxed-local)) (load-local c (cadr loc) reg))
      ((memq kind '(free boxed-free))
-      (i-lc (cx-asm c) reg (closure-reg c $t6) (free-off (cadr loc))))
+      (i-ly (cx-asm c) reg (closure-reg c $t6) (free-off (cadr loc))))
      (else (emit-load c loc reg)))))
 
 (define (boxed-location? loc)
@@ -485,10 +485,10 @@
       (load-local c (cadr loc) $t6)
       (i-set-car a reg $t6))
      ((%eq? kind 'free)
-      (i-sc a reg (closure-reg c $t6) (free-off (cadr loc))))
+      (i-sy a reg (closure-reg c $t6) (free-off (cadr loc))))
      ((%eq? kind 'boxed-free)
       (let ((cr (closure-reg c $t6)))
-        (i-lc a $t6 cr (free-off (cadr loc))))
+        (i-ly a $t6 cr (free-off (cadr loc))))
       (i-set-car a reg $t6))
      ((%eq? kind 'constant) (error "set!: a constant cannot change:" (cadr loc)))
      ;; Through the typed store, which checks that the literal is a symbol.
@@ -504,24 +504,24 @@
 ;; A temporary pushed under sp, one slot.
 (define (emit-push c reg)
   (let ((a (cx-asm c)))
-    (i-cincoffsetimm a $sp $sp (%- 0 value-bytes))
-    (i-sc a reg $sp 0)))
+    (i-yaddi a $sp $sp (%- 0 value-bytes))
+    (i-sy a reg $sp 0)))
 
 ;; ---------------------------------------------------------------- allocation
 ;; Inline cons. gp is bounded to the task's run of cons space and addresses
-;; its next free pair, so a pair is its first sixteen bytes and the run moves
-;; on by sixteen. When the run is used up, `csetboundsimm` faults on gp; the
-;; trap handler gives the task a fresh run and the instruction runs again. A
-;; collection begun there sees every register exactly, so nothing here says
-;; which registers are live.
+;; its next free pair, so a pair is its first sixteen bytes, which `npair`
+;; carves, and the run moves on by sixteen. When the run is used up, `npair`
+;; traps naming gp; the trap handler gives the task a fresh run and the
+;; instruction runs again. A collection begun there sees every register
+;; exactly, so nothing here says which registers are live.
 ;;
 ;; The pair is built in t2 when the destination is also an operand.
 (define (emit-cons a car-reg cdr-reg dst)
   (let ((p (if (if (%= dst car-reg) t (%= dst cdr-reg)) $t2 dst)))
-    (i-csetboundsimm a p $gp (%* 2 value-bytes))
-    (i-cincoffsetimm a $gp $gp (%* 2 value-bytes))
-    (i-sc a car-reg p 0)
-    (i-sc a cdr-reg p value-bytes)
+    (i-npair a p $gp)
+    (i-yaddi a $gp $gp (%* 2 value-bytes))
+    (i-sy a car-reg p 0)
+    (i-sy a cdr-reg p value-bytes)
     (if (%= p dst) nil (i-mv a dst p))))
 
 ;; ---------------------------------------------------------------- booleans
@@ -636,7 +636,7 @@
     (if (cx-leaf c)
         (begin
           (i-mv a $caller-code $s1)
-          (i-lc a $s1 $t0 (slot-off clo-code)))
+          (i-ly a $s1 $t0 (slot-off clo-code)))
         (begin
           ;; A call by a function to its own name can skip the check above:
           ;; the closure is the one in this frame and the count is known to
@@ -653,25 +653,25 @@
           ;; The one instruction that knows the frame size, which size-frame
           ;; rewrites once the body is done, so it keeps its width.
           (set-cx-framefix! c (asm-len a))
-          (i-cincoffsetimm-w a $sp $sp 0)
-          (i-sc a $ra $t3 ra-slot)
-          (i-sc a $s0 $t3 link-slot)
-          (i-sc a $t0 $t3 clo-slot)
-          (i-sc a $s1 $t3 code-slot)
+          (i-yaddi-w a $sp $sp 0)
+          (i-sy a $ra $t3 ra-slot)
+          (i-sy a $s0 $t3 link-slot)
+          (i-sy a $t0 $t3 clo-slot)
+          (i-sy a $s1 $t3 code-slot)
           (i-mv a $s0 $t3)
           ;; s1 is this function's own code object, hanging off the closure.
           ;; Every constant, symbol and inner code object the body mentions
           ;; is one load from there.
-          (i-lc a $s1 $t0 (slot-off clo-code))))))
+          (i-ly a $s1 $t0 (slot-off clo-code))))))
 
 (define (emit-epilogue c)
   (let ((a (cx-asm c)))
     (if (cx-leaf c)
         (i-mv a $s1 $caller-code)
         (begin
-          (i-lc a $ra $s0 ra-slot)
-          (i-lc a $t3 $s0 link-slot)
-          (i-lc a $s1 $s0 code-slot)
+          (i-ly a $ra $s0 ra-slot)
+          (i-ly a $t3 $s0 link-slot)
+          (i-ly a $s1 $s0 code-slot)
           (i-mv a $sp $s0)
           (i-mv a $s0 $t3)))))
 
@@ -738,7 +738,7 @@
          (save (asm-len a)))
     (if (%> frame 2048) (error "compile: frame too large in" (cx-name c)) nil)
     (set-asm-len! a off)
-    (i-cincoffsetimm-w a $sp $sp (%- 0 frame))
+    (i-yaddi-w a $sp $sp (%- 0 frame))
     (set-asm-len! a save)
     frame))
 
@@ -926,13 +926,13 @@
 (define (cap-load op)
   (lambda (c)
     (let ((a (cx-asm c)))
-      (i-cincoffset a $t2 $a0 $a1)
+      (i-yadd a $t2 $a0 $a1)
       (%funcall op a $a0 $t2 0))))
 
 (define (cap-store op)
   (lambda (c)
     (let ((a (cx-asm c)))
-      (i-cincoffset a $t2 $a0 $a1)
+      (i-yadd a $t2 $a0 $a1)
       (%funcall op a $a2 $t2 0)
       (i-mv a $a0 $a2))))
 
@@ -945,10 +945,12 @@
 ;; for `%+o`, is found through its alias.
 (define *const-arg* nil)
 
-;; The immediate is the constant itself, twelve signed bits, and a
-;; subtraction adds the negation, which has to fit as well.
-(define (fits-imm? k) (if (%>= k -2048) (%< k 2048) nil))
-(define (fits-negated-imm? k) (if (%> k -2048) (%<= k 2048) nil))
+;; A fixnum instruction's immediate is the constant itself, ten signed bits,
+;; and a subtraction adds the negation, which has to fit as well. A load's
+;; offset is twelve.
+(define (fits-imm? k) (if (%>= k -512) (%< k 512) nil))
+(define (fits-negated-imm? k) (if (%> k -512) (%<= k 512) nil))
+(define (fits-offset? k) (if (%>= k -2048) (%< k 2048) nil))
 (define (shift-amount? k) (if (%> k -32) (%< k 32) nil))
 
 (define (const-arg-entry c h args)
@@ -997,13 +999,21 @@
               (list '%logior fits-imm? emit-or-const)
               (list '%lsh shift-amount? emit-lsh-const)
               (list '%ash shift-amount? emit-ash-const)
-              (list '%cap-ld fits-imm? (cap-load-const i-lc))
-              (list '%cap-ld-word fits-imm? (cap-load-const i-lw))
-              (list '%cap-ld-byte fits-imm? (cap-load-const i-lbu)))))
+              (list '%cap-ld fits-offset? (cap-load-const i-ly))
+              (list '%cap-ld-word fits-offset? (cap-load-const i-lw))
+              (list '%cap-ld-byte fits-offset? (cap-load-const i-lbu))
+              (list '%cap-and-perms fixnum-constant? emit-and-perms-const))))
+
+;; `ypermc` clears the permissions its mask names, and `%cap-and-perms` keeps
+;; them, so a written-down mask is complemented here and costs nothing more.
+(define (fixnum-constant? k) t)
+(define (emit-and-perms-const a d s k)
+  (i-li a $t2 (%lognot k))
+  (i-ypermc a d s $t2))
 
 ;; ---------------------------------------------------------------- constant index
 ;; An index that is written down, which every record field and closure slot
-;; is, goes in the instruction: the immediate form of custom-1 carries
+;; is, goes in the instruction: the immediate forms of indexed access carry
 ;; indices 0 to 31. Entries are (name type store?); the index is the second
 ;; argument for the load and the store both.
 (define *indexed-imm* nil)
@@ -1044,7 +1054,7 @@
   (setup-const-arg)
 
   ;; ---- pairs ----
-  ;; One custom-0 instruction each, with the base checked on the way past.
+  ;; One Xlm instruction each, with the base checked on the way past.
   (defop '%car 1 (op1 i-car))
   (defop '%cdr 1 (op1 i-cdr))
   (defstore '%set-car! 2 (store-through i-set-car))
@@ -1182,71 +1192,96 @@
   ;; capability comes back with its tag. These are the escape hatch, and the
   ;; processor refuses them to code without SR.
   (definline '%root 0
-    (lambda (c) (i-cspecialrw (cx-asm c) $a0 scr-ddc $zero)))
+    (lambda (c) (i-csrrs (cx-asm c) $a0 csr-ddc $zero)))
   (definline '%from-addr 1
     (lambda (c)
       (let ((a (cx-asm c)))
-        (i-cspecialrw a $t2 scr-ddc $zero)
-        (i-csetaddr a $a0 $t2 $a0))))
+        (i-csrrs a $t2 csr-ddc $zero)
+        (i-yaddrw a $a0 $t2 $a0))))
   (defop '%ld-word 1 (op1 i-lw-ddc))
   (defop '%ld-half 1 (op1 i-lhu-ddc))
   (defop '%ld-byte 1 (op1 i-lbu-ddc))
-  (defop '%ld-cap 1 (op1 i-lc-ddc))
+  (defop '%ld-cap 1 (op1 i-ly-ddc))
   (defstore '%st-word! 2 (store-through i-sw-ddc))
   (defstore '%st-half! 2 (store-through i-sh-ddc))
   (defstore '%st-byte! 2 (store-through i-sb-ddc))
-  (defstore '%st-cap! 2 (store-through i-sc-ddc))
+  (defstore '%st-cap! 2 (store-through i-sy-ddc))
 
   ;; ---- capabilities ----
   ;; The operations on a capability the caller already holds. A load or a
   ;; store is bounded by it, and everything that makes a new one from it can
   ;; only narrow it, seal it, or clear its tag, so none of these is unsafe.
   ;; Offsets are in bytes.
-  (definline '%cap-ld 2 (cap-load i-lc))
-  (definline '%cap-st! 3 (cap-store i-sc))
+  (definline '%cap-ld 2 (cap-load i-ly))
+  (definline '%cap-st! 3 (cap-store i-sy))
   (definline '%cap-ld-word 2 (cap-load i-lw))
   (definline '%cap-st-word! 3 (cap-store i-sw))
   (definline '%cap-ld-byte 2 (cap-load i-lbu))
   (definline '%cap-st-byte! 3 (cap-store i-sb))
   ;; The address of anything, as a fixnum: a pointer's, or an immediate's
-  ;; payload. Following it again takes the root.
-  (defop '%addr-of 1 (op1 i-cgetaddr))
-  (defop '%cap-base 1 (op1 i-cgetbase))
-  (defop '%cap-len 1 (op1 i-cgetlen))
-  (defop '%cap-top 1 (op1 i-cgettop))
-  (defop '%cap-perms 1 (op1 i-cgetperm))
-  (defop '%cap-otype 1 (op1 i-cgettype))
-  (defop '%cap-offset 1 (op1 i-cgetoffset))
-  (defop '%cap-high 1 (op1 i-cgethigh))
-  (definline '%cap-tag? 1 (one-test i-cgettag))
-  (definline '%cap-sealed? 1 (one-test i-cgetsealed))
-  (defop '%cap-set-addr 2 (op2 i-csetaddr))
-  (defop '%cap-inc 2 (op2 i-cincoffset))
-  (defop '%cap-bounds 2 (op2 i-csetbounds))
-  (defop '%cap-bounds-exact 2 (op2 i-csetboundsexact))
-  (defop '%cap-and-perms 2 (op2 i-candperm))
-  (defop '%cap-clear-tag 1 (op1 i-ccleartag))
-  (defop '%cap-seal-entry 1 (op1 i-csealentry))
+  ;; payload. Any integer instruction leaves it. Following it again takes
+  ;; the root.
+  (defop '%addr-of 1 (lambda (a d rs) (i-addi a (value-reg d) (%car rs) 0)))
+  (defop '%cap-base 1 (op1 i-ybaser))
+  (defop '%cap-len 1 (op1 i-ylenr))
+  (defop '%cap-top 1 (op1 i-ytopr))
+  (defop '%cap-perms 1 (op1 i-ypermr))
+  (defop '%cap-otype 1 (op1 i-ytyper))
+  (defop '%cap-offset 1
+    (lambda (a d rs)
+      (i-ybaser a $t2 (%car rs))
+      (i-sub a (value-reg d) (%car rs) $t2)))
+  (defop '%cap-high 1 (op1 i-yhir))
+  (definline '%cap-tag? 1 (one-test i-ytagr))
+  ;; Sealed is an otype other than 0.
+  (definline '%cap-sealed? 1 (one-test i-ytyper))
+  (defop '%cap-set-addr 2 (op2 i-yaddrw))
+  (defop '%cap-inc 2 (op2 i-yadd))
+  ;; The bounds are rounded outward, or must be exact; either way a request
+  ;; the capability does not allow leaves the result untagged.
+  (defop '%cap-bounds 2 (op2 i-ybndsrw))
+  (defop '%cap-bounds-exact 2 (op2 i-ybndsw))
+  ;; Keep the permissions the mask names: `ypermc` of its complement.
+  (defop '%cap-and-perms 2
+    (lambda (a d rs)
+      (i-xori a $t2 (cadr rs) -1)
+      (i-ypermc a (value-reg d) (%car rs) $t2)))
+  ;; The same bits, untagged.
+  (defop '%cap-clear-tag 1
+    (lambda (a d rs)
+      (i-yhir a $t2 (%car rs))
+      (i-yhiw a (value-reg d) (%car rs) $t2)))
+  (defop '%cap-seal-entry 1 (op1 i-yseale))
   ;; A closure object sealed as a closure, which only `jcl` opens again:
   ;; anyone may seal their own closure, and nobody may open one.
-  (defop '%cap-seal-closure 1 (op1 i-csealclo))
-  ;; With an authority that has SE and whose address is the otype.
-  (defop '%cap-seal 2 (op2 i-cseal))
-  (defop '%cap-unseal 2 (op2 i-cunseal))
+  (defop '%cap-seal-closure 1 (op1 i-sealcl))
+  ;; (%cap-seal c key) and (%cap-unseal c key): with a key that has SE and
+  ;; whose address is the otype. The key is the instructions' first operand.
+  (defop '%cap-seal 2 (lambda (a d rs) (i-ysealt a (value-reg d) (cadr rs) (%car rs))))
+  (defop '%cap-unseal 2 (lambda (a d rs) (i-yunsealt a (value-reg d) (cadr rs) (%car rs))))
+  ;; (%cap-unseal-within c outer): c unsealed, whatever its otype, if it lies
+  ;; within outer. The root opens anything this way.
+  (defop '%cap-unseal-within 2 (lambda (a d rs) (i-yunseals a (value-reg d) (cadr rs) (%car rs))))
   ;; Untagged, with the metadata given: how an immediate is made from parts.
-  (defop '%cap-set-high 2 (op2 i-csethigh))
-  (definline '%cap=? 2 (two-test i-cseqx))
+  (defop '%cap-set-high 2 (op2 i-yhiw))
+  (definline '%cap=? 2 (two-test i-yeq))
   ;; (%cap-subset? a b): whether b's bounds and permissions lie within a's,
-  ;; both tagged or both not. `ctestsubset` asks it of its second operand
-  ;; against its first.
+  ;; both tagged or both not. `yss` asks it of its second operand against
+  ;; its first.
   (definline '%cap-subset? 2
     (lambda (c)
-      (i-ctestsubset (cx-asm c) $t2 $a0 $a1)
+      (i-yss (cx-asm c) $t2 $a0 $a1)
       (emit-bool-from-flag c $t2 $a0)))
   ;; The length and the alignment mask the processor would round a request
   ;; for n bytes to, so an allocator can pad an object to bounds it can have.
-  (defop '%rrl 1 (op1 i-crrl))
-  (defop '%ram 1 (op1 i-cram))
+  ;; The length is n rounded up to the alignment `yamask` gives.
+  (defop '%rrl 1
+    (lambda (a d rs)
+      (i-yamask a $t2 (%car rs))
+      (i-xori a $t3 $t2 -1)
+      (i-add a $t3 (%car rs) $t3)
+      (i-and a (value-reg d) $t3 $t2)))
+  (defop '%ram 1 (op1 i-yamask))
 
   ;; ---- min and max ----
   ;; The comparison is `flt`, which checks its operands and widens through
@@ -1342,16 +1377,16 @@
         (i-ecall a)
         (i-mv a $a0 $tp))))
 
-  ;; The register context MScratchC names, as a capability: inside a trap,
+  ;; The register context `mscratch` names, as a capability: inside a trap,
   ;; the block the interrupted code was saved into. The trap stub restores
-  ;; from whatever MScratchC names on its way out, so setting it is the
+  ;; from whatever `mscratch` names on its way out, so setting it is the
   ;; context switch.
   (definline '%context 0
-    (lambda (c) (i-cspecialrw (cx-asm c) $a0 scr-mscratchc $zero)))
+    (lambda (c) (i-csrrs (cx-asm c) $a0 csr-mscratch $zero)))
   (definline '%set-context! 1
     (lambda (c)
       (let ((a (cx-asm c)))
-        (i-cspecialrw a $zero scr-mscratchc $a0)
+        (i-csrrw a $zero csr-mscratch $a0)
         (i-mv a $a0 $tp))))
 
   ;; Let the timer, the chips and software interrupts through.
@@ -1572,10 +1607,10 @@
     (set! i 0)
     (dolist (p plan)
       (if (%eq? (%car p) 'stack)
-          (i-lc a (%+ $a0 i) $sp (%* value-bytes (%- (%- pushed 1) (%cdr p))))
+          (i-ly a (%+ $a0 i) $sp (%* value-bytes (%- (%- pushed 1) (%cdr p))))
           nil)
       (set! i (%+ i 1)))
-    (if (%> pushed 0) (i-cincoffsetimm a $sp $sp (%* value-bytes pushed)) nil)
+    (if (%> pushed 0) (i-yaddi a $sp $sp (%* value-bytes pushed)) nil)
     ;; pass three: the simple ones, which cannot disturb anything
     (set! i 0)
     (dolist (p plan)
@@ -1646,23 +1681,23 @@
       (emit-push c $a0))
     ;; Pushed left to right, so argument k is n-1-k slots from the top.
     (while (%< i 8)
-      (i-lc a (%+ $a0 i) $sp (%* value-bytes (%- (%- n 1) i)))
+      (i-ly a (%+ $a0 i) $sp (%* value-bytes (%- (%- n 1) i)))
       (set! i (%+ i 1)))
     ;; Reverse the overflow block in place.
     (set! i 0)
     (while (%< i (%/ extra 2))
       (let ((lo (%* value-bytes i)) (hi (%* value-bytes (%- (%- extra 1) i))))
-        (i-lc a $t3 $sp lo)
-        (i-lc a $t4 $sp hi)
-        (i-sc a $t4 $sp lo)
-        (i-sc a $t3 $sp hi))
+        (i-ly a $t3 $sp lo)
+        (i-ly a $t4 $sp hi)
+        (i-sy a $t4 $sp lo)
+        (i-sy a $t3 $sp hi))
       (set! i (%+ i 1)))
     (if op-on-stack
-        (i-lc a $t0 $sp (%* value-bytes n))
+        (i-ly a $t0 $sp (%* value-bytes n))
         (emit-load c (location-of c op) $t0))
     (i-li a $t1 n)
     (i-jcl a $ra $t0)
-    (i-cincoffsetimm a $sp $sp (%* value-bytes (if op-on-stack (%+ n 1) n)))))
+    (i-yaddi a $sp $sp (%* value-bytes (if op-on-stack (%+ n 1) n)))))
 
 ;; A call is a self-call when the operator is this function's own name, that
 ;; name is not shadowed by a local, and the argument count is the one the
@@ -1694,15 +1729,15 @@
       (compile-args c args n)
       (if (self-call? c op n)
           (begin
-            (i-lc a $t0 $s0 clo-slot)
+            (i-ly a $t0 $s0 clo-slot)
             (if tail
                 (begin (emit-epilogue c) (i-j a (cx-self-label c)))
                 (i-jal a $ra (cx-self-label c))))
           (begin
             (if op-on-stack
                 (begin
-                  (i-lc a $t0 $sp 0)
-                  (i-cincoffsetimm a $sp $sp value-bytes))
+                  (i-ly a $t0 $sp 0)
+                  (i-yaddi a $sp $sp value-bytes))
                 (emit-load c (location-of c op) $t0))
             (i-li a $t1 n)
             (if tail
@@ -1765,8 +1800,8 @@
     (i-mv a $t4 $sp)
     (label a fill)
     (i-car a $t5 $t3)
-    (i-sc a $t5 $t4 0)
-    (i-cincoffsetimm a $t4 $t4 value-bytes)
+    (i-sy a $t5 $t4 0)
+    (i-yaddi a $t4 $t4 value-bytes)
     (i-cdr a $t3 $t3)
     (i-bnex a $t3 $tp fill)
     (emit-apply-registers c)
@@ -2100,9 +2135,9 @@
     (i-jcl a $ra $t0)
     (dolist (s free)
       (emit-load-cell c (location-of c s) $t5)
-      (i-sc a $t5 $a0 (free-off i))
+      (i-sy a $t5 $a0 (free-off i))
       (set! i (%+ i 1)))
-    (i-csealclo a $a0 $a0)))
+    (i-sealcl a $a0 $a0)))
 
 (define (dedup xs)
   (let ((acc nil))
@@ -2215,7 +2250,7 @@
             (if (%< i 8)
                 (store-local c slot (%+ $a0 i))
                 (begin
-                  (i-lc a $t3 $s0 (%* value-bytes (%- i 8)))
+                  (i-ly a $t3 $s0 (%* value-bytes (%- i 8)))
                   (store-local c slot $t3)))
             (cx-bind c p (list 'local slot))
             (set! i (%+ i 1)))))
@@ -2261,7 +2296,7 @@
     (while (%< k 8) (cx-alloc-local c) (set! k (%+ k 1)))
     (set! k 0)
     (while (%< k 8)
-      (i-sc a (%+ $a0 k) $s0 (local-off (%+ spill k)))
+      (i-sy a (%+ $a0 k) $s0 (local-off (%+ spill k)))
       (set! k (%+ k 1)))
     (i-mv a $a2 $tp)                       ; the list under construction
     (i-addi a $t3 $t1 -1)                  ; i = nargs - 1
@@ -2273,21 +2308,21 @@
     ;; argument 8 + j sits 8j above s0
     (i-addi a $t6 $t3 -8)
     (i-slli a $t6 $t6 3)
-    (i-cincoffset a $t6 $s0 $t6)
-    (i-lc a $a3 $t6 0)
+    (i-yadd a $t6 $s0 $t6)
+    (i-ly a $a3 $t6 0)
     (i-j a got)
     ;; argument i < 8 is spill slot i, 8i below spill slot 0
     (label a from-reg)
     (i-slli a $t6 $t3 3)
     (i-sub a $t6 $zero $t6)
-    (i-cincoffset a $t6 $s0 $t6)
-    (i-lc a $a3 $t6 (local-off spill))
+    (i-yadd a $t6 $s0 $t6)
+    (i-ly a $a3 $t6 (local-off spill))
     (label a got)
     (emit-cons a $a3 $a2 $a2)
     (i-addi a $t3 $t3 -1)
     (i-j a loop)
     (label a done)
-    (i-sc a $a2 $s0 (local-off slot))))
+    (i-sy a $a2 $s0 (local-off slot))))
 
 ;; ---------------------------------------------------------------- top level
 ;; A function definition is installed at compile time. Anything else becomes

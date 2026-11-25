@@ -1505,7 +1505,7 @@ impl<'a> Lisp<'a> {
             }
             Prim::CapPerms => {
                 need!(1);
-                fix(a[0].perms() as i32)
+                fix(a[0].perm_bits() as i32)
             }
             Prim::CapOtype => {
                 need!(1);
@@ -1548,9 +1548,11 @@ impl<'a> Lisp<'a> {
                     ),
                 }
             }
+            // The permissions the mask names are kept: `YPERMC` of its
+            // complement, as the compiler emits it.
             Prim::CapAndPerms => {
                 need!(2);
-                a[0].and_perms(a[1].addr)
+                a[0].clear_perms(!a[1].addr)
             }
             Prim::CapSealEntry => {
                 need!(1);
@@ -1571,6 +1573,14 @@ impl<'a> Lisp<'a> {
                     bail!("{name}: {} is not sealed with {ot}", self.h.write(a[0]))
                 }
                 a[0].unseal()
+            }
+            Prim::CapUnsealWithin => {
+                need!(2);
+                let c = a[0].unsealed_within(&a[1]);
+                if !c.tag {
+                    bail!("{name}: {} is not sealed within {}", self.h.write(a[0]), self.h.write(a[1]))
+                }
+                c
             }
             Prim::CapSetHigh => {
                 need!(2);
@@ -1965,6 +1975,7 @@ prims! {
     CapSealEntry       "%cap-seal-entry";
     CapSealClosure     "%cap-seal-closure";
     CapUnseal          "%cap-unseal";
+    CapUnsealWithin    "%cap-unseal-within";
     CapSetHigh         "%cap-set-high";
     Rrl                "%rrl";
     Ram                "%ram";

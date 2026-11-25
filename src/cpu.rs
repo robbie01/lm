@@ -1,4 +1,4 @@
-//! Token-threaded RV32IMC core in CHERI capability mode, with Xlm.
+//! Token-threaded RV32IMC core: RVY in capability mode, with Xlm.
 //!
 //! The token is the opcode itself. There is no predecode pass and no
 //! translation cache, so nothing needs invalidating when the Lisp compiler
@@ -126,7 +126,7 @@ fn wcw(m: &mut Machine, i: u32, addr: u32, xm: u64, wb: u32, wl: u32) {
     }
 }
 
-/// Copy a register whole, window and all: `cmove`.
+/// Copy a register whole, window and all: `YMV`.
 #[inline(always)]
 fn mv(m: &mut Machine, d: u32, s: u32) {
     let (d, s) = ((d & 31) as usize, (s & 31) as usize);
@@ -207,11 +207,6 @@ fn link(m: &mut Machine, d: u32, ret: u32) {
 #[inline(always)]
 fn pcc_at(m: &Machine, pc: u32) -> Cap {
     Cap { addr: pc, meta: m.pcc_meta, tag: m.pcc_tag }
-}
-
-#[inline(always)]
-fn capfault(m: &mut Machine, reg: u32, code: u32, pc: u32, fuel: u32) -> Stop {
-    m.fault(C_CAP, (reg << CAPEX_REG_SHIFT) | code, pc, fuel)
 }
 
 /// orc.b: every byte that has any bit set becomes 0xff.
@@ -375,7 +370,7 @@ pub fn run_block(m: &mut Machine, pc: u32, fuel: u32) -> Stop {
 
 /// A fetch that is not four bytes inside PCC's window. A 16-bit instruction
 /// in the window's last two bytes is legal; anything else is a fault, a
-/// capability fault naming PCC if PCC forbids it and an access fault if PCC
+/// capability fault on PCC if PCC forbids it and an access fault if PCC
 /// allows it and there is no RAM there.
 #[cold]
 #[inline(never)]
@@ -387,18 +382,8 @@ fn fetch_slow(m: &mut Machine, pc: u32, fuel: u32) -> Stop {
         }
     }
     let c = pcc_at(m, pc);
-    let code = if !c.tag {
-        CAPEX_TAG
-    } else if c.is_sealed() {
-        CAPEX_SEAL
-    } else if !c.has(P_EX) {
-        CAPEX_EXECUTE
-    } else if !c.covers(pc, 2) {
-        CAPEX_LENGTH
-    } else {
-        return m.fault(C_IFAULT, pc, pc, fuel);
-    };
-    capfault(m, CAPEX_REG_PCC, code, pc, fuel)
+    let cause = if c.tag && !c.is_sealed() && c.has(P_EX) && c.covers(pc, 2) { C_IFAULT } else { C_CAP_FETCH };
+    m.fault(cause, pc, pc, fuel)
 }
 
 #[cold]
@@ -424,15 +409,15 @@ fn ilen(w: u32) -> u32 {
 
 // ============================================================== 32-bit opcodes
 
-// ---- LUI / AUIPCC ---------------------------------------------------------
+// ---- LUI / AUIPC ----------------------------------------------------------
 #[inline(never)]
 fn op_lui(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     w_(m, rd(w), w & 0xffff_f000);
     next!(m, pc.wrapping_add(4), fuel - 1)
 }
 
-/// `auipcc`: PCC with its address moved. Inside PCC's window the move is
-/// representable and the window is PCC's.
+/// `auipc`: PCC with its address moved, as RVY has it. Inside PCC's window
+/// the move is representable and the window is PCC's.
 #[inline(never)]
 fn op_auipc(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let a = pc.wrapping_add(w & 0xffff_f000);
@@ -473,23 +458,22 @@ fn op_jal(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 }
 
 /// A jump or branch within PCC to `t` outside its window: past its bounds,
-/// or to no RAM.
+/// which is a capability fault on PCC with the target's address, raised at
+/// the jump as RVY envisages an extension may, or to no RAM.
 #[cold]
 #[inline(never)]
 fn jump_out(m: &mut Machine, t: u32, pc: u32, fuel: u32) -> Stop {
-    if pcc_at(m, pc).covers(t, 2) {
-        m.fault(C_IFAULT, t, pc, fuel)
-    } else {
-        capfault(m, CAPEX_REG_PCC, CAPEX_LENGTH, pc, fuel)
-    }
+    let cause = if pcc_at(m, pc).covers(t, 2) { C_IFAULT } else { C_CAP_FETCH };
+    m.fault(cause, t, pc, fuel)
 }
 
-/// A jump through a capability: `jalr`, `c.jr`, `c.jalr` and `cjalr`. The
-/// target is `cs1` plus the offset, and `cs1` must be tagged and
-/// executable, unsealed or a sentry, which is unsealed by the jump and may
-/// only be entered at its own address: with no offset, and at an even
-/// address, since a jump clears bit 0 of its target. PCC becomes `cs1` at
-/// the target; the link is a sentry for the next instruction. A macro, so
+/// A jump through a capability: `jalr`, `c.jr` and `c.jalr`. The target is
+/// `cs1` plus the offset, and `cs1` must be tagged and executable, unsealed
+/// or a sentry, which is unsealed by the jump and may only be entered at its
+/// own address: with no offset, and at an even address, since a jump clears
+/// bit 0 of its target. PCC becomes `cs1` at the target; the link is a
+/// sentry for the next instruction. A jump that would leave PCC unable to
+/// fetch faults where it stands, with the target's address. A macro, so
 /// that its `next!` tail-calls from the handler it is expanded in.
 macro_rules! jump {
     ($m:expr, $w:expr, $pc:expr, $fuel:expr, $s:expr, $off:expr, $d:expr) => {{
@@ -520,34 +504,22 @@ fn jump_form(w: u32) -> (u32, u32) {
     if w & 3 != 3 {
         // c.jr and c.jalr
         (rd(w), 0)
-    } else if w & 0x7f == 0x67 {
-        (rs1(w), imm_i(w))
     } else {
-        // cjalr
-        (rs1(w), 0)
+        (rs1(w), imm_i(w))
     }
 }
 
-/// A jump the fast test refused: the fault that says why.
+/// A jump the fast test refused: a capability fault on the target, or,
+/// when the capability allows the jump, an access fault for a target
+/// outside RAM.
 #[cold]
 #[inline(never)]
 fn jump_slow(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let (s, off) = jump_form(w);
     let c = m.reg(s);
     let t = c.addr.wrapping_add(off) & !1;
-    let code = if !c.tag {
-        CAPEX_TAG
-    } else if !c.enterable(off) {
-        CAPEX_SEAL
-    } else if !c.has(P_EX) {
-        CAPEX_EXECUTE
-    } else if !c.covers(t, 2) {
-        CAPEX_LENGTH
-    } else {
-        // The jump is allowed, so its target is outside RAM.
-        return m.fault(C_IFAULT, t, pc, fuel);
-    };
-    capfault(m, s, code, pc, fuel)
+    let ok = c.tag && c.enterable(off) && c.has(P_EX) && c.covers(t, 2);
+    m.fault(if ok { C_IFAULT } else { C_CAP_FETCH }, t, pc, fuel)
 }
 
 #[inline(never)]
@@ -603,7 +575,7 @@ unsafe fn st_data(m: &mut Machine, a: u32, f: u32, v: u32) {
 }
 
 /// The write barrier, asked before every store into RAM, with the register
-/// the store goes through, or `CAPEX_REG_DDC`.
+/// the store goes through, or `WHO_DDC`.
 #[inline(always)]
 fn barrier(m: &Machine, a: u32, sz: u32, who: u32) -> Option<u32> {
     if m.gcmode & 1 == 0 {
@@ -615,7 +587,7 @@ fn barrier(m: &Machine, a: u32, sz: u32, who: u32) -> Option<u32> {
 
 /// Load a capability from RAM at `a` into `d` through an authority whose
 /// metadata is `auth`. Without LC the tag is dropped; without LM a tagged,
-/// unsealed capability loses SD, SC and LM.
+/// unsealed capability loses SD, SC and LM, as RVY's `LY` drops W and LM.
 #[inline(always)]
 fn ld_cap(m: &mut Machine, d: u32, a: u32, auth: u64) {
     let c = unsafe { m.rd_cap(a) };
@@ -627,32 +599,18 @@ fn ld_cap(m: &mut Machine, d: u32, a: u32, auth: u64) {
     wc(m, d, c.addr, xm | if tag { TAG } else { 0 });
 }
 
+/// Store register `s` into the granule at `a` through an authority whose
+/// metadata is `auth`: its tag goes with it only if the authority has SC,
+/// as RVY's `SY` stores the tag only through C.
 #[inline(always)]
-unsafe fn st_cap(m: &mut Machine, a: u32, s: u32) {
+unsafe fn st_cap(m: &mut Machine, a: u32, s: u32, auth: u64) {
     let c = m.reg(s);
-    m.wr_cap(a, c);
+    m.wr_cap(a, Cap { tag: c.tag && auth & M_SC != 0, ..c });
 }
 
-/// The bytes an access moves, by its width as LOAD's funct3 numbers it.
+/// The bytes an access moves, by its width as LOAD's funct3 numbers it,
+/// with 3 for a capability.
 const SIZE: [u32; 8] = [1, 2, 4, 8, 1, 2, 0, 0];
-
-/// Whether the fast paths take width `f` at address `a`: any load width,
-/// a capability only when aligned. A store's widths stop at 3.
-#[inline(always)]
-fn fits(f: u32, a: u32) -> bool {
-    f < 6 && (f != 3 || a & 7 == 0)
-}
-
-/// What storing register `v` at width `f` needs: SC as well as SD for a
-/// tagged capability.
-#[inline(always)]
-fn store_needs(m: &Machine, f: u32, v: u32) -> u64 {
-    if f == 3 && h(m, v) & TAG != 0 {
-        M_SD | M_SC
-    } else {
-        M_SD
-    }
-}
 
 /// A checked load into `d` from RAM at `a`, at width `f`, through an
 /// authority whose metadata is `au`.
@@ -666,25 +624,27 @@ fn load(m: &mut Machine, d: u32, a: u32, f: u32, au: u64) {
     }
 }
 
-/// A checked store of register `v` into RAM at `a`, at width `f`.
+/// A checked store of register `v` into RAM at `a`, at width `f`, through
+/// an authority whose metadata is `au`.
 #[inline(always)]
-fn store(m: &mut Machine, a: u32, f: u32, v: u32) {
+fn store(m: &mut Machine, a: u32, f: u32, v: u32, au: u64) {
     if f == 3 {
-        unsafe { st_cap(m, a, v) };
+        unsafe { st_cap(m, a, v, au) };
     } else {
         let x = r(m, v);
         unsafe { st_data(m, a, f, x) };
     }
 }
 
-/// LOAD: `lb lh lw lbu lhu` and `lc`, through `cs1`, or through DDC when
-/// the base register is x0.
+/// LOAD: `lb lh lw lbu lhu`, through `cs1`, or through DDC when the base
+/// register is x0. funct3 3 is RV64's `ld` and Zilsd's, neither of which
+/// the machine has.
 #[inline(never)]
 fn op_load(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let s = rs1(w);
     let a = r(m, s).wrapping_add(imm_i(w));
     let f = f3(w);
-    if fits(f, a) {
+    if f < 6 && f != 3 {
         if let Some(au) = authority(m, s, M_LD, a, SIZE[f as usize]) {
             load(m, rd(w), a, f, au);
             next!(m, pc.wrapping_add(4), fuel - 1)
@@ -693,41 +653,43 @@ fn op_load(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     mem_slow(m, w, pc, fuel)
 }
 
-/// STORE: `sb sh sw` and `sc`, likewise.
+/// STORE: `sb sh sw`, likewise.
 #[inline(never)]
 fn op_store(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let s = rs1(w);
     let a = r(m, s).wrapping_add(imm_s(w));
     let (f, v) = (f3(w), rs2(w));
-    if f < 4 && fits(f, a) {
+    if f < 3 {
         let sz = SIZE[f as usize];
-        let need = store_needs(m, f, v);
-        if authority(m, s, need, a, sz).is_some() && barrier(m, a, sz, s).is_none() {
-            store(m, a, f, v);
-            next!(m, pc.wrapping_add(4), fuel - 1)
+        if let Some(au) = authority(m, s, M_SD, a, sz) {
+            if barrier(m, a, sz, s).is_none() {
+                store(m, a, f, v, au);
+                next!(m, pc.wrapping_add(4), fuel - 1)
+            }
         }
     }
     mem_slow(m, w, pc, fuel)
 }
 
-/// The explicit DDC forms, `sb.ddc` to `sc.ddc` and `lb.ddc` to `lhu.ddc`:
-/// `rs1` the integer address, the width in `rd` for a store and in `rs2`
-/// for a load.
+/// Xlm's loads and stores through DDC, `lb.ddc` to `ly.ddc` and `sb.ddc`
+/// to `sy.ddc`: `rs1` the integer address, the width in `rd` for a store
+/// and in `rs2` for a load.
 #[inline(never)]
 fn op_ddc(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let a = r(m, rs1(w));
     if w >> 25 == 0x7c {
         let (f, v) = (rd(w), rs2(w));
-        if f < 4 && fits(f, a) {
+        if f < 4 && (f != 3 || a & 7 == 0) {
             let sz = SIZE[f as usize];
-            if ddc_auth(m, store_needs(m, f, v), a, sz) && barrier(m, a, sz, CAPEX_REG_DDC).is_none() {
-                store(m, a, f, v);
+            if ddc_auth(m, M_SD, a, sz) && barrier(m, a, sz, WHO_DDC).is_none() {
+                let au = m.ddc.meta as u64;
+                store(m, a, f, v, au);
                 next!(m, pc.wrapping_add(4), fuel - 1)
             }
         }
     } else {
         let f = rs2(w);
-        if fits(f, a) && ddc_auth(m, M_LD, a, SIZE[f as usize]) {
+        if f < 6 && (f != 3 || a & 7 == 0) && ddc_auth(m, M_LD, a, SIZE[f as usize]) {
             let au = m.ddc.meta as u64;
             load(m, rd(w), a, f, au);
             next!(m, pc.wrapping_add(4), fuel - 1)
@@ -759,18 +721,17 @@ fn decode_mem(m: &Machine, w: u32) -> Option<Mem> {
     let base = |s: u32| if s == 0 { Via::Ddc } else { Via::Reg(s) };
     let at = |s: u32, off: u32| r(m, s).wrapping_add(off);
     Some(if w & 3 == 3 {
+        let (f, s) = (f3(w), rs1(w));
         match w & 0x7f {
-            0x03 if f3(w) < 6 => {
-                Mem { store: false, f: f3(w), via: base(rs1(w)), a: at(rs1(w), imm_i(w)), data: rd(w), len: 4 }
+            0x03 if f < 6 && f != 3 => Mem { store: false, f, via: base(s), a: at(s, imm_i(w)), data: rd(w), len: 4 },
+            0x23 if f < 3 => Mem { store: true, f, via: base(s), a: at(s, imm_s(w)), data: rs2(w), len: 4 },
+            0x7b if f == 1 => Mem { store: false, f: 3, via: base(s), a: at(s, imm_i(w)), data: rd(w), len: 4 },
+            0x7b if f == 2 => Mem { store: true, f: 3, via: base(s), a: at(s, imm_s(w)), data: rs2(w), len: 4 },
+            0x0b if f == 6 && w >> 25 == 0x7d && rs2(w) < 6 => {
+                Mem { store: false, f: rs2(w), via: Via::Ddc, a: r(m, s), data: rd(w), len: 4 }
             }
-            0x23 if f3(w) < 4 => {
-                Mem { store: true, f: f3(w), via: base(rs1(w)), a: at(rs1(w), imm_s(w)), data: rs2(w), len: 4 }
-            }
-            0x5b if w >> 25 == 0x7d && rs2(w) < 6 => {
-                Mem { store: false, f: rs2(w), via: Via::Ddc, a: r(m, rs1(w)), data: rd(w), len: 4 }
-            }
-            0x5b if w >> 25 == 0x7c && rd(w) < 4 => {
-                Mem { store: true, f: rd(w), via: Via::Ddc, a: r(m, rs1(w)), data: rs2(w), len: 4 }
+            0x0b if f == 6 && w >> 25 == 0x7c && rd(w) < 4 => {
+                Mem { store: true, f: rd(w), via: Via::Ddc, a: r(m, s), data: rs2(w), len: 4 }
             }
             _ => return None,
         }
@@ -790,25 +751,14 @@ fn decode_mem(m: &Machine, w: u32) -> Option<Mem> {
     })
 }
 
-/// Check an access of `sz` bytes at `a` through `c`, which register `who`
-/// names in a fault, needing the permissions `perms`, each with the code
-/// its absence is reported as. Answers whether the access is to RAM (else
-/// to a device), or the fault as a cause and `mtval`.
-fn check(m: &Machine, c: Cap, who: u32, perms: &[(u32, u32)], a: u32, sz: u32, store: bool) -> Result<bool, (u32, u32)> {
-    let cf = |code: u32| Err((C_CAP, (who << CAPEX_REG_SHIFT) | code));
-    if !c.tag {
-        return cf(CAPEX_TAG);
-    }
-    if c.is_sealed() {
-        return cf(CAPEX_SEAL);
-    }
-    for &(p, code) in perms {
-        if !c.has(p) {
-            return cf(code);
-        }
-    }
-    if !c.covers(a, sz) {
-        return cf(CAPEX_LENGTH);
+/// Check an access of `sz` bytes at `a` through `c` needing the permission
+/// `perm`, as RVY checks one: tag, seal, permission and bounds, any of
+/// which refused is a capability fault on the access, cause 33 for a load
+/// and 34 for a store, with the address. Answers whether the access is to
+/// RAM (else to a device), or the fault as a cause and `mtval`.
+fn check(m: &Machine, c: Cap, perm: u32, a: u32, sz: u32, store: bool) -> Result<bool, (u32, u32)> {
+    if !c.tag || c.is_sealed() || !c.has(perm) || !c.covers(a, sz) {
+        return Err((if store { C_CAP_STORE } else { C_CAP_LOAD }, a));
     }
     if m.in_ram(a, sz) {
         Ok(true)
@@ -827,25 +777,20 @@ fn mem_slow(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let Some(d) = decode_mem(m, w) else {
         return illegal(m, w, pc, fuel);
     };
+    // Integer addressing is Xlm's, in the encodings RVY reserves, and
+    // without SR they are the reserved encodings they would otherwise be.
     let (c, who) = match d.via {
         Via::Reg(s) => (m.reg(s), s),
-        Via::Ddc => {
-            if !m.pcc_has(P_SR) {
-                return capfault(m, CAPEX_REG_PCC, CAPEX_SYSREG, pc, fuel);
-            }
-            (m.ddc, CAPEX_REG_DDC)
-        }
+        Via::Ddc if !m.pcc_has(P_SR) => return illegal(m, w, pc, fuel),
+        Via::Ddc => (m.ddc, WHO_DDC),
     };
     let sz = SIZE[d.f as usize];
-    let perms: &[(u32, u32)] = match (d.store, d.f == 3 && m.reg(d.data).tag) {
-        (false, _) => &[(P_LD, CAPEX_LOAD)],
-        (true, false) => &[(P_SD, CAPEX_STORE)],
-        (true, true) => &[(P_SD, CAPEX_STORE), (P_SC, CAPEX_STORE_CAP)],
-    };
-    let ram = match check(m, c, who, perms, d.a, sz, d.store) {
+    let ram = match check(m, c, if d.store { P_SD } else { P_LD }, d.a, sz, d.store) {
         Ok(ram) => ram,
         Err((cause, tval)) => return m.fault(cause, tval, pc, fuel),
     };
+    // A tag belongs to an aligned granule, so a misaligned capability
+    // access cannot be emulated: it is an access fault, as RVY has it.
     if d.f == 3 && d.a & 7 != 0 {
         return m.fault(if d.store { C_SFAULT } else { C_LFAULT }, d.a, pc, fuel);
     }
@@ -858,6 +803,7 @@ fn mem_slow(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         m.tick(fuel);
         if d.f == 3 {
             let v = m.reg(d.data);
+            let v = if c.has(P_SC) { v } else { v.without_tag() };
             dev::write_cap(m, d.a, v);
         } else if d.store {
             let v = r(m, d.data);
@@ -876,7 +822,7 @@ fn mem_slow(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         if let Some(g) = barrier(m, d.a, sz, who) {
             return m.fault(C_BARRIER, g, pc, fuel);
         }
-        store(m, d.a, d.f, d.data);
+        store(m, d.a, d.f, d.data, c.meta as u64);
     } else {
         load(m, d.data, d.a, d.f, c.meta as u64);
     }
@@ -1061,8 +1007,11 @@ fn op_fence(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     next!(m, pc.wrapping_add(4), fuel - 1)
 }
 
-/// SYSTEM: `ecall`, `ebreak`, `mret`, `wfi` and Zicsr. Writing a CSR,
-/// reading a machine-level one, `mret` and `wfi` need SR in PCC.
+/// SYSTEM: `ecall`, `ebreak`, `mret`, `wfi` and Zicsr. `mret`, every CSR
+/// write and every read of a privileged CSR need SR in PCC, as RVY's ASR
+/// gates them, and without it are illegal instructions. A capability-wide
+/// CSR reads as a capability; `csrrw` writes one whole, and the other forms
+/// write its address.
 #[inline(never)]
 fn op_system(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let f = f3(w);
@@ -1071,7 +1020,7 @@ fn op_system(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         return match w {
             0x0000_0073 => m.fault(C_ECALL, 0, pc, fuel),
             0x0010_0073 => m.fault(C_BREAK, pc, pc, fuel),
-            0x3020_0073 | 0x1050_0073 if !sr => capfault(m, CAPEX_REG_PCC, CAPEX_SYSREG, pc, fuel),
+            0x3020_0073 if !sr => illegal(m, w, pc, fuel),
             0x3020_0073 => {
                 m.tick(fuel);
                 m.trap_return();
@@ -1094,12 +1043,29 @@ fn op_system(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     // ---- Zicsr ----
     m.tick(fuel);
     let csr = w >> 20;
-    let src = if f & 4 != 0 { rs1(w) } else { r(m, rs1(w)) };
-    let d = rd(w);
+    let (s, d) = (rs1(w), rd(w));
+    let src = if f & 4 != 0 { s } else { r(m, s) };
     // A csrrs/csrrc with x0 or a zero immediate only reads.
-    let writes = if f & 3 == 1 { true } else { rs1(w) != 0 };
-    if !sr && (writes || !Machine::csr_public(csr)) {
-        return capfault(m, CAPEX_REG_PCC, CAPEX_SYSREG, pc, fuel);
+    let writes = f & 3 == 1 || s != 0;
+    if (writes && Machine::csr_read_only(csr)) || (!sr && (writes || !Machine::csr_public(csr))) {
+        return illegal(m, w, pc, fuel);
+    }
+    if let Some(old) = m.csr_cap(csr) {
+        if writes {
+            match f {
+                1 => {
+                    let c = m.reg(s);
+                    m.csr_cap_write(csr, c, true);
+                }
+                5 => m.csr_cap_write(csr, Cap::int(src), false),
+                _ => {
+                    let a = if f & 3 == 2 { old.addr | src } else { old.addr & !src };
+                    m.csr_cap_write(csr, Cap::int(a), false);
+                }
+            }
+        }
+        wcap(m, d, old);
+        next!(m, pc.wrapping_add(4), fuel - 1)
     }
     let old = if d != 0 || writes { m.csr_read(csr) } else { 0 };
     if writes {
@@ -1120,11 +1086,11 @@ fn op_system(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     next!(m, pc.wrapping_add(4), fuel - 1)
 }
 
-// ======================================================= CHERI, opcode 0x5b
+// ============================================================ RVY-A, opcode 0x7b
 
 /// Move a capability's address by `d`, keeping its window when the new
 /// address is still inside it, which makes the move representable. A move
-/// of sp down is checked against the stack limit.
+/// of sp down is checked against the stack limit, which is Xlm's.
 #[inline(always)]
 fn inc_cap(m: &mut Machine, pc: u32, fuel: u32, d: u32, s: u32, off: u32) -> Result<(), Stop> {
     let k = (s & 31) as usize;
@@ -1143,12 +1109,12 @@ fn inc_cap(m: &mut Machine, pc: u32, fuel: u32, d: u32, s: u32, off: u32) -> Res
     Ok(())
 }
 
-/// `csetbounds`: bounds from `cs1`'s address for `len` bytes, refusing to
-/// round if `exact`. A request inside the window below 256 bytes is exact
-/// and its own window, unless `cs1` is headed: whether the result keeps HD
-/// is `Cap::set_bounds`'s to say.
+/// `YBNDSW` and `YBNDSRW`: bounds from `cs1`'s address for `len` bytes,
+/// exact or rounded outward, untagged where RVY says. A request inside the
+/// window below 256 bytes is exact and its own window, unless `cs1` is
+/// headed: whether the result keeps HD is `Cap::bounded`'s to say.
 #[inline(always)]
-fn csetbounds(m: &mut Machine, d: u32, s: u32, len: u32, exact: bool, pc: u32, fuel: u32) -> Result<(), Stop> {
+fn bounds(m: &mut Machine, d: u32, s: u32, len: u32, exact: bool) {
     let k = (s & 31) as usize;
     let hh = hw(m, s);
     let a = r(m, s);
@@ -1160,188 +1126,124 @@ fn csetbounds(m: &mut Machine, d: u32, s: u32, len: u32, exact: bool, pc: u32, f
         let t = a.wrapping_add(len);
         let meta = (hh as u32 & !BOUNDS_MASK) | ((t & 0xff) << 10) | (a & 0x3ff);
         wcw(m, d, a, meta as u64 | TAG, a, len);
-        return Ok(());
+        return;
     }
-    let c = m.reg(s);
-    let code = if !c.tag {
-        CAPEX_TAG
-    } else if c.is_sealed() {
-        CAPEX_SEAL
-    } else {
-        match c.set_bounds(len) {
-            None => CAPEX_LENGTH,
-            Some((_, false)) if exact => CAPEX_REPRESENTABLE,
-            Some((n, _)) => {
-                wcap(m, d, n);
-                return Ok(());
-            }
-        }
-    };
-    Err(capfault(m, s, code, pc, fuel))
+    let c = m.reg(s).bounded(len, exact);
+    wcap(m, d, c);
 }
 
-/// The CHERI instructions. funct3 1 and 2 are the immediate forms of
-/// `cincoffset` and `csetbounds`; funct3 0 is R-type, funct7 choosing.
+/// The length `YBNDSWI`'s nine-bit immediate encodes: 1 to 255 bytes, 256
+/// to 504 by eight, 512 to 4080 by sixteen, and 0 for 4096.
+pub fn ybndswi_len(imm: u32) -> u32 {
+    if imm == 0 {
+        4096
+    } else if imm & 0x100 == 0 {
+        imm & 0xff
+    } else if (imm >> 5) & 7 == 0 {
+        0x100 | ((imm & 0xf) << 4) | (((imm >> 4) & 1) << 3)
+    } else {
+        (imm & 0xff) << 4
+    }
+}
+
+/// RVY-A: the capability instructions RVY defines. funct3 1 is `LY` and 2
+/// `SY`, the commonest instructions there are, tested first and alone; 0 is
+/// R-type, funct7 choosing, 4 `YADDI` and 5 `YBNDSWI`.
 #[inline(never)]
-fn op_cheri(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
+fn op_rvy(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
+    let f = f3(w);
+    let s = rs1(w);
+    if f == 1 {
+        let a = r(m, s).wrapping_add(imm_i(w));
+        if a & 7 == 0 {
+            if let Some(au) = authority(m, s, M_LD, a, 8) {
+                ld_cap(m, rd(w), a, au);
+                next!(m, pc.wrapping_add(4), fuel - 1)
+            }
+        }
+        return mem_slow(m, w, pc, fuel);
+    }
+    if f == 2 {
+        let a = r(m, s).wrapping_add(imm_s(w));
+        if a & 7 == 0 {
+            if let Some(au) = authority(m, s, M_SD, a, 8) {
+                if barrier(m, a, 8, s).is_none() {
+                    unsafe { st_cap(m, a, rs2(w), au) };
+                    next!(m, pc.wrapping_add(4), fuel - 1)
+                }
+            }
+        }
+        return mem_slow(m, w, pc, fuel);
+    }
+    op_rvy_more(m, w, pc, fuel)
+}
+
+/// The rest of RVY-A.
+#[inline(never)]
+fn op_rvy_more(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let (d, s, t) = (rd(w), rs1(w), rs2(w));
     match f3(w) {
-        1 => {
+        4 => {
             if let Err(st) = inc_cap(m, pc, fuel, d, s, imm_i(w)) {
                 return st;
             }
         }
-        2 => {
-            if let Err(st) = csetbounds(m, d, s, w >> 20, false, pc, fuel) {
-                return st;
-            }
-        }
+        5 if w >> 29 == 7 => bounds(m, d, s, ybndswi_len((w >> 20) & 0x1ff), true),
         0 => match w >> 25 {
-            // `cincoffset` by x0 moves nothing: it is `cmove`, sealed or
-            // not.
-            0x11 if t == 0 => mv(m, d, s),
-            0x11 => {
+            // `YADD` by x0 is `YMV`: the whole capability, sealed or not.
+            0x03 if t == 0 => mv(m, d, s),
+            0x03 => {
                 let off = r(m, t);
                 if let Err(st) = inc_cap(m, pc, fuel, d, s, off) {
                     return st;
                 }
             }
-            0x7f if t == 0x0a => mv(m, d, s),
-            0x7f => return op_cheri_one(m, w, pc, fuel),
-            0x7c | 0x7d => return op_ddc(m, w, pc, fuel),
-            0x08 | 0x09 => {
+            0x1b | 0x23 => {
                 let len = r(m, t);
-                if let Err(st) = csetbounds(m, d, s, len, w >> 25 == 0x09, pc, fuel) {
-                    return st;
-                }
+                bounds(m, d, s, len, w >> 25 == 0x1b);
             }
-            _ => return op_cheri_two(m, w, pc, fuel),
+            _ => return op_rvy_r(m, w, pc, fuel),
         },
         _ => return illegal(m, w, pc, fuel),
     }
     next!(m, pc.wrapping_add(4), fuel - 1)
 }
 
-/// The two-operand CHERI instructions other than the hot ones.
+/// The R-type capability instructions other than the hot ones.
 #[cold]
 #[inline(never)]
-fn op_cheri_two(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
+fn op_rvy_r(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let (d, s, t) = (rd(w), rs1(w), rs2(w));
     let a = m.reg(s);
     let b = m.reg(t);
+    let sat = |v: u64| v.min(u32::MAX as u64) as u32;
     match w >> 25 {
-        0x01 => {
-            // cspecialrw: cs1 = c0 only reads.
-            if !m.pcc_has(P_SR) {
-                return capfault(m, CAPEX_REG_PCC, CAPEX_SYSREG, pc, fuel);
-            }
-            // PCC's address is the pc this instruction is at.
-            let old = if t == SCR_PCC { Some(pcc_at(m, pc)) } else { m.scr_read(t) };
-            let Some(old) = old else {
-                return illegal(m, w, pc, fuel);
-            };
-            if s != 0 {
-                m.scr_write(t, a);
-            }
-            wcap(m, d, old);
-        }
-        0x0b => {
-            // cseal: cs2 an SE authority whose address, in its bounds, is
-            // the otype, any from 1 to 15.
-            if let Err((reg, code)) = seal_check(a, s, b, t) {
-                return capfault(m, reg, code, pc, fuel);
-            }
-            if b.addr == 0 || b.addr > 15 {
-                return capfault(m, t, CAPEX_TYPE, pc, fuel);
-            }
-            wcap(m, d, a.seal(b.addr));
-        }
-        0x0c => {
-            // cunseal: any sealed capability, by an SE authority whose address
-            // is its otype. This is how the explorer looks inside a closure.
-            if !a.tag {
-                return capfault(m, s, CAPEX_TAG, pc, fuel);
-            }
-            if !a.is_sealed() {
-                return capfault(m, s, CAPEX_SEAL, pc, fuel);
-            }
-            if !b.tag {
-                return capfault(m, t, CAPEX_TAG, pc, fuel);
-            }
-            if b.is_sealed() {
-                return capfault(m, t, CAPEX_SEAL, pc, fuel);
-            }
-            if !b.has(P_SE) {
-                return capfault(m, t, CAPEX_UNSEAL, pc, fuel);
-            }
-            if !b.covers(b.addr, 1) {
-                return capfault(m, t, CAPEX_LENGTH, pc, fuel);
-            }
-            if b.addr != a.otype() {
-                return capfault(m, t, CAPEX_TYPE, pc, fuel);
-            }
-            wcap(m, d, a.unseal());
-        }
-        0x0d => wcap(m, d, a.and_perms(b.addr)),
-        0x10 => wcap(m, d, a.with_addr(b.addr)),
-        0x14 => w_(m, d, a.addr.wrapping_sub(b.addr)),
-        0x16 => wcap(m, d, Cap { addr: a.addr, meta: b.addr, tag: false }),
-        0x1d => {
-            // cbuildcap: cs2's bits, tagged again if cs1 could have made
-            // them. No instruction makes bits that are not the encoding of
-            // their own bounds.
-            if !a.tag {
-                return capfault(m, s, CAPEX_TAG, pc, fuel);
-            }
-            if a.is_sealed() {
-                return capfault(m, s, CAPEX_SEAL, pc, fuel);
-            }
-            if !b.canonical() {
-                return capfault(m, t, CAPEX_REPRESENTABLE, pc, fuel);
-            }
-            let (bb, bt) = b.bounds();
-            let (ab, at) = a.bounds();
-            if bb < ab || bt > at {
-                return capfault(m, s, CAPEX_LENGTH, pc, fuel);
-            }
-            if b.perms() & !a.perms() != 0 || (b.has(P_HD) && !a.heads_at(bb)) {
-                return capfault(m, s, CAPEX_SOFT_PERM, pc, fuel);
-            }
-            if b.otype() > OT_SENTRY {
-                return capfault(m, t, CAPEX_TYPE, pc, fuel);
-            }
-            wcap(m, d, Cap { tag: true, ..b });
-        }
-        0x20 => w_(m, d, b.is_subset_of(&a) as u32),
-        0x21 => w_(m, d, (a == b) as u32),
+        0x01 => wcap(m, d, Cap { addr: a.addr, meta: b.addr, tag: false }),
+        // YSH1ADD, YSH2ADD, YSH3ADD: cs2 moved by rs1 shifted.
+        0x05 | 0x0d | 0x15 => wcap(m, d, b.inc(a.addr << (((w >> 28) & 3) + 1))),
+        0x06 => w_(m, d, (a == b) as u32),
+        0x07 => wcap(m, d, b.unsealed_within(&a)),
+        0x0b => wcap(m, d, a.with_addr(b.addr)),
+        0x0e => w_(m, d, b.is_subset_of(&a) as u32),
+        0x0f => wcap(m, d, b.built_by(&a)),
+        0x13 => wcap(m, d, a.clear_perms(b.addr)),
+        0x17 if s == 0 => wcap(m, d, b.sealed_entry()),
+        0x17 => wcap(m, d, b.sealed_by(&a)),
+        0x1f => wcap(m, d, b.unsealed_by(&a)),
+        0x78 if t == 0 => w_(m, d, ram(a.addr)),
+        0x7a => match t {
+            0 => w_(m, d, a.base()),
+            1 => w_(m, d, a.perm_bits()),
+            2 => w_(m, d, sat(a.top())),
+            3 => w_(m, d, sat(a.len())),
+            4 => w_(m, d, a.tag as u32),
+            5 => w_(m, d, a.otype()),
+            7 => w_(m, d, a.meta),
+            _ => return illegal(m, w, pc, fuel),
+        },
         _ => return illegal(m, w, pc, fuel),
     }
     next!(m, pc.wrapping_add(4), fuel - 1)
-}
-
-/// What sealing `a` (register `s`) with the authority `b` (register `t`)
-/// needs: both tagged and unsealed, and `b` an SE capability whose address
-/// is inside it.
-fn seal_check(a: Cap, s: u32, b: Cap, t: u32) -> Result<(), (u32, u32)> {
-    if !a.tag {
-        return Err((s, CAPEX_TAG));
-    }
-    if a.is_sealed() {
-        return Err((s, CAPEX_SEAL));
-    }
-    if !b.tag {
-        return Err((t, CAPEX_TAG));
-    }
-    if b.is_sealed() {
-        return Err((t, CAPEX_SEAL));
-    }
-    if !b.has(P_SE) {
-        return Err((t, CAPEX_SEAL_PERM));
-    }
-    if !b.covers(b.addr, 1) {
-        return Err((t, CAPEX_LENGTH));
-    }
-    Ok(())
 }
 
 /// The header word of the object `c` names, if `c` is headed and the header
@@ -1354,138 +1256,134 @@ fn header(m: &Machine, c: Cap) -> Option<u32> {
     Some(unsafe { m.rd32(b - 8) })
 }
 
-/// The one-operand CHERI instructions, the rs2 field choosing.
-#[inline(never)]
-fn op_cheri_one(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
-    let (d, s) = (rd(w), rs1(w));
-    let c = m.reg(s);
-    let sat = |v: u64| v.min(u32::MAX as u64) as u32;
-    match rs2(w) {
-        0x00 => w_(m, d, c.perms()),
-        0x01 => w_(m, d, c.otype()),
-        0x02 => w_(m, d, c.base()),
-        0x03 => w_(m, d, sat(c.len())),
-        0x04 => w_(m, d, c.tag as u32),
-        0x05 => w_(m, d, c.is_sealed() as u32),
-        0x06 => w_(m, d, c.addr.wrapping_sub(c.base())),
-        0x08 => w_(m, d, rrl(c.addr)),
-        0x09 => w_(m, d, ram(c.addr)),
-        0x0b => wcap(m, d, c.without_tag()),
-        0x0c => jump!(m, w, pc, fuel, s, 0, d),
-        0x0f => w_(m, d, c.addr),
-        0x11 => {
-            let code = if !c.tag {
-                CAPEX_TAG
-            } else if c.is_sealed() {
-                CAPEX_SEAL
-            } else if !c.has(P_EX) {
-                CAPEX_EXECUTE
-            } else {
-                wcap(m, d, c.seal(OT_SENTRY));
-                next!(m, pc.wrapping_add(4), fuel - 1)
-            };
-            return capfault(m, s, code, pc, fuel);
-        }
-        0x17 => w_(m, d, c.meta),
-        0x18 => w_(m, d, sat(c.top())),
-        0x1c => {
-            // csealclo: anyone may seal their own closure object.
-            let code = if !c.tag {
-                CAPEX_TAG
-            } else if c.is_sealed() {
-                CAPEX_SEAL
-            } else if header(m, c).map(|hd| hd & 0xff) != Some(T_CLOSURE) {
-                CAPEX_TYPE
-            } else {
-                wcap(m, d, c.seal(OT_CLOSURE));
-                next!(m, pc.wrapping_add(4), fuel - 1)
-            };
-            return capfault(m, s, code, pc, fuel);
-        }
-        _ => return illegal(m, w, pc, fuel),
-    }
-    next!(m, pc.wrapping_add(4), fuel - 1)
-}
-
-// ===================================================== Xlm custom-0: references
+// ================================================================ Xlm, custom-0
 
 /// A pair in the processor's sense: tagged, unsealed, not headed. nil is
 /// one. The bounds check of the access does the rest.
 const PAIR_MASK: u64 = TAG | M_OT | M_HD;
 
-/// The custom-0 opcode space: references.
+/// custom-0: the Lisp instructions, every one a CHERI operation and a Lisp
+/// type check.
 ///
 /// ```text
 ///     f3 0  lref  rd, imm(rs1)   the capability at imm in a pair
-///     f3 1  vkind rd, rs1        the kind of a value
+///     f3 1  sref  rs2, imm(rs1)  store into a pair; nil is refused
 ///     f3 2  lvar  rd, imm(rs1)   a symbol's slot, refusing the unbound marker
-///     f3 3  jcl   rd, rs1        call a closure
-///     f3 4  sref  rs2, imm(rs1)  store into a pair; nil is refused
-///     f3 5  lhdr  rd, rs1, type  an object's length, checking its type
-///     f3 6  beqx  rs1, rs2, off  branch if identical
-///     f3 7  bnex  rs1, rs2, off  branch if not
+///     f3 3  beqx  rs1, rs2, off  branch if identical
+///     f3 4  bnex  rs1, rs2, off  branch if not
+///     f3 5  fixnum immediates    imm[11:10] the operation, imm[9:0] signed
+///     f3 6  R-type, funct7 the operation: fixnums, calls, kinds, DDC
+///     f3 7  indexed access       funct7 = the form << 4 | the type
 /// ```
 ///
 /// `car` and `cdr` are offsets 0 and 8 of `lref`. The fast paths are the
 /// common case, a reference through a capability that is what it should be
-/// to a slot inside its bounds; everything else is decided in `ref_slow`.
+/// to a slot inside its bounds; everything else is decided in `xlm_slow`.
 #[inline(never)]
-fn op_ref(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
+fn op_xlm(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
+    become (unsafe { *XLM.get_unchecked(f3(w) as usize) })(m, w, pc, fuel)
+}
+
+/// custom-0 by funct3, each its own handler, so that each has its own
+/// branch sites as each opcode does.
+static XLM: [Handler; 8] = [op_lref, op_sref, op_lvar, op_beqx, op_beqx, op_fixi, op_xlm_r, op_index];
+
+#[inline(never)]
+fn op_lref(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let s = rs1(w);
     let k = (s & 31) as usize;
-    match f3(w) {
-        0 => {
-            let hh = hw(m, s);
-            let a = r(m, s).wrapping_add(imm_i(w));
-            if hh & (READY | PAIR_MASK | M_LD | M_LC) == READY | TAG | M_LD | M_LC
-                && a & 7 == 0
-                && in_win(a, m.wb[k], m.wl[k], 8)
-            {
-                ld_cap(m, rd(w), a, hh);
-                next!(m, pc.wrapping_add(4), fuel - 1)
-            }
-        }
-        4 => {
-            let hh = hw(m, s);
-            let a = r(m, s).wrapping_add(imm_s(w));
-            if hh & (READY | PAIR_MASK | M_SD | M_SC) == READY | TAG | M_SD | M_SC
-                && a & 7 == 0
-                && in_win(a, m.wb[k], m.wl[k], 8)
-                && barrier(m, a, 8, s).is_none()
-            {
-                unsafe { st_cap(m, a, rs2(w)) };
-                next!(m, pc.wrapping_add(4), fuel - 1)
-            }
-        }
-        2 => {
-            // lvar: a symbol is a headed object whose header, in the granule
-            // below its window, says so. The unbound marker is the trap's to
-            // report.
-            let hh = hw(m, s);
-            let a = r(m, s).wrapping_add(imm_i(w));
-            let (b, l) = (m.wb[k], m.wl[k]);
-            if hh & (READY | TAG | M_OT | M_HD | M_LD | M_LC) == READY | TAG | M_HD | M_LD | M_LC
-                && a & 7 == 0
-                && in_win(a, b, l, 8)
-                && b >= 8
-                && unsafe { m.rd32(b - 8) } & 0xff == T_SYMBOL
-            {
-                let v = unsafe { m.rd_cap(a) };
-                if v.tag || v.meta != IMM_UNBOUND {
-                    ld_cap(m, rd(w), a, hh);
-                    next!(m, pc.wrapping_add(4), fuel - 1)
-                }
-            }
-        }
-        6 | 7 => {
-            let (a, b) = (rs1(w), rs2(w));
-            let same = r(m, a) == r(m, b) && (h(m, a) ^ h(m, b)) & !READY == 0;
-            if same == (f3(w) == 6) {
-                branch_to!(m, pc.wrapping_add(imm_b(w)), pc, fuel)
-            }
+    let hh = hw(m, s);
+    let a = r(m, s).wrapping_add(imm_i(w));
+    if hh & (READY | PAIR_MASK | M_LD | M_LC) == READY | TAG | M_LD | M_LC
+        && a & 7 == 0
+        && in_win(a, m.wb[k], m.wl[k], 8)
+    {
+        ld_cap(m, rd(w), a, hh);
+        next!(m, pc.wrapping_add(4), fuel - 1)
+    }
+    xlm_slow(m, w, pc, fuel)
+}
+
+#[inline(never)]
+fn op_sref(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
+    let s = rs1(w);
+    let k = (s & 31) as usize;
+    let hh = hw(m, s);
+    let a = r(m, s).wrapping_add(imm_s(w));
+    if hh & (READY | PAIR_MASK | M_SD) == READY | TAG | M_SD
+        && a & 7 == 0
+        && in_win(a, m.wb[k], m.wl[k], 8)
+        && barrier(m, a, 8, s).is_none()
+    {
+        unsafe { st_cap(m, a, rs2(w), hh) };
+        next!(m, pc.wrapping_add(4), fuel - 1)
+    }
+    xlm_slow(m, w, pc, fuel)
+}
+
+/// lvar: a symbol is a headed object whose header, in the granule below its
+/// window, says so. The unbound marker is the trap's to report.
+#[inline(never)]
+fn op_lvar(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
+    let s = rs1(w);
+    let k = (s & 31) as usize;
+    let hh = hw(m, s);
+    let a = r(m, s).wrapping_add(imm_i(w));
+    let (b, l) = (m.wb[k], m.wl[k]);
+    if hh & (READY | TAG | M_OT | M_HD | M_LD | M_LC) == READY | TAG | M_HD | M_LD | M_LC
+        && a & 7 == 0
+        && in_win(a, b, l, 8)
+        && b >= 8
+        && unsafe { m.rd32(b - 8) } & 0xff == T_SYMBOL
+    {
+        let v = unsafe { m.rd_cap(a) };
+        if v.tag || v.meta != IMM_UNBOUND {
+            ld_cap(m, rd(w), a, hh);
             next!(m, pc.wrapping_add(4), fuel - 1)
         }
-        1 => {
+    }
+    xlm_slow(m, w, pc, fuel)
+}
+
+/// beqx and bnex: whether two registers are identical, tag, metadata and
+/// address.
+#[inline(never)]
+fn op_beqx(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
+    let (a, b) = (rs1(w), rs2(w));
+    let same = r(m, a) == r(m, b) && (h(m, a) ^ h(m, b)) & !READY == 0;
+    if same == (f3(w) == 3) {
+        branch_to!(m, pc.wrapping_add(imm_b(w)), pc, fuel)
+    }
+    next!(m, pc.wrapping_add(4), fuel - 1)
+}
+
+/// custom-0's R-type instructions, by funct7:
+///
+/// ```text
+///     0x00..0x15  fop   rd, rs1, rs2   two fixnums (see `op_fop`)
+///     0x18..0x1a  fshi  rd, rs1, n     a fixnum shifted by the rs2 field:
+///                                      sll, srl, sra
+///     0x20  jcl    rd, rs1             call a closure
+///     0x21  vkind  rd, rs1             the kind of a value
+///     0x22  lhdr   rd, rs1, type       an object's length, its type checked
+///                                      against the rs2 field (0 any)
+///     0x23  sealcl cd, cs1             seal a closure object as a closure
+///     0x24  npair  cd, cs1             the next pair of a cons run
+///     0x40 | from  retag rd, rs1, to   rs1 untagged of kind `from` (31 any);
+///                                      rd its address with metadata `to`
+///     0x7c  sb.ddc .. sy.ddc           stores through DDC, rd the width
+///     0x7d  lb.ddc .. lhu.ddc          loads through DDC, rs2 the width
+/// ```
+#[inline(never)]
+fn op_xlm_r(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
+    let s = rs1(w);
+    let k = (s & 31) as usize;
+    if w >> 25 <= 0x15 {
+        return op_fop(m, w, pc, fuel);
+    }
+    match w >> 25 {
+        0x20 => return op_jcl(m, w, pc, fuel),
+        0x21 => {
             // vkind, of everything the window settles: an untagged value,
             // nil, a pair, an object. The rest is `kind`'s to decide.
             let hh = hw(m, s);
@@ -1501,24 +1399,58 @@ fn op_ref(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
                     .filter(|_| (OBJ_BASE + 8..OBJ_END + 8).contains(&b))
                     .map(|hd| KIND_OBJECT + (hd & 0xff))
             };
-            if let Some(v) = v.filter(|_| imm_i(w) == 0) {
+            if let Some(v) = v.filter(|_| rs2(w) == 0) {
                 w_(m, rd(w), v);
                 next!(m, pc.wrapping_add(4), fuel - 1)
             }
         }
-        5 => {
-            // lhdr
+        0x22 => {
             let hh = hw(m, s);
-            let want = imm_i(w) & 0xfff;
+            let want = rs2(w);
             if let Some(hd) = headed(m, k, hh).filter(|hd| want == 0 || hd & 0xff == want) {
                 w_(m, rd(w), hd >> 8);
                 next!(m, pc.wrapping_add(4), fuel - 1)
             }
         }
-        3 => return op_jcl(m, w, pc, fuel),
-        _ => {}
+        0x24 => {
+            // npair: the run's next sixteen bytes, as YBNDSWI would bound
+            // them; a pair is short enough to be its own window.
+            let hh = hw(m, s);
+            let a = r(m, s);
+            if hh & (READY | TAG | M_OT | M_HD) == READY | TAG && in_win(a, m.wb[k], m.wl[k], 16) {
+                let meta = (hh as u32 & !BOUNDS_MASK) | ((a.wrapping_add(16) & 0xff) << 10) | (a & 0x3ff);
+                wcw(m, rd(w), a, meta as u64 | TAG, a, 16);
+                next!(m, pc.wrapping_add(4), fuel - 1)
+            }
+        }
+        0x7c | 0x7d => return op_ddc(m, w, pc, fuel),
+        0x40..=0x5f => {
+            let from = (w >> 25) & 31;
+            let hh = h(m, s);
+            if hh & TAG != 0 || (from != 31 && hh as u32 != from) {
+                return m.fault(C_TYPE, s, pc, fuel);
+            }
+            let a = r(m, s);
+            wc(m, rd(w), a, rs2(w) as u64);
+            next!(m, pc.wrapping_add(4), fuel - 1)
+        }
+        0x18..=0x1a => {
+            if h(m, s) != 0 {
+                return m.fault(C_TYPE, s, pc, fuel);
+            }
+            let (x, sh) = (r(m, s), rs2(w));
+            let v = match w >> 25 {
+                0x18 => x << sh,
+                0x19 => x >> sh,
+                _ => ((x as i32) >> sh) as u32,
+            };
+            w_(m, rd(w), v);
+            next!(m, pc.wrapping_add(4), fuel - 1)
+        }
+        0x23 => {}
+        _ => return illegal(m, w, pc, fuel),
     }
-    ref_slow(m, w, pc, fuel)
+    xlm_slow(m, w, pc, fuel)
 }
 
 /// The header word of the object register `k` holds, read through its
@@ -1532,70 +1464,89 @@ fn headed(m: &Machine, k: usize, hh: u64) -> Option<u32> {
     ok.then(|| unsafe { m.rd32(b - 8) })
 }
 
+/// What an Xlm load or store of the granule at `a` through `c`, register
+/// `s`, does after its type check: the checks and the faults of `LY` or
+/// `SY`, with the barrier before a store.
+fn xlm_access(m: &mut Machine, c: Cap, s: u32, a: u32, store: bool, v: u32, pc: u32, fuel: u32) -> Option<Stop> {
+    match check(m, c, if store { P_SD } else { P_LD }, a, 8, store) {
+        Ok(true) if a & 7 == 0 => {}
+        Ok(_) => return Some(m.fault(if store { C_SFAULT } else { C_LFAULT }, a, pc, fuel)),
+        Err((cause, tval)) => return Some(m.fault(cause, tval, pc, fuel)),
+    }
+    if store {
+        if let Some(g) = barrier(m, a, 8, s) {
+            return Some(m.fault(C_BARRIER, g, pc, fuel));
+        }
+        unsafe { st_cap(m, a, v, c.meta as u64) };
+    } else {
+        ld_cap(m, v, a, c.meta as u64);
+    }
+    None
+}
+
 #[cold]
 #[inline(never)]
-fn ref_slow(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
+fn xlm_slow(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let s = rs1(w);
     let c = m.reg(s);
     let pair = c.tag && !c.is_sealed() && !c.has(P_HD);
-    match f3(w) {
-        0 | 4 => {
-            let store = f3(w) == 4;
+    match (f3(w), w >> 25) {
+        (0, _) | (1, _) => {
+            let store = f3(w) == 1;
             if !pair || (store && c == Cap::NIL) {
                 return m.fault(C_TYPE, s, pc, fuel);
             }
             let a = c.addr.wrapping_add(if store { imm_s(w) } else { imm_i(w) });
-            let perms: &[(u32, u32)] = if store {
-                &[(P_SD, CAPEX_STORE), (P_SC, CAPEX_STORE_CAP)]
-            } else {
-                &[(P_LD, CAPEX_LOAD), (P_LC, CAPEX_LOAD_CAP)]
-            };
-            match check(m, c, s, perms, a, 8, store) {
-                Ok(true) if a & 7 == 0 => {}
-                Ok(_) => return m.fault(if store { C_SFAULT } else { C_LFAULT }, a, pc, fuel),
-                Err((cause, tval)) => return m.fault(cause, tval, pc, fuel),
-            }
-            if store {
-                if let Some(g) = barrier(m, a, 8, s) {
-                    return m.fault(C_BARRIER, g, pc, fuel);
-                }
-                unsafe { st_cap(m, a, rs2(w)) };
-            } else {
-                ld_cap(m, rd(w), a, c.meta as u64);
+            let v = if store { rs2(w) } else { rd(w) };
+            if let Some(st) = xlm_access(m, c, s, a, store, v, pc, fuel) {
+                return st;
             }
         }
-        1 => {
-            if imm_i(w) != 0 {
-                return illegal(m, w, pc, fuel);
-            }
-            let k = kind(m, c);
-            w_(m, rd(w), k);
-        }
-        2 => {
+        (2, _) => {
             // lvar: a symbol's slot.
             if !(c.tag && !c.is_sealed() && header(m, c).map(|hd| hd & 0xff) == Some(T_SYMBOL)) {
                 return m.fault(C_TYPE, s, pc, fuel);
             }
             let a = c.addr.wrapping_add(imm_i(w));
-            match check(m, c, s, &[(P_LD, CAPEX_LOAD), (P_LC, CAPEX_LOAD_CAP)], a, 8, false) {
-                Ok(true) if a & 7 == 0 => {}
-                Ok(_) => return m.fault(C_LFAULT, a, pc, fuel),
-                Err((cause, tval)) => return m.fault(cause, tval, pc, fuel),
+            if a & 7 == 0 && m.in_ram(a, 8) && c.covers(a, 8) {
+                let v = unsafe { m.rd_cap(a) };
+                if !v.tag && v.meta == IMM_UNBOUND {
+                    return m.fault(C_TYPE, s, pc, fuel);
+                }
             }
-            let v = unsafe { m.rd_cap(a) };
-            if !v.tag && v.meta == IMM_UNBOUND {
-                return m.fault(C_TYPE, s, pc, fuel);
+            if let Some(st) = xlm_access(m, c, s, a, false, rd(w), pc, fuel) {
+                return st;
             }
-            ld_cap(m, rd(w), a, c.meta as u64);
         }
-        5 => {
+        (_, 0x21) => {
+            if rs2(w) != 0 {
+                return illegal(m, w, pc, fuel);
+            }
+            let k = kind(m, c);
+            w_(m, rd(w), k);
+        }
+        (_, 0x22) => {
             // lhdr: an object, a closure included, of the type asked for.
-            let want = imm_i(w) & 0xfff;
+            let want = rs2(w);
             let ok = c.tag && (c.otype() == OT_UNSEALED || c.otype() == OT_CLOSURE);
             match header(m, c) {
                 Some(hd) if ok && (want == 0 || hd & 0xff == want) => w_(m, rd(w), hd >> 8),
                 _ => return m.fault(C_TYPE, s, pc, fuel),
             }
+        }
+        (_, 0x23) => {
+            // sealcl: anyone may seal their own closure object.
+            if !(c.tag && !c.is_sealed() && header(m, c).map(|hd| hd & 0xff) == Some(T_CLOSURE)) {
+                return m.fault(C_TYPE, s, pc, fuel);
+            }
+            wcap(m, rd(w), c.seal(OT_CLOSURE));
+        }
+        (_, 0x24) => {
+            // npair: a run with no pair left, or no run.
+            if !(pair && c.covers(c.addr, 16)) {
+                return m.fault(C_RUN, s, pc, fuel);
+            }
+            wcap(m, rd(w), c.bounded(16, true));
         }
         _ => return illegal(m, w, pc, fuel),
     }
@@ -1626,12 +1577,15 @@ pub fn kind(m: &Machine, c: Cap) -> u32 {
     }
 }
 
-/// `jcl rd, rs1`: call a closure. rs1 must be sealed as a closure, with LD
-/// and LC, since the entry is loaded through it; it is left unsealed for the
-/// callee, rd gets a sentry for the next instruction, and PCC becomes the
-/// entry capability in the closure's slot 0, which must be tagged and
-/// executable. The entry's window comes from the window cache when the same
-/// entry was called before.
+/// `jcl rd, rs1`: call a closure. rs1 must be sealed as a closure; the
+/// entry is loaded through it, as `LY` would load it, so a closure without
+/// LD or LC, or one whose slot 0 is outside its bounds, is a load fault on
+/// that slot. rs1 is left unsealed for the callee, rd gets a sentry for the
+/// next instruction, and PCC becomes the entry, which must be tagged,
+/// enterable and executable with its first instruction inside its bounds,
+/// or the call faults where it stands, as RVY envisages a jump may, with
+/// the entry's address. The entry's window comes from the window cache
+/// when the same entry was called before.
 #[inline(never)]
 fn op_jcl(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let s = rs1(w);
@@ -1640,37 +1594,25 @@ fn op_jcl(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     if hh & (TAG | M_OT) != TAG | M_CLOSURE {
         return m.fault(C_TYPE, s, pc, fuel);
     }
-    // The entry is a capability loaded through the closure.
-    if hh & (M_LD | M_LC) != M_LD | M_LC {
-        return capfault(m, s, if hh & M_LD == 0 { CAPEX_LOAD } else { CAPEX_LOAD_CAP }, pc, fuel);
-    }
     let a = r(m, s);
-    if a & 7 != 0 || !in_win(a, m.wb[k], m.wl[k], 8) {
-        return if m.reg(s).covers(a, 8) {
+    if hh & (M_LD | M_LC) != M_LD | M_LC || !in_win(a, m.wb[k], m.wl[k], 8) {
+        return if hh & (M_LD | M_LC) == M_LD | M_LC && m.reg(s).covers(a, 8) {
             m.fault(C_LFAULT, a, pc, fuel)
         } else {
-            capfault(m, s, CAPEX_LENGTH, pc, fuel)
+            m.fault(C_CAP_LOAD, a, pc, fuel)
         };
+    }
+    if a & 7 != 0 {
+        return m.fault(C_LFAULT, a, pc, fuel);
     }
     let e = unsafe { m.rd_cap(a) };
+    let t = e.addr & !1;
     if !e.tag || !e.enterable(0) || !e.has(P_EX) {
-        let code = if !e.tag {
-            CAPEX_TAG
-        } else if !e.enterable(0) {
-            CAPEX_SEAL
-        } else {
-            CAPEX_EXECUTE
-        };
-        return capfault(m, s, code, pc, fuel);
+        return m.fault(C_CAP_FETCH, t, pc, fuel);
     }
     let (b, l) = m.window(e);
-    let t = e.addr & !1;
     if !in_win(t, b, l, 2) {
-        return if e.covers(t, 2) {
-            m.fault(C_IFAULT, t, pc, fuel)
-        } else {
-            capfault(m, s, CAPEX_LENGTH, pc, fuel)
-        };
+        return m.fault(if e.covers(t, 2) { C_IFAULT } else { C_CAP_FETCH }, t, pc, fuel);
     }
     m.xm[k] &= !M_OT;
     link(m, rd(w), pc.wrapping_add(4));
@@ -1681,15 +1623,13 @@ fn op_jcl(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     next!(m, t, fuel - 1)
 }
 
-// ================================================ Xlm custom-1: indexed access
-
-/// The custom-1 opcode space: indexed access to an object, checked.
+/// Indexed access to an object, checked: funct3 7 of custom-0.
 ///
 /// ```text
-///     funct7   the type the object must be, or 0 for any object
-///     funct3   bit 0 store, bit 1 byte, bit 2 the index is an immediate
+///     funct7   the form << 4 | the type the object must be, or 0 for any
+///     form     bit 0 store, bit 1 byte, bit 2 the index is an immediate
 ///     rs1      the object: headed and unsealed
-///     rs2      the index, a fixnum, or with funct3 bit 2 the five-bit
+///     rs2      the index, a fixnum, or with form bit 2 the five-bit
 ///              immediate in its place
 ///     rd       where the result goes, or, for a store, the value to write
 /// ```
@@ -1705,7 +1645,7 @@ fn op_jcl(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 fn op_index(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let s = rs1(w);
     let k = (s & 31) as usize;
-    let f = f3(w);
+    let f = w >> 29;
     let hh = hw(m, s);
     if hh & (TAG | M_OT | M_HD) != TAG | M_HD {
         return m.fault(C_TYPE, s, pc, fuel);
@@ -1719,7 +1659,7 @@ fn op_index(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     }
     let hdr = unsafe { m.rd32(base - 8) };
     let ty = hdr & 0xff;
-    let want = w >> 25;
+    let want = (w >> 25) & 15;
     let bytes = ty == T_STRING || ty == T_BYTES;
     if (want != 0 && ty != want) || bytes != (f & 2 != 0) {
         return m.fault(C_TYPE, s, pc, fuel);
@@ -1736,26 +1676,13 @@ fn op_index(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         return m.fault(C_RANGE, ireg, pc, fuel);
     }
     let (a, sz) = if bytes { (base.wrapping_add(i), 1) } else { (base.wrapping_add(i << 3), 8) };
-    if !in_win(a, base, wl, sz) {
-        return capfault(m, s, CAPEX_LENGTH, pc, fuel);
+    let store = f & 1 != 0;
+    let perm = if store { M_SD } else { M_LD };
+    if !in_win(a, base, wl, sz) || hh & perm != perm {
+        return m.fault(if store { C_CAP_STORE } else { C_CAP_LOAD }, a, pc, fuel);
     }
     let v = rd(w);
-    let perm = match (f & 1 != 0, bytes) {
-        (false, false) => M_LD,
-        (false, true) => M_LD,
-        (true, false) if h(m, v) & TAG != 0 => M_SD | M_SC,
-        (true, _) => M_SD,
-    };
-    if hh & perm != perm {
-        let code = match perm {
-            M_LD => CAPEX_LOAD,
-            M_SD => CAPEX_STORE,
-            _ if hh & M_SD == 0 => CAPEX_STORE,
-            _ => CAPEX_STORE_CAP,
-        };
-        return capfault(m, s, code, pc, fuel);
-    }
-    if f & 1 != 0 {
+    if store {
         if let Some(g) = barrier(m, a, sz, s) {
             return m.fault(C_BARRIER, g, pc, fuel);
         }
@@ -1763,7 +1690,7 @@ fn op_index(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
             let b = r(m, v) as u8;
             unsafe { m.wr8(a, b) };
         } else {
-            unsafe { st_cap(m, a, v) };
+            unsafe { st_cap(m, a, v, hh) };
         }
     } else if bytes {
         let b = unsafe { m.rd8(a) } as u32;
@@ -1774,70 +1701,51 @@ fn op_index(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     next!(m, pc.wrapping_add(4), fuel - 1)
 }
 
-// ========================================================= Xlm custom-3: fixnums
-
-/// The custom-3 opcode space: fixnums. Every operand must be untagged with
-/// metadata 0, which is one comparison of `xm` against zero; the register
-/// that is not lands in `mtval`.
+/// The fixnum immediates, funct3 5 of custom-0. The operand must be a
+/// fixnum (untagged, metadata 0), which is one comparison of `xm` against
+/// zero; the result is one.
 ///
 /// ```text
-///     f3 0  faddi  rd, rs1, imm   wrapping
-///     f3 1  faddio rd, rs1, imm   overflow traps
-///     f3 2  fandi  rd, rs1, imm
-///     f3 3  fori   rd, rs1, imm
-///     f3 4  fshi   rd, rs1, imm   imm[4:0] the amount, imm[6:5] 0 sll 1 srl 2 sra
-///     f3 5  fop    rd, rs1, rs2   R-type, funct7 the operation
-///     f3 7  retag  rd, rs1, imm   rs1 untagged of kind imm[11:6] (63 any);
-///                                 rd its address with metadata imm[5:0]
+///     imm[11:10] 0  faddi   rd, rs1, imm   wrapping
+///                1  faddio  rd, rs1, imm   cause 26 on overflow
+///                2  fandi   rd, rs1, imm
+///                3  fori    rd, rs1, imm
 /// ```
 ///
-/// Overflow is cause 26 and the handler widens the result into a bignum;
-/// division by zero is cause 27.
+/// The immediate is imm[9:0], sign-extended: -512 to 511.
 #[inline(never)]
-fn op_fix(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
+fn op_fixi(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let s = rs1(w);
-    let f = f3(w);
-    if f == 7 {
-        let k = (w >> 26) & 63;
-        let hh = h(m, s);
-        if hh & TAG != 0 || (k != 63 && hh as u32 != k) {
-            return m.fault(C_TYPE, s, pc, fuel);
-        }
-        let a = r(m, s);
-        wc(m, rd(w), a, ((w >> 20) & 63) as u64);
-        next!(m, pc.wrapping_add(4), fuel - 1)
-    }
     if h(m, s) != 0 {
         return m.fault(C_TYPE, s, pc, fuel);
     }
     let x = r(m, s) as i32;
-    let i = imm_i(w) as i32;
-    let v = match f {
+    let i = ((w << 2) as i32) >> 22;
+    let v = match w >> 30 {
         0 => x.wrapping_add(i),
         1 => match x.checked_add(i) {
             Some(v) => v,
             None => return m.fault(C_OVER, 0, pc, fuel),
         },
         2 => x & i,
-        3 => x | i,
-        4 => {
-            let sh = (i as u32) & 31;
-            match ((i as u32) >> 5) & 3 {
-                0 => ((x as u32) << sh) as i32,
-                1 => ((x as u32) >> sh) as i32,
-                2 => x >> sh,
-                _ => return illegal(m, w, pc, fuel),
-            }
-        }
-        5 => return op_fop(m, w, pc, fuel),
-        _ => return illegal(m, w, pc, fuel),
+        _ => x | i,
     };
     w_(m, rd(w), v as u32);
     next!(m, pc.wrapping_add(4), fuel - 1)
 }
 
-/// `fop`: two fixnums.
-#[inline(never)]
+/// `fop`: two fixnums, funct7 the operation.
+///
+/// ```text
+///     0x00 add 0x01 sub 0x02 mul 0x03 div 0x04 rem 0x05 and 0x06 or 0x07 xor
+///     0x08 addo 0x09 subo 0x0a mulo          cause 26 on overflow
+///     0x10 sll 0x11 srl 0x12 sra             amount taken mod 32
+///     0x13 lt 0x14 ltu 0x15 eq               the fixnum 0 or 1
+/// ```
+///
+/// Overflow is cause 26 and the handler widens the result into a bignum;
+/// division by zero is cause 27.
+#[inline(always)]
 fn op_fop(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let (s, t) = (rs1(w), rs2(w));
     if h(m, s) != 0 {
@@ -1890,7 +1798,7 @@ fn op_fop(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 
 // =========================================================== compressed, Q0
 
-/// `c.addi4spn`: `cincoffset rd', csp, imm`.
+/// `c.addi4spn`: `YADDI rd', csp, imm`.
 #[inline(never)]
 fn c_addi4spn(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let i = ciw_imm(w);
@@ -1915,6 +1823,7 @@ fn c_lw(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     mem_slow(m, w, pc, fuel)
 }
 
+/// `c.ly`, in `c.flw`'s slot.
 #[inline(never)]
 fn c_lc(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let s = rcs(w, 7);
@@ -1939,26 +1848,31 @@ fn c_sw(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     mem_slow(m, w, pc, fuel)
 }
 
+/// `c.sy`, in `c.fsw`'s slot.
 #[inline(never)]
 fn c_sc(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let s = rcs(w, 7);
     let a = r(m, s).wrapping_add(clc_imm(w));
-    let v = rcs(w, 2);
-    let need = if h(m, v) & TAG != 0 { M_SD | M_SC } else { M_SD };
-    if a & 7 == 0 && auth(m, s, need, a, 8) && barrier(m, a, 8, s).is_none() {
-        unsafe { st_cap(m, a, v) };
+    if a & 7 == 0 && auth(m, s, M_SD, a, 8) && barrier(m, a, 8, s).is_none() {
+        let au = h(m, s);
+        unsafe { st_cap(m, a, rcs(w, 2), au) };
         next!(m, pc.wrapping_add(2), fuel - 1)
     }
     mem_slow(m, w, pc, fuel)
 }
 
 // =========================================================== compressed, Q1
+// Every Zca HINT is a nop, as RVY has them: `c.addi` and the shifts by
+// nothing leave their register as it was, tag and all, rather than making
+// it an integer.
 
 #[inline(never)]
 fn c_addi(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
-    let d = rd(w);
-    let v = r(m, d).wrapping_add(ci_imm(w));
-    w_(m, d, v);
+    let (d, i) = (rd(w), ci_imm(w));
+    if i != 0 {
+        let v = r(m, d).wrapping_add(i);
+        w_(m, d, v);
+    }
     next!(m, pc.wrapping_add(2), fuel - 1)
 }
 
@@ -1978,7 +1892,7 @@ fn c_li(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     next!(m, pc.wrapping_add(2), fuel - 1)
 }
 
-/// `c.lui`, and `c.addi16sp`, which is `cincoffset csp, csp, imm`.
+/// `c.lui`, and `c.addi16sp`, which is `YADDI csp, csp, imm`.
 #[inline(never)]
 fn c_lui(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let d = rd(w);
@@ -1992,7 +1906,7 @@ fn c_lui(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         }
     } else {
         let i = ci_imm(w) << 12;
-        if i == 0 || d == 0 {
+        if i == 0 {
             return illegal(m, w, pc, fuel);
         }
         w_(m, d, i);
@@ -2004,9 +1918,13 @@ fn c_lui(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 fn c_alu(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let d = rcs(w, 7);
     let a = r(m, d);
+    let sh = (((w >> 2) & 31) | (bit(w, 12) << 5)) & 31;
+    if (w >> 10) & 3 < 2 && sh == 0 {
+        next!(m, pc.wrapping_add(2), fuel - 1)
+    }
     let v = match (w >> 10) & 3 {
-        0 => a >> ((((w >> 2) & 31) | (bit(w, 12) << 5)) & 31),
-        1 => ((a as i32) >> ((((w >> 2) & 31) | (bit(w, 12) << 5)) & 31)) as u32,
+        0 => a >> sh,
+        1 => ((a as i32) >> sh) as u32,
         2 => a & ci_imm(w),
         _ => {
             if bit(w, 12) != 0 {
@@ -2056,8 +1974,10 @@ fn c_bnez(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 fn c_slli(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let d = rd(w);
     let sh = (((w >> 2) & 31) | (bit(w, 12) << 5)) & 31;
-    let v = r(m, d) << sh;
-    w_(m, d, v);
+    if sh != 0 {
+        let v = r(m, d) << sh;
+        w_(m, d, v);
+    }
     next!(m, pc.wrapping_add(2), fuel - 1)
 }
 
@@ -2073,6 +1993,7 @@ fn c_lwsp(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     mem_slow(m, w, pc, fuel)
 }
 
+/// `c.lysp`, in `c.flwsp`'s slot.
 #[inline(never)]
 fn c_lcsp(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let d = rd(w);
@@ -2096,19 +2017,19 @@ fn c_swsp(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     mem_slow(m, w, pc, fuel)
 }
 
+/// `c.sysp`, in `c.fswsp`'s slot.
 #[inline(never)]
 fn c_scsp(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let a = r(m, 2).wrapping_add(scsp_imm(w));
-    let v = (w >> 2) & 31;
-    let need = if h(m, v) & TAG != 0 { M_SD | M_SC } else { M_SD };
-    if a & 7 == 0 && auth(m, 2, need, a, 8) && barrier(m, a, 8, 2).is_none() {
-        unsafe { st_cap(m, a, v) };
+    if a & 7 == 0 && auth(m, 2, M_SD, a, 8) && barrier(m, a, 8, 2).is_none() {
+        let au = h(m, 2);
+        unsafe { st_cap(m, a, (w >> 2) & 31, au) };
         next!(m, pc.wrapping_add(2), fuel - 1)
     }
     mem_slow(m, w, pc, fuel)
 }
 
-/// `c.jr`, `c.mv` (`cmove`), `c.ebreak`, `c.jalr` and `c.add`.
+/// `c.jr`, `c.mv` (`C.YMV`), `c.ebreak`, `c.jalr` and `c.add`.
 #[inline(never)]
 fn c_jalr_mv(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let d = rd(w);
@@ -2143,7 +2064,7 @@ fn c_jalr_mv(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
 pub fn watch_backtrace(m: &Machine) -> String {
     let mut out = String::new();
     let mut s0 = m.x[8];
-    let mut code = code_containing(m, m.mepcc.addr).unwrap_or(m.reg(9));
+    let mut code = code_containing(m, m.mepc.addr).unwrap_or(m.reg(9));
     for _ in 0..12 {
         out.push_str(&name_of(m, code));
         out.push_str(" <- ");
@@ -2235,15 +2156,15 @@ fn store_target(m: &Machine, w: u32) -> Option<(u32, u32, u32)> {
     if w & 3 != 3 {
         return None;
     }
-    let f = f3(w);
+    let (f, form) = (f3(w), w >> 29);
     match w & 0x7f {
         // sref
-        0x0b if f == 4 => Some((r(m, rs1(w)).wrapping_add(imm_s(w)), 8, r(m, rs2(w)))),
+        0x0b if f == 1 => Some((r(m, rs1(w)).wrapping_add(imm_s(w)), 8, r(m, rs2(w)))),
         // an indexed store, the value in rd
-        0x2b if f & 1 != 0 => {
+        0x0b if f == 7 && form & 1 != 0 => {
             let base = m.reg(rs1(w)).base();
-            let i = if f & 4 != 0 { rs2(w) } else { r(m, rs2(w)) };
-            if f & 2 == 0 {
+            let i = if form & 4 != 0 { rs2(w) } else { r(m, rs2(w)) };
+            if form & 2 == 0 {
                 Some((base.wrapping_add(i << 3), 8, r(m, rd(w))))
             } else {
                 Some((base.wrapping_add(i), 1, r(m, rd(w))))
@@ -2299,10 +2220,10 @@ fn watch_hook(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         } else {
             None
         };
-        // mret returns to whatever the trap stub put in MEPCC; for a
+        // mret returns to whatever the trap stub put in `mepc`; for a
         // resuming task that is slot 0 of its context. A wrong value is a
         // jump without a jump instruction, so it is checked too.
-        let mret = if w == 0x3020_0073 { Some(m.mepcc.addr) } else { None };
+        let mret = if w == 0x3020_0073 { Some(m.mepc.addr) } else { None };
         let jump_bad = match jump.map(|(_, t)| t).or(mret) {
             Some(t) => !in_code(t),
             None => false,
@@ -2316,7 +2237,7 @@ fn watch_hook(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
                 eprintln!("jump watch: pc {pc:#x} insn {w:#010x} through x{s} to {t:#x}");
             }
             if let Some(t) = mret {
-                eprintln!("mret watch: pc {pc:#x} returns to {t:#x}; context at {:#x}", m.mscratchc.addr);
+                eprintln!("mret watch: pc {pc:#x} returns to {t:#x}; context at {:#x}", m.mscratch.addr);
             }
             eprintln!("  before: {:#010x} at pc {:#x}", m.watch_prev_w, m.watch_prev);
             for i in 0..32 {
@@ -2340,11 +2261,11 @@ pub static TABLE: [Handler; 64] = [
     c_addi4spn, // 000 c.addi4spn
     op_bad,     // 001 c.fld
     c_lw,       // 010 c.lw
-    c_lc,       // 011 c.lc (c.flw)
+    c_lc,       // 011 c.ly (c.flw)
     op_bad,     // 100 reserved
     op_bad,     // 101 c.fsd
     c_sw,       // 110 c.sw
-    c_sc,       // 111 c.sc (c.fsw)
+    c_sc,       // 111 c.sy (c.fsw)
     // ---- quadrant 1 (tok 8..15) ----
     c_addi, // 000 c.nop / c.addi
     c_jal,  // 001 c.jal
@@ -2358,25 +2279,25 @@ pub static TABLE: [Handler; 64] = [
     c_slli,    // 000 c.slli
     op_bad,    // 001 c.fldsp
     c_lwsp,    // 010 c.lwsp
-    c_lcsp,    // 011 c.lcsp (c.flwsp)
+    c_lcsp,    // 011 c.lysp (c.flwsp)
     c_jalr_mv, // 100 c.jr/c.mv/c.ebreak/c.jalr/c.add
     op_bad,    // 101 c.fsdsp
     c_swsp,    // 110 c.swsp
-    c_scsp,    // 111 c.scsp (c.fswsp)
+    c_scsp,    // 111 c.sysp (c.fswsp)
     // ---- tok 24..31: unreachable, op[1:0]==3 means 32-bit ----
     op_bad, op_bad, op_bad, op_bad, op_bad, op_bad, op_bad, op_bad,
     // ---- 32-bit, indexed by opcode[6:2] (tok 32..63) ----
-    op_load,   // 00 LOAD, and lc
+    op_load,   // 00 LOAD
     op_bad,    // 01 LOAD-FP
-    op_ref,    // 02 custom-0: references
+    op_xlm,    // 02 custom-0: Xlm
     op_fence,  // 03 MISC-MEM
     op_imm,    // 04 OP-IMM
-    op_auipc,  // 05 AUIPCC
+    op_auipc,  // 05 AUIPC
     op_bad,    // 06 OP-IMM-32
     op_bad,    // 07 (48-bit)
-    op_store,  // 08 STORE, and sc
+    op_store,  // 08 STORE
     op_bad,    // 09 STORE-FP
-    op_index,  // 0a custom-1: indexed access, bounds and type checked
+    op_bad,    // 0a RVY-C, reserved
     op_bad,    // 0b AMO
     op_reg,    // 0c OP
     op_lui,    // 0d LUI
@@ -2388,7 +2309,7 @@ pub static TABLE: [Handler; 64] = [
     op_bad,    // 13 NMADD
     op_bad,    // 14 OP-FP
     op_bad,    // 15 reserved
-    op_cheri,  // 16 custom-2: CHERI
+    op_bad,    // 16 RVY-B, reserved
     op_bad,    // 17 (48-bit)
     op_branch, // 18 BRANCH
     op_jalr,   // 19 JALR
@@ -2396,6 +2317,6 @@ pub static TABLE: [Handler; 64] = [
     op_jal,    // 1b JAL
     op_system, // 1c SYSTEM
     op_bad,    // 1d reserved
-    op_fix,    // 1e custom-3: fixnums
+    op_rvy,    // 1e RVY-A
     op_bad,    // 1f (>= 80-bit)
 ];
