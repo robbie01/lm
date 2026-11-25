@@ -200,29 +200,46 @@
   $a0 $a1 $a2 $a3 $a4 $a5 $a6 $a7 $gp $ra $s0 $s1 $s2 $sp $t0 $t1 $t2 $t3 $t4
   $t5 $t6 $tp $zero
   ;; s3..s11 are where a leaf function keeps its locals.
-  $s3 $s4 $s5 $s6 $s7 $s8 $s9 $s10 $s11 code-object gensym-label label asm-len
-  literal make-assembler asm-origin place place-at asm-buf asm-fixups
-  asm-labels asm-nlits set-asm-len! set-asm-origin! csr-cycle
-  csr-mcause csr-mepc csr-mie csr-mscratch csr-mstatus csr-mtval csr-mtvec csr-stklim
-  csr-gcmode
-  i-add i-addi i-addi-w i-and i-andi i-beq i-beqz i-bge i-blt i-bltu i-bne
-  i-bnez
-  i-call-reg i-car i-cdr i-lref i-lobj i-lvar i-sref i-sobj i-csrrci i-csrrs i-csrrsi i-csrrw i-div i-ecall
-  i-j i-jal i-jr i-lbu i-ldx i-ldxb i-ldxbi i-ldxi i-lhu i-li i-li-fixnum
-  i-lw i-mret
-  i-mul i-mv i-not i-or i-ori i-rem i-ret i-sb i-seqz i-set-car i-set-cdr
-  i-sh i-sll i-slli i-slt i-snez i-sra i-srai i-srl i-srli i-stx i-stxb
-  i-stxbi i-stxi
-  i-sub i-sw i-sw-abs i-wfi i-xor i-xori literal-offset op-index
-  ;; the B extension
+  $s3 $s4 $s5 $s6 $s7 $s8 $s9 $s10 $s11
+  ;; the assembler and placing its code
+  make-assembler asm-buf asm-len asm-labels asm-fixups asm-origin asm-nlits
+  asm-privileged set-asm-len! set-asm-origin! set-asm-privileged!
+  label gensym-label literal literal-offset place place-at code-object
+  ;; CSRs, SCRs, and the opcodes a trap handler decodes
+  csr-cycle csr-cycleh csr-gcmode csr-mcause csr-mepc csr-mie csr-mip
+  csr-mscratch csr-mstatus csr-mtval csr-mtvec csr-stklim
+  scr-ddc scr-mepcc scr-mscratchc scr-mtcc scr-mtdc scr-pcc
+  op-cheri op-fixnum op-index op-ref
+  ;; RV32IMC
+  i-add i-addi i-addi-w i-and i-andi i-auipc i-beq i-beqz i-bge i-bgeu i-bgt
+  i-ble i-blt i-bltu i-bne i-bnez i-branch i-call-reg i-csrrc i-csrrci
+  i-csrrs i-csrrsi i-csrrw i-csrrwi i-div i-divu i-ebreak i-ecall i-j i-jal
+  i-jalr i-jr i-la i-lb i-lbu i-lc i-lh i-lhu i-li i-lui i-lw i-mret i-mul
+  i-mulh i-mulhsu i-mulhu i-mv i-neg i-nop i-not i-or i-ori i-rem i-remu
+  i-ret i-sb i-sc i-seqz i-sh i-sll i-slli i-slt i-slti i-sltiu i-sltu i-snez
+  i-sra i-srai i-srl i-srli i-sub i-sw i-wfi i-xor i-xori
+  i-lc-abs i-lw-abs i-sc-abs i-sw-abs
+  ;; the B extension and Zicond
   i-andn i-bclr i-bclri i-bext i-bexti i-binv i-binvi i-bset i-bseti
   i-clz i-cpop i-ctz i-czero-eqz i-czero-nez i-max i-maxu i-min i-minu
   i-orcb i-orn i-rev8 i-rol i-ror i-rori i-sextb i-sexth i-sh1add i-sh2add
   i-sh3add i-xnor i-zexth
-  ;; custom-2 and custom-3
-  i-fadd i-faddi i-faddo i-fand i-fandi i-fdiv i-feq i-flt i-fltu i-fmul
-  i-fmulo i-for i-fori i-frem i-fshi i-fsll i-fsra i-fsrl i-fsub i-fsubo
-  i-fxor i-tlb i-tlw i-tsb i-tsw op-fixnum op-tagged
+  ;; CHERI
+  i-candperm i-cbuildcap i-ccleartag i-cgetaddr i-cgetbase i-cgethigh
+  i-cgetlen i-cgetoffset i-cgetperm i-cgetsealed i-cgettag i-cgettop
+  i-cgettype i-cincoffset i-cincoffsetimm i-cincoffsetimm-w i-cjalr i-cmove
+  i-cram i-crrl i-cseal i-csealclo i-csealentry i-cseqx i-csetaddr
+  i-csetbounds i-csetboundsexact i-csetboundsimm i-csethigh i-cspecialrw
+  i-csub i-ctestsubset i-cunseal
+  i-lb-ddc i-lbu-ddc i-lc-ddc i-lh-ddc i-lhu-ddc i-lw-ddc
+  i-sb-ddc i-sc-ddc i-sh-ddc i-sw-ddc
+  ;; Xlm: references, indexed access, fixnums
+  i-beqx i-bnex i-car i-cdr i-jcl i-lhdr i-lref i-lvar i-set-car i-set-cdr
+  i-sref i-vkind
+  i-ldx i-ldxb i-ldxbi i-ldxi i-stx i-stxb i-stxbi i-stxi
+  i-fadd i-faddi i-faddio i-faddo i-fand i-fandi i-fdiv i-feq i-flt i-fltu
+  i-fmul i-fmulo i-for i-fori i-frem i-fshi i-fsll i-fsra i-fsrl i-fsub
+  i-fsubo i-fxor i-retag
 ))
 
 (in-package compiler)
