@@ -170,18 +170,19 @@
 (define gc-clear-w 1024)
 
 ;; n bytes of zero at `at`, as rows the blitter can take, through the
-;; collector's own descriptor ring.
+;; collector's own descriptor ring. The chip is handed the root narrowed to
+;; the rows and to storing data.
 (define (gc-fill-bytes at n)
   (if (%<= n 0)
       nil
       (let* ((w (if (%< n gc-clear-w) n gc-clear-w))
              (rows (%/ (%+ n (%- w 1)) w))
              (b (gc-blit-descriptor)))
-        (poke (%+ b bl-dst) at)
-        (poke (%+ b bl-w) w)
-        (poke (%+ b bl-h) rows)
-        (poke (%+ b bl-dmod) w)
-        (poke (%+ b bl-val) 0)
+        (%cap-st! b bl-dst (%cap-and-perms (%cap-bounds (%from-addr at) (%* rows w)) perm-sd))
+        (%cap-st-word! b bl-w w)
+        (%cap-st-word! b bl-h rows)
+        (%cap-st-word! b bl-dmod w)
+        (%cap-st-word! b bl-val 0)
         (blit-go b op-fill)))
   nil)
 

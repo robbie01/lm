@@ -24,8 +24,8 @@ everything else it is waiting for.
 
 **Shared, and made safe by its arguments: `blit`.** Sixty or more blits a
 frame from several tasks into disjoint memory. Safety comes from a blit
-naming bitmaps rather than addresses; arbitration is the chip walking a
-chain of descriptors.
+naming bitmaps rather than addresses, and the chip being handed their
+capabilities; arbitration is the chip walking a chain of descriptors.
 
 ## The two numbers that shape the design
 
@@ -61,8 +61,10 @@ A device is a value:
 
 The record holds the page's address as a number, which is no authority.
 `dev-page` makes the authority, only for the task that holds the device: a
-capability bounded exactly to the device's page, with LD and SD and nothing
-else. `dev-ld` and `dev-st!` load and store a register through it. A
+capability bounded exactly to the device's page, with LD, SD and SC and
+nothing else. `dev-ld` and `dev-st!` load and store a register through it,
+and a capability store through it writes a capability register; every
+other register refuses a capability, and no register hands one out. A
 register offset that leaves the page is a bounds fault, never a store into
 the next device. The capability is made afresh for each use and never
 stored: a record field or a global can be read by anyone who can name it,
@@ -93,10 +95,10 @@ into the pixels at `bm-index`, with no `unsafe` anywhere. The collector
 frees the pixels when the last reference goes, so closing a window drops it
 from the list and does nothing else, and a new bitmap starts zeroed.
 
-The chips address memory by number. Objects never move, so the address of
-the pixels is good for ever, which is what lets it be handed to the display
-register and the blitter; only privileged code can write a number into
-either.
+The chips that write memory are handed capabilities, not numbers, and
+refuse what those do not cover (below). The display chip only reads: it is
+handed the pixels' address, which is good for ever because objects never
+move, and `gfx-show` takes it from a bitmap.
 
 Drawing goes through a rastport: a bitmap, an origin and a clip region.
 Every rectangle is clipped to the region and the bitmap before a descriptor
@@ -104,31 +106,54 @@ is filled.
 
 ## The blitter
 
-The chip walks a chain of descriptors in memory. A descriptor is a block of
-`blit-list-size` words: source, destination, width, height, the two
-strides, a value, the operation, a status word, a link, and a clip
-rectangle, every one of them a machine word, the addresses among them
-numbers the chip follows. Each task has a ring of eight in the pool; an
-interrupt server has a ring of its own. Filling a descriptor is a store by
-number, so `blit-descriptor` and `blit-go` are unsafe names, and the
-rectangle calls in hw.lisp, which take bitmaps, are how everything else
-blits.
+The chip walks a chain of descriptors in memory. A descriptor is
+`blit-list-size` bytes: three capability slots, the source, the destination
+and the link to the next descriptor, each written with a capability store
+so that it keeps its tag; then width, height, the two strides, a value, the
+operation, a line's two ends and a done word, each a machine word. The list
+register is a capability register: a capability store of a descriptor's
+capability starts the chain there. Each task has a ring of eight in the
+pool, and the collector has one of its own.
+
+The chip checks what it is handed, as the processor would. It loads each
+slot the way `lc` does through the descriptor's own capability, which must
+cover the descriptor with LD and SD. A source needs LD and a destination SD,
+and LD as well for an operation that reads it; every byte the rectangle
+touches, rows and stride included, must lie inside the capability's bounds,
+and for a line every byte of the box its ends make. A transfer that fails
+any check is not made: its done word is `blit-refused-src` or
+`blit-refused-dst` with the capability fault in the low byte, and the status
+register keeps `blit-status-refused` until it is cleared. The descriptor
+completes either way, so nothing waits for a blit that will never land. A
+link that is no capability ends the chain; one the chip may not follow ends
+it as refused. When it finishes a descriptor the chip clears its three
+capability slots, so a finished descriptor holds no authority over anything.
+
+A bitmap's pixels are handed over as their byte object's capability, moved
+to the first pixel, so building a descriptor names no memory by number. A
+descriptor is pool memory that can hold capabilities, and the pool is not
+traced, so `blit-descriptor` and `blit-go` stay unsafe names: rings, the
+chain's tail and the waiting functions name descriptors by number, and the
+capability to one exists only while it is being filled. The rectangle calls
+in hw.lisp, which take bitmaps, are how everything else blits.
 
 A blit is queued by filling the next free descriptor of the ring and linking
 it onto the chain. Linking follows the hardware rule: link only while the
 chip is busy, then look again and start it if it went idle without taking
 the new descriptor. The chip reads a descriptor's link before it writes the
-descriptor's status, so a descriptor its owner sees as done is one the chip
-has finished with.
+descriptor's done word, so a descriptor its owner sees as done is one the
+chip has finished with.
 
 The chip is asynchronous. A commit returns in a few hundred cycles; the
 transfer happens on the chip's clock, charged by bandwidth: a row is a burst
 with a setup cost, partial words at the ends of rows cost whole words, XOR,
 AND, OR and ADD read the destination before writing it, and each descriptor
 is fetched and written back. The constants are at the top of
-`src/dev/blit.rs` and assume a 32-bit path at the machine's clock, about
-80 MB/s. Until a transfer lands the destination holds its old contents.
-When a descriptor finishes the chip writes a done word into it.
+`src/dev/blit.rs` and assume a 32-bit path to memory at the machine's clock:
+the blitter is a bus master on the processor's bus, so its cost is in
+processor cycles, and the machine is a 200 MHz part, so that is 800 MB/s. A
+refused transfer costs only its descriptor. Until a transfer lands the
+destination holds its old contents.
 
 `blit-sync` waits for this task's last descriptor: a short spin, then a
 sleep on `sigf-blit`, which `gfx.driver`'s interrupt server raises when the
@@ -167,9 +192,11 @@ language.
 bytes)`, `(flush)`, `(size)`, `(exclusive job)`. Synchronous to the caller,
 asynchronous to the device: the driver sleeps on the completion interrupt
 and the client sleeps on its reply. A transfer names a byte object, never an
-address, and the driver checks that the blocks fit before it takes the
-object's address; the controller writes memory by number, so the transfers
-by address underneath are unsafe names. `exclusive` runs a job
+address, and the controller is handed the object's capability: its buffer
+register is a capability register, a read into the buffer needs SD and a
+write from it LD, and every byte of the blocks must lie inside its bounds,
+or the command moves nothing and answers `disk-refused`. A read clears the
+tags of what it fills. Nothing in disk.lisp is unsafe. `exclusive` runs a job
 in the driver's task with interrupts off, with every transfer watched rather
 than slept through; saving an image is one such job, since the collection
 and every region's write must happen with nothing else running.
@@ -217,13 +244,11 @@ directly.
 ## What this does not do
 
 - Privileged code still names memory by number. The collector, the kernel
-  and the chips can write anywhere, and so can the blitter and the disk
-  controller on behalf of whoever programmed them; what keeps that to those
-  few files is that programming them is an unsafe name.
-- Capabilities do not reach the chips. The blitter and the disk controller
-  follow the numbers in a descriptor or a request, so a wrong one written by
-  privileged code lands anywhere in RAM; `LM_BLIT_GUARD` checks blits, and
-  is off by default.
+  and the image writer can write anywhere, and can hand a chip a capability
+  made from the root; the chip then moves whatever that capability covers.
+  What keeps that to those few files is that the root is an unsafe name.
+- The display chip reads its picture by number. It only reads, and it is
+  pointed only at a bitmap's pixels.
 - Ports have no priority, so a low-priority client's request sits in front
   of a high-priority client's. `wait-ports` starts its scan one port further
   along on each call, so a busy client cannot starve a quiet one.
@@ -234,6 +259,9 @@ directly.
   the granularity rule above matters.
 
 `(devices)` checks ownership at the prompt and `(drivers)` checks the
-drivers end to end; the latter needs a disk. `(capabilities)` checks, among
-the rest of what the processor guarantees, that a device's capability is
-its page and no more.
+drivers end to end, a disk read into a buffer too small for it among them;
+the latter needs a disk. `(blitting)` checks that the blitter refuses a
+descriptor whose capabilities are too small, a number or missing a
+permission, and moves nothing. `(capabilities)` checks, among the rest of
+what the processor guarantees, that a device's capability is its page and
+no more, and that only a capability register takes a capability.

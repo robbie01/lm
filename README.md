@@ -322,7 +322,8 @@ Every slot is 8 bytes: a global, a value slot of an object, a frame slot, a
 saved register. A low global that holds an address holds it as a fixnum,
 and authority to what it names comes from DDC; one that holds a value holds
 the value. Every slot below `0x800` is one load or store off `x0`. Tags exist
-for RAM only: a device page holds no capabilities.
+for RAM only: a device page hands out no capabilities, and only the chips'
+two capability registers take one.
 
 ## Calling
 
@@ -676,8 +677,8 @@ Every device is a 4 KiB page of 32-bit registers at `0xF0000000` and up:
 
 A device page lies outside RAM, and the only way to it is by number, which
 is a privilege. A device is a value with an owner: `dev-page` makes a
-capability bounded exactly to the device's page, with LD and SD and nothing
-else, and only for the task that holds the device; `dev-ld` and `dev-st!`
+capability bounded exactly to the device's page, with LD, SD and SC and
+nothing else, and only for the task that holds the device; `dev-ld` and `dev-st!`
 go through it, so a register offset past the page is a bounds fault, not a
 store into the next device. The capability is made for each use and never
 stored. A task that ends gives back what it held. `sys` and `timer` are the
@@ -705,9 +706,13 @@ an origin and a clip region.
 **The blitter** is asynchronous. A task fills a descriptor from its own ring
 of eight and links it onto the chain; the chip walks the chain on its own
 clock, charged by bandwidth, and writes a done word back into each
-descriptor. A descriptor names memory by number, so filling one is an unsafe
-name, and the rectangle calls in hw.lisp, which take bitmaps, are how
-everything else blits. `blit-sync` waits for this task's last descriptor,
+descriptor. A descriptor's source, destination and link are capabilities,
+a bitmap's pixels among them, and the chip refuses a transfer they do not
+cover, moving nothing and saying why in the done word; the disk controller
+likewise takes its buffer as a capability. A descriptor is pool memory, so
+taking and linking one are unsafe names, and the rectangle calls in
+hw.lisp, which take bitmaps, are how everything else blits. `blit-sync`
+waits for this task's last descriptor,
 sleeping on `sigf-blit` if the wait would be long; `blit-drain` waits for
 the chip. Anything that reads or writes pixels directly calls `blit-sync`
 first.
@@ -872,7 +877,6 @@ LM_FNPROF=1 lmforge rebuild     the same profile of a rebuild
 LM_ISAPROF=1 lmforge rebuild    the same histogram of a rebuild
 LM_TRACE_TRAPS=1 lmforge rebuild  every trap a rebuild takes
 LM_FORGE_PROF=1 lmforge build   which interpreted function the forge spends its time in
-LM_BLIT_GUARD=1       check every blit against the block it named
 LM_WATCH_ADDR=hex     report every store to an address (LM_WATCH_LEN bytes)
 LM_WATCH_HI=hex       report stores to one word, with the function that made them
 LM_WATCH_S2=1         report every change of the running task
@@ -904,9 +908,9 @@ drawn it.
   stacks, contexts and descriptors by number; `free-pool` gives a block back
   while capabilities and addresses to it may still be held, nothing revokes
   them, and a stale one reaches whatever the block holds next.
-- The chips address memory by number. A blitter descriptor or a disk request
-  written by privileged code can name any RAM, and the blitter's guard is
-  opt-in.
+- The chips check space, not time: nothing keeps a bitmap alive for a blit
+  still running into it, since the descriptor is in the pool, which is not
+  traced.
 - The root is everything. Code compiled `unsafe` can make any capability,
   including one that writes an object's header or opens any closure.
 - `eq?` is exact: two capabilities to the same object with different

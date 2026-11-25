@@ -1,6 +1,9 @@
 //! Block storage, backed by a host file. A live heap is written out as an
-//! image through this device: the Lisp side hands over an address and a block
-//! range, and the bytes land on the host.
+//! image through this device: the Lisp side hands over a capability to the
+//! memory and a block range, and the bytes land on the host. The controller
+//! moves only what the capability covers: a read needs SD, a write LD, and
+//! every byte of the transfer inside its bounds, or the command is refused
+//! and moves nothing.
 //!
 //! A command takes time. Writing `D_CMD` latches the command and marks the
 //! controller busy until `now + cost`; the transfer happens in one go when
@@ -9,21 +12,25 @@
 //! still be changed under it. On hardware that would be a torn block; here it
 //! is the newer data. A driver that does not wait sees wrong data.
 
-use crate::mach::Machine;
-use crate::dev::TIMER_HZ;
+use crate::cap::*;
+use crate::dev::{refusal, TIMER_HZ};
+use crate::mach::*;
 use crate::map::INT_DISK;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 
 pub const BLOCK: u32 = 512;
 
-pub const D_ADDR: u32 = 0x00; // memory address
-pub const D_BLOCK: u32 = 0x04; // first block
-pub const D_COUNT: u32 = 0x08; // blocks to move
-pub const D_CMD: u32 = 0x0c; // write starts a command: 1 read, 2 write, 3 flush, 4 trunc
-pub const D_STATUS: u32 = 0x10; // STATUS_BUSY while a command runs, then its result
-pub const D_BLOCKS: u32 = 0x14; // r: size of the attached file, in blocks
-pub const D_CTRL: u32 = 0x18; // bit0: raise INT_DISK on completion
+/// A capability register: the memory a read fills or a write takes from,
+/// written with a capability store. A word store writes a number, which is no
+/// capability, and a transfer through it is refused.
+pub const D_BUF: u32 = 0x00;
+pub const D_BLOCK: u32 = 0x08; // first block
+pub const D_COUNT: u32 = 0x0c; // blocks to move
+pub const D_CMD: u32 = 0x10; // write starts a command: 1 read, 2 write, 3 flush, 4 trunc
+pub const D_STATUS: u32 = 0x14; // STATUS_BUSY while a command runs, then its result
+pub const D_BLOCKS: u32 = 0x18; // r: size of the attached file, in blocks
+pub const D_CTRL: u32 = 0x1c; // bit0: raise INT_DISK on completion
 
 pub const CMD_READ: u32 = 1;
 pub const CMD_WRITE: u32 = 2;
@@ -31,9 +38,14 @@ pub const CMD_FLUSH: u32 = 3;
 pub const CMD_TRUNC: u32 = 4; // cut the file to D_COUNT blocks
 
 /// What `D_STATUS` reads while a command is running. Once it finishes, the
-/// register holds the result instead: 0 ok, 1 no file attached, 2 the range
-/// is not in RAM, 3 the host's I/O failed.
+/// register holds the result instead: `STATUS_OK`, `STATUS_NO_FILE`,
+/// `STATUS_REFUSED` when the buffer's capability does not allow the
+/// transfer, or `STATUS_IO` when the host's I/O failed.
 pub const STATUS_BUSY: u32 = 0x80;
+pub const STATUS_OK: u32 = 0;
+pub const STATUS_NO_FILE: u32 = 1;
+pub const STATUS_REFUSED: u32 = 2;
+pub const STATUS_IO: u32 = 3;
 
 // What a command takes: a rate a real controller might manage, and a fixed
 // time for getting started. The disk's speed is its medium's, not the
@@ -45,20 +57,21 @@ pub const SETUP_US: u64 = 10;
 #[derive(Clone, Copy, Default)]
 struct Cmd {
     op: u32,
-    addr: u32,
+    buf: Cap,
     block: u32,
     count: u32,
 }
 
 pub struct Disk {
-    pub addr: u32,
+    /// The buffer register, a capability.
+    pub buf: Cap,
     pub block: u32,
     pub count: u32,
     pub status: u32,
     pub ctrl: u32,
     pub busy: bool,
     pub busy_until: u64,
-    /// The running command, latched when it was issued: the address and
+    /// The running command, latched when it was issued: the buffer and
     /// block registers are free to be written for the next one meanwhile.
     cmd: Cmd,
     file: Option<File>,
@@ -67,7 +80,7 @@ pub struct Disk {
 impl Disk {
     pub fn new() -> Disk {
         Disk {
-            addr: 0,
+            buf: Cap::NULL,
             block: 0,
             count: 0,
             status: 0,
@@ -100,7 +113,7 @@ impl Disk {
 
     pub fn read(&mut self, reg: u32) -> u32 {
         match reg {
-            D_ADDR => self.addr,
+            D_BUF => self.buf.addr,
             D_BLOCK => self.block,
             D_COUNT => self.count,
             D_STATUS => self.status,
@@ -111,10 +124,11 @@ impl Disk {
     }
 }
 
+/// A word store to a register.
 pub fn command(m: &mut Machine, reg: u32, v: u32) {
     match reg {
-        D_ADDR => {
-            m.disk.addr = v;
+        D_BUF => {
+            m.disk.buf = Cap::int(v);
             return;
         }
         D_BLOCK => {
@@ -150,7 +164,7 @@ pub fn command(m: &mut Machine, reg: u32, v: u32) {
 
     let c = Cmd {
         op: v,
-        addr: m.disk.addr,
+        buf: m.disk.buf,
         block: m.disk.block,
         count: m.disk.count,
     };
@@ -173,13 +187,19 @@ fn perform(m: &mut Machine, c: Cmd) -> u32 {
     let n = (c.count as usize) * BLOCK as usize;
     let off = (c.block as u64) * BLOCK as u64;
     if m.disk.file.is_none() {
-        return 1;
+        return STATUS_NO_FILE;
     }
-    // Checked in 64 bits: the count comes from the guest, and a large one
-    // wraps a 32-bit extent back into range.
-    let transfer = c.op == CMD_READ || c.op == CMD_WRITE;
-    if transfer && c.addr as u64 + n as u64 > m.ramlen as u64 {
-        return 2;
+    // A read writes memory and a write reads it. Checked in 64 bits: the
+    // count comes from the guest, and a large one wraps a 32-bit extent back
+    // into range.
+    let need: &[(u32, u32)] = match c.op {
+        CMD_READ => &[(P_SD, CAPEX_STORE)],
+        CMD_WRITE => &[(P_LD, CAPEX_LOAD)],
+        _ => &[],
+    };
+    let addr = c.buf.addr;
+    if !need.is_empty() && refusal(m, c.buf, need, addr as u64, n as u64).is_some() {
+        return STATUS_REFUSED;
     }
     // Split the machine borrow: the file and the RAM live in the same struct
     // but never overlap.
@@ -187,7 +207,7 @@ fn perform(m: &mut Machine, c: Cmd) -> u32 {
     let f = m.disk.file.as_mut().unwrap();
     let r = match c.op {
         CMD_READ => f.seek(SeekFrom::Start(off)).and_then(|_| {
-            let buf = unsafe { std::slice::from_raw_parts_mut(ramp.add(c.addr as usize), n) };
+            let buf = unsafe { std::slice::from_raw_parts_mut(ramp.add(addr as usize), n) };
             // A short read at end of file leaves the rest zeroed, which is
             // what an unwritten block should look like.
             let mut got = 0;
@@ -204,7 +224,7 @@ fn perform(m: &mut Machine, c: Cmd) -> u32 {
             Ok(())
         }),
         CMD_WRITE => f.seek(SeekFrom::Start(off)).and_then(|_| {
-            let buf = unsafe { std::slice::from_raw_parts(ramp.add(c.addr as usize), n) };
+            let buf = unsafe { std::slice::from_raw_parts(ramp.add(addr as usize), n) };
             f.write_all(buf)
         }),
         CMD_FLUSH => f.flush(),
@@ -213,12 +233,12 @@ fn perform(m: &mut Machine, c: Cmd) -> u32 {
     };
     // What the disk wrote into RAM is data.
     if c.op == CMD_READ {
-        m.clear_tags(c.addr, n as u32);
+        m.clear_tags(addr, n as u32);
     }
     if r.is_err() {
-        3
+        STATUS_IO
     } else {
-        0
+        STATUS_OK
     }
 }
 

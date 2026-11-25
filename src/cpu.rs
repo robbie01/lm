@@ -733,7 +733,7 @@ fn check(m: &Machine, c: Cap, who: u32, perms: &[(u32, u32)], a: u32, sz: u32, s
     }
     if m.in_ram(a, sz) {
         Ok(true)
-    } else if Machine::is_mmio(a) && sz <= 4 {
+    } else if Machine::is_mmio(a) && Machine::is_mmio(a.wrapping_add(sz - 1)) {
         Ok(false)
     } else {
         Err((if store { C_SFAULT } else { C_LFAULT }, a))
@@ -771,8 +771,9 @@ fn mem_slow(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
         Ok(ram) => ram,
         Err((cause, tval)) => return m.fault(cause, tval, pc, fuel),
     };
-    if !ram && d.f == 3 {
-        // A device page holds no capabilities.
+    // A device hands out no capabilities, and only a capability register
+    // takes one.
+    if !ram && d.f == 3 && !(d.store && dev::takes_cap(d.a)) {
         return m.fault(if d.store { C_SFAULT } else { C_LFAULT }, d.a, pc, fuel);
     }
     if let Via::Reg(s) = d.via {
@@ -781,7 +782,10 @@ fn mem_slow(m: &mut Machine, w: u32, pc: u32, fuel: u32) -> Stop {
     let auth_meta = c.meta as u64;
     if !ram {
         m.tick(fuel);
-        if d.store {
+        if d.f == 3 {
+            let v = m.reg(d.data);
+            dev::write_cap(m, d.a, v);
+        } else if d.store {
             let v = r(m, d.data);
             dev::write(m, d.a, d.f, v);
             // A store that powers the machine down is the last instruction.

@@ -1,14 +1,16 @@
 ;;; hw.lisp - the custom chips.
 ;;;
-;;; Every device is a 4 KiB page of naturally aligned 32-bit registers. Naming
-;;; memory by number is a privilege: a load or store through an integer
-;;; address goes through DDC and needs SR, which only code compiled unsafe
-;;; has, and this file is that code for the chips. A device is a value, a
-;;; register is an offset into its page (generated into layout.lisp from the
-;;; Rust side), and `dev-page` is the only way to the registers: for the task
-;;; that holds the device it makes a capability bounded exactly to the page,
-;;; so a register offset that leaves the page is a bounds fault and never a
-;;; store into the next device.
+;;; Every device is a 4 KiB page of naturally aligned 32-bit registers, but for
+;;; the blitter's list register and the disk's buffer register, which take a
+;;; capability: the chips that move memory are handed capabilities and refuse
+;;; what those do not cover. Naming memory by number is a privilege: a load
+;;; or store through an integer address goes through DDC and needs SR, which
+;;; only code compiled unsafe has, and this file is that code for the chips.
+;;; A device is a value, a register is an offset into its page (generated
+;;; into layout.lisp from the Rust side), and `dev-page` is the only way to
+;;; the registers: for the task that holds the device it makes a capability
+;;; bounded exactly to the page, so a register offset that leaves the page is
+;;; a bounds fault and never a store into the next device.
 
 (in-package hw)
 (unsafe-file)
@@ -48,14 +50,15 @@
     (if (%null? o) t (if (%eq? o 'kernel) t (%eq? o (%this-task))))))
 
 ;; The capability a device's registers are reached through: the root narrowed
-;; to the page and to loading and storing data. It is made afresh for each
-;; use and never stored, so no capability to a device lies anywhere a program
-;; could come across one; making it is a few instructions and allocates
-;; nothing, so the trap handler and interrupt servers use it too.
+;; to the page, to loading and storing data, and to storing capabilities,
+;; which only the chips' capability registers take. It is made afresh for
+;; each use and never stored, so no capability to a device lies anywhere a
+;; program could come across one; making it is a few instructions and
+;; allocates nothing, so the trap handler and interrupt servers use it too.
 (define (dev-page d)
   (if (device-usable? d)
       (%cap-and-perms (%cap-bounds-exact (%from-addr (dv-base d)) device-page-bytes)
-                      (%logior perm-ld perm-sd))
+                      (%logior perm-ld (%logior perm-sd perm-sc)))
       (error "dev-page:" (dv-name d) "belongs to another task")))
 
 (define (dev-ld d reg) (%cap-ld-word (dev-page d) reg))
@@ -195,10 +198,10 @@
 ;; cannot be forged, a store the processor makes outside it is a bounds fault,
 ;; the collector frees the pixels when the last reference goes, and the
 ;; extent is checked once at construction so that everything downstream can
-;; trust `w` and `h`. The chips address memory by number: the address of a
-;; byte object is good for ever because objects never move, which is what
-;; lets one be handed to the display register and to the blitter, and only
-;; privileged code can write a number into either.
+;; trust `w` and `h`. The blitter is handed the pixels' capability itself
+;; and refuses a rectangle it does not cover. The display chip, which only
+;; reads, is handed their address: objects never move, so it is good for
+;; ever.
 (defrecord (bitmap bm) pixels w h)
 
 (define (make-bitmap pixels w h)
@@ -214,10 +217,6 @@
     (set-bm-h! b h)
     b))
 
-;; Where the pixels are, as a number, for descriptors and the display
-;; register.
-(defsubst (bm-addr b) (%addr-of (bm-pixels b)))
-
 ;; `make-bytes` zero-fills, so a new bitmap starts black.
 (define (alloc-bitmap w h) (make-bitmap (make-bytes (%* w h)) w h))
 
@@ -228,7 +227,7 @@
 ;; stop the vertical blank.
 (define (gfx-show b)
   (let ((p (dev-page *gfx*)))
-    (%cap-st-word! p gfx-base (bm-addr b))
+    (%cap-st-word! p gfx-base (%addr-of (bm-pixels b)))
     (%cap-st-word! p gfx-width (bm-w b))
     (%cap-st-word! p gfx-height (bm-h b))
     (%cap-st-word! p gfx-pitch (bm-w b))
@@ -256,10 +255,10 @@
   (%logior (%lsh (%logand r 255) 16)
            (%logior (%lsh (%logand g 255) 8) (%logand b 255))))
 
-;; Where pixel x, y is: its index in the pixels, for the processor, and its
-;; address, for the blitter.
+;; Where pixel x, y is: its index in the pixels, for the processor, and the
+;; pixels' capability moved to it, for the blitter.
 (define (bm-index b x y) (%+ (%* y (bm-w b)) x))
-(define (bm-at b x y) (%+ (bm-addr b) (bm-index b x y)))
+(define (bm-at b x y) (%cap-inc (bm-pixels b) (bm-index b x y)))
 
 (define (bm-inside? b x y)
   (if (%>= x 0)
@@ -281,17 +280,27 @@
 ;; ---------------------------------------------------------------- blitter
 ;; Every task blits, dozens of times a frame, so the blitter belongs to the
 ;; kernel like `sys` and the timer: never claimed, reached only through the
-;; functions below. The chip has parameter registers too, but programming
-;; through them takes six stores that something would have to hold off, and
-;; descriptors exist to avoid that. Three registers are used, all of them
-;; here; the only way onto the chain is `blit-go`.
+;; functions below. It has three registers, all of them used here: the list
+;; register, which takes a capability to a descriptor and starts the chain
+;; there, the status and the control. The only way onto the chain is
+;; `blit-go`.
 (define *blit* (make-device "blit" dev-blit 'kernel))
 
 ;; ---------------------------------------------------------------- descriptors
-;; A blit is a descriptor in memory: the parameters, a status word the chip
-;; clears when it has finished, and a link to the next descriptor. The chip
-;; walks the links itself, so a queue of blits is a chain in memory and
-;; adding one is a store into the last one's link.
+;; A blit is a descriptor in memory: the capabilities of the source and the
+;; destination, the parameters, a done word the chip writes when it has
+;; finished, and a capability to the next descriptor. The chip walks the
+;; links itself, so a queue of blits is a chain in memory and adding one is a
+;; store into the last one's link.
+;;
+;; The chip checks what it is handed. A source needs LD, a destination SD,
+;; and LD too for an operation that reads it, and every byte the rectangle
+;; touches, rows and stride, must lie inside the capability. A transfer that
+;; fails is not made: its done word says which capability refused it and
+;; why, as `blit-refused-src` or `blit-refused-dst` with the capability
+;; fault in the low byte, and the chip's status keeps `blit-status-refused`
+;; until it is cleared. The descriptor completes either way, so nothing waits
+;; for a blit that will never land.
 ;;
 ;; A descriptor belongs to whoever is filling it. Every task has a ring of
 ;; eight, swapped in by the scheduler with its other bindings, so two
@@ -306,13 +315,22 @@
 (define *in-interrupt* nil) ; set by the trap handler, cleared before it returns
 
 ;; A ring is a word saying which descriptor is next, then the descriptors.
-;; Every word in it is a machine word, and the chip reads the descriptors by
-;; number.
+;; Rings, the tail and the waiting functions name a descriptor by number:
+;; the pool is not traced, so a capability to it must not lie in a global or
+;; on a list where any program could pick it up and hide a pointer from the
+;; collector in it.
 (define (ring-slot r i) (%+ r (%+ 8 (%* i blit-list-size))))
 
+;; The capability the descriptor at `d` is filled through and handed to the
+;; chip as: bounded to the descriptor, with a pair's permissions, so that the
+;; chip can load capabilities through it with their tags and write them
+;; mutable.
+(define (descriptor-cap d)
+  (%cap-and-perms (%cap-bounds-exact (%from-addr d) blit-list-size) perms-pair))
+
 ;; The pool hands a block out zeroed: the next descriptor is the first, and
-;; every status reads as done, so no descriptor that was never used waits for
-;; a write-back that never comes.
+;; every done word reads as done, so no descriptor that was never used waits
+;; for a write-back that never comes.
 (define (new-blit-ring)
   (alloc-pool (%+ 8 (%* blit-ring-size blit-list-size))))
 
@@ -322,7 +340,7 @@
          (d (ring-slot r i)))
     (blit-wait-descriptor d)
     (%st-word! r (if (%= (%+ i 1) blit-ring-size) 0 (%+ i 1)))
-    d))
+    (descriptor-cap d)))
 
 ;; A descriptor from the running task's ring. Not in an interrupt server: a
 ;; server runs with the world half saved, must not allocate or block, and
@@ -350,7 +368,14 @@
 ;; pixels with the processor, `blit-sync`: reading too early shows the old
 ;; picture.
 
-(define (blit-busy?) (%= 1 (%logand (dev-ld *blit* blit-status-reg) 1)))
+(define (blit-busy?)
+  (%= blit-status-busy (%logand (dev-ld *blit* blit-status-reg) blit-status-busy)))
+
+;; Whether the chip has refused a descriptor, a link or a transfer since the
+;; bit was last cleared.
+(define (blit-refused?)
+  (%= blit-status-refused (%logand (dev-ld *blit* blit-status-reg) blit-status-refused)))
+(define (blit-clear-refused!) (dev-st! *blit* blit-status-reg blit-status-refused))
 
 ;; Reading the status register is what lets a finished transfer be noticed,
 ;; so this spin also drives completion. Preemptible.
@@ -358,7 +383,8 @@
   (while (blit-busy?) nil)
   nil)
 
-(define (blit-done? d) (%= 0 (%ld-word (%+ d bl-status))))
+;; Done, whether it landed or was refused.
+(define (blit-done? d) (if (%= blit-pending (%ld-word (%+ d bl-status))) nil t))
 
 ;; How a task whose blit has not landed goes to sleep instead of spinning.
 ;; gfx.driver installs it, since the driver owns the completion interrupt.
@@ -410,20 +436,22 @@
 ;; a tail it has already finished is never seen. Hence the order: link only
 ;; while the chip is busy, then look again, and start the chip from here if it
 ;; went idle without taking this one. The fields go in before the section:
-;; the descriptor is this task's and on no chain yet.
+;; the descriptor is this task's and on no chain yet. `d` is the capability
+;; `blit-descriptor` handed out, and the link and the list register take it
+;; with a capability store.
 (define (blit-go d op)
-  (%st-word! (%+ d bl-op) op)
-  (%st-word! (%+ d bl-next) 0)
-  (%st-word! (%+ d bl-status) 1)
+  (%cap-st-word! d bl-op op)
+  (%cap-st! d bl-next 0)
+  (%cap-st-word! d bl-status blit-pending)
   (without-interrupts
     (let ((linked (if (if (%> *blit-tail* 0) (blit-busy?) nil)
-                      (begin (%st-word! (%+ *blit-tail* bl-next) d) t)
+                      (begin (%cap-st! (descriptor-cap *blit-tail*) bl-next d) t)
                       nil)))
-      (set! *blit-tail* d)
+      (set! *blit-tail* (%addr-of d))
       (if (if linked (blit-busy?) nil)
           nil
-          (if (%= 1 (%ld-word (%+ d bl-status)))
-              (dev-st! *blit* blit-list-reg d)
+          (if (%= blit-pending (%cap-ld-word d bl-status))
+              (%cap-st! (dev-page *blit*) blit-list-reg d)
               nil))))
   nil)
 
@@ -439,11 +467,11 @@
          (y1 (let ((e (%+ y h))) (if (%> e bh) bh e))))
     (if (if (%< x0 x1) (%< y0 y1) nil)
         (let ((b (blit-descriptor)))
-          (poke (%+ b bl-dst) (bm-at bmp x0 y0))
-          (poke (%+ b bl-w) (%- x1 x0))
-          (poke (%+ b bl-h) (%- y1 y0))
-          (poke (%+ b bl-dmod) bw)
-          (poke (%+ b bl-val) c)
+          (%cap-st! b bl-dst (bm-at bmp x0 y0))
+          (%cap-st-word! b bl-w (%- x1 x0))
+          (%cap-st-word! b bl-h (%- y1 y0))
+          (%cap-st-word! b bl-dmod bw)
+          (%cap-st-word! b bl-val c)
           (blit-go b op-fill))
         nil)))
 
@@ -466,12 +494,12 @@
                (dy1 (let ((e (%+ dy (%- sy1 sy0)))) (if (%> e dh) dh e))))
           (if (if (%< dx0 dx1) (%< dy0 dy1) nil)
               (let ((b (blit-descriptor)))
-                (poke (%+ b bl-src) (bm-at src sx0 sy0))
-                (poke (%+ b bl-dst) (bm-at dst dx0 dy0))
-                (poke (%+ b bl-w) (%- dx1 dx0))
-                (poke (%+ b bl-h) (%- dy1 dy0))
-                (poke (%+ b bl-smod) sw)
-                (poke (%+ b bl-dmod) dw)
+                (%cap-st! b bl-src (bm-at src sx0 sy0))
+                (%cap-st! b bl-dst (bm-at dst dx0 dy0))
+                (%cap-st-word! b bl-w (%- dx1 dx0))
+                (%cap-st-word! b bl-h (%- dy1 dy0))
+                (%cap-st-word! b bl-smod sw)
+                (%cap-st-word! b bl-dmod dw)
                 (blit-go b op-copy))
               nil))
         nil)))
@@ -669,13 +697,13 @@
   (set! y0 (clamp (%+ y0 oy) 0 (%- bh 1)))
   (set! y1 (clamp (%+ y1 oy) 0 (%- bh 1)))
   (let ((b (blit-descriptor)))
-    (poke (%+ b bl-dst) (bm-addr bmp))
-    (poke (%+ b bl-dmod) bw)
-    (poke (%+ b bl-x0) x0)
-    (poke (%+ b bl-y0) y0)
-    (poke (%+ b bl-x1) x1)
-    (poke (%+ b bl-y1) y1)
-    (poke (%+ b bl-val) c)
+    (%cap-st! b bl-dst (bm-pixels bmp))
+    (%cap-st-word! b bl-dmod bw)
+    (%cap-st-word! b bl-x0 x0)
+    (%cap-st-word! b bl-y0 y0)
+    (%cap-st-word! b bl-x1 x1)
+    (%cap-st-word! b bl-y1 y1)
+    (%cap-st-word! b bl-val c)
     (blit-go b op-line))))
 
 ;; A filled circle, one scanline at a time: two device pokes a row.
@@ -750,20 +778,22 @@
 ;; The disk controller. A command runs on its own time: `disk-go` programs it
 ;; and returns at once, the status reads `disk-busy` for as long as the
 ;; transfer takes, and then it reads the result: 0 ok, 1 no disk attached,
-;; 2 the range is not in memory, 3 the host's I/O failed. With bit 0 of the
-;; control register set, the controller raises `int-disk` when it finishes.
-;; disk.driver owns it (see disk.lisp); until the driver has claimed it,
-;; whoever holds it may use it.
+;; `disk-refused` when the buffer does not allow the transfer, 3 the host's
+;; I/O failed. With bit 0 of the control register set, the controller raises
+;; `int-disk` when it finishes. disk.driver owns it (see disk.lisp); until the
+;; driver has claimed it, whoever holds it may use it.
 (define *disk* (make-device "disk" dev-disk nil))
 
 ;; The command goes last: the controller latches the other three when it
 ;; arrives, so they can be rewritten for the next command while this one runs.
-;; The controller reads or writes memory by number, so a call names memory by
-;; number, and is privileged like any other store that does.
-(define (disk-go cmd addr block n)
+;; The buffer is a capability, written to the buffer register with a
+;; capability store, and the controller moves only what it covers: a read
+;; into it needs SD, a write out of it LD, and every byte of the n blocks
+;; inside its bounds. A flush takes no buffer.
+(define (disk-go cmd buf block n)
   (let ((p (dev-page *disk*)))
     (without-interrupts
-      (%cap-st-word! p dsk-addr addr)
+      (%cap-st! p dsk-buf buf)
       (%cap-st-word! p dsk-block block)
       (%cap-st-word! p dsk-count n)
       (%cap-st-word! p dsk-cmd cmd)))
@@ -890,6 +920,8 @@
     n))
 
 ;; What reaches memory by number, hands it out or frees it, or reaches a
-;; device: needs an `unsafe` around the call.
+;; device: needs an `unsafe` around the call. A descriptor is pool memory
+;; that can hold capabilities, so handing one out and linking one are among
+;; them.
 (unsafe-names (quote (peek poke peek8 poke8 alloc-pool free-pool
-                      dev-page dev-ld dev-st! disk-go blit-descriptor blit-go)))
+                      dev-page dev-ld dev-st! blit-descriptor blit-go)))
