@@ -64,7 +64,7 @@
   cause-misaligned-load cause-load-fault cause-misaligned-store cause-store-fault
   cause-ecall cause-wrong-type cause-range cause-overflow cause-divzero cause-run
   cause-barrier cause-stack cause-cap-fetch cause-cap-load cause-cap-store
-  refuse-length refuse-tag refuse-seal refuse-load refuse-store
+  refuse-length refuse-tag refuse-seal refuse-load refuse-store refuse-object
   irq-software irq-timer irq-external
   exit-ok exit-error exit-gc-stack exit-gc-corrupt exit-trap-spiral
   dev-sys dev-uart dev-timer dev-gfx dev-input dev-blit dev-disk
@@ -94,7 +94,7 @@
   %set-symbol-plist! %set-symbol-value! %slot %st-half! %st-byte!
   %stack-pointer %string-length %string-ref %string-set! %string?
   %symbol-flags %symbol-function %symbol-name %symbol-plist %symbol-value
-  %symbol? %vector-length %vector-ref %vector-set!
+  %symbol? %vector-length %vector-ref %vector-set! %bignum-ref %bignum-set!
   %vector? %wait-for-interrupt %write
   ;; capabilities
   %root %cap-ld %cap-st! %cap-ld-word %cap-st-word! %cap-ld-byte %cap-st-byte!

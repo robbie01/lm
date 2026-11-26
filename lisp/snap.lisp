@@ -62,7 +62,10 @@
         (else (kernel-ref kb-objects)))))
 
 ;; What the controller is handed to write n blocks from where `c` stands:
-;; `c` narrowed to those blocks and to loading data.
+;; `c` narrowed to those blocks and to loading data. Object space's goes
+;; from its first byte, which is how the controller knows it for the
+;; kernel's: anything else in object space it moves only as a byte object
+;; or a string.
 (define (blocks c n)
   (declare unsafe)
   (unsafe (%cap-and-perms (%cap-bounds c (%lsh n 9)) perm-ld)))

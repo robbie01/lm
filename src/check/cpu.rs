@@ -1506,7 +1506,7 @@ pub fn run_all() -> bool {
     }
     {
         // Only a capability register takes a capability, and the blitter's
-        // hands none back.
+        // hands back only the descriptor it is working on: none when idle.
         use crate::dev::blit::*;
         let blit = MMIO_BASE + (DEV_BLIT << 12);
         let mut code = vec![];
@@ -1516,7 +1516,8 @@ pub fn run_all() -> bool {
         let mut code = vec![];
         capr(&mut code, A0, blit);
         code.push(ly(A1, A0, B_LIST as i32));
-        ok("the list register reads back no capability", go(&code).took(C_LFAULT, blit + B_LIST));
+        let o = go(&code);
+        ok("an idle blitter's list register reads back NULL", o.clean() && o.c(A1) == Cap::NULL);
     }
     {
         // The disk is handed its buffer as a capability, completes

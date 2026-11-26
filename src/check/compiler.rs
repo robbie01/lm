@@ -180,7 +180,7 @@ fn cases() -> Vec<Case> {
         // by kind, and its capability has no store permission.
         Case("(%set-car! nil 1)", "TRAP: wrong type: 0xa"),
         Case("(set-cdr! nil 1)", "TRAP: wrong type: 0xa"),
-        Case("(%cap-st! nil 0 1)", "TRAP: capability store fault"),
+        Case("(unsafe (%cap-st! nil 0 1))", "TRAP: capability store fault"),
         // ---- a constant is read-only all the way down ----
         // SD and SC are gone from the literal and from every pair, vector,
         // string and byte object inside it; LM stays.
@@ -395,7 +395,7 @@ fn cases() -> Vec<Case> {
         Case("(%closure? car)", "t"),
         Case("(%obj-type car)", "5"),
         Case("(%obj-type 5)", "TRAP: wrong type: 0xa"),
-        Case("(%cap-ld (lambda () 1) 16)", "TRAP: capability load fault"),
+        Case("(unsafe (%cap-ld (lambda () 1) 16))", "TRAP: capability load fault"),
         // a captured variable that is also assigned has to be boxed
         Case(
             "(let ((n 0)) (let ((bump (lambda () (set! n (%+ n 1))))) (bump) (bump) n))",
@@ -484,11 +484,17 @@ fn cases() -> Vec<Case> {
         Case("(%addr-of 42)", "42"),
         Case("(%addr-of #\\A)", "65"),
         Case("(%cap=? 'a 'a)", "t"),
-        // Loads within one, at a written-down offset and at a computed one.
-        Case("(%cap-ld '(7 8) 8)", "(8)"),
-        Case("(let ((o 0)) (%cap-ld '(7 8) o))", "7"),
-        Case("(%cap-ld-byte \"abc\" 1)", "98"),
-        Case("(let ((s (make-bytes 4))) (%cap-st-byte! s 2 7) (%bytes-ref s 2))", "7"),
+        // A load or a store through one is a dereference, and unsafe, on a
+        // symbol and on anything else; inside a block, it is bounded by the
+        // capability, at a written-down offset and at a computed one.
+        Case("(%cap-ld '(7 8) 8)", "COMPILE ERROR: unsafe"),
+        Case("(%cap-ld 'car 8)", "COMPILE ERROR: unsafe"),
+        Case("(%cap-st! 'car 8 0)", "COMPILE ERROR: unsafe"),
+        Case("(%bit-set! (make-bytes 4) 3)", "COMPILE ERROR: unsafe"),
+        Case("(unsafe (%cap-ld '(7 8) 8))", "(8)"),
+        Case("(let ((o 0)) (unsafe (%cap-ld '(7 8) o)))", "7"),
+        Case("(unsafe (%cap-ld-byte \"abc\" 1))", "98"),
+        Case("(let ((s (make-bytes 4))) (unsafe (%cap-st-byte! s 2 7)) (%bytes-ref s 2))", "7"),
         // Narrowing one, and what the narrowed one can no longer reach.
         Case("(%cap-len (%cap-bounds (make-string 10) 4))", "4"),
         // (%cap-subset? a b) asks what `yss` asks: whether b lies within a.
@@ -497,7 +503,7 @@ fn cases() -> Vec<Case> {
             "(t nil)",
         ),
         Case(
-            "(%cap-ld-byte (%cap-bounds \"abcdef\" 2) 3)",
+            "(unsafe (%cap-ld-byte (%cap-bounds \"abcdef\" 2) 3))",
             "TRAP: capability load fault",
         ),
         Case("(%rrl 100)", "100"),

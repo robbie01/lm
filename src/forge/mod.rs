@@ -342,6 +342,7 @@ pub fn write_layout() {
     def!("refuse-seal", crate::dev::REFUSE_SEAL);
     def!("refuse-load", crate::dev::REFUSE_LOAD);
     def!("refuse-store", crate::dev::REFUSE_STORE);
+    def!("refuse-object", crate::dev::REFUSE_OBJECT);
 
     s.push_str("\n;; ---- interrupt numbers, as mcause carries them ----\n");
     def!("irq-software", IRQ_SOFT);
@@ -475,7 +476,8 @@ fn write_devices() {
     s.push_str(";;; written for, by the base of its page, and loads or stores one register:\n");
     s.push_str(";;; handed another device it traps, and it never touches another device's\n");
     s.push_str(";;; register. `(gfx-ctrl dev)` reads a register, `(gfx-ctrl! dev v)` writes\n");
-    s.push_str(";;; it, and a capability register moves a capability.\n\n");
+    s.push_str(";;; it, and a capability register moves a capability. Opening the device and\n");
+    s.push_str(";;; the load or store through its page are the accessor's one block.\n\n");
     s.push_str("(in-package hw)\n");
     let signed = |v: u32| v as i32;
     let mut names: Vec<String> = Vec::new();
@@ -496,14 +498,14 @@ fn write_devices() {
         }
         for r in regs {
             let (get, put) = if r.cap { ("%cap-ld", "%cap-st!") } else { ("%cap-ld-word", "%cap-st-word!") };
-            let open = format!("(unsafe (device-open dev {base}))");
+            let open = format!("(device-open dev {base})");
             let off = format!("{prefix}-{}", r.name);
             if r.read {
-                s.push_str(&format!("(define ({dev}-{} dev) ({get} {open} {off}))\n", r.name));
+                s.push_str(&format!("(define ({dev}-{} dev) (unsafe ({get} {open} {off})))\n", r.name));
                 names.push(format!("{dev}-{}", r.name));
             }
             if r.write {
-                s.push_str(&format!("(define ({dev}-{}! dev v) ({put} {open} {off} v))\n", r.name));
+                s.push_str(&format!("(define ({dev}-{}! dev v) (unsafe ({put} {open} {off} v)))\n", r.name));
                 names.push(format!("{dev}-{}!", r.name));
             }
         }

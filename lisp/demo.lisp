@@ -617,17 +617,18 @@
 ;; through a descriptor of this task's ring and waited for. Answers the done
 ;; word the chip wrote back.
 (define (blit-probe op dst src w h)
-  (let ((d (unsafe (blit-descriptor))))
-    (%cap-st! d bl-dst dst)
-    (%cap-st! d bl-src src)
-    (%cap-st-word! d bl-w w)
-    (%cap-st-word! d bl-h h)
-    (%cap-st-word! d bl-smod w)
-    (%cap-st-word! d bl-dmod w)
-    (%cap-st-word! d bl-val 3)
-    (unsafe (blit-go d op))
-    (blit-sync)
-    (%cap-ld-word d bl-status)))
+  (unsafe
+   (let ((d (blit-descriptor)))
+     (%cap-st! d bl-dst dst)
+     (%cap-st! d bl-src src)
+     (%cap-st-word! d bl-w w)
+     (%cap-st-word! d bl-h h)
+     (%cap-st-word! d bl-smod w)
+     (%cap-st-word! d bl-dmod w)
+     (%cap-st-word! d bl-val 3)
+     (blit-go d op)
+     (blit-sync)
+     (%cap-ld-word d bl-status))))
 
 (define (all-bytes? b from to v)
   (let ((same t))
@@ -784,18 +785,23 @@
       nil))
 
 ;; The first device page reachable from `roots` by loading through
-;; capabilities the way such a program can, or nil.
+;; capabilities the way such a program can, or nil: everything it is handed,
+;; all of it loaded whole, but for the value of a name that is unsafe,
+;; which it can neither name nor reach through the symbol. The walk loads
+;; more than a program may, inside `unsafe`, and so finds more, not less.
 (define (loads-reach roots)
   (let ((seen (make-table 65536)) (todo roots) (found nil))
     (while (if found nil (pair? todo))
       (let ((c (car todo)))
         (set! todo (cdr todo))
         (cond ((device-cap? c) (set! found c))
+              ((if (symbol? c) (symbol-unsafe? c) nil)
+               (set! todo (cons (symbol-name c) (cons (symbol-plist c) todo))))
               ((if (loadable? c) (not (table-has? seen c)) nil)
                (table-set! seen c t)
                (let ((at (%cap-set-addr c (%cap-base c))) (n (%cap-len c)) (off 0))
                  (while (<= (+ off 8) n)
-                   (let ((v (%cap-ld at off)))
+                   (let ((v (unsafe (%cap-ld at off))))
                      (if (%cap-tag? v) (set! todo (cons v todo)) nil))
                    (set! off (+ off 8)))))
               (else nil))))
@@ -832,7 +838,7 @@
                (list (%cap-len sys) (logand (%cap-perms sys) perms-all) (logand (%cap-perms disk) perms-all))
                (list device-page-bytes (logior perm-ld perm-sd)
                      (logior perm-ld perm-sd perm-lc perm-sc)))
-    (num-check 'reading-a-register-through-it (> (%cap-ld-word sys hw::sys-ramsize) 0) t)
+    (num-check 'reading-a-register-through-it (> (unsafe (%cap-ld-word sys hw::sys-ramsize)) 0) t)
     ;; Taking a page is unsafe, and so are sealing one into a device and
     ;; opening a device without an accessor; and a number is no authority.
     (num-check 'the-compiler-will-not-take-a-page
@@ -844,7 +850,7 @@
                      (refused? (lambda () (eval '(device-open nil gfx-page-base)))))
                (list t t))
     (num-check 'an-address-is-not-a-device
-               (refused? (lambda () (%cap-ld-word (+ mmio-base (* dev-disk device-page-bytes)) 0)))
+               (refused? (lambda () (unsafe (%cap-ld-word (+ mmio-base (* dev-disk device-page-bytes)) 0))))
                t)
     ;; A device is its page sealed: nothing loads or stores through it, and
     ;; an accessor opens it only for its own device.
@@ -852,9 +858,9 @@
                (list (%cap-otype gfx) (%cap-base gfx) (%cap-len gfx))
                (list hw::otype-device gfx-page-base device-page-bytes))
     (num-check 'nothing-loads-through-a-device
-               (refused? (lambda () (%cap-ld-word gfx g-hz))) t)
+               (refused? (lambda () (unsafe (%cap-ld-word gfx g-hz)))) t)
     (num-check 'or-stores-through-one
-               (refused? (lambda () (%cap-st-word! gfx g-sync 1))) t)
+               (refused? (lambda () (unsafe (%cap-st-word! gfx g-sync 1)))) t)
     (num-check 'its-own-accessor-reads-it (gfx-hz gfx) 60)
     (num-check 'another-devices-accessor-traps
                (list (refused? (lambda () (disk-status gfx)))
@@ -869,7 +875,7 @@
                (list (%cap-sealed? (exec::tc-context task)) (%cap-sealed? (exec::tc-stack task)))
                (list t t))
     (num-check 'and-cannot-be-read
-               (refused? (lambda () (%cap-ld (exec::tc-context task) 0))) t)
+               (refused? (lambda () (unsafe (%cap-ld (exec::tc-context task) 0)))) t)
     (num-check 'the-walk-finds-a-page-left-lying-about
                (device-cap? (loads-reach (list (list 1 (vector 2 sys))))) t)
     (num-check 'but-not-a-device
@@ -1072,11 +1078,11 @@
     (churn 300000)
     (gc)
     (num-check 'a-narrowed-pair-keeps-its-pair
-               (list (%cap-len c) (%cap-ld c 0))
+               (list (%cap-len c) (unsafe (%cap-ld c 0)))
                (list value-bytes 'apple))
-    (num-check 'and-one-narrowed-to-its-cdr (%cap-ld d 0) 'quince)
+    (num-check 'and-one-narrowed-to-its-cdr (unsafe (%cap-ld d 0)) 'quince)
     (num-check 'a-narrowed-slot-keeps-its-vector
-               (list (%cap-len s) (%cap-ld s 0))
+               (list (%cap-len s) (unsafe (%cap-ld s 0)))
                (list value-bytes '(kept 42)))
     ;; Its base is a slot, not a payload, so it is not headed: the slot below
     ;; it cannot be passed off as a header.
@@ -1087,7 +1093,7 @@
       (set! s nil)
       (churn 300000)
       (gc)
-      (num-check 'and-so-does-one-without-hd (%cap-ld u 0) '(kept 42)))))
+      (num-check 'and-so-does-one-without-hd (unsafe (%cap-ld u 0)) '(kept 42)))))
 
 ;; Machine code is an object, a text, and the collector takes it back like
 ;; any other: a function defined again and again leaves the code and the
@@ -1133,7 +1139,7 @@
 (define (code-object-of? c e)
   (if (%object? c)
       (if (= (%obj-type c) t-code)
-          (let ((x (%cap-ld c 0))) (if (%cap-tag? x) (= (%cap-base x) (%cap-base e)) nil))
+          (let ((x (unsafe (%cap-ld c 0)))) (if (%cap-tag? x) (= (%cap-base x) (%cap-base e)) nil))
           nil)
       nil))
 
@@ -1217,7 +1223,7 @@
     (num-check 'a-device-is-its-page
                (list (%cap-len page) (logand (%cap-perms page) perms-all))
                (list device-page-bytes (logior perm-ld perm-sd)))
-    (num-check 'inside-the-bounds-reads (%cap-ld-word b 4) 0)
+    (num-check 'inside-the-bounds-reads (unsafe (%cap-ld-word b 4)) 0)
     ;; A closure is sealed: calling it is the only way in, unless the escape
     ;; hatch opens it.
     (num-check 'a-closure-is-sealed (list (%cap-sealed? f) (%cap-otype f)) (list t otype-closure))
@@ -1240,13 +1246,13 @@
     ;; A capability store keeps the tag, and any other store clears it, as
     ;; does a capability store through a capability without SC.
     (let ((m (make-vector 1 nil)))
-      (%cap-st! m 0 v)
-      (num-check 'a-capability-store-keeps-the-tag (eq? (%cap-ld m 0) v) t)
-      (%cap-st-word! m 0 (%addr-of v))
-      (num-check 'a-word-store-clears-it (%cap-tag? (%cap-ld m 0)) nil)
-      (%cap-st! (%cap-and-perms m (lognot perm-sc)) 0 v)
+      (unsafe (%cap-st! m 0 v))
+      (num-check 'a-capability-store-keeps-the-tag (eq? (unsafe (%cap-ld m 0)) v) t)
+      (unsafe (%cap-st-word! m 0 (%addr-of v)))
+      (num-check 'a-word-store-clears-it (%cap-tag? (unsafe (%cap-ld m 0))) nil)
+      (unsafe (%cap-st! (%cap-and-perms m (lognot perm-sc)) 0 v))
       (num-check 'without-sc-the-tag-stays-behind
-                 (list (%cap-tag? (%cap-ld m 0)) (%addr-of (%cap-ld m 0)))
+                 (list (%cap-tag? (unsafe (%cap-ld m 0))) (%addr-of (unsafe (%cap-ld m 0))))
                  (list nil (%addr-of v))))
     (princ "capabilities: the errors below are on purpose")
     (newline)
@@ -1255,15 +1261,15 @@
     (num-check 'a-dropped-permission-is-gone (refused? (lambda () (vector-set! w 0 9))) t)
     (vector-set! v 0 9)
     (num-check 'and-the-original-still-has-it (vector-ref w 0) 9)
-    (num-check 'past-the-bounds-is-refused (refused? (lambda () (%cap-ld-word b 8))) t)
-    (num-check 'a-store-past-them-too (refused? (lambda () (%cap-st-byte! b 8 1))) t)
-    (num-check 'narrowed-is-refused-beyond (refused? (lambda () (%cap-ld-word narrow 4))) t)
+    (num-check 'past-the-bounds-is-refused (refused? (lambda () (unsafe (%cap-ld-word b 8)))) t)
+    (num-check 'a-store-past-them-too (refused? (lambda () (unsafe (%cap-st-byte! b 8 1)))) t)
+    (num-check 'narrowed-is-refused-beyond (refused? (lambda () (unsafe (%cap-ld-word narrow 4)))) t)
     (num-check 'past-a-device-page-is-refused
-               (refused? (lambda () (%cap-ld-word page device-page-bytes))) t)
-    (num-check 'a-device-hands-out-no-capability (refused? (lambda () (%cap-ld page 0))) t)
+               (refused? (lambda () (unsafe (%cap-ld-word page device-page-bytes)))) t)
+    (num-check 'a-device-hands-out-no-capability (refused? (lambda () (unsafe (%cap-ld page 0)))) t)
     (num-check 'only-a-capability-register-takes-one
-               (list (refused? (lambda () (%cap-st! page hw::sys-ramsize v)))
-                     (refused? (lambda () (%cap-st! blit b-status v))))
+               (list (refused? (lambda () (unsafe (%cap-st! page hw::sys-ramsize v))))
+                     (refused? (lambda () (unsafe (%cap-st! blit b-status v)))))
                (list t t))
     ;; A chip is handed capabilities, not numbers.
     (num-check 'a-chip-refuses-a-number
@@ -1448,6 +1454,24 @@
                    (refused? (lambda () (eval '(define (peek a) a)))))
              (list t t t))
   (num-check 'and-its-flags (refused? (lambda () (eval '(%set-symbol-flags! 'peek 0)))) t)
+  ;; Nor is a symbol's value cell, or its flags, or anything else a
+  ;; capability bounds, data to a program that says nothing unsafe: a load
+  ;; or a store through a capability is a dereference, and a raw name, on a
+  ;; symbol as on a byte object, written down or given as data. Nor will a
+  ;; chip move data into a symbol.
+  (num-check 'a-dereference-is-unsafe
+             (list (refused? (lambda () (eval '(%cap-ld 'peek 8))))
+                   (refused? (lambda () (eval '(%cap-st! 'peek 8 0))))
+                   (refused? (lambda () (eval '(%bit-set! 'peek 258))))
+                   (refused? (lambda () (eval '(%cap-ld (vector 1 2) 8))))
+                   (refused? (lambda () (eval '(%cap-st-word! (make-bytes 8) 0 1))))
+                   (refused? (lambda () (eval '(%bit-ref (make-bytes 8) 0))))
+                   (refused? (lambda () (funcall '%cap-ld (vector 1 2) 8))))
+             (list t t t t t t t))
+  (num-check 'and-no-chip-writes-a-symbol
+             (blit-probe op-fill 'peek (make-bytes 64) 8 1)
+             (logior blit-refused-dst refuse-object))
+  (num-check 'so-peek-is-still-unsafe (symbol-unsafe? 'peek) t)
   (let ((p (unsafe (symbol-function 'peek))))
     (num-check 'a-block-may-hand-one-out
                (list (%closure? p) (fixnum? (p cons-base)))
@@ -1515,6 +1539,6 @@
   (num-check 'taking-a-page-is-unsafe
              (refused? (lambda () (eval '(device-page dev-timer)))) t)
   (let ((timer (unsafe (device-page dev-timer))))
-    (num-check 'and-holding-one-is-the-device (> (%cap-ld-word timer hw::tmr-freq) 0) t))
+    (num-check 'and-holding-one-is-the-device (> (unsafe (%cap-ld-word timer hw::tmr-freq)) 0) t))
   (princ "unsafety: done (nothing above = all correct)")
   (newline))

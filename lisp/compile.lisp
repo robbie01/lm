@@ -1221,6 +1221,9 @@
   ;; These name the type they require, so (vector-ref "abc" 0) traps.
   (defop '%vector-ref 2 (indexed-load i-ldx t-vector))
   (defstore '%vector-set! 3 (indexed-store i-stx t-vector))
+  ;; A bignum's slots, its sign and then its limbs, each a fixnum.
+  (defop '%bignum-ref 2 (indexed-load i-ldx t-bignum))
+  (defstore '%bignum-set! 3 (indexed-store i-stx t-bignum))
   (defop '%vector-length 1 (lambda (a d rs) (i-lhdr a (value-reg d) (%car rs) t-vector)))
   (defop '%string-length 1 (lambda (a d rs) (i-lhdr a (value-reg d) (%car rs) t-string)))
   (defop '%bytes-length 1 (lambda (a d rs) (i-lhdr a (value-reg d) (%car rs) t-bytes)))
@@ -1269,9 +1272,14 @@
 
   ;; ---- capabilities ----
   ;; The operations on a capability the caller already holds. A load or a
-  ;; store is bounded by it, and everything that makes a new one from it can
-  ;; only narrow it, seal it, or clear its tag, so none of these is unsafe.
-  ;; Offsets are in bytes.
+  ;; store through one is bounded by it, but it is a dereference all the
+  ;; same: what lies within a capability is not data to every holder, a
+  ;; symbol's capability bounds its value cell and its flags, a code
+  ;; object's its literals, so the loads and stores are raw names, as
+  ;; dereferencing a raw pointer is unsafe in Rust. What makes a new
+  ;; capability from one can only narrow it, seal it, or clear its tag, and
+  ;; what reads its fields reads numbers, so those are safe. Offsets are in
+  ;; bytes.
   (defop '%cap-ld 2 (cap-load i-ly))
   (defstore '%cap-st! 3 (cap-store i-sy))
   (defop '%cap-ld-word 2 (cap-load i-lw))
@@ -1380,7 +1388,7 @@
   ;; look for them. On a little-endian machine bit i of the word at (i >> 5)
   ;; is bit i & 7 of the byte at (i >> 3), so the blitter can still clear a
   ;; map by the byte. The word is reached through the capability, so these
-  ;; are bounded by it like any other access.
+  ;; are bounded by it, and raw, like any other access through one.
   (definline '%bit-ref 2
     (lambda (c)
       (let ((a (cx-asm c)))
@@ -2815,13 +2823,18 @@
 ;; processor refuses to code without SR; `%slot`, which reads any object,
 ;; a symbol's cells and a code object's literals among them; the stack
 ;; pointer, which reaches every frame of the task; and the symbol flags,
-;; which say which names are unsafe. Every other raw name is declared at its
-;; definition. The operations on a capability the caller already holds are
-;; not here, and neither is `%addr-of`, whose answer cannot be followed
-;; without one of these.
+;; which say which names are unsafe; and the loads and stores through a
+;; capability the caller holds, which reach whatever it bounds. Every other
+;; raw name is declared at its definition. The rest of what works on a
+;; capability, its fields, narrowing it and sealing it, is not here, and
+;; neither is `%addr-of`, whose answer cannot be followed without one of
+;; these.
 (unsafe-names
  '(%root %kernel
    %ld-word %st-word! %ld-half %st-half! %ld-byte %st-byte! %ld-cap %st-cap!
+   %cap-ld %cap-st! %cap-ld-word %cap-st-word! %cap-ld-byte %cap-st-byte!
+   %cap-ld-at %cap-st-at! %cap-ld-word-at %cap-st-word-at! %cap-ld-byte-at %cap-st-byte-at!
+   %bit-ref %bit-set!
    %slot %set-slot!
    %context %set-context! %stack-limit %set-stack-limit! %set-gc-mode!
    %set-this-task! %stack-pointer %set-symbol-flags!

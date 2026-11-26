@@ -15,6 +15,7 @@ pub mod uart;
 pub mod win;
 
 use crate::cap::*;
+use crate::heap::{T_BYTES, T_STRING, T_VECTOR};
 use crate::mach::*;
 use crate::map::*;
 
@@ -254,19 +255,43 @@ pub fn loaded_through(c: Cap, auth: Cap) -> Cap {
 pub const REFUSE_LENGTH: u32 = 0x01;
 pub const REFUSE_TAG: u32 = 0x02;
 pub const REFUSE_SEAL: u32 = 0x03;
+/// Memory in object space that is not an object of a type the chip takes.
+pub const REFUSE_OBJECT: u32 = 0x04;
+
+/// What a chip takes in object space: data moves only in and out of a byte
+/// object or a string, and a blitter descriptor is a run of a vector's
+/// slots, a task's ring.
+pub const DATA_OBJECTS: &[u32] = &[T_BYTES, T_STRING];
+pub const DESCRIPTOR_OBJECTS: &[u32] = &[T_VECTOR];
 pub const REFUSE_LOAD: u32 = 0x12;
 pub const REFUSE_STORE: u32 = 0x13;
 
 /// Why a chip may not move the `len` bytes from `at` through `c`, as a
 /// `REFUSE_*` code: `c` must be tagged, unsealed and hold every permission
-/// in `perms` (each with the code its absence is reported as), and the
-/// bytes must lie inside its bounds and in RAM. None if `c` allows it.
-pub fn refusal(m: &Machine, c: Cap, perms: &[(u32, u32)], at: u64, len: u64) -> Option<u32> {
+/// in `perms` (each with the code its absence is reported as), the bytes
+/// must lie inside its bounds and in RAM, and memory in object space must
+/// be an object of one of the types `takes`, unless `c` starts where object
+/// space does. None if `c` allows it.
+///
+/// The last is because code that does not say `unsafe` reaches what is in
+/// object space only through the typed operations, and the blitter's
+/// device is anybody's: a chip that wrote into a symbol, a code object or a
+/// record of the kernel's for it would clear the tags of what it holds and
+/// could clear the bit that makes a name unsafe. A capability based where object space starts, at the
+/// kernel block's header, is narrowed from object space's own, which only
+/// the kernel holds: the image writer hands the disk object space that way.
+pub fn refusal(m: &Machine, c: Cap, perms: &[(u32, u32)], at: u64, len: u64, takes: &[u32]) -> Option<u32> {
     if !c.tag {
         return Some(REFUSE_TAG);
     }
     if c.is_sealed() {
         return Some(REFUSE_SEAL);
+    }
+    if (OBJ_BASE + 1..OBJ_END).contains(&c.base()) {
+        match m.referent(c) {
+            Some(h) if m.in_ram(h, 4) && takes.contains(&(unsafe { m.rd32(h) } & 0xff)) => {}
+            _ => return Some(REFUSE_OBJECT),
+        }
     }
     if let Some(&(_, code)) = perms.iter().find(|&&(p, _)| !c.has(p)) {
         return Some(code);

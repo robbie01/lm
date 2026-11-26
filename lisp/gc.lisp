@@ -159,20 +159,20 @@
 ;; `m` is the mark map.
 (defsubst (gc-bit-index p) (%lsh (%- p gc-heap-lo) -3))
 
-(defsubst (marked? m p) (%bit-ref m (gc-bit-index p)))
-(defsubst (gc-mark! m p) (%bit-set! m (gc-bit-index p)))
+(defsubst (marked? m p) (declare unsafe) (%bit-ref m (gc-bit-index p)))
+(defsubst (gc-mark! m p) (declare unsafe) (%bit-set! m (gc-bit-index p)))
 
 (defsubst (gc-map-byte p) (%lsh (%- p gc-heap-lo) -6))
 
-(defsubst (gc-unmark! m p)
+(defsubst (gc-unmark! m p) (declare unsafe)
   (let* ((i (gc-bit-index p)) (b (%lsh i -3)))
     (%cap-st-byte! m b (%logand (%cap-ld-byte m b) (%lognot (%lsh 1 (%logand i 7)))))))
 
 ;; ---------------------------------------------------------------- starts
 ;; `s` is the start map.
 (defsubst (start-index p) (%lsh (%- p obj-base) -3))
-(defsubst (start-set! s p) (%bit-set! s (start-index p)))
-(defsubst (start-clear! s p)
+(defsubst (start-set! s p) (declare unsafe) (%bit-set! s (start-index p)))
+(defsubst (start-clear! s p) (declare unsafe)
   (let* ((i (start-index p)) (b (%lsh i -3)))
     (%cap-st-byte! s b (%logand (%cap-ld-byte s b) (%lognot (%lsh 1 (%logand i 7)))))))
 
@@ -299,9 +299,9 @@
 ;; the heap, four bytes of map to 256 of heap. The 256 is written into the
 ;; loops because a literal compiles to one instruction where a global costs
 ;; two loads.
-(defsubst (gc-run-dead? m mp) (%= 0 (%cap-ld-word m mp)))
+(defsubst (gc-run-dead? m mp) (declare unsafe) (%= 0 (%cap-ld-word m mp)))
 
-(defsubst (gc-word-pairs m mp) (%popcount (%cap-ld-word m mp)))
+(defsubst (gc-word-pairs m mp) (declare unsafe) (%popcount (%cap-ld-word m mp)))
 
 ;; Every granule of region `r` from `lo` up to `hi` zeroed, which also clears
 ;; its tag.

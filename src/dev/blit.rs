@@ -13,7 +13,7 @@
 //! somewhere else.
 
 use crate::cap::*;
-use crate::dev::{load_through, refusal, REFUSE_LOAD, REFUSE_STORE};
+use crate::dev::{load_through, refusal, DATA_OBJECTS, DESCRIPTOR_OBJECTS, REFUSE_LOAD, REFUSE_STORE};
 use crate::mach::*;
 use crate::map::INT_BLIT;
 
@@ -241,7 +241,7 @@ const DEST_READ: &[(u32, u32)] = &[(P_LD, REFUSE_LOAD), (P_SD, REFUSE_STORE)];
 /// nothing and answers false.
 fn start_block(m: &mut Machine, d: Cap, at: u64) -> bool {
     let a = d.addr;
-    if a & 7 != 0 || refusal(m, d, DESCRIPTOR, a as u64, LIST_BYTES as u64).is_some() {
+    if a & 7 != 0 || refusal(m, d, DESCRIPTOR, a as u64, LIST_BYTES as u64, DESCRIPTOR_OBJECTS).is_some() {
         return false;
     }
     let word = |k: u32| m.peek32(a + k);
@@ -301,11 +301,11 @@ fn verdict(m: &Machine, op: u32, r: &Regs) -> u32 {
         _ => return DONE,
     };
     if reads_src {
-        if let Some(code) = refusal(m, r.src, SOURCE, r.src.addr as u64, extent(r.w, r.h, r.smod)) {
+        if let Some(code) = refusal(m, r.src, SOURCE, r.src.addr as u64, extent(r.w, r.h, r.smod), DATA_OBJECTS) {
             return REFUSED_SRC | code;
         }
     }
-    match refusal(m, r.dst, dst_perms, dst.saturating_add(off), len) {
+    match refusal(m, r.dst, dst_perms, dst.saturating_add(off), len, DATA_OBJECTS) {
         Some(code) => REFUSED_DST | code,
         None => DONE,
     }

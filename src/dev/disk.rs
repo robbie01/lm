@@ -13,7 +13,7 @@
 //! is the newer data. A driver that does not wait sees wrong data.
 
 use crate::cap::*;
-use crate::dev::{refusal, REFUSE_LOAD, REFUSE_STORE, TIMER_HZ};
+use crate::dev::{refusal, DATA_OBJECTS, REFUSE_LOAD, REFUSE_STORE, TIMER_HZ};
 use crate::mach::*;
 use crate::map::INT_DISK;
 use std::fs::{File, OpenOptions};
@@ -214,7 +214,7 @@ fn perform(m: &mut Machine, c: Cmd) -> u32 {
         _ => &[],
     };
     let addr = c.buf.addr;
-    if !need.is_empty() && refusal(m, c.buf, need, addr as u64, n as u64).is_some() {
+    if !need.is_empty() && refusal(m, c.buf, need, addr as u64, n as u64, DATA_OBJECTS).is_some() {
         return STATUS_REFUSED;
     }
     // Split the machine borrow: the file and the RAM live in the same struct

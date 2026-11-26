@@ -522,8 +522,9 @@
   (cond
    ((%eq? a b) t)
    ((%bignum? a) (if (%bignum? b) (%= a b) nil))
+   ;; Two floats, each checked, are equal when their one word is.
    ((%float? a)
-    (if (%float? b) (%= (%cap-ld-word a 0) (%cap-ld-word b 0)) nil))
+    (if (%float? b) (unsafe (%= (%cap-ld-word a 0) (%cap-ld-word b 0))) nil))
    (else nil)))
 
 ;; Structure compared element by element, and numbers as `eqv?` compares them.
