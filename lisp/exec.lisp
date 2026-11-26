@@ -1569,6 +1569,7 @@
   (if (tc-context task) (drop-context-run (task-context task)) nil)))
 
 (define (invalidate-runs)
+  (declare unsafe)
   (unsafe
   (if *ready-list*
       (begin
@@ -1604,6 +1605,7 @@
       (set! p (node-next p)))))
 
 (define (extra-roots)
+  (declare unsafe)
   (unsafe
   (if *ready-list*
       (begin

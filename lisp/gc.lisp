@@ -98,8 +98,8 @@
 (defsubst (set-obj-ptr! p) (declare unsafe) (kernel-set! kb-obj-ptr p))
 
 ;; ---------------------------------------------------------------- geometry
-(define gc-heap-lo cons-base)
-(define gc-heap-hi obj-limit)
+(defconstant gc-heap-lo cons-base)
+(defconstant gc-heap-hi obj-limit)
 ;; One mark bit per eight bytes of heap, in the mark map: bit i of the word
 ;; at index i/32, from the map's base. The write barrier reads this map
 ;; through the capability in its CSR, so the layout is the machine's: a
@@ -135,11 +135,11 @@
 ;; with one slot per granule count, are exact-fit free lists; the forge knows
 ;; their layout too.
 
-(define *mark-sp* 0)
-(define *run-last* 0)
+(define *mark-sp* (declare unsafe) 0)
+(define *run-last* (declare unsafe) 0)
 ;; The first hole in cons space the last sweep left, or 0, and how many free
 ;; pairs there are, holes and fresh ground together.
-(define *holes* 0)
+(define *holes* (declare unsafe) 0)
 (define *cons-free-n* 0)
 ;; The bytes of the run handed out last, charged to the collector at the next
 ;; refill: a run is paid for once it has been used up, not when it is given.
@@ -162,7 +162,7 @@
 (defsubst (marked? m p) (%bit-ref m (gc-bit-index p)))
 (defsubst (gc-mark! m p) (%bit-set! m (gc-bit-index p)))
 
-(define (gc-map-byte p) (%lsh (%- p gc-heap-lo) -6))
+(defsubst (gc-map-byte p) (%lsh (%- p gc-heap-lo) -6))
 
 (defsubst (gc-unmark! m p)
   (let* ((i (gc-bit-index p)) (b (%lsh i -3)))
@@ -179,9 +179,12 @@
 ;; The nearest object start at or below `a`, an address in object space; 0
 ;; when there is none.
 (define (object-start-at s a)
-  (if (%bit-ref s (start-index a)) a (object-start-below s a)))
+  (declare unsafe)
+  (unsafe (if (%bit-ref s (start-index a)) a (object-start-below s a))))
 
 (define (object-start-below s a)
+  (declare unsafe)
+  (unsafe
   (let* ((i (start-index a))
          (w (%lsh i -5))
          (k (%logand i 31))
@@ -194,7 +197,7 @@
         0
         (let ((n 31))
           (while (%= 0 (%logand bits (%lsh 1 n))) (set! n (%- n 1)))
-          (%+ obj-base (%lsh (%+ (%lsh w 5) n) 3))))))
+          (%+ obj-base (%lsh (%+ (%lsh w 5) n) 3)))))))
 
 ;; Every bit for the heap from `lo` up to `hi` cleared: whole words of the map
 ;; where it can, single bits at the edges.
@@ -231,6 +234,8 @@
 
 ;; Bytes `b0` up to `b1` of the map `map`, zeroed: whole words where it can.
 (define (clear-map-bytes-at map b0 b1)
+  (declare unsafe)
+  (unsafe
   (while (if (%< b0 b1) (%> (%logand b0 3) 0) nil)
     (%cap-st-byte! map b0 0)
     (set! b0 (%+ b0 1)))
@@ -239,7 +244,7 @@
     (set! b0 (%+ b0 4)))
   (while (%< b0 b1)
     (%cap-st-byte! map b0 0)
-    (set! b0 (%+ b0 1))))
+    (set! b0 (%+ b0 1)))))
 
 (define (clear-map-bytes b0 b1)
   (declare unsafe)
@@ -301,10 +306,12 @@
 ;; Every granule of region `r` from `lo` up to `hi` zeroed, which also clears
 ;; its tag.
 (define (blank r lo hi)
+  (declare unsafe)
+  (unsafe
   (let ((g (%cap-set-addr r lo)))
     (while (%< (%addr-of g) hi)
       (%cap-st! g 0 0)
-      (set! g (%cap-inc g 8)))))
+      (set! g (%cap-inc g 8))))))
 
 ;; ---------------------------------------------------------------- objects
 ;; The bytes a block occupies, header included, from its header word: a free
@@ -516,7 +523,7 @@
 (define (each-trap-context fn)
   (declare unsafe)
   (unsafe
-  (let ((depth (trap-depth)) (ctx (%context)))
+  (let ((depth (kernel-ref kb-depth)) (ctx (%context)))
     (while (%> depth 0)
       (%funcall fn ctx)
       (set! depth (%- depth 1))
@@ -533,8 +540,8 @@
     (if (%= (%cap-base sp) (%cap-base (%stack-pointer))) nil (scan-stack sp)))))
 
 ;; Replaced by exec.lisp once the kernel is up, to scan every other task's
-;; context with `scan-context`.
-(define (extra-roots) nil)
+;; context with `scan-context`. Unsafe: what it leaves out, the sweep frees.
+(define (extra-roots) (declare unsafe) nil)
 
 ;; The kernel block holds the roots of the world: the symbols, through which
 ;; every name reaches what it names, the trap stub's stacks and frames, and
@@ -580,8 +587,9 @@
   (unsafe
   (%cap-st! ctx (%lsh reg-gp 3) (empty-cons-run))))
 
-;; Replaced by exec.lisp once there are other tasks to tell.
-(define (invalidate-runs) nil)
+;; Replaced by exec.lisp once there are other tasks to tell. Unsafe: a run
+;; it leaves a task, the task fills with pairs the cycle never marks.
+(define (invalidate-runs) (declare unsafe) nil)
 
 ;; Every run in the machine given up: this task's, any a trap interrupted, and
 ;; every other task's. What was left of them lies below the frontier, where
@@ -651,29 +659,29 @@
 (defconstant phase-idle 0)
 (defconstant phase-marking 1)
 (defconstant phase-sweeping 2)
-(define *phase* 0)
+(define *phase* (declare unsafe) 0)
 
-(define *cons-hi* 0)         ; the frontiers when the cycle began
-(define *obj-hi* 0)
+(define *cons-hi* (declare unsafe) 0)         ; the frontiers when the cycle began
+(define *obj-hi* (declare unsafe) 0)
 ;; The map is zero wherever nothing is marked, all the time, so that a cycle
 ;; can begin without clearing it: the sweep clears the bits behind it, what
 ;; was made black while marking is cleared once the sweep is done (these are
 ;; those ranges), and a run or an object taken at any other time has its
 ;; bits cleared as it is handed out.
-(define *clear-cons* 0)
-(define *clear-cons-hi* 0)
-(define *clear-obj* 0)
-(define *clear-obj-hi* 0)
+(define *clear-cons* (declare unsafe) 0)
+(define *clear-cons-hi* (declare unsafe) 0)
+(define *clear-obj* (declare unsafe) 0)
+(define *clear-obj-hi* (declare unsafe) 0)
 
 ;; The object sweep's place, and the dead run it is in the middle of.
-(define *sweep-obj* 0)
-(define *sweep-run* 0)
-(define *sweep-runlen* 0)
+(define *sweep-obj* (declare unsafe) 0)
+(define *sweep-run* (declare unsafe) 0)
+(define *sweep-runlen* (declare unsafe) 0)
 ;; The cons sweep's place, in the heap and in the map, and the hole it is in
 ;; the middle of.
-(define *sweep-cons* 0)
-(define *sweep-map* 0)
-(define *sweep-hole* 0)
+(define *sweep-cons* (declare unsafe) 0)
+(define *sweep-map* (declare unsafe) 0)
+(define *sweep-hole* (declare unsafe) 0)
 
 ;; What the cycle found, for the budget and the report.
 (define *obj-freed* 0)       ; bytes of object space freed
@@ -708,7 +716,7 @@
 
 ;; The sweep clears the mark bits behind it. The compactor wants them
 ;; afterwards, so a collection for an image asks for them to be kept.
-(define *keep-marks* nil)
+(define *keep-marks* (declare unsafe) nil)
 
 (defsubst (note-slice t0)
   (let ((d (cycles-since t0)))
@@ -992,6 +1000,7 @@
 
 ;; Straight to the serial line: no allocation inside a collection.
 (define (report spent)
+  (unsafe
   (uart-string "[gc ")
   (uart-num (%- (%lsh (%- *cons-hi* cons-base) -4) (%lsh *cons-live* -4)))
   (uart-string " pairs, ")
@@ -1020,10 +1029,10 @@
   (uart-string " bytes, dead in live words ") (uart-num *inner-dead*)
   (uart-string " bytes, refills since last ") (uart-num *refills*)
   (uart-string "]")
-  (uart-nl))
+  (uart-nl)))
 
 ;; ---------------------------------------------------------------- stepping
-(define (busy?) (if (%= *phase* phase-idle) nil t))
+(defsubst (busy?) (declare unsafe) (if (%= *phase* phase-idle) nil t))
 
 ;; One slice of whatever the cycle is doing, interrupts off for its length.
 ;; Answers the cycles it took.
@@ -1080,8 +1089,9 @@
   nil))
 
 ;; The whole of a cycle now, interrupts off: for an image, and for a heap
-;; with no room left.
+;; with no room left. Unsafe: what comes after it trusts that it finished.
 (define (collect)
+  (declare unsafe)
   (unsafe
   (without-interrupts
     (if (%= *phase* phase-idle) (start-cycle) nil)
@@ -1122,7 +1132,7 @@
 
 ;; The run to hand a task whose last run was `last` bytes long, and 0 for a
 ;; task that has had none.
-(define (run-size last)
+(defsubst (run-size last)
   (cond ((%< last run-first) run-first)
         ((%< last cons-chunk) (%lsh last 1))
         (else cons-chunk)))
@@ -1323,12 +1333,14 @@
 ;; Where the live pair at `p` is going: its word's entry plus sixteen bytes
 ;; for every live pair ahead of it in the word.
 (define (forward-cons m prefix p)
+  (declare unsafe)
+  (unsafe
   (let* ((i (gc-bit-index p))
          (w (%lsh (%lsh i -5) 2)))
     (%+ (%cap-ld-word prefix w)
         (%lsh (%popcount (%logand (%cap-ld-word m w)
                                   (%- (%lsh 1 (%logand i 31)) 1)))
-              4))))
+              4)))))
 
 ;; Every capability into a pair below `cons-hi` in the granules of region `r`
 ;; from `lo` up to `hi`, rewritten: cons space's capability narrowed afresh
@@ -1662,7 +1674,7 @@
   (emit-str (number->string (code-bytes)))
   (emit-str ", collections ")
   (emit-str (number->string *count*))
-  (if (busy?) (emit-str ", one in progress") nil)
+  (if (unsafe (busy?)) (emit-str ", one in progress") nil)
   (newline)
   nil)
 

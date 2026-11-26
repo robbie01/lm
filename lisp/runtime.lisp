@@ -30,21 +30,26 @@
 ;; fixnum stored in the granule. The payload is a byte per element for a
 ;; string, a byte vector or a function's text, which hold no capabilities,
 ;; and a slot per element for the rest.
-(define (byte-payload? type)
+(defsubst (byte-payload? type)
   (cond ((%= type t-string) t)
         ((%= type t-bytes) t)
         (else (%= type t-text))))
 
 ;; A task's stack or its register context: slots the collector never traces,
 ;; because the roots scan the part of each that is in use.
-(define (state-payload? type)
+(defsubst (state-payload? type)
   (if (%= type t-stack) t (%= type t-context)))
 
-(define (object-payload type len)
+(defsubst (object-payload type len)
   (cond ((byte-payload? type) len)
         ((%= type t-symbol) (%* value-bytes sym-slots))
         ((%= type t-float) value-bytes)
         (else (%* value-bytes len))))
+
+;; What a fresh slot holds until it is given something: nil, so that a
+;; record's fields start empty, or zero in the limbs of a number.
+(defsubst (fresh-slot type)
+  (if (%= type t-bignum) 0 (if (%= type t-float) 0 nil)))
 
 ;; The closure is answered unsealed, so that its maker can fill in the free
 ;; variables; sealing it with `%cap-seal-closure` is the maker's last act. Its
@@ -77,7 +82,7 @@
   (%cap-and-perms (%cap-bounds-exact (%cap-set-addr (kernel-ref kb-seals) ot) 1) perm-se)))
 
 ;; A length an object can have: its header holds it in twenty-four bits.
-(define (check-length n)
+(defsubst (check-length n)
   (if (if (%fixnum? n) (if (%>= n 0) (%< n 16777216) nil) nil)
       n
       (error "not a length:" n)))
@@ -169,18 +174,15 @@
     (if later (fill-granules (%cap-set-addr space (%cap-base obj)) 0 (%- size value-bytes) 0) nil)
     obj)))
 
-;; What a fresh slot holds until it is given something: nil, so that a
-;; record's fields start empty, or zero in the limbs of a number.
-(define (fresh-slot type)
-  (if (%= type t-bignum) 0 (if (%= type t-float) 0 nil)))
-
 ;; Every granule `from` bytes into `c` up to `to` set to `v`. A store of an
 ;; untagged value clears the granule's tag.
 (define (fill-granules c from to v)
+  (declare unsafe)
+  (unsafe
   (let ((g (%cap-inc c from)) (end (%+ (%addr-of c) to)))
     (while (%< (%addr-of g) end)
       (%cap-st! g 0 v)
-      (set! g (%cap-inc g 8)))))
+      (set! g (%cap-inc g 8))))))
 
 (define (make-record n tag)
   (check-length n)

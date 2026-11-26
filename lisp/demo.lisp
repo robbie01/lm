@@ -734,7 +734,7 @@
     (gc)
     (let ((a (blit-and-drop)))
       (num-check 'a-dropped-bitmap-still-being-filled
-                 (list (blit-busy?) gc::*phase*) (list t gc::phase-idle))
+                 (list (blit-busy?) (unsafe gc::*phase*)) (list t gc::phase-idle))
       (unsafe (without-interrupts
                 (gc::start-cycle)
                 (gc::gc-push-1 *blit-ring*)
@@ -742,7 +742,7 @@
       (num-check 'is-kept-by-its-descriptor
                  (list (blit-busy?) (unsafe (gc::marked? (gc::mark-map) (- a 8))))
                  (list t t))
-      (while (= gc::*phase* gc::phase-marking) (unsafe (gc::step)))
+      (unsafe (while (= gc::*phase* gc::phase-marking) (gc::step)))
       (gc)
       (blit-sync)
       (num-check 'and-the-fill-landed-in-it
@@ -1458,6 +1458,23 @@
   (num-check 'a-safe-name-cannot-become-unsafe
              (refused? (lambda () (eval '(define (safe-probe) (declare unsafe) 2))))
              t)
+  ;; The collector's state is its own: where a sweep goes, the holes it
+  ;; hands out and the marks it keeps are unsafe names, and so are the
+  ;; helpers it hands a region to, so a safe program can neither steer a
+  ;; sweep over live objects nor stand in for a helper and keep the region.
+  ;; What it asks a safe name, a length's check, is open-coded where an
+  ;; object is made.
+  (num-check 'the-collectors-state-is-unsafe
+             (map symbol-unsafe? '(gc::*phase* gc::*holes* gc::*sweep-obj* gc::*mark-sp* gc::*keep-marks*))
+             (list t t t t t))
+  (num-check 'and-setting-it-is-refused (refused? (lambda () (eval '(set! gc::*holes* 0)))) t)
+  (num-check 'a-helper-handed-a-region-is-unsafe
+             (refused? (lambda () (eval '(define (gc::blank r lo hi) r)))) t)
+  (let ((was check-length))
+    (set! check-length (lambda (n) n))
+    (num-check 'a-length-is-checked-where-an-object-is-made
+               (refused? (lambda () (make-vector -5 0))) t)
+    (set! check-length was))
   ;; And a device: taking its page is unsafe, and the page a block hands
   ;; out is the device to whoever holds it.
   (num-check 'taking-a-page-is-unsafe

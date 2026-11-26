@@ -100,7 +100,7 @@
 (define (handle-trap cause epc tval ctx)
   (declare unsafe)
   (unsafe
-  (if (%>= (trap-depth) trap-nest-limit) (trap-spiral cause epc tval) nil)
+  (if (%>= (kernel-ref kb-depth) trap-nest-limit) (trap-spiral cause epc tval) nil)
   (if (cons-refill? cause tval)
       (refill-run ctx)
       (begin
@@ -910,7 +910,7 @@
   (declare unsafe)
   (unsafe
   (let ((r (if (%cons? report) (%car report) nil)))
-    (if (%> (trap-depth) 1)
+    (if (%> (kernel-ref kb-depth) 1)
         (begin
           (uart-string "\n*** error inside the trap handler\n")
           (if r (uart-string r) nil)
