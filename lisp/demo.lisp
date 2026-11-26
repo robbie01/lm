@@ -869,13 +869,12 @@
     (num-check 'and-so-does-a-bare-page (refused? (lambda () (gfx-hz (unsafe (device-page dev-gfx))))) t)
     (num-check 'the-printer-names-it (write-to-string gfx) "#<device gfx>")
     ;; The driver holds its device, sealed, and no page; and a task's stack
-    ;; and saved registers are sealed in its record.
+    ;; and saved registers are in no record a program can read, but in
+    ;; Exec's own table, an unsafe name.
     (num-check 'the-driver-holds-no-page (opened-reach (exec::tc-fn task)) nil)
-    (num-check 'a-tasks-registers-are-sealed
-               (list (%cap-sealed? (exec::tc-context task)) (%cap-sealed? (exec::tc-stack task)))
-               (list t t))
-    (num-check 'and-cannot-be-read
-               (refused? (lambda () (unsafe (%cap-ld (exec::tc-context task) 0)))) t)
+    (num-check 'a-tasks-registers-are-execs-own
+               (list (symbol-unsafe? 'exec::*tasks*) (loads-reach (list task)))
+               (list t nil))
     (num-check 'the-walk-finds-a-page-left-lying-about
                (device-cap? (loads-reach (list (list 1 (vector 2 sys))))) t)
     (num-check 'but-not-a-device
@@ -1409,6 +1408,31 @@
     (exec::start-task c)
     (while (not (= (exec::tc-state c) exec::ts-removed)) (sleep 10))))
 
+;; A task taken off every list, by a program that says nothing unsafe, and
+;; put back after two collections: its frames are what Exec's own table
+;; holds, not what the lists say, so the vector only its frame holds is
+;; still there when it wakes.
+(define *hidden-saw* nil)
+(define (hidden-task-keeps-its-frames)
+  (let* ((mask 0)
+         (c (exec::make-child "hidden" 0
+              (lambda ()
+                (let ((v (make-vector 6 'kept)))
+                  (wait mask)
+                  (set! *hidden-saw* (vector-ref v 0)))))))
+    (set! *hidden-saw* nil)
+    (set! mask (exec::alloc-signal c))
+    (exec::start-task c)
+    (while (not (= (exec::tc-state c) exec::ts-wait)) (sleep 10))
+    (exec::remove-node c)
+    (gc)
+    (gc)
+    (let ((i 0)) (while (< i 3000) (make-vector 6 i) (set! i (+ i 1))))
+    (gc)
+    (signal c mask)
+    (while (not (= (exec::tc-state c) exec::ts-removed)) (sleep 10))
+    *hidden-saw*))
+
 (define (unsafety)
   ;; Blocks and islands.
   (num-check 'a-raw-name-outside-a-block-is-refused
@@ -1417,7 +1441,7 @@
   ;; without compiling it as an expression first.
   (num-check 'a-raw-name-as-an-argument-is-refused
              (list (refused? (lambda () (eval '(define (hands-on) (list peek)))))
-                   (refused? (lambda () (eval '(define (hands-on x) (vector x exec::task-unseal))))))
+                   (refused? (lambda () (eval '(define (hands-on x) (vector x exec::*tasks*))))))
              (list t t))
   (num-check 'the-block-does-its-work (with-a-block 1) (list 1 t))
   (num-check 'the-function-around-it-has-no-sr (sr? (entry-of with-a-block)) nil)
@@ -1534,6 +1558,8 @@
     (blit-sync)
     (set-blit-sleep! was)
     (num-check 'a-sleeper-that-answers-early-is-not-believed (first-pixel b) 9))
+
+  (num-check 'a-task-off-every-list-keeps-its-frames (hidden-task-keeps-its-frames) 'kept)
   ;; And a device: taking its page is unsafe, and the page a block hands
   ;; out is the device to whoever holds it.
   (num-check 'taking-a-page-is-unsafe

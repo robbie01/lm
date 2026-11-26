@@ -1502,7 +1502,7 @@
     (lambda (c) (i-csrrs (cx-asm c) $a0 csr-cycle $zero)))
 
   ;; The lowest address the stack pointer may reach before the processor
-  ;; faults; see `task-stack-limit` in exec.lisp. An integer address.
+  ;; faults; see `stack-limit` in exec.lisp. An integer address.
   (definline '%set-stack-limit! 1
     (lambda (c)
       (let ((a (cx-asm c)))

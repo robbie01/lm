@@ -268,7 +268,7 @@
 
 (in-package sys)
 (export '(
-  *abort-cleanup-fn* *repl-restart* *resume-fn* *return-addr-fn* *stack-top-fn*
+  *abort-cleanup-fn* *repl-restart* *resume-fn* *return-addr-fn*
   *task-abort-fn*
   bye compile-time-eval error-trap eval expand-macro handle-trap
   kickstart macro-form?
@@ -289,7 +289,7 @@
   ;; what `mutex-lock` answers instead of `t` when the last owner ended holding it
   abandoned
   preemption-off preemption-on
-  task-snapshot task?
+  task-snapshot task? task-stack
   this-task
   remove-task reschedule sigf-vblank signal sigf-blit
   ;; ---- talking between tasks ----

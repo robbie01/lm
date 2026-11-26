@@ -904,10 +904,9 @@
 ;; Starting a task does the same thing for the same reason.
 (define *repl-restart* nil)
 
-;; Two things sys.lisp cannot know because Exec is compiled after it: whose
-;; stack to restart on, and what to do with a task that faults without a
-;; prompt to go back to. Exec fills these in when it starts.
-(define *stack-top-fn* nil)
+;; Two things sys.lisp cannot know because Exec is compiled after it: where
+;; a restarted closure returns to, and what to do with a task that faults
+;; without a prompt to go back to. Exec fills these in when it starts.
 (define *task-abort-fn* nil)
 (define *return-addr-fn* nil)
 ;; Exec keeps state that an abort walks out of and has to put back: a switch
@@ -924,14 +923,13 @@
   (unsafe (%ecall ecall-error)))
 
 ;; A task restarts on its own stack, which is a capability standing at its
-;; top. Before there are tasks, on the boot stack, which the kernel block
-;; holds the same way.
+;; top, as Exec's own table holds it. Before there are tasks, on the boot
+;; stack, which the kernel block holds the same way.
 (define (restart-stack)
   (declare unsafe)
   (unsafe
-  (if *stack-top-fn*
-      (%funcall *stack-top-fn*)
-      (kernel-ref kb-boot-stack))))
+  (let ((me (%this-task)))
+    (if me (task-stack me) (kernel-ref kb-boot-stack)))))
 
 ;; Where a restarted closure returns to when it finally does: on the machine
 ;; the sentry for the task exit stub, so a prompt in a window that is

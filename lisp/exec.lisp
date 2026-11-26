@@ -124,21 +124,20 @@
     (reverse acc)))
 
 ;; ---------------------------------------------------------------- Task
-;; The stack and the 256-byte register context are objects, a stack and a
-;; context, and the task holds each as a capability to it. The trap stub
-;; saves the registers into the context as thirty-two capabilities, tags and
-;; all. What holds the task holds them, and when nothing does the collector
-;; takes all three back.
+;; A task runs on a stack and is saved into a register context, both
+;; objects: the trap stub saves the registers into the context as
+;; thirty-two capabilities, tags and all.
 ;;
-;; Both are sealed in the record, with an otype of the kernel's. A task
-;; record is anybody's to read, and a task's stack and saved registers hold
-;; whatever it was working with, a driver's device page among them; sealed,
-;; their bounds can be read and nothing through them. Only the kernel opens
-;; them, with its key to that otype.
+;; Neither is in the task's record. A record is anybody's to read and to
+;; write, the lists it is on are anybody's to splice, and a stack and a
+;; context hold whatever their task was working with, a driver's device
+;; among them. So Exec keeps every task's stack and context in a table of
+;; its own (`*tasks*` below), and the scheduler runs a task, and the
+;; collector keeps alive what its registers and frames hold, only by what
+;; that table says, whatever a program has done to the records and the
+;; lists.
 (defrecord (task tc) (include node)
   state sigalloc sigwait sigrecvd
-  stack                          ; the whole stack, standing at its top
-  context                        ; the register block the trap stub saves into
   fn                             ; the closure the task runs
   result switches
   binds                          ; this task's fluid bindings, innermost first
@@ -152,19 +151,48 @@
   run-owed                       ; bytes of cons run handed to it, unpaid; see gc.lisp
   gen)                           ; which Exec it belongs to: see `task-alive?`
 
-;; The otype they are sealed with, and the key to it: minted when Exec
-;; starts, and held by these two closures and nothing else, which are unsafe
-;; names: what they open is a task's frames and registers.
-(defconstant otype-task 3)
-(define task-seal (declare unsafe))
-(define task-unseal (declare unsafe))
-(define (mint-task-key)
+;; Every task of this Exec from the moment it is made until it is reaped,
+;; as (task context . stack): the context the trap stub saves it into, and
+;; its stack standing at its top. An unsafe name, and walked by hand rather
+;; than handed to a library function: what it holds is every task's frames
+;; and registers.
+(define *tasks* (declare unsafe) nil)
+
+;; A task's entry, or nil for a task that is not this Exec's or has been
+;; reaped, which nothing runs again.
+(define (task-entry task)
+  (declare unsafe)
   (unsafe
-  (let ((key (sealing-key otype-task)))
-    (set! task-seal (lambda (c) (%cap-seal c key)))
-    (set! task-unseal (lambda (c) (%cap-unseal c key))))))
-(define (task-stack task) (declare unsafe) (unsafe (task-unseal (tc-stack task))))
-(define (task-context task) (declare unsafe) (unsafe (task-unseal (tc-context task))))
+  (let ((p *tasks*) (e nil))
+    (while (if e nil (%cons? p))
+      (if (%eq? (%car (%car p)) task) (set! e (%car p)) (set! p (%cdr p))))
+    e)))
+
+(define (task-context task)
+  (declare unsafe)
+  (unsafe (let ((e (task-entry task))) (if e (%car (%cdr e)) nil))))
+(define (task-stack task)
+  (declare unsafe)
+  (unsafe (let ((e (task-entry task))) (if e (%cdr (%cdr e)) nil))))
+
+(define (add-task-entry! task ctx stack)
+  (declare unsafe)
+  (unsafe
+  (without-interrupts
+    (set! *tasks* (%cons (%cons task (%cons ctx stack)) *tasks*)))))
+
+;; In place, allocating nothing: a task is reaped on the trap stack.
+(define (drop-task-entry! task)
+  (declare unsafe)
+  (unsafe
+  (without-interrupts
+    (if (if (%cons? *tasks*) (%eq? (%car (%car *tasks*)) task) nil)
+        (set! *tasks* (%cdr *tasks*))
+        (let ((p *tasks*))
+          (while (%cons? (%cdr p))
+            (if (%eq? (%car (%car (%cdr p))) task)
+                (%set-cdr! p (%cdr (%cdr p)))
+                (set! p (%cdr p)))))))))
 
 (defconstant ts-added 1)
 (defconstant ts-run 2)
@@ -295,7 +323,7 @@
 (define (switch-tasks)
   (declare unsafe)
   (unsafe
-  (let* ((cur (this-task))
+  (let* ((cur (%this-task))
          (head (list-first (ready-list)))
          ;; A task still able to run keeps the processor against anything
          ;; less urgent: the tick is for its equals, in turn, and its
@@ -307,8 +335,11 @@
                            nil)
                        nil)
                    nil
-                   (remove-head (ready-list)))))
-          (if (%null? next)
+                   (remove-head (ready-list))))
+         ;; Whatever is on the ready list, only a task the table holds is
+         ;; run, on the context and the stack the table holds for it.
+         (entry (if next (task-entry next) nil)))
+          (if (%null? entry)
               nil
               (begin
                 (swap-binds-out! (tc-binds cur))
@@ -320,8 +351,8 @@
                 (set-tc-switches! next (%+ (tc-switches next) 1))
                 (swap-binds-in! (tc-binds next))
                 (set! *switch-count* (%+ *switch-count* 1))
-                (%set-context! (task-context next))
-                (%set-stack-limit! (task-stack-limit next))
+                (%set-context! (%car (%cdr entry)))
+                (%set-stack-limit! (stack-limit (%cdr (%cdr entry))))
                 ;; Only now, with the context switched away, can a dead task
                 ;; let go of its stack.
                 (if *reaped* (reap-tasks) nil)))
@@ -497,9 +528,9 @@
 ;; full and has to finish. A small stack keeps a quarter of itself.
 (defconstant stack-reserve 8192)
 
-(define (task-stack-limit task)
-  (let* ((lo (%cap-base (tc-stack task)))
-         (quarter (%lsh (%cap-len (tc-stack task)) -2)))
+(define (stack-limit s)
+  (let* ((lo (%cap-base s))
+         (quarter (%lsh (%cap-len s) -2)))
     (%+ lo (if (%< quarter stack-reserve) quarter stack-reserve))))
 
 ;; A stack of `size` bytes, as a capability to its slots standing at its
@@ -541,8 +572,6 @@
     (set-tc-gen! task *exec-generation*)
     (zero-task-counters! task)
     (set-tc-state! task ts-added)
-    (set-tc-stack! task (task-seal top))
-    (set-tc-context! task (task-seal ctx))
     (set-tc-fn! task fn)
     (set-tc-binds! task binds)
     (set-tc-quantum! task *quantum*)
@@ -556,6 +585,7 @@
     (ctx-set! ctx reg-s2 task)
     ;; Its first cons traps into a refill: the run it starts with is empty.
     (ctx-set! ctx reg-gp (empty-cons-run))
+    (add-task-entry! task ctx top)
     task)))
 
 ;; Onto the ready list: from here it runs when the scheduler says so.
@@ -671,14 +701,13 @@
       (let ((b (assq '*blit-ring* (tc-binds task))))
         (if b (%cdr b) 0))))
 
-;; The task is an object, collected when the last reference goes, and its
-;; stack and context with it. A task somebody still holds keeps neither: they
-;; go here, and its links first, so that it does not keep every task behind
-;; it alive either.
+;; The task is an object, collected when the last reference goes. Its stack
+;; and context go here, out of the table, since nothing will run it again,
+;; and its links first, so that it does not keep every task behind it alive
+;; either.
 (define (reap-task task)
   (forget-node task)
-  (set-tc-stack! task nil)
-  (set-tc-context! task nil)
+  (unsafe (drop-task-entry! task))
   nil)
 
 (define (find-task name)
@@ -1452,7 +1481,7 @@
 (define (exec-init)
   (declare unsafe)
   (unsafe
-  (mint-task-key)
+  (set! *tasks* nil)
   (set! *vblank-int* nil)
   (%set-this-task! nil)
   (set! *idle-task* nil)
@@ -1488,21 +1517,19 @@
     (zero-task-counters! boot)
     (set-tc-quantum! boot *quantum*)
     (set-tc-state! boot ts-run)
-    (set-tc-context! boot (task-seal (kernel-ref kb-boot-frame)))
-    (set-tc-stack! boot (task-seal (kernel-ref kb-boot-stack)))
+    (add-task-entry! boot (kernel-ref kb-boot-frame) (kernel-ref kb-boot-stack))
     (set-tc-sigalloc! boot sig-reserved)
     ;; Task zero takes whatever was bound before there were tasks.
     (set-tc-binds! boot *boot-binds*)
     (set! *boot-binds* nil)
     (install-task-binds!)
     (%set-this-task! boot)
-    (%set-stack-limit! (task-stack-limit boot))
+    (%set-stack-limit! (stack-limit (kernel-ref kb-boot-stack)))
     (set! *task-count* 1))
   (build-task-exit-stub)
-  ;; What sys.lisp had to leave blank: a task restarts on its own stack, and a
-  ;; task that faults with no prompt behind it ends rather than halting the
-  ;; machine.
-  (set! *stack-top-fn* (lambda () (task-stack (this-task))))
+  ;; What sys.lisp had to leave blank: a restarted closure returns to the
+  ;; exit stub, and a task that faults with no prompt behind it ends rather
+  ;; than halting the machine.
   (set! *return-addr-fn* (lambda () *task-exit-stub*))
   (vblank-start)
   (idle-start)
@@ -1555,27 +1582,25 @@
 ;; ---------------------------------------------------------------- gc roots
 ;; Exec's records are objects hanging off variables, so the collector finds
 ;; the tasks, ports, messages and interrupt servers and every value in them
-;; by itself, the stacks and contexts among them. What is in use of a
-;; suspended task's stack and context it is told here, because it does not
-;; trace either. Nothing here may allocate: these run inside a collection.
+;; by itself, and the stacks and contexts through `*tasks*`. What is in use
+;; of each stack and context it is told here, because it traces neither:
+;; every task the table holds, which is every task that can run again,
+;; whether or not it is on a list. Nothing here may allocate: these run
+;; inside a collection.
 
-;; A cycle has begun: the run a suspended task was holding is not its own any
-;; more, because whatever it makes from now on has to come from a run handed
-;; out marked. Its next cons traps into a refill. A pair it was in the middle
-;; of making is in one of its saved registers, which the collector scans.
-(define (drop-task-run task)
-  (declare unsafe)
-  (unsafe
-  (if (tc-context task) (drop-context-run (task-context task)) nil)))
-
+;; A cycle has begun: the run a suspended task was holding is not its own
+;; any more, because whatever it makes from now on has to come from a run
+;; handed out marked. Its next cons traps into a refill. A pair it was in
+;; the middle of making is in one of its saved registers, which the
+;; collector scans. The running task's registers are the collector's own to
+;; see to, live or in the frame a trap saved them in.
 (define (invalidate-runs)
   (declare unsafe)
   (unsafe
-  (if *ready-list*
-      (begin
-        (scan-list-of *ready-list* drop-task-run)
-        (scan-list-of *wait-list* drop-task-run))
-      nil))
+  (let ((p *tasks*) (me (%this-task)))
+    (while (%cons? p)
+      (if (%eq? (%car (%car p)) me) nil (drop-context-run (%car (%cdr (%car p)))))
+      (set! p (%cdr p)))))
   nil)
 
 ;; The run a task was handed is owed by that task, not by whoever refills
@@ -1591,28 +1616,15 @@
         (let ((b (tc-run-owed me))) (set-tc-run-owed! me 0) b)
         (let ((b gc::*run-owed*)) (set! gc::*run-owed* 0) b))))
 
-;; A suspended task's saved registers, and its stack from the saved sp to
-;; the top.
-(define (scan-task task)
-  (declare unsafe)
-  (unsafe
-  (if (tc-context task) (scan-context (task-context task)) nil)))
-
-(define (scan-list-of l fn)
-  (let ((p (list-first l)))
-    (while p
-      (%funcall fn p)
-      (set! p (node-next p)))))
-
+;; Every suspended task's saved registers, and its stack from the saved sp
+;; to the top. The running task's are stale: what it holds now is in the
+;; registers and on the stack the roots scan where they stand.
 (define (extra-roots)
   (declare unsafe)
   (unsafe
-  (if *ready-list*
-      (begin
-        (scan-list-of *ready-list* scan-task)
-        (scan-list-of *wait-list* scan-task))
-      nil)))
+  (let ((p *tasks*) (me (%this-task)))
+    (while (%cons? p)
+      (if (%eq? (%car (%car p)) me) nil (scan-context (%car (%cdr (%car p)))))
+      (set! p (%cdr p))))))
 
 (define (task-count) *task-count*)
-
-;; What opens a task's stack or its saved registers.
