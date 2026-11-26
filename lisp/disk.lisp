@@ -133,7 +133,20 @@
 ;; `write-raw` writes n blocks out of whatever capability it is handed, a
 ;; byte object or not, through the disk device it is handed: the image
 ;; writer hands it each region of memory through the region's own
-;; capability.
+;; capability. So it is unsafe, and programs the controller through its page
+;; itself, watching the status until the transfer is over: the accessors
+;; and `transfer` are names anybody may define again, and the region is
+;; handed to none of them.
 (define (exclusive job) (declare unsafe) (request (driver-port) (list 'exclusive job)))
 
-(define (write-raw dev buf block n) (transfer dev disk-cmd-write buf block n))
+(define (write-raw dev buf block n)
+  (declare unsafe)
+  (unsafe
+  (let ((page (device-open dev disk-page-base)))
+    (without-interrupts
+      (%cap-st! page d-buf buf)
+      (%cap-st-word! page d-block block)
+      (%cap-st-word! page d-count n)
+      (%cap-st-word! page d-cmd disk-cmd-write))
+    (while (%= (%cap-ld-word page d-status) disk-busy) nil)
+    (%cap-ld-word page d-status))))

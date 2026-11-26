@@ -290,7 +290,7 @@
   (unsafe
   (clear-map-range cons-base (cons-ptr))
   (clear-map-range obj-base (obj-ptr))
-  (blit-wait-ring *gc-blit-ring*)))
+  (ring-drain (blit-unseal *gc-blit-ring*))))
 
 ;; ---------------------------------------------------------------- skipping
 ;; A word of the mark map covers sixteen pairs, 256 bytes of heap. Where that
@@ -552,7 +552,7 @@
 ;; descriptor rings in use are objects that something holds, a task, a
 ;; binding or the kernel block, and are marked as any object is; what is in
 ;; use of a stack or a context is scanned here. A chip that holds a
-;; capability for as long as it shows something is a root as well.
+;; capability for as long as it uses it is a root as well.
 (define (roots)
   (declare unsafe)
   (unsafe
@@ -568,7 +568,12 @@
   ;; Whatever a trap interrupted, if this is inside one.
   (each-trap-context scan-trap-context)
   ;; Every other task.
-  (extra-roots)))
+  (extra-roots)
+  ;; The descriptor the blitter is working on, which its list register hands
+  ;; back, and through it its ring and the chain linked after it: a task may
+  ;; let go of its ring with blits still in flight. Last, so that it is the
+  ;; first thing traced, while the chip is still at it.
+  (gc-push-1 (%cap-ld (%slot (kernel-ref kb-devices) dev-blit) hw::b-list))))
 
 ;; ---------------------------------------------------------------- runs
 ;; A task's cons run is its `gp`: a capability bounded to the run, its

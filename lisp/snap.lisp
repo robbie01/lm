@@ -43,9 +43,13 @@
 ;; image writer is the site that says so.
 (define (save-image) (unsafe (save-image-with resume-kickstart)))
 
+;; It and the two below are handed the collector's scratch or a region of
+;; memory, so they are unsafe names.
 (define (put-region hdr i base len)
+  (declare unsafe)
+  (unsafe
   (%cap-st-word! hdr (region-field i 0) base)
-  (%cap-st-word! hdr (region-field i 1) len)
+  (%cap-st-word! hdr (region-field i 1) len))
   nil)
 
 ;; Region i of the image, as the capability the kernel block holds for it:
@@ -60,7 +64,8 @@
 ;; What the controller is handed to write n blocks from where `c` stands:
 ;; `c` narrowed to those blocks and to loading data.
 (define (blocks c n)
-  (%cap-and-perms (%cap-bounds c (%lsh n 9)) perm-ld))
+  (declare unsafe)
+  (unsafe (%cap-and-perms (%cap-bounds c (%lsh n 9)) perm-ld)))
 
 ;; The first thing that went wrong, or 0 if nothing has.
 (define (first-bad bad status) (if (%= bad 0) status bad))
@@ -69,6 +74,8 @@
 ;; written through `at`, padded with zeroes to a whole block. Answers the
 ;; map's length in blocks.
 (define (tag-map r lo hi at)
+  (declare unsafe)
+  (unsafe
   (let ((q 0) (g (%cap-set-addr r lo)))
     (while (%< lo hi)
       (let ((byte 0) (bit 1) (e (%+ lo 64)))
@@ -82,7 +89,7 @@
     (while (%> (%logand q 511) 0)
       (%cap-st-byte! at q 0)
       (set! q (%+ q 1)))
-    (%lsh q -9)))
+    (%lsh q -9))))
 
 ;; Everything from the collection to the last block written is one critical
 ;; section, and nothing inside it allocates: another task could otherwise

@@ -138,7 +138,7 @@
   object-payload byte-payload? odd? or out-char out-of-memory *names-seen* package package-name
   package-use package? pair? pop position positive? princ print print-list
   print-obj print-record print-symbol print-vector print-function print-capability
-  emit-cap-summary cap-top-hex cap-top-saturated?
+  emit-cap-summary cap-top-hex cap-top-saturated? emit-capability-fields
   push put qualified-hash
   quasiquote quote quotient reduce rem remainder remove-if rest revappend
   read-char-or-nil read-form read-toplevel read-forms-from-string read-from-string
@@ -188,7 +188,7 @@
 (in-package hw)
 (export '(
   bm-pixels bitmap? make-bitmap alloc-bitmap
-  blit-busy? blit-drain blit-sync blit-wait-descriptor blit-wait-ring
+  blit-busy? blit-drain blit-sync blit-wait-descriptor blit-wait-ring ring-drain blit-unseal
   device-page device device-seal device-open otype-device device-page-bytes
   reset-processor disk-go disk-busy? blitter
   *blit-ring* *gc-blit-ring* *in-interrupt*

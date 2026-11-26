@@ -292,13 +292,17 @@
 
 ;; A ring is a vector: a slot saying which descriptor is next, then the
 ;; descriptors, each a run of value slots, a field to a slot, laid out as the
-;; chip reads them. A blit the chip has not finished holds the capabilities
-;; of its source and destination in its descriptor, so a ring is marked and
-;; traced as any vector is, and what a blit in flight reads and writes stays
-;; alive while it is in flight. A task's ring is held by its binding; one
-;; whose task ends is waited for first (`remove-task` in exec.lisp).
+;; chip reads them, then the task the ring is for. A blit the chip has not
+;; finished holds the capabilities of its source and destination in its
+;; descriptor, so a ring is marked and traced as any vector is, and what a
+;; blit in flight reads and writes stays alive while it is in flight: the
+;; chip hands the descriptor it is working on back to the collector's roots,
+;; and that keeps its ring and every descriptor linked after it. A task's
+;; ring is held by its binding; one whose task ends is waited for first
+;; (`remove-task` in exec.lisp).
 (defconstant blit-ring-slots
-  (%+ 1 (%* blit-ring-size (%lsh blit-list-size -3))))
+  (%+ 2 (%* blit-ring-size (%lsh blit-list-size -3))))
+(defconstant blit-ring-owner (%- blit-ring-slots 1))
 
 ;; A fresh ring holds zero in every slot: the next descriptor is the first,
 ;; and every done word reads as done, so no descriptor that was never used
@@ -306,13 +310,16 @@
 (define (new-blit-ring)
   (unsafe
   (if blit-seal nil (mint-blit-key))
-  (blit-seal (make-vector blit-ring-slots 0))))
+  (let ((r (make-vector blit-ring-slots 0)))
+    (%vector-set! r blit-ring-owner (%this-task))
+    (blit-seal r))))
 
 ;; Descriptor i of ring r, as the capability it is filled through and handed
 ;; to the chip as: bounded to the descriptor, with a pair's permissions, so
 ;; that the chip can load capabilities through it with their tags and write
 ;; them mutable.
-(define (ring-slot r i)
+(defsubst (ring-slot r i)
+  (declare unsafe)
   (%cap-and-perms (%cap-bounds-exact (%cap-inc r (%+ value-bytes (%* i blit-list-size)))
                                      blit-list-size)
                   perms-pair))
@@ -320,24 +327,35 @@
 ;; The ring's next descriptor, once the chip has finished with it.
 (define (ring-take r)
   (declare unsafe)
+  (unsafe
   (let* ((i (%vector-ref r 0))
          (d (ring-slot r i)))
-    (unsafe (blit-wait-descriptor d))
+    (blit-wait-descriptor d)
     (%vector-set! r 0 (if (%= (%+ i 1) blit-ring-size) 0 (%+ i 1)))
-    d))
+    d)))
 
 ;; A descriptor from the running task's ring. Not in an interrupt server: a
 ;; server runs with the world half saved, must not allocate or block, and
 ;; anything it draws is drawn over by the next task that composites. A server
 ;; that wants pixels signals a task.
+;;
+;; The binding is anybody's to set, so what is in it is used only if it
+;; unseals to a ring made for this task: two tasks filling one ring could
+;; each rewrite a descriptor the other had put on the chain, and the
+;; capabilities of a blit in flight would be in no descriptor at all.
 (define (blit-descriptor)
   (declare unsafe)
   (if *in-interrupt*
       (error "the blitter is task context only: signal a task instead")
       nil)
   (unsafe
-  (if (%cap-tag? *blit-ring*) nil (set! *blit-ring* (new-blit-ring)))
-  (ring-take (blit-unseal *blit-ring*))))
+  (let ((r (if (%cap-tag? *blit-ring*) (blit-unseal *blit-ring*) nil)))
+    (if (if r (%eq? (%vector-ref r blit-ring-owner) (%this-task)) nil)
+        nil
+        (begin
+          (set! *blit-ring* (new-blit-ring))
+          (set! r (blit-unseal *blit-ring*))))
+    (ring-take r))))
 
 ;; The collector's own ring. Not a fluid binding: a collection runs with
 ;; interrupts off from end to end, so there is never a second one. It is
@@ -383,8 +401,10 @@
 
 ;; Done, whether it landed or was refused: of a descriptor in hand, and of
 ;; one a sleeper holds sealed.
-(define (descriptor-done? d) (if (%= blit-pending (%cap-ld-word d bl-status)) nil t))
-(define (blit-done? s) (descriptor-done? (unsafe (blit-unseal s))))
+(defsubst (descriptor-done? d)
+  (declare unsafe)
+  (if (%= blit-pending (%cap-ld-word d bl-status)) nil t))
+(define (blit-done? s) (unsafe (descriptor-done? (blit-unseal s))))
 
 ;; How a task whose blit has not landed goes to sleep instead of spinning.
 ;; gfx.driver installs it, since the driver owns the completion interrupt.
@@ -404,33 +424,39 @@
 (define (blit-irq-each! on) (blit-ctrl! (blitter) (if on 2 0)))
 
 ;; A short spin first: most blits are small and done before a sleep could be
-;; arranged. Unsafe, since it seals what it is handed as a descriptor.
+;; arranged. Unsafe, since it seals what it is handed as a descriptor. The
+;; sleeper is anybody's to install, so what it says is not taken for an
+;; answer: the descriptor is asked again, and slept on again, until it is
+;; done.
 (define (blit-wait-descriptor b)
   (declare unsafe)
+  (unsafe
   (if (descriptor-done? b)
       nil
       (let ((n 0))
         (while (if (descriptor-done? b) nil (%< n 64))
           (blit-busy?)
           (set! n (%+ n 1)))
-        (if (descriptor-done? b)
-            nil
-            (if (if *blit-sleep* (if *in-interrupt* nil (interrupts-on?)) nil)
-                (%funcall *blit-sleep* (unsafe (blit-seal b)))
-                (while (if (descriptor-done? b) nil t) (blit-busy?))))))
+        (while (if (descriptor-done? b) nil t)
+          (if (if *blit-sleep* (if *in-interrupt* nil (interrupts-on?)) nil)
+              (%funcall *blit-sleep* (blit-seal b))
+              (blit-busy?))))))
   nil)
 
-;; Every descriptor in a ring, as a binding holds it: sealed, or 0 for a task
-;; that has never blitted. The chain runs in order, so this is the same as
-;; waiting for the last one issued.
-(define (blit-wait-ring s)
+;; Every descriptor in an unsealed ring. The chain runs in order, so this is
+;; the same as waiting for the last one issued.
+(define (ring-drain r)
+  (declare unsafe)
   (unsafe
-  (if (%cap-tag? s)
-      (let ((r (blit-unseal s)) (i 0))
-        (while (%< i blit-ring-size)
-          (blit-wait-descriptor (ring-slot r i))
-          (set! i (%+ i 1))))
-      nil))
+  (let ((i 0))
+    (while (%< i blit-ring-size)
+      (blit-wait-descriptor (ring-slot r i))
+      (set! i (%+ i 1))))))
+
+;; Every descriptor in a ring as a binding holds it: sealed, or 0 for a task
+;; that has never blitted.
+(define (blit-wait-ring s)
+  (unsafe (if (%cap-tag? s) (ring-drain (blit-unseal s)) nil))
   nil)
 
 (define (blit-sync) (blit-wait-ring *blit-ring*))
@@ -442,7 +468,8 @@
 ;; went idle without taking this one. The fields go in before the section:
 ;; the descriptor is this task's and on no chain yet. `d` is the capability
 ;; `blit-descriptor` handed out, and the link and the list register take it
-;; with a capability store.
+;; with a capability store, the register's through the chip's own page: the
+;; accessor is a name anybody may define again.
 (define (blit-go d op)
   (declare unsafe)
   (unsafe
@@ -457,7 +484,7 @@
       (if (if linked (blit-busy?) nil)
           nil
           (if (%= blit-pending (%cap-ld-word d bl-status))
-              (blit-list! (blitter) d)
+              (%cap-st! (device-page dev-blit) b-list d)
               nil)))))
   nil)
 

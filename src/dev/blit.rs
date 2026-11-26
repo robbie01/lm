@@ -155,8 +155,9 @@ pub struct Blitter {
     pub busy_until: u64,
     op: u32,
     /// The capability of the descriptor the running transfer came from,
-    /// checked when it was fetched, for the write-back.
-    block: Cap,
+    /// checked when it was fetched, for the write-back, and handed back to a
+    /// capability load of the list register while the transfer runs.
+    pub block: Cap,
     /// The running transfer's done word: `DONE`, or why it was refused.
     verdict: u32,
     ctrl: u32,

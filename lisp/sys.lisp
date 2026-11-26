@@ -34,18 +34,31 @@
 ;; are x1..x31, eight bytes each; `reg-<name>` for each comes from the
 ;; generated layout. A slot holds what the register held, tag and all, so an
 ;; integer reads back as a fixnum and a pointer as the value it was.
-(define (ctx-off n) (%* value-bytes n))
-(define (ctx-ref ctx n) (%cap-ld ctx (ctx-off n)))
-(define (ctx-set! ctx n v) (%cap-st! ctx (ctx-off n) v))
+;;
+;; A context is the whole of what the code it saved was holding, its stack
+;; and its cons run among it, and the trap handler hands none of it to a
+;; name a program could define again: these are open-coded and unsafe, and
+;; so is every function here that is handed a context, a register's value,
+;; or a frame.
+(defsubst (ctx-off n) (%* value-bytes n))
+(defsubst (ctx-ref ctx n) (declare unsafe) (%cap-ld ctx (ctx-off n)))
+(defsubst (ctx-set! ctx n v) (declare unsafe) (%cap-st! ctx (ctx-off n) v))
 
 ;; What an instruction read from register n: x0 reads as 0, whatever slot 0
 ;; holds.
-(define (ctx-operand ctx n) (if (%= n 0) 0 (ctx-ref ctx n)))
+(defsubst (ctx-operand ctx n) (declare unsafe) (if (%= n 0) 0 (ctx-ref ctx n)))
 
 ;; Moving the saved pc past the instruction is what makes a trap resume after
 ;; it rather than run it again.
-(define (step-past ctx n)
+(defsubst (step-past ctx n)
+  (declare unsafe)
   (ctx-set! ctx reg-pc (%cap-inc (ctx-ref ctx reg-pc) n)))
+
+;; Whether the code the context saved has SR: the code of an `unsafe` block,
+;; which may hold anything at all.
+(defsubst (sr-code? ctx)
+  (declare unsafe)
+  (%= perm-sr (%logand (%cap-perms (ctx-ref ctx reg-pc)) perm-sr)))
 
 ;; ---------------------------------------------------------------- traps
 ;; Everything that goes wrong arrives here, along with every interrupt. The
@@ -178,32 +191,60 @@
               lo))
         0))))
 
-(define (compressed? w) (if (%= (%logand w 3) 3) nil t))
-(define (insn-op w)  (%logand w 127))
-(define (insn-rd w)  (%logand (%lsh w -7) 31))
-(define (insn-f3 w)  (%logand (%lsh w -12) 7))
-(define (insn-rs1 w) (%logand (%lsh w -15) 31))
-(define (insn-rs2 w) (%logand (%lsh w -20) 31))
-(define (insn-f7 w)  (%logand (%lsh w -25) 127))
+;; The fields, open-coded: which register the handler reads, or writes a
+;; widened result into, is what they say.
+(defsubst (compressed? w) (if (%= (%logand w 3) 3) nil t))
+(defsubst (insn-op w)  (%logand w 127))
+(defsubst (insn-rd w)  (%logand (%lsh w -7) 31))
+(defsubst (insn-f3 w)  (%logand (%lsh w -12) 7))
+(defsubst (insn-rs1 w) (%logand (%lsh w -15) 31))
+(defsubst (insn-rs2 w) (%logand (%lsh w -20) 31))
+(defsubst (insn-f7 w)  (%logand (%lsh w -25) 127))
 
 ;; The I-type and S-type immediates, sign-extended as the processor reads
 ;; them.
-(define (insn-imm-i w) (%ash w -20))
-(define (insn-imm-s w) (%logior (%lsh (%ash w -25) 5) (%logand (%lsh w -7) 31)))
+(defsubst (insn-imm-i w) (%ash w -20))
+(defsubst (insn-imm-s w) (%logior (%lsh (%ash w -25) 5) (%logand (%lsh w -7) 31)))
 
 ;; Xlm's fixnum immediates: the operation in imm[11:10], and a ten-bit
 ;; signed immediate below it.
-(define (fixi-op w) (%logand (%lsh w -30) 3))
-(define (fixi-imm w) (%ash (%lsh w 2) -22))
+(defsubst (fixi-op w) (%logand (%lsh w -30) 3))
+(defsubst (fixi-imm w) (%ash (%lsh w 2) -22))
 
 ;; Whether an instruction is Xlm's, in its R-type group, and if so its
 ;; funct7.
-(define (xlm-r? w) (if (%= (insn-op w) op-xlm) (%= (insn-f3 w) 6) nil))
+(defsubst (xlm-r? w) (if (%= (insn-op w) op-xlm) (%= (insn-f3 w) 6) nil))
 
 ;; The value a fault names by its register. Register 0 is x0, which reads as
 ;; NULL, the integer 0; its slot in the context holds the pc.
-(define (fault-value ctx reg)
+(defsubst (fault-value ctx reg)
+  (declare unsafe)
   (if (if (%> reg 0) (%< reg 32) nil) (ctx-ref ctx reg) 0))
+
+;; What the report says of the value in register `reg`. Code that says
+;; nothing unsafe holds only what it was handed, and a value of its is
+;; written as the printer writes it. The registers a program never names, its
+;; return address, stack, frame, code object and cons run, and every register
+;; of code with SR, may hold what no program was handed, so a capability
+;; there is named by its fields, which are numbers and hand nothing on.
+(define (emit-held ctx reg)
+  (declare unsafe)
+  (unsafe
+  (let ((v (fault-value ctx reg)))
+    (if (if (%cap-tag? v)
+            (if (%null? v)
+                nil
+                (if (sr-code? ctx)
+                    t
+                    (if (%= reg reg-ra) t
+                        (if (%= reg reg-sp) t
+                            (if (%= reg reg-gp) t
+                                (if (%= reg reg-tp) t
+                                    (if (%= reg reg-s0) t (%= reg reg-s1))))))))
+            nil)
+        (emit-capability-fields (%addr-of v) (%cap-base v) (cap-top-hex v)
+                                (%cap-perms v) (%cap-otype v))
+        (write v)))))
 
 ;; ------------------------- naming the operation
 (define (pair-op-name w)
@@ -314,16 +355,19 @@
 ;; ------------------------- naming the value
 ;; Tags make every value say what it is, so whatever a register held is
 ;; printed as the printer prints it, a raw capability included.
-(define (emit-a-or-an sym)
-  (if (%symbol? sym)
-      (begin
-        (emit-str (if (if (%> (%string-length (%symbol-name sym)) 0)
-                          (string-index "aeiou" (%string-ref (%symbol-name sym) 0))
-                          nil)
-                      "an "
-                      "a "))
-        (emit-str (%symbol-name sym)))
-      (write sym)))
+(define (emit-a-or-an ctx reg)
+  (declare unsafe)
+  (unsafe
+  (let ((sym (fault-value ctx reg)))
+    (if (%symbol? sym)
+        (begin
+          (emit-str (if (if (%> (%string-length (%symbol-name sym)) 0)
+                            (string-index "aeiou" (%string-ref (%symbol-name sym) 0))
+                            nil)
+                        "an "
+                        "a "))
+          (emit-str (%symbol-name sym)))
+        (emit-held ctx reg)))))
 
 (define (type-name ty)
   (cond ((%= ty t-vector) "a vector")
@@ -343,58 +387,62 @@
 ;; to write. `lvar` traps on the unbound marker naming the symbol's
 ;; register, `jcl` on anything that is not a closure, and `npair` on
 ;; anything that is not a cons run with a pair left in it.
-(define (emit-ref-fault w v)
-  (let ((f (insn-f3 w)) (f7 (insn-f7 w)))
+(define (emit-ref-fault w ctx reg)
+  (declare unsafe)
+  (unsafe
+  (let ((f (insn-f3 w)) (f7 (insn-f7 w)) (v (fault-value ctx reg)))
     (cond
      ((%= f 2)
       (if (%symbol? v)
           (begin (emit-str "unbound variable: ") (emit-str (%symbol-name v)))
-          (begin (emit-str "variable: expected a symbol, got ") (write v))))
+          (begin (emit-str "variable: expected a symbol, got ") (emit-held ctx reg))))
      ((%< f 2)
       (emit-str (pair-op-name w))
       (cond ((%null? v) (emit-str ": nil has no cell"))
             ((%cons? v)
              (emit-str (if (%= f 1) ": the pair is read-only" ": the pair cannot be read")))
-            (else (emit-str ": expected a pair, got ") (write v))))
+            (else (emit-str ": expected a pair, got ") (emit-held ctx reg))))
      ((%= f7 #x20)
       (emit-str "call: ")
       ;; A name nothing was ever stored in holds the unbound marker.
       (if (%eq? v (%unbound))
           (emit-str "undefined function")
-          (begin (emit-str "expected a function, got ") (write v))))
+          (begin (emit-str "expected a function, got ") (emit-held ctx reg))))
      ((%= f7 #x22)
       (emit-str (length-op-name (insn-rs2 w)))
       (emit-str ": expected ")
       (emit-str (type-name (insn-rs2 w)))
       (emit-str ", got ")
-      (write v))
-     ((%= f7 #x24) (emit-str "cons: no pair is left in ") (write v))
-     (else (emit-str (op-name w)) (emit-str ": expected a closure object, got ") (write v)))))
+      (emit-held ctx reg))
+     ((%= f7 #x24) (emit-str "cons: no pair is left in ") (emit-held ctx reg))
+     (else (emit-str (op-name w)) (emit-str ": expected a closure object, got ") (emit-held ctx reg))))))
 
 ;; Both operands are still in the registers the instruction named, so the
 ;; report can say what was indexed as well as what with. The immediate form
 ;; keeps the index in the rs2 field, and a wrong type there can only be the
 ;; object's.
 (define (emit-index-fault w cause tval ctx)
+  (declare unsafe)
+  (unsafe
   (let* ((ty (index-type w))
          (f (index-form w))
          (imm (%= 4 (%logand f 4)))
          (obj (ctx-ref ctx (insn-rs1 w)))
-         (idx (if imm (insn-rs2 w) (ctx-ref ctx (insn-rs2 w))))
          (wanted (if (if (%= ty 0) (%= 2 (%logand f 2)) nil)
                      "a string or byte vector"
                      (type-name ty))))
     (emit-str (index-op-name w))
     (cond
      ((%= cause cause-range)
-      (emit-str ": index ") (write idx)
+      (emit-str ": index ")
+      (if imm (write (insn-rs2 w)) (emit-held ctx (insn-rs2 w)))
       (emit-str " is outside ") (emit-str wanted)
       (emit-str " of ") (emit-str (number->string (%obj-len obj))))
      ((if imm t (%= tval (insn-rs1 w)))
       (emit-str ": expected ") (emit-str wanted)
-      (emit-str ", got ") (write obj))
+      (emit-str ", got ") (emit-held ctx (insn-rs1 w)))
      (else
-      (emit-str ": index is not a number, it is ") (write idx)))))
+      (emit-str ": index is not a number, it is ") (emit-held ctx (insn-rs2 w)))))))
 
 ;; Whether an Xlm instruction is a fixnum operation: the immediates, `fop`,
 ;; `fshi` and `retag`.
@@ -408,16 +456,18 @@
 ;; `try-widen` has already had its chance, so a bignum reaching here means
 ;; this operator has no bignum form, not that the operand was the wrong kind
 ;; of thing.
-(define (emit-arith-fault w cause v)
+(define (emit-arith-fault w cause ctx reg)
+  (declare unsafe)
+  (unsafe
   (emit-str (op-name w))
   (cond
    ((%= cause cause-divzero) (emit-str ": division by zero"))
    ((%= cause cause-overflow) (emit-str ": the result does not fit in a fixnum"))
    ((retag? w)
     (emit-str (if (%= (retag-from w) 1) ": expected a character, got " ": expected a number, got "))
-    (write v))
-   ((%bignum? v) (emit-str ": no bignum form, given ") (write v))
-   (else (emit-str ": expected a number, got ") (write v))))
+    (emit-held ctx reg))
+   ((%bignum? (fault-value ctx reg)) (emit-str ": no bignum form, given ") (emit-held ctx reg))
+   (else (emit-str ": expected a number, got ") (emit-held ctx reg)))))
 
 ;; Causes 24 to 28. A wrong type, an index out of range or a cons run with
 ;; nothing left names the register that held the offending value, and the
@@ -429,9 +479,9 @@
     (lambda ()
       (let ((w (insn-at epc)))
         (cond ((if (%= (insn-op w) op-xlm) (%= (insn-f3 w) 7) nil) (emit-index-fault w cause tval ctx))
-              ((fixnum-op? w) (emit-arith-fault w cause (fault-value ctx tval)))
+              ((fixnum-op? w) (emit-arith-fault w cause ctx tval))
               ((if (%= (insn-op w) op-xlm) (if (%= cause cause-wrong-type) t (%= cause cause-run)) nil)
-               (emit-ref-fault w (fault-value ctx tval)))
+               (emit-ref-fault w ctx tval))
               (else (emit-str (op-name w)) (emit-str ": ") (emit-str (cause-name cause)))))))))
 
 ;; ------------------------- capability faults
@@ -443,14 +493,14 @@
 
 ;; The register a load or a store takes as its authority: the base, or the
 ;; object of an Xlm access.
-(define (access-authority w)
+(defsubst (access-authority w)
   (if (compressed? w)
       (if (%= (%logand w 3) 2) reg-sp (%+ 8 (%logand (%lsh w -7) 7)))
       (insn-rs1 w)))
 
 ;; The register a jump takes its target from, or nil for one relative to the
 ;; pc: `jalr`, and `c.jr` and `c.jalr`, which name it where rd would be.
-(define (jump-register w)
+(defsubst (jump-register w)
   (cond ((compressed? w)
          (if (%= (%logand w 3) 2) (if (%= (%logand (%lsh w -13) 7) 4) (insn-rd w) nil) nil))
         ((%= (insn-op w) op-jalr) (insn-rs1 w))
@@ -467,23 +517,31 @@
             (emit-access-fault w (access-authority w) (%= cause cause-cap-store) tval ctx)))))))
 
 ;; Whether the capability stores data, or loads it, at all.
-(define (stores-data? c) (%= perm-sd (%logand (%cap-perms c) perm-sd)))
-(define (loads-data? c) (%= perm-ld (%logand (%cap-perms c) perm-ld)))
-(define (executes? c) (%= perm-ex (%logand (%cap-perms c) perm-ex)))
+(defsubst (stores-data? c) (%= perm-sd (%logand (%cap-perms c) perm-sd)))
+(defsubst (loads-data? c) (%= perm-ld (%logand (%cap-perms c) perm-ld)))
+(defsubst (executes? c) (%= perm-ex (%logand (%cap-perms c) perm-ex)))
 
-;; A value as the printer writes it, unless the printer could not read it:
-;; then as the capability it is.
-(define (emit-value v)
-  (if (if (%cap-tag? v) (not (loads-data? v)) nil) (print-capability v) (write v)))
+;; A register's value as the report names it, and as the capability it is
+;; where the printer could not read it.
+(define (emit-value ctx reg)
+  (declare unsafe)
+  (unsafe
+  (let ((v (fault-value ctx reg)))
+    (if (if (%cap-tag? v) (if (loads-data? v) nil t) nil)
+        (emit-capability-fields (%addr-of v) (%cap-base v) (cap-top-hex v)
+                                (%cap-perms v) (%cap-otype v))
+        (emit-held ctx reg)))))
 
-(define (emit-sealed v)
-  (cond ((%= (%cap-otype v) otype-closure) (emit-str " is a sealed function: only calling it opens it"))
-        ((%= (%cap-otype v) otype-sentry) (emit-str " is a sealed entry: only jumping to it opens it"))
+(define (emit-sealed otype)
+  (cond ((%= otype otype-closure) (emit-str " is a sealed function: only calling it opens it"))
+        ((%= otype otype-sentry) (emit-str " is a sealed entry: only jumping to it opens it"))
         (else (emit-str " is sealed"))))
 
 ;; `sp` is bounded to its task's stack, so writing below the bottom is a
 ;; capability fault even where the stack limit has not caught it.
 (define (emit-access-fault w reg store a ctx)
+  (declare unsafe)
+  (unsafe
   (let ((v (fault-value ctx reg)))
     (if (if (%= reg reg-sp) (if (%cap-tag? v) (%< a (%cap-base v)) nil) nil)
         (emit-str "stack overflow: below the bottom of the stack")
@@ -491,19 +549,29 @@
           (emit-str (op-name w))
           (emit-str ": ")
           (cond
-           ((not (%cap-tag? v)) (emit-value v) (emit-str " is not a pointer"))
-           ((%cap-sealed? v) (emit-value v) (emit-sealed v))
-           ((if store (not (stores-data? v)) nil)
-            (if (%null? v) (emit-str "nil has no cell") (begin (emit-value v) (emit-str " is read-only"))))
-           ((if store nil (not (loads-data? v))) (emit-value v) (emit-str " cannot be read"))
-           (else (emit-str "outside the bounds of ") (emit-value v)))))))
+           ((if (%cap-tag? v) nil t) (emit-value ctx reg) (emit-str " is not a pointer"))
+           ((%cap-sealed? v) (emit-value ctx reg) (emit-sealed (%cap-otype v)))
+           ((if store (if (stores-data? v) nil t) nil)
+            (if (%null? v) (emit-str "nil has no cell") (begin (emit-value ctx reg) (emit-str " is read-only"))))
+           ((if store nil (if (loads-data? v) nil t)) (emit-value ctx reg) (emit-str " cannot be read"))
+           (else (emit-str "outside the bounds of ") (emit-value ctx reg))))))))
 
-;; What refused a jump's target: the capability it was to run under.
-(define (emit-entry-refusal v)
-  (cond ((not (%cap-tag? v)) (emit-value v) (emit-str " is not a pointer"))
-        ((%cap-sealed? v) (emit-value v) (emit-sealed v))
-        ((not (executes? v)) (emit-value v) (emit-str " is not code"))
-        (else (emit-str "outside the bounds of ") (emit-value v))))
+;; What refused a jump's target: the capability it was to run under, the
+;; value `v` of register `reg`, or with `reg` nil a closure's entry.
+(define (emit-entry-refusal ctx reg v)
+  (declare unsafe)
+  (unsafe
+  (cond ((if (%cap-tag? v) nil t) (emit-entry ctx reg v) (emit-str " is not a pointer"))
+        ((%cap-sealed? v) (emit-entry ctx reg v) (emit-sealed (%cap-otype v)))
+        ((if (executes? v) nil t) (emit-entry ctx reg v) (emit-str " is not code"))
+        (else (emit-str "outside the bounds of ") (emit-entry ctx reg v)))))
+
+(define (emit-entry ctx reg v)
+  (declare unsafe)
+  (unsafe
+  (if reg
+      (emit-value ctx reg)
+      (emit-capability-fields (%addr-of v) (%cap-base v) (cap-top-hex v) (%cap-perms v) (%cap-otype v)))))
 
 ;; The pc itself refused at the fetch, a jump or a branch out of its code,
 ;; or a jump or a call to a capability that cannot run there.
@@ -516,19 +584,19 @@
       (emit-str (if (executes? (ctx-ref ctx reg-pc))
                     "the pc has run off the end of its code"
                     "the pc is not in code")))
-     (reg (emit-str "jump: ") (emit-entry-refusal (fault-value ctx reg)))
+     (reg (emit-str "jump: ") (emit-entry-refusal ctx reg (fault-value ctx reg)))
      ((if (xlm-r? w) (%= (insn-f7 w) #x20) nil)
       (emit-str "call: the entry of ")
-      (write (fault-value ctx (insn-rs1 w)))
+      (emit-held ctx (insn-rs1 w))
       (emit-str " cannot run: ")
-      (emit-entry-refusal (%cap-ld (open-closure (fault-value ctx (insn-rs1 w))) 0)))
+      (emit-entry-refusal ctx nil (%cap-ld (open-closure (fault-value ctx (insn-rs1 w))) 0)))
      (else (emit-str (op-name w)) (emit-str ": the target is outside the code"))))))
 
 ;; An illegal instruction. Without SR in the pc the privileged instructions
 ;; are illegal: a CSR and `mret`. A load or a store through x0, which RVY
 ;; reserves, is illegal with SR or without: memory is reached through a
 ;; capability, and x0 is none.
-(define (privileged-insn? w)
+(defsubst (privileged-insn? w)
   (if (compressed? w) nil (%= (insn-op w) op-sys)))
 
 (define (illegal-trap epc tval ctx)
@@ -572,8 +640,10 @@
           (else nil))))
 
 ;; `faddi` and `faddio` add their immediate; `fop` takes both operands from
-;; registers.
+;; registers. Only numbers go on to the arithmetic.
 (define (widened w ctx)
+  (declare unsafe)
+  (unsafe
   (let ((f (insn-f3 w))
         (x (ctx-operand ctx (insn-rs1 w))))
     (cond ((%= f 5)
@@ -584,7 +654,7 @@
              (if (if (%<= (insn-f7 w) #x15) (if (widenable? x) (widenable? y) nil) nil)
                  (widened-op (insn-f7 w) x y)
                  nil)))
-          (else nil))))
+          (else nil)))))
 
 ;; Slot zero of the context is the saved pc, not register x0, so an
 ;; instruction that writes x0 has nowhere to put an answer. The compiler
@@ -634,7 +704,7 @@
             ;; A name given as data was to be resolved outside `unsafe`, and
             ;; the name is unsafe. The symbol is in a0.
             (emit-str "\n*** ")
-            (write (ctx-ref ctx reg-a0))
+            (emit-held ctx reg-a0)
             (emit-str " is unsafe: given as data it names nothing outside an unsafe form, at ")
             (emit-str (number->hex epc))
             (emit-str "\n"))
@@ -642,9 +712,9 @@
             ;; A record accessor was handed the wrong kind of record. It left
             ;; the tag it wanted in t3 and what it was given in a0.
             (emit-str "\nexpected ")
-            (emit-a-or-an (ctx-ref ctx reg-t3))
+            (emit-a-or-an ctx reg-t3)
             (emit-str ", got ")
-            (write (ctx-ref ctx reg-a0))
+            (emit-held ctx reg-a0)
             (emit-str ", at ")
             (emit-str (number->hex epc))
             (emit-str "\n"))
@@ -679,9 +749,9 @@
 ;; its bounds. NULL, the link at the bottom of every stack, is not one, and
 ;; neither is anything else a broken frame could hold. The trace is printed
 ;; from inside the trap handler, where a fault would stop the machine.
-(define frame-link-perms (%logior perm-ld perm-lc))
+(defconstant frame-link-perms (%logior perm-ld perm-lc))
 
-(define (frame-readable? f)
+(defsubst (frame-readable? f)
   (if (%cap-tag? f)
       (if (%cap-sealed? f)
           nil
@@ -703,7 +773,8 @@
         (else nil))))
 
 ;; The code object of the closure that built the frame `f`, or nil.
-(define (frame-code f)
+(defsubst (frame-code f)
+  (declare unsafe)
   (let ((clo (%cap-ld f compiler::clo-slot)))
     (if (%object? clo)
         (if (%= (%obj-type clo) t-closure) (%cap-ld clo (%* value-bytes clo-code)) nil)
@@ -711,22 +782,26 @@
 
 ;; The function a code object's code runs as: its own, or for an island the
 ;; function it belongs to, whose frame it runs on.
-(define (code-owner code)
+(defsubst (code-owner code)
+  (declare unsafe)
   (let ((name (%cap-ld code (%* value-bytes code-name))))
     (if (if (%cons? name) (%eq? (%car name) 'unsafe) nil)
         (%cap-ld code (%* value-bytes code-lits))
         code)))
 
 ;; Whether the function whose code object is `code` built the frame `f`.
-(define (frame-built-by? f code)
+(defsubst (frame-built-by? f code)
+  (declare unsafe)
   (let ((built (frame-code f)))
     (if (if code built nil) (%= (%cap-base built) (%cap-base (code-owner code))) nil)))
 
-(define (emit-frame-line pc code)
+;; A line of the trace: the code object, which names its function, and the
+;; address, a number.
+(define (emit-frame-line at code)
   (emit-str "  ")
   (emit-code-label code)
   (emit-str " at ")
-  (emit-str (number->hex (%addr-of pc)))
+  (emit-str (number->hex at))
   (emit-str "\n"))
 
 ;; A leaf has no frame, and neither has a function stopped in its prologue:
@@ -734,27 +809,31 @@
 ;; caller. So the first line is the function at the pc, then each frame:
 ;; the pc or return address in the function that built it.
 (define (print-backtrace pc ra s0 s1)
+  (declare unsafe)
+  (unsafe
   (emit-str "backtrace:\n")
-  (let ((f s0) (p pc) (i 0) (code (unsafe (code-of pc s1))) (first nil))
+  (let ((f s0) (p pc) (i 0) (code (code-of pc s1)) (first nil))
     ;; The pc's own frame, or its island's function's, is named by the code
     ;; the pc is in.
     (if (if (frame-readable? f) (frame-built-by? f code) nil)
         (set! first code)
-        (begin (emit-frame-line pc code) (set! p ra)))
+        (begin (emit-frame-line (%addr-of pc) code) (set! p ra)))
     (while (if (%< i backtrace-limit) (frame-readable? f) nil)
-      (emit-frame-line p (if first first (frame-code f)))
+      (emit-frame-line (%addr-of p) (if first first (frame-code f)))
       (set! first nil)
       (set! p (%cap-ld f compiler::ra-slot))
       (set! f (%cap-ld f compiler::link-slot))
       (set! i (%+ i 1)))
-    (if (frame-readable? f) (emit-str "  ...\n") nil)))
+    (if (frame-readable? f) (emit-str "  ...\n") nil))))
 
 ;; The saved pc is the capability PCC was, so its bounds are the code's.
 (define (backtrace-from-context epc ctx)
+  (declare unsafe)
+  (unsafe
   (print-backtrace (%cap-set-addr (ctx-ref ctx reg-pc) epc)
                    (ctx-ref ctx reg-ra)
                    (ctx-ref ctx reg-s0)
-                   (ctx-ref ctx reg-s1)))
+                   (ctx-ref ctx reg-s1))))
 
 ;; One line for the fault, made by `what`, and the trace below it.
 (define (fault-report epc ctx what)
@@ -799,6 +878,7 @@
 (define *printing-report* nil)   ; the task printing one, if any
 
 (define (compose-report thunk)
+  (declare unsafe)
   (let ((acc nil))
     (fluid-let ((*out* (lambda (c) (set! acc (%cons c acc)))))
       (%funcall thunk))

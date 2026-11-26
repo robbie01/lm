@@ -723,15 +723,18 @@
    (if (asm-privileged a) (%logior perm-ex perm-sr) perm-ex))))
 
 ;; The code into a fresh text, through the text's own capability: a word at
-;; a time, then the last bytes one by one.
+;; a time, then the last bytes one by one. Unsafe, as what it is handed is
+;; machine code nobody has entered yet, to be written.
 (define (copy-into a text)
+  (declare unsafe)
+  (unsafe
   (let ((len (asm-len a)) (buf (asm-buf a)) (i 0))
     (while (%<= (%+ i 4) len)
       (%cap-st-word! text i (%cap-ld-word buf i))
       (set! i (%+ i 4)))
     (while (%< i len)
       (%cap-st-byte! text i (%bytes-ref buf i))
-      (set! i (%+ i 1)))))
+      (set! i (%+ i 1))))))
 
 ;; Place in a fresh text, and answer the entry capability. The text's own
 ;; capability goes no further than this.
@@ -739,7 +742,7 @@
   (declare unsafe)
   (resolve a)
   (let ((text (unsafe (alloc-object t-text (asm-len a)))))
-    (copy-into a text)
+    (unsafe (copy-into a text))
     (set-asm-origin! a (%addr-of text))
     (unsafe (entry-capability a))))
 

@@ -727,17 +727,20 @@
       (num-check 'all-of-it (all-bytes? v 0 32 3) t)
       (num-check 'and-nothing-was-refused (blit-refused?) nil))
     ;; A blit in flight keeps its bitmap alive: the descriptor holding the
-    ;; pixels nothing else holds is a slot of this task's ring, and a
-    ;; collection that reaches the ring while the chip is still filling them
-    ;; marks them through it, as it would through any vector, and the fill
-    ;; lands in a live object.
+    ;; pixels nothing else holds is a slot of this task's ring, and the one
+    ;; the chip is working on is a root, which its list register hands back.
+    ;; So a collection marks them through it while the chip is still filling
+    ;; them, even with the ring let go of as well, and the fill lands in a
+    ;; live object.
     (gc)
     (let ((a (blit-and-drop)))
       (num-check 'a-dropped-bitmap-still-being-filled
                  (list (blit-busy?) (unsafe gc::*phase*)) (list t gc::phase-idle))
+      (num-check 'the-chip-hands-back-its-descriptor
+                 (%cap-tag? (unsafe (%cap-ld (device-page dev-blit) hw::b-list))) t)
+      (set! *blit-ring* 0)
       (unsafe (without-interrupts
                 (gc::start-cycle)
-                (gc::gc-push-1 *blit-ring*)
                 (gc::trace-some)))
       (num-check 'is-kept-by-its-descriptor
                  (list (blit-busy?) (unsafe (gc::marked? (gc::mark-map) (- a 8))))
@@ -1394,6 +1397,12 @@
        (set! i (+ i 1)))
      acc)))
 
+;; Run `thunk` as a task of its own and wait for it to end.
+(define (in-a-task thunk)
+  (let ((c (exec::make-child "probe" 0 thunk)))
+    (exec::start-task c)
+    (while (not (= (exec::tc-state c) exec::ts-removed)) (sleep 10))))
+
 (define (unsafety)
   ;; Blocks and islands.
   (num-check 'a-raw-name-outside-a-block-is-refused
@@ -1475,6 +1484,32 @@
     (num-check 'a-length-is-checked-where-an-object-is-made
                (refused? (lambda () (make-vector -5 0))) t)
     (set! check-length was))
+  ;; Nor does the rest of the kernel hand a raw capability, a context, a
+  ;; frame, a region, a descriptor or code to be written, to a name a program
+  ;; could define again and keep it.
+  (num-check 'what-the-kernel-hands-a-raw-capability-is-unsafe
+             (map symbol-unsafe? '(sys::ctx-ref sys::fault-value sys::print-backtrace
+                                   sys::compose-report hw::ring-slot hw::descriptor-done?
+                                   snap::tag-map snap::blocks disk:write-raw asm::copy-into))
+             (list t t t t t t t t t t))
+  ;; A blitter ring is its own task's: a task handed another's, sealed, as
+  ;; its binding, blits through a ring of its own, so no two tasks fill one
+  ;; descriptor.
+  (let ((mine (begin (bm-fill-rect (alloc-bitmap 4 4) 0 0 4 4 1) (blit-sync) *blit-ring*))
+        (theirs nil))
+    (in-a-task (lambda ()
+                 (set! *blit-ring* mine)
+                 (bm-fill-rect (alloc-bitmap 4 4) 0 0 4 4 1)
+                 (blit-sync)
+                 (set! theirs *blit-ring*)))
+    (num-check 'a-ring-is-its-own-tasks (list (%cap-tag? theirs) (eq? theirs mine)) (list t nil)))
+  ;; And a sleeper that answers before the blit has landed is not believed.
+  (let ((b (alloc-bitmap 1024 768)) (was hw::*blit-sleep*))
+    (set-blit-sleep! (lambda (s) nil))
+    (bm-fill-rect b 0 0 1024 768 9)
+    (blit-sync)
+    (set-blit-sleep! was)
+    (num-check 'a-sleeper-that-answers-early-is-not-believed (first-pixel b) 9))
   ;; And a device: taking its page is unsafe, and the page a block hands
   ;; out is the device to whoever holds it.
   (num-check 'taking-a-page-is-unsafe

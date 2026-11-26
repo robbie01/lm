@@ -192,12 +192,20 @@ pub fn takes_cap(a: u32) -> bool {
 }
 
 /// Whether the register at `a` hands back the capability it holds to a
-/// capability load: the display's scan-out register, which holds its bitmap
-/// for as long as it shows it, so that the collector can keep what is on
-/// show alive. The blitter and the disk hold theirs only for a transfer,
-/// which their owners hold too, and hand nothing back.
+/// capability load, so that the collector can keep alive what a chip is
+/// still using: the display's scan-out register, which holds its bitmap for
+/// as long as it shows it, and the blitter's list register, which holds the
+/// descriptor the chip is working on, and through it its ring and the
+/// chain linked after it. A ring is anybody's to let go of while its blits
+/// are in flight. The disk holds its buffer only for a command, whose
+/// caller is blocked holding it, and hands nothing back.
 pub fn gives_cap(a: u32) -> bool {
-    dev_of(a) == DEV_GFX && a & 0xfff == gfx::G_BASE
+    let reg = a & 0xfff;
+    match dev_of(a) {
+        DEV_GFX => reg == gfx::G_BASE,
+        DEV_BLIT => reg == blit::B_LIST,
+        _ => false,
+    }
 }
 
 /// A capability load from a register `gives_cap` allows, through `auth`,
@@ -205,6 +213,7 @@ pub fn gives_cap(a: u32) -> bool {
 pub fn read_cap(m: &Machine, a: u32, auth: Cap) -> Cap {
     let held = match dev_of(a) {
         DEV_GFX => m.gfx.base,
+        DEV_BLIT if m.blit.busy => m.blit.block,
         _ => Cap::NULL,
     };
     loaded_through(held, auth)
