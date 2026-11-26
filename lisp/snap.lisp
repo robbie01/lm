@@ -23,7 +23,6 @@
 ;;; at base + 8(8k + j).
 
 (in-package snap)
-(unsafe-file)
 
 (defconstant snap-header-blocks 1)
 (defconstant snap-regions 3)
@@ -31,14 +30,18 @@
 ;; The header is put together in the image writer's part of the collector's
 ;; scratch, which no allocator hands out, and each region's tag map after
 ;; it: a capability to it, from the kernel block's.
-(define (snap-area) (%cap-inc (kernel-ref kb-scratch) scratch-image))
+(define (snap-area)
+  (declare unsafe)
+  (unsafe (%cap-inc (kernel-ref kb-scratch) scratch-image)))
 
 (define (region-blocks len) (%lsh (%+ len 511) -9))
 
 ;; The offset of word k of region i's entry in the header.
 (defsubst (region-field i k) (%+ 12 (%+ (%lsh i 4) (%lsh k 2))))
 
-(define (save-image) (save-image-with (%symbol-value 'resume-kickstart)))
+;; Writing the image is the one place raw blocks go to the disk, and the
+;; image writer is the site that says so.
+(define (save-image) (unsafe (save-image-with resume-kickstart)))
 
 (define (put-region hdr i base len)
   (%cap-st-word! hdr (region-field i 0) base)
@@ -48,9 +51,11 @@
 ;; Region i of the image, as the capability the kernel block holds for it:
 ;; the low block, cons space and object space.
 (define (snap-region i)
+  (declare unsafe)
+  (unsafe
   (cond ((%= i 0) (kernel-ref kb-low))
         ((%= i 1) (kernel-ref kb-cons))
-        (else (kernel-ref kb-objects))))
+        (else (kernel-ref kb-objects)))))
 
 ;; What the controller is handed to write n blocks from where `c` stands:
 ;; `c` narrowed to those blocks and to loading data.
@@ -89,9 +94,10 @@
 ;; driver's is in flight under it, and a transfer inside a section with
 ;; interrupts off can only be watched. `disk:exclusive` runs the job there,
 ;; and this task sleeps until it answers with the blocks written, or minus
-;; the first status that was not ok. The job writes through the
-;; controller's page, which the kernel block holds.
+;; the first status that was not ok.
 (define (save-image-with top)
+  (declare unsafe)
+  (unsafe
   (let* ((saved-top (kernel-ref kb-toplevel))
          (result
           (disk:exclusive
@@ -108,10 +114,10 @@
               ;; A resumed image re-enters through `top` rather than through
               ;; the boot list: every global it would have set is already set.
               (kernel-set! kb-toplevel top)
-              (let ((r (write-regions (device-page dev-disk))))
+              (let ((r (write-regions)))
                 (kernel-set! kb-toplevel saved-top)
                 r)))))
-    (report-save result)))
+    (report-save result))))
 
 ;; Three regions: the low block, pairs, objects, each from its base to as
 ;; far as its allocator has reached, each read through the kernel block's
@@ -119,9 +125,12 @@
 ;; collector's scratch. The header goes out last, so that a run that is
 ;; interrupted leaves a file with no valid header rather than a wrong one.
 ;; Answers the blocks written, or minus the first status that was not ok.
-;; Allocates nothing, and writes through `page`, the controller's.
-(define (write-regions page)
+;; Allocates nothing.
+(define (write-regions)
+  (declare unsafe)
+  (unsafe
   (let* ((hdr (snap-area))
+         (dev (device dev-disk))
          (maps (%cap-inc hdr 512))
          (i 0) (k snap-header-blocks) (bad 0))
     (put-region hdr 0 0 low-end)
@@ -135,15 +144,15 @@
              (m (tag-map r base (%+ base len) maps)))
         (%cap-st-word! hdr (region-field i 2) k)
         (%cap-st-word! hdr (region-field i 3) (%+ k n))
-        (set! bad (first-bad bad (disk:write-raw page (blocks (%cap-set-addr r base) n) k n)))
-        (set! bad (first-bad bad (disk:write-raw page (blocks maps m) (%+ k n) m)))
+        (set! bad (first-bad bad (disk:write-raw dev (blocks (%cap-set-addr r base) n) k n)))
+        (set! bad (first-bad bad (disk:write-raw dev (blocks maps m) (%+ k n) m)))
         (set! k (%+ k (%+ n m))))
       (set! i (%+ i 1)))
     (%cap-st-word! hdr 0 snap-magic)
     (%cap-st-word! hdr 4 reset-vector)
     (%cap-st-word! hdr 8 snap-regions)
-    (set! bad (first-bad bad (disk:write-raw page (blocks hdr 1) 0 1)))
-    (if (%= bad 0) k (%- 0 bad))))
+    (set! bad (first-bad bad (disk:write-raw dev (blocks hdr 1) 0 1)))
+    (if (%= bad 0) k (%- 0 bad)))))
 
 (define (report-save result)
   (if (%< result 0)
@@ -157,12 +166,14 @@
 
 ;; Everything the boot list would set up is already in the image. Exec is
 ;; rebuilt, because the task that saved is not the task that resumes, and
-;; the drivers start again in `exec-init`, each taking its page afresh. The
-;; tasks that were saved never run again: the new Exec's lists do not hold
-;; them, and the collector takes them back with their stacks. An image on
-;; the disk may have had its object space slid down by the forge, so it
-;; counts a move before anything can look in a table.
+;; the drivers start again in `exec-init`. The tasks that were saved never
+;; run again: the new Exec's lists do not hold them, and the collector
+;; takes them back with their stacks. An image on the disk may have had its
+;; object space slid down by the forge, so it counts a move before anything
+;; can look in a table.
 (define (resume-kickstart)
+  (declare unsafe)
+  (unsafe
   (note-move!)
   (kernel-set! kb-trap-hook (%symbol-value 'handle-trap))
   (set! *error-handler* (%symbol-value 'error-trap))
@@ -179,7 +190,7 @@
   ;; does the machine, whether or not an error has restarted it since.
   (repl (lambda () (%halt exit-ok)))
   (%halt exit-ok)
-  0)
+  0))
 
 ;; ---------------------------------------------------------------- fresh
 ;; The end of a fresh rebuild. `genesis` has left in `*fresh-image*` what the
@@ -196,6 +207,8 @@
 ;; top level on a clean stack, with no task, an empty cons run, and nothing
 ;; running but the image's own code.
 (define (save-fresh)
+  (declare unsafe)
+  (unsafe
   (let* ((fresh *fresh-image*)
          (e (if fresh (table-ref (%car fresh) 'finish-fresh nil) nil)))
     (if e nil (error "save-fresh: run sys:genesis first"))
@@ -203,7 +216,7 @@
     (kernel-set! kb-toplevel (%vector-ref e 0))
     (%disable)
     (%set-this-task! nil)
-    (reset-processor)))
+    (reset-processor))))
 
 ;; Where the reset lands. The symbols still hold the builder's definitions,
 ;; so the handover itself happens in `fresh-become`, which is the builder's,
@@ -212,11 +225,13 @@
 ;; it, so the collection's roots are the image's own globals and what
 ;; survives is exactly the image.
 (define (finish-fresh)
+  (declare unsafe)
+  (unsafe
   (fresh-become)
   (forget-unused-packages)
   (kernel-set! kb-package (find-package "user"))
   (collect-for-image)
-  (let ((r (write-regions (device-page dev-disk))))
+  (let ((r (write-regions)))
     (if (%< r 0)
         (begin
           (uart-string "fresh image: the disk answered ")
@@ -228,9 +243,11 @@
           (uart-num r)
           (uart-string " blocks")
           (uart-nl)
-          (%halt exit-ok)))))
+          (%halt exit-ok))))))
 
 (define (fresh-become)
+  (declare unsafe)
+  (unsafe
   (let* ((fresh (kernel-ref kb-roots))
          (image (%car fresh))
          (seen (cadr fresh))
@@ -261,13 +278,15 @@
     ;; nothing since the symbols changed has allocated, and from here on
     ;; anything may.
     (install-allocator)
-    nil))
+    nil)))
 
 ;; The image's symbols: the ones its sources use, any it gives something to,
 ;; and each package's tag. A new obarray and a new symbol list, made with the
 ;; builder's allocator while that still answers; everything else goes when
 ;; the collector runs.
 (define (keep-image-symbols image seen)
+  (declare unsafe)
+  (unsafe
   (dolist (p (all-packages)) (table-set! seen (%slot p pkg-tag) t))
   (let* ((n (%vector-length (kernel-ref kb-obarray)))
          (ob (make-vector n nil))
@@ -284,7 +303,7 @@
             nil))
       (set! l (%cdr l)))
     (kernel-set! kb-obarray ob)
-    (kernel-set! kb-symbols (reverse kept))))
+    (kernel-set! kb-symbols (reverse kept)))))
 
 ;; Every symbol is emptied, and then takes what the image gives it: its
 ;; value, a function only if that is a macro's expander, and the flags that
@@ -296,6 +315,8 @@
 ;; underneath it, so it reaches nothing: everything it needs arrives as an
 ;; argument, and everything it does is open coded. It allocates nothing.
 (define (become-image all entries unbound)
+  (declare unsafe)
+  (unsafe
   (let ((l all))
     (while (%cons? l)
       (let ((s (%car l)))
@@ -311,4 +332,4 @@
         (%set-symbol-value! s (%vector-ref e 0))
         (%set-symbol-function! s (%vector-ref e 1))
         (%set-symbol-flags! s (%logior (%symbol-flags s) (%vector-ref e 2))))
-      (set! l (%cdr l)))))
+      (set! l (%cdr l))))))

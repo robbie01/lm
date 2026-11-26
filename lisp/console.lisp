@@ -17,8 +17,7 @@
 ;;;                     per burst: one key, or a whole pasted page
 ;;;
 ;;; The raw functions do not ask the driver and are not refused by it, and the
-;;; driver uses them too: it holds no page, and owns the line only in that it
-;;; is the one reader.
+;;; driver uses them too: it owns the line only in that it is the one reader.
 
 (in-package console)
 

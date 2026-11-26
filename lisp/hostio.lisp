@@ -29,8 +29,7 @@
 ;; and a variable initialiser an assignment on the same list; the image runs
 ;; them in order when it starts.
 (define (top-level-form form) (add-boot-thunk form))
-(define (record-initialiser name expr)
-  (add-boot-thunk (list 'set! name expr)))
+(define (record-initialiser form) (add-boot-thunk form))
 (define (register-macro form) (%eval form))
 
 ;; A macro is whatever the bootstrap interpreter has recorded.

@@ -712,8 +712,11 @@
 
 ;; The capability that enters placed code: bounds exactly its bytes, EX, and
 ;; SR as well when the code is privileged, made from object space's own
-;; capability in the kernel block, which holds both.
+;; capability in the kernel block, which holds both. Whatever is in the
+;; buffer runs with it, so all three of these are unsafe: the compiler,
+;; which checked every raw name in what it emitted, is what calls them.
 (define (entry-capability a)
+  (declare unsafe)
   (unsafe
   (%cap-and-perms
    (%cap-bounds-exact (%cap-set-addr (kernel-ref kb-objects) (asm-origin a)) (code-size a))
@@ -733,11 +736,12 @@
 ;; Place in a fresh text, and answer the entry capability. The text's own
 ;; capability goes no further than this.
 (define (place a)
+  (declare unsafe)
   (resolve a)
-  (let ((text (alloc-object t-text (asm-len a))))
+  (let ((text (unsafe (alloc-object t-text (asm-len a)))))
     (copy-into a text)
     (set-asm-origin! a (%addr-of text))
-    (entry-capability a)))
+    (unsafe (entry-capability a))))
 
 ;; The placed code as a heap object, which is how the collector sees every
 ;; literal it refers to: slot 0 the entry capability, then the name, then
@@ -745,6 +749,7 @@
 ;; from the far end. The name is what a backtrace prints: every frame saves
 ;; its caller's code object.
 (define (code-object a name)
+  (declare unsafe)
   (unsafe
   (let* ((n (asm-nlits a))
          (v (alloc-object t-code (%+ code-lits n)))
@@ -755,3 +760,20 @@
       (%set-slot! v i l)
       (set! i (%- i 1)))
     v)))
+
+;; An island's code object (see `compile-island`): its entry, its name, and
+;; one literal, the code object of the function it belongs to, which
+;; `island-owner!` fills in once that function's code object is made. Its
+;; code reads every other literal through the function's.
+(define (island-object a name)
+  (declare unsafe)
+  (unsafe
+  (let ((v (alloc-object t-code (%+ code-lits 1)))
+        (entry (place a)))
+    (%set-slot! v code-entry entry)
+    (%set-slot! v code-name name)
+    v)))
+
+(define (island-owner! island code)
+  (declare unsafe)
+  (unsafe (%set-slot! island code-lits code)))

@@ -91,13 +91,16 @@
 
 (define (part name x) (list (labelled name x) x (has-parts? x)))
 
+;; Every cell of a symbol, an unsafe name's too: the explorer is a debugger,
+;; and hands out what it shows on purpose. The function slot is the
+;; compiler's, a macro's expander or an intrinsic's note.
 (define (symbol-parts s)
-  (let ((acc nil))
-    (if (%eq? (symbol-value s) (%unbound))
+  (let ((acc nil) (v (unsafe (%symbol-value s))))
+    (if (%eq? v (%unbound))
         nil
-        (set! acc (%cons (part "value" (symbol-value s)) acc)))
-    (if (symbol-function s)
-        (set! acc (%cons (part "function" (symbol-function s)) acc))
+        (set! acc (%cons (part "value" v) acc)))
+    (if (%symbol-function s)
+        (set! acc (%cons (part "function" (%symbol-function s)) acc))
         nil)
     (if (symbol-plist s)
         (set! acc (%cons (part "plist" (symbol-plist s)) acc))

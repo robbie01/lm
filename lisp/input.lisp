@@ -18,11 +18,14 @@
 ;;;   (unsubscribe port)
 ;;;   (inject kind ascii code payload)
 ;;;                          an event as though the keyboard had sent it, so
-;;;                          that a test can drive all of this
+;;;                          that a test can drive all of this; `inject` is
+;;;                          unsafe, since it types for whoever is at the
+;;;                          keyboard
 ;;;
 ;;; Where the pointer is right now is not a message. The driver keeps it in
 ;;; three variables, updated with each event it takes, and anybody may read
-;;; them. The chip's page is the driver's alone, kept in its closures.
+;;; them. The driver holds the chip's device, its page sealed, and reaches
+;;; the registers through the accessors generated into devices.lisp.
 
 (in-package input)
 
@@ -44,21 +47,22 @@
 ;; server masks the line and wakes the driver, and the driver turns the line
 ;; back on once it has emptied the queue; anything that arrived in between
 ;; raises it again at once.
-(define (poll page)
-  (let ((e (input-take page)))
+;; `dev` is the chip: its page sealed, which only the accessors open.
+(define (poll dev)
+  (let ((e (input-take dev)))
     (while e
-      (publish (decode page e))
-      (set! e (input-take page))))
+      (publish (decode dev e))
+      (set! e (input-take dev))))
   (int-enable int-input)
   nil)
 
 ;; The chip's event word, laid out as the input section of hw.lisp says.
-(define (decode page w)
+(define (decode dev w)
   (let ((kind (%lsh w -28)))
     (cond ((%= kind ev-keydown)
-           (list 'key 'down (key-ascii-bits w) (key-code-bits w) (input-mods page)))
+           (list 'key 'down (key-ascii-bits w) (key-code-bits w) (input-mods dev)))
           ((%= kind ev-keyup)
-           (list 'key 'up (key-ascii-bits w) (key-code-bits w) (input-mods page)))
+           (list 'key 'up (key-ascii-bits w) (key-code-bits w) (input-mods dev)))
           ((%= kind ev-wheel)
            (list 'wheel (wheel-delta (%logand w 4095)) *mouse-x* *mouse-y*))
           ((if (%>= kind ev-mousemove) (%<= kind ev-buttonup) nil)
@@ -69,7 +73,7 @@
                  (b (%logand w 15)))
              (set! *mouse-x* x)
              (set! *mouse-y* y)
-             (set! *mouse-buttons* (input-buttons page))
+             (set! *mouse-buttons* (input-buttons dev))
              (cond ((%= kind ev-mousemove) (list 'mouse 'moved x y))
                    ((%= kind ev-buttondown) (list 'button 'down b x y))
                    (else (list 'button 'up b x y)))))
@@ -95,7 +99,7 @@
     (dolist (p ps) (if (port-open? p) (set! keep (%cons p keep)) nil))
     (reverse keep)))
 
-(define (serve page body)
+(define (serve dev body)
   (let ((op (%car body)))
     (cond ((%eq? op 'subscribe)
            (set! *subscribers* (%cons (cadr body) (remove-eq (cadr body) *subscribers*)))
@@ -104,18 +108,19 @@
            (set! *subscribers* (remove-eq (cadr body) *subscribers*))
            t)
           ((%eq? op 'inject)
-           (input-inject page (cadr body) (caddr body) (cadddr body) (nth 4 body))
+           (input-type dev (cadr body) (caddr body) (cadddr body) (nth 4 body))
            t)
           (else (error "input.driver: no such request:" op)))))
 
 (define (running?) (server-running? *driver*))
 
-;; The page goes into the closures before the task exists; see `disk:start`.
+;; The chip's device, its page sealed, is what the driver's start takes,
+;; the one unsafe act here, and what its handler and its poll are handed.
 (define (start)
   (if (running?)
       *driver*
-      (let* ((page (unsafe (device-page dev-input)))
-             (s (make-server "input.driver" 20 (lambda (body) (serve page body))))
+      (let* ((dev (unsafe (device dev-input)))
+             (s (make-server "input.driver" 20 (lambda (body) (serve dev body))))
              (task (server-task s))
              (port (server-port s))
              (int (make-interrupt "input" 0
@@ -125,8 +130,8 @@
         ;; After a resume the old list names the ports of tasks that belonged
         ;; to the Exec before this one.
         (set! *subscribers* nil)
-        (input-interrupts! page t)
-        (server-poll! s (lambda () (poll page)))
+        (input-ctrl! dev 1)
+        (server-poll! s (lambda () (poll dev)))
         (add-int-server int-input int)
         (on-task-end task (lambda () (remove-int-server int-input int)))
         (set! *driver* s)
@@ -159,6 +164,7 @@
     (message-body m)))
 
 (define (inject kind ascii code payload)
+  (declare unsafe)
   (request (driver-port) (list 'inject kind ascii code payload)))
 
 ;; Where the pointer is, as of the last event the driver took.

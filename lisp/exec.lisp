@@ -19,7 +19,6 @@
 ;;; task's context.
 
 (in-package exec)
-(unsafe-file)
 
 ;; ---------------------------------------------------------------- Node
 ;; Everything on one of Exec's lists starts with the same four slots. A task
@@ -154,16 +153,18 @@
   gen)                           ; which Exec it belongs to: see `task-alive?`
 
 ;; The otype they are sealed with, and the key to it: minted when Exec
-;; starts, and held by these two closures and nothing else.
+;; starts, and held by these two closures and nothing else, which are unsafe
+;; names: what they open is a task's frames and registers.
 (defconstant otype-task 3)
-(define task-seal)
-(define task-unseal)
+(define task-seal (declare unsafe))
+(define task-unseal (declare unsafe))
 (define (mint-task-key)
+  (unsafe
   (let ((key (sealing-key otype-task)))
     (set! task-seal (lambda (c) (%cap-seal c key)))
-    (set! task-unseal (lambda (c) (%cap-unseal c key)))))
-(define (task-stack task) (task-unseal (tc-stack task)))
-(define (task-context task) (task-unseal (tc-context task)))
+    (set! task-unseal (lambda (c) (%cap-unseal c key))))))
+(define (task-stack task) (declare unsafe) (unsafe (task-unseal (tc-stack task))))
+(define (task-context task) (declare unsafe) (unsafe (task-unseal (tc-context task))))
 
 (defconstant ts-added 1)
 (defconstant ts-run 2)
@@ -237,10 +238,11 @@
 ;; task's saved context does not hold the interrupt enable, so the task
 ;; switched to would start deaf.
 (define (reschedule)
+  (unsafe
   (if (if *exec-started* (if (interrupts-on?) nil t) nil)
       (error "reschedule: inside without-interrupts, where the next task would start with them off")
       nil)
-  (%ecall ecall-reschedule))
+  (%ecall ecall-reschedule)))
 
 ;; ---------------------------------------------------------------- fluids
 ;; Where a fluid binding goes: onto the running task's own stack, so that the
@@ -291,6 +293,8 @@
 ;; Choose the next task and point the frame at its context. Called only from
 ;; inside the trap handler, with the outgoing task's registers already saved.
 (define (switch-tasks)
+  (declare unsafe)
+  (unsafe
   (let* ((cur (this-task))
          (head (list-first (ready-list)))
          ;; A task still able to run keeps the processor against anything
@@ -321,7 +325,7 @@
                 ;; Only now, with the context switched away, can a dead task
                 ;; let go of its stack.
                 (if *reaped* (reap-tasks) nil)))
-    nil))
+    nil)))
 
 ;; ---------------------------------------------------------------- signals
 ;; Four bits are fixed, the same in every task, so that waking every waiter
@@ -397,6 +401,7 @@
 ;; task's saved context does not hold the interrupt enable, so the task that
 ;; runs next gets whatever the reschedule was asked for in.
 (define (wait mask)
+  (unsafe
   (sleep-check "wait:")
   (if (%= mask 0) (error "wait: an empty mask would sleep for ever") nil)
   (let ((entry (%disable)))
@@ -417,7 +422,7 @@
                     (%logand (tc-sigrecvd task) (%lognot got)))
       (set-tc-sigwait! task 0)
       (%restore-interrupts entry)
-      got)))
+      got))))
 
 ;; ---------------------------------------------------------------- time
 ;; A task can wait for a moment as well as for a signal. Time here is the
@@ -503,8 +508,10 @@
 ;; way the processor says bounds of that length must be, so the stack limit
 ;; and the bounds are exact.
 (define (new-stack size)
+  (declare unsafe)
+  (unsafe
   (let ((s (%cap-and-perms (alloc-object t-stack (%lsh (%+ size 7) -3)) perms-pair)))
-    (%cap-set-addr s (%cap-top s))))
+    (%cap-set-addr s (%cap-top s)))))
 
 ;; A fresh record's slots hold nil, and nil is not the fixnum zero, so
 ;; anything counted or masked is set before it is read.
@@ -521,8 +528,10 @@
 ;; `start-task` does. `make-server` needs the gap, to give the task its port
 ;; before it can run.
 (define (make-task name pri fn . opts)
+  (if (%closure? fn) nil (error "make-task: not a function:" fn))
+  (unsafe
   (let* ((binds (initial-binds))
-         (size (if (%cons? opts) (%car opts) default-stack))
+         (size (check-length (if (%cons? opts) (%car opts) default-stack)))
          (task (tc-alloc))
          (ctx (alloc-object t-context ctx-slots))
          (top (new-stack size)))
@@ -547,7 +556,7 @@
     (ctx-set! ctx reg-s2 task)
     ;; Its first cons traps into a refill: the run it starts with is empty.
     (ctx-set! ctx reg-gp (empty-cons-run))
-    task))
+    task)))
 
 ;; Onto the ready list: from here it runs when the scheduler says so.
 (define (start-task task)
@@ -726,6 +735,8 @@
 (define *task-exit-stub* 0)
 
 (define (task-finished)
+  (declare unsafe)
+  (unsafe
   (let ((task (this-task)))
     ;; A section the task's function opened and returned without closing ends
     ;; with the task.
@@ -738,12 +749,14 @@
         nil)
     (remove-task task)
     ;; `remove-task` on the current task never returns.
-    (while t (reschedule))))
+    (while t (reschedule)))))
 
 ;; The stub reads `task-finished` out of the kernel block, which takes
 ;; `mscratch`, so it is placed with SR. Exec builds it each time it starts,
 ;; and the sentry in `*task-exit-stub*` keeps its text.
 (define (build-task-exit-stub)
+  (declare unsafe)
+  (unsafe
   (let ((a (make-assembler)))
     (set-asm-privileged! a t)
     (i-li a $t1 0)
@@ -752,7 +765,7 @@
     (i-jcl a $ra $t0)
     (kernel-set! kb-task-exit (%symbol-value 'task-finished))
     (set! *task-exit-stub* (%cap-seal-entry (place a)))
-    *task-exit-stub*))
+    *task-exit-stub*)))
 
 ;; ---------------------------------------------------------------- ports
 (defrecord (msgport mp) (include node) sigmask sigtask msglist)
@@ -1319,14 +1332,16 @@
 ;; progress is what an idle machine should be doing, so it does that first,
 ;; a slice at a time, with interrupts on in between.
 (define (idle-task)
+  (declare unsafe)
+  (unsafe
   (while t
     (set! *idle-count* (%+ *idle-count* 1))
-    (if (busy?) (step) (%wait-for-interrupt))))
+    (if (busy?) (step) (%wait-for-interrupt)))))
 
 (define (idle-start)
   (if *idle-task*
       nil
-      (set! *idle-task* (add-task "idle" -128 (lambda () (idle-task)) 4096)))
+      (set! *idle-task* (add-task "idle" -128 (lambda () (unsafe (idle-task))) 4096)))
   *idle-task*)
 
 ;; Only the kernel's end of the line: telling the display chip to raise it is
@@ -1378,12 +1393,16 @@
 ;; safe to set this way only because it is cleared before the handler
 ;; returns, and no other task runs until it does.
 (define (handle-interrupt n ctx)
+  (declare unsafe)
+  (unsafe
   (set! *in-interrupt* t)
   (handle-interrupt-1 n ctx)
   (set! *in-interrupt* nil)
-  nil)
+  nil))
 
 (define (handle-interrupt-1 n ctx)
+  (declare unsafe)
+  (unsafe
   (cond
    ((%= n irq-timer)
     (set! *disp-count* (%+ *disp-count* 1))
@@ -1408,7 +1427,7 @@
         nil))
    ((%= n irq-software) (switch-tasks))
    (else nil))
-  nil)
+  nil))
 
 ;; ---------------------------------------------------------------- residents
 ;; What Exec starts when it starts: the drivers. A driver's file registers
@@ -1431,6 +1450,8 @@
 ;; A resumed image arrives with the counts and flags of an Exec that no longer
 ;; exists, so every one of them is set here.
 (define (exec-init)
+  (declare unsafe)
+  (unsafe
   (mint-task-key)
   (set! *vblank-int* nil)
   (%set-this-task! nil)
@@ -1500,7 +1521,7 @@
           (task-finished)))
   ;; The drivers last, once a task that fails has somewhere to go.
   (start-residents)
-  *ready-list*)
+  *ready-list*))
 
 ;; Stop the clock driving the scheduler, and the chips that would call into
 ;; the kernel. Tasks still switch when they ask to. The one caller is a
@@ -1523,11 +1544,13 @@
 
 ;; From here the timer interrupt drives the scheduler.
 (define (exec-start)
+  (declare unsafe)
+  (unsafe
   (timer-set-in *quantum*)
   (%enable-interrupt-lines)
   (%enable)
   (set! *exec-started* t)
-  nil)
+  nil))
 
 ;; ---------------------------------------------------------------- gc roots
 ;; Exec's records are objects hanging off variables, so the collector finds
@@ -1541,7 +1564,9 @@
 ;; out marked. Its next cons traps into a refill. A pair it was in the middle
 ;; of making is in one of its saved registers, which the collector scans.
 (define (drop-task-run task)
-  (if (tc-context task) (drop-context-run (task-context task)) nil))
+  (declare unsafe)
+  (unsafe
+  (if (tc-context task) (drop-context-run (task-context task)) nil)))
 
 (define (invalidate-runs)
   (if *ready-list*
@@ -1567,7 +1592,9 @@
 ;; A suspended task's saved registers, and its stack from the saved sp to
 ;; the top.
 (define (scan-task task)
-  (if (tc-context task) (scan-context (task-context task)) nil))
+  (declare unsafe)
+  (unsafe
+  (if (tc-context task) (scan-context (task-context task)) nil)))
 
 (define (scan-list-of l fn)
   (let ((p (list-first l)))
@@ -1585,4 +1612,3 @@
 (define (task-count) *task-count*)
 
 ;; What opens a task's stack or its saved registers.
-(unsafe-names (quote (task-seal task-unseal task-stack task-context)))

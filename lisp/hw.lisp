@@ -8,9 +8,17 @@
 ;;; Rust side), and the only way to the registers is a capability bounded
 ;;; exactly to the page, so a register offset that leaves the page is a
 ;;; bounds fault and never a store into the next device.
+;;;
+;;; A page is the authority over its device, and it stays in the kernel's
+;;; hands. What everything else holds is a device: the page sealed with
+;;; `otype-device`, which anyone may hold and pass, and which nothing but the
+;;; accessors generated into devices.lisp opens. Each accessor opens it for
+;;; the one device it was written for and traps on any other, so a safe
+;;; accessor only ever touches a register of the device it was written for.
+;;; The kernel's own devices, `sys` and the timer, and the raw serial line
+;;; are reached through their pages in the kernel block, inside `unsafe`.
 
 (in-package hw)
-(unsafe-file)
 
 (defconstant device-page-bytes 4096)
 
@@ -18,16 +26,40 @@
 ;; A device's page: its 4 KiB, to load and store data, and, for the three
 ;; chips with a capability register, capabilities as well, since storing
 ;; them goes with loading them. The reset stub mints every page from the
-;; memory map and the kernel block holds them. Holding one is owning the
-;; device. Nothing records who holds one, and nothing needs to: the name is
-;; unsafe, so taking a page is a privilege, and a driver takes its page
-;; once, when it starts, and keeps it in its own closures, which are sealed.
-;; No global, record field or message holds it, so no other task can name
-;; it, and it lives exactly as long as the driver. Exec's own devices, `sys`,
-;; the timer and the blitter, are reached through the page each use takes
-;; afresh: two loads and no allocation, so the trap handler and interrupt
-;; servers use them too.
-(define (device-page dev) (%slot (kernel-ref kb-devices) dev))
+;; memory map into the kernel block: two loads and no allocation, so the
+;; trap handler uses it too. Holding a page is the authority over its
+;; device, so taking one is unsafe.
+(defsubst (device-page dev) (declare unsafe) (%slot (kernel-ref kb-devices) dev))
+
+;; A device, as everything but the kernel holds one: its page sealed with
+;; `otype-device`, one otype for every device, with a key hw mints once and
+;; keeps in these two closures and nowhere else, as it keeps the blitter's.
+;; `device-open` unseals a device and checks that its page's base is the
+;; one asked for, and traps otherwise: the base is the class, which is right
+;; while every device has a fixed address, as on this machine. A device
+;; whose address could not be known would be sealed as a {class, page} pair
+;; instead, and only `device-open` and the accessors' generator would
+;; change.
+(defconstant otype-device 5)
+(define device-seal (declare unsafe))
+(define device-open (declare unsafe))
+(define (mint-device-key)
+  (unsafe
+  (let ((key (sealing-key otype-device)))
+    (set! device-seal (lambda (page) (%cap-seal page key)))
+    (set! device-open
+          (lambda (dev base)
+            (let ((page (%cap-unseal dev key)))
+              (if (if (%cap-tag? page) (%= (%cap-base page) base) nil)
+                  page
+                  (error "not the device this accessor is for:" dev))))))))
+
+;; Device `dev` of the memory map, sealed: what a driver's start takes.
+(define (device dev)
+  (declare unsafe)
+  (unsafe
+  (if device-seal nil (mint-device-key))
+  (device-seal (device-page dev))))
 
 ;; ---------------------------------------------------------------- words
 ;; A machine word is a fixnum. `peek` reads the word at an address as a
@@ -36,41 +68,47 @@
 ;; their way, and nothing but code that says `unsafe` can reach for them.
 ;; `poke` takes nothing but a fixnum: anything else would store its address,
 ;; which is never what was meant.
-(define (peek a) (%ld-word a))
+(define (peek a) (declare unsafe) (unsafe (%ld-word a)))
 
 (define (poke a v)
+  (declare unsafe)
+  (unsafe
   (if (%fixnum? v) (%st-word! a v) (error "poke: not a machine word:" v))
-  v)
+  v))
 
-(define (peek8 a) (%ld-byte a))
-(define (poke8 a v) (%st-byte! a v))
+(define (peek8 a) (declare unsafe) (unsafe (%ld-byte a)))
+(define (poke8 a v) (declare unsafe) (unsafe (%st-byte! a v)))
 
 ;; ---------------------------------------------------------------- system
 ;; Thirty-one bits and never negative.
 (define (random)
-  (%logand (%cap-ld-word (device-page dev-sys) sys-random) most-positive-fixnum))
+  (unsafe (%logand (%cap-ld-word (device-page dev-sys) sys-random) most-positive-fixnum)))
 
 ;; Read-modify-write of the enable register, atomic: a task turning a line
 ;; back on races the interrupt server that masks it.
 (define (int-enable line)
+  (unsafe
   (let ((p (device-page dev-sys)))
     (without-interrupts
-      (%cap-st-word! p sys-intena (%logior (%cap-ld-word p sys-intena) (%lsh 1 line))))))
+      (%cap-st-word! p sys-intena (%logior (%cap-ld-word p sys-intena) (%lsh 1 line)))))))
 (define (int-disable line)
+  (unsafe
   (let ((p (device-page dev-sys)))
     (without-interrupts
       (%cap-st-word! p sys-intena
-                     (%logand (%cap-ld-word p sys-intena) (%lognot (%lsh 1 line)))))))
-(define (int-ack line) (%cap-st-word! (device-page dev-sys) sys-intreq (%lsh 1 line)))
-(define (int-raise line) (%cap-st-word! (device-page dev-sys) sys-intset (%lsh 1 line)))
+                     (%logand (%cap-ld-word p sys-intena) (%lognot (%lsh 1 line))))))))
+(define (int-ack line) (unsafe (%cap-st-word! (device-page dev-sys) sys-intreq (%lsh 1 line))))
+(define (int-raise line) (unsafe (%cap-st-word! (device-page dev-sys) sys-intset (%lsh 1 line))))
 ;; The lowest pending and enabled line, or -1, which the chip spells as a
 ;; word of all ones. Runs inside the trap handler and must not allocate.
-(define (int-pending) (%cap-ld-word (device-page dev-sys) sys-intnum))
+(define (int-pending) (unsafe (%cap-ld-word (device-page dev-sys) sys-intnum)))
 
 ;; The processor started again at the reset vector, as from power-on, with
 ;; memory as it is: the reset stub mints the memory map and enters the
 ;; kernel block's top level. Never returns.
-(define (reset-processor) (%cap-st-word! (device-page dev-sys) sys-reset 1))
+(define (reset-processor)
+  (declare unsafe)
+  (unsafe (%cap-st-word! (device-page dev-sys) sys-reset 1)))
 
 ;; ---------------------------------------------------------------- timer
 ;; The timebase is the retired instruction count, so the same program
@@ -78,10 +116,10 @@
 ;; The host's clock, in milliseconds since boot, read as a fixnum: for pacing
 ;; something to the host, not for deadlines, which exec keeps on the machine's
 ;; own ticks (`now-ms`). No allocation and no critical section.
-(define (millis) (%cap-ld-word (device-page dev-timer) tmr-wall))
+(define (millis) (unsafe (%cap-ld-word (device-page dev-timer) tmr-wall)))
 
 ;; Cycles per second of the machine's clock.
-(define (timer-hz) (%cap-ld-word (device-page dev-timer) tmr-freq))
+(define (timer-hz) (unsafe (%cap-ld-word (device-page dev-timer) tmr-freq)))
 
 ;; Fire n ticks from now, n a fixnum no smaller than zero. The compare is 64
 ;; bits: the high half is written first so a wrap cannot leave a compare in
@@ -90,24 +128,26 @@
 ;; wrapping sum with n is not. Wrapping fixnum operations throughout, because
 ;; this runs from the timer interrupt every quantum and must not allocate.
 (define (timer-set-in n)
+  (unsafe
   (let ((p (device-page dev-timer)))
     (without-interrupts
       (let* ((lo (%cap-ld-word p tmr-lo))
              (sum (%+ lo n))
              (carry (if (%< lo 0) (if (%>= sum 0) 1 0) 0)))
         (%cap-st-word! p tmr-cmphi (%+ (%cap-ld-word p tmr-hi) carry))
-        (%cap-st-word! p tmr-cmplo sum)))))
+        (%cap-st-word! p tmr-cmplo sum))))))
 
 (define (timer-never)
+  (unsafe
   (let ((p (device-page dev-timer)))
     (without-interrupts
       (%cap-st-word! p tmr-cmphi -1)
-      (%cap-st-word! p tmr-cmplo -1))))
+      (%cap-st-word! p tmr-cmplo -1)))))
 
 ;; ---------------------------------------------------------------- display
 ;; The display chip: where the picture comes from, how big it is, the
-;; palette, and whether it raises the vertical blank. gfx.driver holds its
-;; page (see gfx.lisp), and these take it.
+;; palette, and whether it raises the vertical blank. gfx.driver is what
+;; calls these (see gfx.lisp).
 
 ;; The size the machine comes up in.
 (defconstant screen-width 1024)
@@ -144,32 +184,31 @@
 
 (define *screen* nil)      ; the bitmap being displayed; gfx.driver sets it
 
-;; Point the chip at a bitmap, 8-bit indexed, with the picture and the frame
-;; clock on: writing the control register without the interrupt bit would
-;; stop the vertical blank. The pixels go to the scan-out register with a
-;; capability store.
-(define (gfx-show p b)
-  (%cap-st! p gfx-base (bm-pixels b))
-  (%cap-st-word! p gfx-width (bm-w b))
-  (%cap-st-word! p gfx-height (bm-h b))
-  (%cap-st-word! p gfx-pitch (bm-w b))
-  (%cap-st-word! p gfx-mode 8)
-  (%cap-st-word! p gfx-ctrl (%logior gfx-on gfx-vbirq))
+;; Point the display at a bitmap, 8-bit indexed, with the picture and the
+;; frame clock on: writing the control register without the interrupt bit
+;; would stop the vertical blank. The pixels go to the scan-out register
+;; with a capability store, and the chip shows only what they let it read.
+(define (gfx-show dev b)
+  (gfx-base! dev (bm-pixels b))
+  (gfx-width! dev (bm-w b))
+  (gfx-height! dev (bm-h b))
+  (gfx-pitch! dev (bm-w b))
+  (gfx-mode! dev 8)
+  (gfx-ctrl! dev (%logior gfx-on gfx-vbirq))
   b)
 
-(define (gfx-vblank-irq! p on)
-  (%cap-st-word! p gfx-ctrl
-                 (if on
-                     (%logior (%cap-ld-word p gfx-ctrl) gfx-vbirq)
-                     (%logand (%cap-ld-word p gfx-ctrl) (%lognot gfx-vbirq)))))
+(define (gfx-vblank-irq! dev on)
+  (gfx-ctrl! dev (if on
+                     (%logior (gfx-ctrl dev) gfx-vbirq)
+                     (%logand (gfx-ctrl dev) (%lognot gfx-vbirq)))))
 
 ;; An index register and a data register: two writes that mean one thing.
-(define (gfx-colour! p i c)
+(define (gfx-colour! dev i c)
   (without-interrupts
-    (%cap-st-word! p gfx-palidx i)
-    (%cap-st-word! p gfx-paldat c)))
+    (gfx-palidx! dev i)
+    (gfx-paldat! dev c)))
 
-(define (gfx-present! p) (%cap-st-word! p gfx-sync 1))
+(define (gfx-present! dev) (gfx-sync! dev 1))
 
 (define (rgb r g b)
   (%logior (%lsh (%logand r 255) 16)
@@ -228,9 +267,9 @@
 ;; until the chip has finished it, and a task with one descriptor would wait
 ;; for each blit before starting the next.
 (defconstant blit-ring-size 8)
-(define *blit-ring* 0)      ; the running task's, swapped in with its bindings
-(define *gc-blit-ring* 0)   ; and one the collector owns outright
-(define *blit-tail* 0)      ; the last descriptor put on the chain, anybody's
+(define *blit-ring* 0)      ; the running task's, swapped in with its bindings, sealed
+(define *gc-blit-ring* (declare unsafe) 0)   ; and one the collector owns outright
+(define *blit-tail* (declare unsafe) 0)      ; the last descriptor put on the chain, anybody's
 (define *in-interrupt* nil) ; set by the trap handler, cleared before it returns
 
 ;; Each of those holds its ring or its descriptor sealed, with an otype of
@@ -238,14 +277,18 @@
 ;; global and a list are anybody's to read, and a capability to a descriptor
 ;; is authority over what the chip does next. Only the code here opens one,
 ;; with its key to that otype, which the first ring made mints and these two
-;; closures hold, and nothing else.
+;; closures hold, and nothing else. The two closures, the collector's ring
+;; and the chain's tail are unsafe names: the code here trusts what they
+;; hold. A task's ring is a binding, and a binding anybody may make, so the
+;; code here trusts only what unsealing it gives.
 (defconstant otype-blit 4)
-(define blit-seal)
-(define blit-unseal)
+(define blit-seal (declare unsafe))
+(define blit-unseal (declare unsafe))
 (define (mint-blit-key)
+  (unsafe
   (let ((key (sealing-key otype-blit)))
     (set! blit-seal (lambda (c) (%cap-seal c key)))
-    (set! blit-unseal (lambda (c) (%cap-unseal c key)))))
+    (set! blit-unseal (lambda (c) (%cap-unseal c key))))))
 
 ;; A ring is a vector: a slot saying which descriptor is next, then the
 ;; descriptors, each a run of value slots, a field to a slot, laid out as the
@@ -261,8 +304,9 @@
 ;; and every done word reads as done, so no descriptor that was never used
 ;; waits for a write-back that never comes. It is handed out sealed.
 (define (new-blit-ring)
+  (unsafe
   (if blit-seal nil (mint-blit-key))
-  (blit-seal (make-vector blit-ring-slots 0)))
+  (blit-seal (make-vector blit-ring-slots 0))))
 
 ;; Descriptor i of ring r, as the capability it is filled through and handed
 ;; to the chip as: bounded to the descriptor, with a pair's permissions, so
@@ -275,9 +319,10 @@
 
 ;; The ring's next descriptor, once the chip has finished with it.
 (define (ring-take r)
+  (declare unsafe)
   (let* ((i (%vector-ref r 0))
          (d (ring-slot r i)))
-    (blit-wait-descriptor d)
+    (unsafe (blit-wait-descriptor d))
     (%vector-set! r 0 (if (%= (%+ i 1) blit-ring-size) 0 (%+ i 1)))
     d))
 
@@ -286,20 +331,24 @@
 ;; anything it draws is drawn over by the next task that composites. A server
 ;; that wants pixels signals a task.
 (define (blit-descriptor)
+  (declare unsafe)
   (if *in-interrupt*
       (error "the blitter is task context only: signal a task instead")
       nil)
+  (unsafe
   (if (%cap-tag? *blit-ring*) nil (set! *blit-ring* (new-blit-ring)))
-  (ring-take (blit-unseal *blit-ring*)))
+  (ring-take (blit-unseal *blit-ring*))))
 
 ;; The collector's own ring. Not a fluid binding: a collection runs with
 ;; interrupts off from end to end, so there is never a second one. It is
 ;; made before a collection that uses it begins, because nothing may be
 ;; allocated inside one.
 (define (ensure-gc-blit-ring)
-  (if (%cap-tag? *gc-blit-ring*) nil (set! *gc-blit-ring* (new-blit-ring))))
+  (unsafe (if (%cap-tag? *gc-blit-ring*) nil (set! *gc-blit-ring* (new-blit-ring)))))
 
-(define (gc-blit-descriptor) (ring-take (blit-unseal *gc-blit-ring*)))
+(define (gc-blit-descriptor)
+  (declare unsafe)
+  (unsafe (ring-take (blit-unseal *gc-blit-ring*))))
 
 ;; ---------------------------------------------------------------- waiting
 ;; A blit takes time and `blit-go` returns before it has happened. Two
@@ -310,17 +359,21 @@
 ;; pixels with the processor, `blit-sync`: reading too early shows the old
 ;; picture.
 
+;; The blitter is everybody's, so its device is anybody's to hold: the chip
+;; checks every capability a descriptor hands it.
+(define *blitter* 0)
+(define (blitter)
+  (if (%cap-tag? *blitter*) nil (set! *blitter* (unsafe (device dev-blit))))
+  *blitter*)
+
 (define (blit-busy?)
-  (%= blit-status-busy
-      (%logand (%cap-ld-word (device-page dev-blit) blit-status-reg) blit-status-busy)))
+  (%= blit-status-busy (%logand (blit-status (blitter)) blit-status-busy)))
 
 ;; Whether the chip has refused a descriptor, a link or a transfer since the
 ;; bit was last cleared.
 (define (blit-refused?)
-  (%= blit-status-refused
-      (%logand (%cap-ld-word (device-page dev-blit) blit-status-reg) blit-status-refused)))
-(define (blit-clear-refused!)
-  (%cap-st-word! (device-page dev-blit) blit-status-reg blit-status-refused))
+  (%= blit-status-refused (%logand (blit-status (blitter)) blit-status-refused)))
+(define (blit-clear-refused!) (blit-status! (blitter) blit-status-refused))
 
 ;; Reading the status register is what lets a finished transfer be noticed,
 ;; so this spin also drives completion. Preemptible.
@@ -331,7 +384,7 @@
 ;; Done, whether it landed or was refused: of a descriptor in hand, and of
 ;; one a sleeper holds sealed.
 (define (descriptor-done? d) (if (%= blit-pending (%cap-ld-word d bl-status)) nil t))
-(define (blit-done? s) (descriptor-done? (blit-unseal s)))
+(define (blit-done? s) (descriptor-done? (unsafe (blit-unseal s))))
 
 ;; How a task whose blit has not landed goes to sleep instead of spinning.
 ;; gfx.driver installs it, since the driver owns the completion interrupt.
@@ -341,17 +394,19 @@
 (define (set-blit-sleep! fn) (set! *blit-sleep* fn) nil)
 
 (define (interrupts-on?)
+  (unsafe
   (let ((s (%disable)))
     (%restore-interrupts s)
-    (%= s 1)))
+    (%= s 1))))
 
 ;; Ask the chip for an interrupt after every descriptor, not only at the end
 ;; of the chain, while anybody is asleep waiting for one.
-(define (blit-irq-each! on) (%cap-st-word! (device-page dev-blit) blit-ctrl-reg (if on 2 0)))
+(define (blit-irq-each! on) (blit-ctrl! (blitter) (if on 2 0)))
 
 ;; A short spin first: most blits are small and done before a sleep could be
-;; arranged.
+;; arranged. Unsafe, since it seals what it is handed as a descriptor.
 (define (blit-wait-descriptor b)
+  (declare unsafe)
   (if (descriptor-done? b)
       nil
       (let ((n 0))
@@ -361,7 +416,7 @@
         (if (descriptor-done? b)
             nil
             (if (if *blit-sleep* (if *in-interrupt* nil (interrupts-on?)) nil)
-                (%funcall *blit-sleep* (blit-seal b))
+                (%funcall *blit-sleep* (unsafe (blit-seal b)))
                 (while (if (descriptor-done? b) nil t) (blit-busy?))))))
   nil)
 
@@ -369,12 +424,13 @@
 ;; that has never blitted. The chain runs in order, so this is the same as
 ;; waiting for the last one issued.
 (define (blit-wait-ring s)
+  (unsafe
   (if (%cap-tag? s)
       (let ((r (blit-unseal s)) (i 0))
         (while (%< i blit-ring-size)
           (blit-wait-descriptor (ring-slot r i))
           (set! i (%+ i 1))))
-      nil)
+      nil))
   nil)
 
 (define (blit-sync) (blit-wait-ring *blit-ring*))
@@ -388,6 +444,8 @@
 ;; `blit-descriptor` handed out, and the link and the list register take it
 ;; with a capability store.
 (define (blit-go d op)
+  (declare unsafe)
+  (unsafe
   (%cap-st-word! d bl-op op)
   (%cap-st! d bl-next 0)
   (%cap-st-word! d bl-status blit-pending)
@@ -399,8 +457,8 @@
       (if (if linked (blit-busy?) nil)
           nil
           (if (%= blit-pending (%cap-ld-word d bl-status))
-              (%cap-st! (device-page dev-blit) blit-list-reg d)
-              nil))))
+              (blit-list! (blitter) d)
+              nil)))))
   nil)
 
 ;; ---------------------------------------------------------------- rectangles
@@ -414,13 +472,14 @@
          (x1 (let ((e (%+ x w))) (if (%> e bw) bw e)))
          (y1 (let ((e (%+ y h))) (if (%> e bh) bh e))))
     (if (if (%< x0 x1) (%< y0 y1) nil)
+        (unsafe
         (let ((b (blit-descriptor)))
           (%cap-st! b bl-dst (bm-at bmp x0 y0))
           (%cap-st-word! b bl-w (%- x1 x0))
           (%cap-st-word! b bl-h (%- y1 y0))
           (%cap-st-word! b bl-dmod bw)
           (%cap-st-word! b bl-val c)
-          (blit-go b op-fill))
+          (blit-go b op-fill)))
         nil)))
 
 ;; Clipped against both ends: the source rectangle and the destination have
@@ -441,6 +500,7 @@
                (dx1 (let ((e (%+ dx (%- sx1 sx0)))) (if (%> e dw) dw e)))
                (dy1 (let ((e (%+ dy (%- sy1 sy0)))) (if (%> e dh) dh e))))
           (if (if (%< dx0 dx1) (%< dy0 dy1) nil)
+              (unsafe
               (let ((b (blit-descriptor)))
                 (%cap-st! b bl-src (bm-at src sx0 sy0))
                 (%cap-st! b bl-dst (bm-at dst dx0 dy0))
@@ -448,7 +508,7 @@
                 (%cap-st-word! b bl-h (%- dy1 dy0))
                 (%cap-st-word! b bl-smod sw)
                 (%cap-st-word! b bl-dmod dw)
-                (blit-go b op-copy))
+                (blit-go b op-copy)))
               nil))
         nil)))
 
@@ -644,6 +704,7 @@
   (set! x1 (clamp (%+ x1 ox) 0 (%- bw 1)))
   (set! y0 (clamp (%+ y0 oy) 0 (%- bh 1)))
   (set! y1 (clamp (%+ y1 oy) 0 (%- bh 1)))
+  (unsafe
   (let ((b (blit-descriptor)))
     (%cap-st! b bl-dst (bm-pixels bmp))
     (%cap-st-word! b bl-dmod bw)
@@ -652,7 +713,7 @@
     (%cap-st-word! b bl-x1 x1)
     (%cap-st-word! b bl-y1 y1)
     (%cap-st-word! b bl-val c)
-    (blit-go b op-line))))
+    (blit-go b op-line)))))
 
 ;; A filled circle, one scanline at a time: two device pokes a row.
 (define (fill-circle rp cx cy r c)
@@ -686,26 +747,21 @@
 ;; with the kind in bits 31..28. A key has ascii in 27..20 and the raw key
 ;; code in 19..12; a pointer event has y in 27..16, x in 15..4 and the button
 ;; in 3..0; the wheel has its step in 11..0. Reading the event register takes
-;; one off the queue. input.driver holds its page (see input.lisp), and these
-;; take it.
+;; one off the queue. input.driver is the one reader (see input.lisp).
 
 ;; The next event's word, or nil when the queue is empty. Read once, because
 ;; reading takes the event.
-(define (input-take p)
-  (let ((w (%cap-ld-word p inp-event)))
+(define (input-take dev)
+  (let ((w (input-event dev)))
     (if (%= w 0) nil w)))
 
 ;; The same word the other way, into the loopback register: an event as
-;; though the keyboard had sent it.
-(define (input-inject p kind ascii code payload)
-  (%cap-st-word! p inp-inject
-                 (%logior (%logior (%lsh kind 28) (%lsh ascii 20))
-                          (%logior (%lsh code 12) payload)))
+;; though the keyboard had sent it. Whoever holds the input device types for
+;; the person at the keyboard.
+(define (input-type dev kind ascii code payload)
+  (input-inject! dev (%logior (%logior (%lsh kind 28) (%lsh ascii 20))
+                              (%logior (%lsh code 12) payload)))
   nil)
-
-(define (input-interrupts! p on) (%cap-st-word! p inp-ctrl (if on 1 0)))
-(define (input-buttons p) (%cap-ld-word p inp-buttons))
-(define (input-mods p) (%cap-ld-word p inp-mods))
 
 ;; ---------------------------------------------------------------- serial
 ;; The serial line. Its registers are reached raw from runtime.lisp by
@@ -715,7 +771,7 @@
 ;; Whether the chip raises its line when a byte arrives. Raw, like the rest of
 ;; the line's registers: it is turned on by whoever starts console.driver and
 ;; off when the driver ends.
-(define (serial-interrupts! on) (%cap-st-word! (uart-page) uart-ctrl-reg (if on 1 0)))
+(define (serial-interrupts! on) (unsafe (%cap-st-word! (uart-page) uart-ctrl-reg (if on 1 0))))
 
 ;; ---------------------------------------------------------------- storage
 ;; The disk controller. A command runs on its own time: `disk-go` programs it
@@ -723,8 +779,8 @@
 ;; transfer takes, and then it reads the result: 0 ok, 1 no disk attached,
 ;; `disk-refused` when the buffer does not allow the transfer, 3 the host's
 ;; I/O failed. With bit 0 of the control register set, the controller raises
-;; `int-disk` when it finishes. disk.driver holds its page (see disk.lisp),
-;; and these take it.
+;; `int-disk` when it finishes. Whoever holds the disk device reaches every
+;; block, the image's among them: it is as much as a file system.
 
 ;; The command goes last: the controller latches the other three when it
 ;; arrives, so they can be rewritten for the next command while this one runs.
@@ -732,23 +788,13 @@
 ;; capability store, and the controller moves only what it covers: a read
 ;; into it needs SD, a write out of it LD, and every byte of the n blocks
 ;; inside its bounds. A flush takes no buffer.
-(define (disk-go p cmd buf block n)
+(define (disk-go dev cmd buf block n)
   (without-interrupts
-    (%cap-st! p dsk-buf buf)
-    (%cap-st-word! p dsk-block block)
-    (%cap-st-word! p dsk-count n)
-    (%cap-st-word! p dsk-cmd cmd))
+    (disk-buf! dev buf)
+    (disk-block! dev block)
+    (disk-count! dev n)
+    (disk-cmd! dev cmd))
   nil)
 
-;; One load and no allocation: a status is a small number, read in a loop
-;; with interrupts off.
-(define (disk-status p) (%cap-ld-word p dsk-status))
-(define (disk-busy? p) (%= (disk-status p) disk-busy))
-(define (disk-blocks p) (%cap-ld-word p dsk-blocks))
-(define (disk-interrupts! p on) (%cap-st-word! p dsk-ctrl (if on 1 0)))
-
-;; What reaches memory by number or hands out a device's page: needs an
-;; `unsafe` around the call. A descriptor is what the chip is handed, so
-;; handing one out and linking one are among them.
-(unsafe-names (quote (peek poke peek8 poke8 device-page reset-processor blit-descriptor blit-go
-                      blit-seal blit-unseal)))
+;; A status is a small number, read in a loop with interrupts off.
+(define (disk-busy? dev) (%= (disk-status dev) disk-busy))

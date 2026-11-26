@@ -13,7 +13,6 @@
 ;; namespace that only the forge reads.
 (defpackage boot use lm gc hw asm compiler sys exec)
 (in-package boot)
-(unsafe-file)
 (export '(build-boot-code reserve-stub-memory))
 
 ;; ---------------------------------------------------------------- context

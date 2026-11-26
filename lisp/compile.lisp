@@ -79,7 +79,7 @@
 ;; What the compiler knows while it compiles one function.
 (defrecord (context cx)
   asm env nlocals maxlocals free boxed name framefix outer nparams
-  self-label self-arity leaf)
+  self-label self-arity leaf islands)
 
 (define (make-context asm name outer-env)
   (let ((c (cx-alloc)))
@@ -90,6 +90,7 @@
     (set-cx-framefix! c 0)
     (set-cx-outer! c outer-env)
     (set-cx-nparams! c 0)
+    (set-cx-islands! c nil)
     c))
 
 (define (cx-alloc-local c)
@@ -312,13 +313,14 @@
   (if (if (%fixnum? v) t (%char? v))
       nil
       (error "defconstant: not a fixnum or a character:" name))
+  (if (symbol-unsafe? name) (error "defconstant: the name is unsafe:" name) nil)
   (if (constant? name)
       (if (%eq? (%symbol-value name) v)
           nil
           (error "defconstant: a constant cannot change:" name))
       (begin
         (%set-symbol-value! name v)
-        (%set-symbol-flags! name (%logior (%symbol-flags name) sym-constant))))
+        (unsafe (%set-symbol-flags! name (%logior (%symbol-flags name) sym-constant)))))
   name)
 
 ;; What a form stands for if it is written down: a number or a character is
@@ -445,6 +447,7 @@
      (else
       (let ((sym (cadr loc)))
         (note-global-ref sym)
+        (note-safe-ref c sym)
         (emit-literal c sym $t6)
         (i-lvar a reg $t6 (slot-off sym-value)))))))
 
@@ -454,14 +457,14 @@
 (define *global-refs* nil)
 
 (define (note-global-ref sym)
-  (if (%eq? (%symbol-value sym) (%unbound))
+  (if (unbound? sym)
       (if (memq sym *global-refs*)
           nil
           (set! *global-refs* (%cons sym *global-refs*)))
       nil))
 
 (define (undefined-globals)
-  (filter (lambda (s) (%eq? (%symbol-value s) (%unbound))) *global-refs*))
+  (filter (lambda (s) (unbound? s)) *global-refs*))
 
 ;; A location's storage cell, without following a box. Capturing a boxed
 ;; variable takes the box itself, so that the closure and the frame go on
@@ -497,6 +500,7 @@
      ;; collector has not reached yet.
      (else
       (let ((sym (cadr loc)))
+        (note-safe-ref c sym)
         (emit-literal c sym $t6)
         (i-stxi a reg $t6 sym-value t-symbol))))))
 
@@ -685,32 +689,32 @@
 ;; through ra, the function would return to the wrong place, and a build
 ;; failure is the right outcome.
 (define (check-leaf c)
-  (let* ((a (cx-asm c))
-         (buf (asm-buf a))
+  (if (links? (cx-asm c)) (error "compile: a leaf that calls" (cx-name c)) nil)
+  0)
+
+;; Whether anything in the code put out so far links through ra: jal, jalr,
+;; jcl, c.jalr or c.jal.
+(define (links? a)
+  (let* ((buf (asm-buf a))
          (len (asm-len a))
-         (i 0))
+         (i 0)
+         (found nil))
     (while (%< i len)
       (let ((lo (%logior (%bytes-ref buf i) (%lsh (%bytes-ref buf (%+ i 1)) 8))))
         (if (%= 3 (%logand lo 3))
             (let ((hi (%logior (%bytes-ref buf (%+ i 2))
                                (%lsh (%bytes-ref buf (%+ i 3)) 8))))
-              (if (links-ra? lo hi)
-                  (error "compile: a leaf that calls" (cx-name c))
-                  nil)
+              (if (links-ra? lo hi) (set! found t) nil)
               (set! i (%+ i 4)))
             (begin
               ;; c.jalr, which is c.ebreak when its register field is zero
               (if (%= #x9002 (%logand lo #xf07f))
-                  (if (%> (%logand (%lsh lo -7) 31) 0)
-                      (error "compile: a leaf that calls" (cx-name c))
-                      nil)
+                  (if (%> (%logand (%lsh lo -7) 31) 0) (set! found t) nil)
                   nil)
               ;; c.jal, which nothing emits
-              (if (%= #x2001 (%logand lo #xe003))
-                  (error "compile: a leaf that calls" (cx-name c))
-                  nil)
+              (if (%= #x2001 (%logand lo #xe003)) (set! found t) nil)
               (set! i (%+ i 2))))))
-    0))
+    found))
 
 ;; Whether a 32-bit instruction, as its low and high halves, writes a link
 ;; into ra: jal, jalr or jcl.
@@ -796,7 +800,8 @@
 ;; promotes to a bignum the way the variadic ones do. `ash` has no alias:
 ;; `%ash` takes the shift count modulo 32, which is wrong for (ash 1 100).
 ;; `peek` and `poke` have none: what they make of a word's top bit is for
-;; hw.lisp to say.
+;; hw.lisp to say. `symbol-function` is `symbol-value`: this is a Lisp-1,
+;; and the function a name names is its value.
 (define *inline-aliases*
   '((+ 2 %+o) (- 2 %-o) (* 2 %*o) (/ 2 %/) (mod 2 %mod) (rem 2 %rem)
     (= 2 %=) (< 2 %<) (> 2 %>) (<= 2 %<=) (>= 2 %>=)
@@ -815,7 +820,8 @@
     (char->integer 1 %char->int) (integer->char 1 %int->char)
     (logand 2 %logand) (logior 2 %logior) (logxor 2 %logxor)
     (lognot 1 %lognot) (lsh 2 %lsh)
-    (peek8 1 %ld-byte) (poke8 2 %st-byte!)
+    (symbol-value 1 %symbol-value) (set-symbol-value! 2 %set-symbol-value!)
+    (symbol-function 1 %symbol-value) (set-symbol-function! 2 %set-symbol-value!)
     (min 2 %min) (max 2 %max) (min2 2 %min) (max2 2 %max)))
 
 (define (definline name arity fn)
@@ -1397,15 +1403,20 @@
   ;; Through the typed indexed access, so the one instruction also checks
   ;; that it was given a symbol: these are in the checked vocabulary.
   (definline '%symbol-name 1 (fixed-ref sym-name t-symbol))
-  (definline '%symbol-value 1 (fixed-ref sym-value t-symbol))
-  (definline '%set-symbol-value! 2 (fixed-set sym-value t-symbol))
+  ;; A symbol's value cell holds what its name names, a function included,
+  ;; so reading or writing it refuses an unsafe name outside `unsafe`; see
+  ;; `emit-name-check`.
+  (definline '%symbol-value 1 (checked-ref sym-value))
+  (definline '%set-symbol-value! 2 (checked-set sym-value))
   ;; What a reference to this name sees, and how to change it. On the machine
   ;; that is the symbol's value cell, so these are `%symbol-value` again. They
   ;; are spelled apart because the forge's interpreter keeps its own globals
   ;; in a map of its own, and a fluid binding has to land in the world doing
   ;; the reading.
-  (definline '%fluid-value 1 (fixed-ref sym-value t-symbol))
-  (definline '%set-fluid-value! 2 (fixed-set sym-value t-symbol))
+  (definline '%fluid-value 1 (checked-ref sym-value))
+  (definline '%set-fluid-value! 2 (checked-set sym-value))
+  ;; The function slot is the compiler's, for a macro's expander or the
+  ;; note of how to open-code an intrinsic. A call never goes through it.
   (definline '%symbol-function 1 (fixed-ref sym-function t-symbol))
   (definline '%set-symbol-function! 2 (fixed-set sym-function t-symbol))
   (definline '%symbol-plist 1 (fixed-ref sym-plist t-symbol))
@@ -1895,26 +1906,33 @@
     (label a end)))
 
 ;; ---------------------------------------------------------------- unsafe
-;; A raw operation, or a function that hands out raw memory, is a name with
-;; the `sym-unsafe` bit (see `unsafe-names`). The compiler refuses to compile
-;; a call to one, or a reference to one as a value, unless the site is inside
-;; an `unsafe` form or the file said `(unsafe-file)` at its top. So the raw
-;; vocabulary is still there, but every place it is used says so, and can
-;; be found. What is not raw cannot fault the machine: it can only get a
-;; typed error.
+;; A raw operation, or a function that is unsafe to call, is a name with the
+;; `sym-unsafe` bit. A function gets the bit from `(declare unsafe)` at the
+;; top of its definition, and the intrinsics, which have no definition, from
+;; `unsafe-names` below. The compiler refuses a call to such a name, a
+;; reference to it as a value, or an assignment to it, unless the site is
+;; inside an `unsafe` form. So the raw vocabulary is there, but every place
+;; it is used says so and can be found.
 ;;
-;; The processor enforces the same line. A function whose source says
-;; `unsafe` is placed with SR in its entry capability, which integer
-;; addressing, CSRs and SCRs need; every other function is placed without.
+;; `unsafe` is two things, as in Rust. `(unsafe ...)` is a block: "I use raw
+;; things soundly here, and anyone may call me". `(declare unsafe)` is a
+;; contract: "calling me is unsafe". A declared function's body is not a
+;; block of its own: it says `unsafe` around its raw operations like any
+;; other code.
+;;
+;; The processor enforces the same line, block by block. Only the code of a
+;; block runs with SR in PCC. The compiler lifts the block's body into an
+;; island, a text of its own whose entry has SR, entered from the function
+;; around it, which has none (see `compile-island`). A function whose whole
+;; body is one block is placed with SR whole, and needs no island; so is a
+;; function written inside a block, whose maker hands its authority out on
+;; purpose.
 (define *unsafe-ok* nil)     ; inside an `unsafe` form, while it compiles
-(define *unsafe-file* nil)   ; after `(unsafe-file)`, until the next `in-package`
-
-(define (unsafe-allowed?) (if *unsafe-ok* t *unsafe-file*))
 
 (define *unsafe-warn* nil)   ; report and carry on, for an audit of a build
 
 (define (check-unsafe c name)
-  (cond ((unsafe-allowed?) nil)
+  (cond (*unsafe-ok* nil)
         (*unsafe-warn*
          (display (list 'UNSAFE name 'in (cx-name c))) (newline))
         (else
@@ -1923,35 +1941,220 @@
 (define (compile-unsafe c form tail)
   (let ((saved *unsafe-ok*))
     (set! *unsafe-ok* t)
-    (compile-body c (%cdr form) tail)
+    (if (asm-privileged (cx-asm c))
+        (compile-body c (%cdr form) tail)
+        (compile-island c (%cdr form) tail))
     (set! *unsafe-ok* saved)
     nil))
 
-;; Whether a function's code needs SR: it is compiled in an unsafe file, or
-;; inside an `unsafe` form of the function around it, or its body says
-;; `unsafe` outside the functions nested in it, which answer for themselves.
+;; Whether a function's code is placed with SR whole: it is written inside a
+;; block, or its body is one.
 (define (privileged-body? forms)
-  (if (unsafe-allowed?)
+  (if *unsafe-ok*
       t
-      (let ((found nil))
-        (dolist (f forms) (if (says-unsafe? f) (set! found t) nil))
-        found)))
+      (if (%cons? forms)
+          (if (%null? (%cdr forms)) (unsafe-form? (%car forms)) nil)
+          nil)))
 
-(define (says-unsafe? form)
-  (if (%cons? form)
-      (let ((h (%car form)))
-        (cond
-         ((%eq? h 'quote) nil)
-         ((%eq? h 'unsafe) t)
-         ((%eq? h 'lambda) nil)
-         ((if (%eq? h 'define) (%cons? (cadr form)) nil) nil)
-         (else
-          (let ((found nil))
-            (while (%cons? form)
-              (if (says-unsafe? (%car form)) (set! found t) nil)
-              (set! form (%cdr form)))
-            found))))
+(define (unsafe-form? form)
+  (if (%cons? form) (%eq? (%car form) 'unsafe) nil))
+
+;; ---------------------------------------------------------------- islands
+;; An island is a block's body as code of its own: a text whose entry has EX
+;; and SR, held by a code object of its own, which the enclosing function's
+;; code object holds as a literal. The island runs on the enclosing
+;; function's frame and registers, as the inline code would have: its
+;; locals, its closure in t0 or its frame, its literals through s1. It takes
+;; no arguments, makes no closure and builds no frame. The function enters
+;; it with
+;;
+;;     ly    t6, island(s1)       the island's code object
+;;     ly    t6, 0(t6)            its entry
+;;     jalr  t1, t6               or `jr t6` in tail position
+;;
+;; and the island ends with `jr t1`, into the function again, without SR. An
+;; island that calls anything first saves t1 in a local slot of the frame
+;; and loads it back before it jumps. In tail position the island returns
+;; straight to the function's caller, or makes its tail call, and never
+;; comes back. A leaf's island calls nothing, so its ra and t1 survive it.
+;;
+;; The island's entry is reached only through the enclosing function's code
+;; object, which only its own closure leads to: a closure is sealed, `jcl`
+;; alone opens it, and the code object it opens to is in s1 only while that
+;; function's code runs. So only a running activation of the function can
+;; enter its islands, at their first instruction, on its own frame.
+;;
+;; An island is named for its function and its place there, `(unsafe k .
+;; name)`, which a backtrace prints as "name, unsafe block k", and its code
+;; object's one literal is the code object of the function it belongs to,
+;; filled in when that is made.
+(defconstant $island-link $t1)
+(defconstant $island-entry $t6)
+
+(define (compile-island c forms tail)
+  (let* ((outer (cx-asm c))
+         (ia (make-assembler))
+         (k (%+ (length (cx-islands c)) 1))
+         (saved-env (cx-env c))
+         (saved-n (cx-nlocals c))
+         (saved-self (cx-self-label c))
+         ;; A leaf calls nothing, so its islands do not either. Otherwise the
+         ;; walk the leaf test makes says whether this body might, and when it
+         ;; says not, the code that comes out is read to make sure.
+         (calls (if (cx-leaf c) nil (not (leaf-body? forms (island-bound c forms)))))
+         (slot (if tail nil (if calls (cx-alloc-local c) nil))))
+    ;; The island's literals are the function's: it reads them through s1.
+    (set-asm-privileged! ia t)
+    (set-asm-literals! ia (asm-literals outer))
+    (set-asm-nlits! ia (asm-nlits outer))
+    (set-cx-asm! c ia)
+    ;; A self-call jumps to a label in the function's own text, which is
+    ;; not this one's: from here it is an ordinary call.
+    (set-cx-self-label! c nil)
+    (if slot (store-local c slot $island-link) nil)
+    (compile-body c forms tail)
+    (if tail
+        nil
+        (begin
+          (if slot (load-local c slot $island-link) nil)
+          (i-jr ia $island-link)))
+    (set-cx-asm! c outer)
+    (set-cx-self-label! c saved-self)
+    (set-cx-env! c saved-env)
+    (set-cx-nlocals! c saved-n)
+    (set-asm-literals! outer (asm-literals ia))
+    (set-asm-nlits! outer (asm-nlits ia))
+    (if (if tail nil (not calls))
+        (if (links? ia) (error "compile: an island that calls" (cx-name c)) nil)
+        nil)
+    (let ((code (unsafe (island-object ia (%cons 'unsafe (%cons k (cx-name c)))))))
+      (set-cx-islands! c (%cons code (cx-islands c)))
+      (emit-literal c code $island-entry)
+      (i-ly outer $island-entry $island-entry (slot-off code-entry))
+      (if tail
+          (i-jr outer $island-entry)
+          (i-jalr outer $island-link $island-entry 0)))))
+
+;; The names in scope at a block and the names it binds, which shadow any
+;; intrinsic of the same name for the leaf test.
+(define (island-bound c forms)
+  (bound-names (%cons 'begin forms) (map car (cx-env c))))
+
+;; Each island now knows the function it belongs to.
+(define (own-islands c code)
+  (dolist (i (cx-islands c)) (unsafe (island-owner! i code))))
+
+;; ---------------------------------------------------------------- names given as data
+;; A symbol handed over at run time names something only if the name is not
+;; unsafe, or the site that resolves it is inside an `unsafe` form: the
+;; compile-time rule, kept where a name becomes a value. `%symbol-value` and
+;; its setter, and the fluid forms of both, test the symbol's flag before
+;; they touch its cell, and refuse an unsafe name with an ecall naming it;
+;; inside an `unsafe` form the test is not compiled. Compiled references to a
+;; global by name never pass through here, so they pay nothing.
+(define (emit-name-check c)
+  (if *unsafe-ok*
+      nil
+      (let ((a (cx-asm c)) (ok (gensym-label "named")))
+        (i-ldxi a $t2 $a0 sym-flags t-symbol)
+        (i-fandi a $t2 $t2 sym-unsafe)
+        (i-beqz a $t2 ok)
+        (i-li a $a7 ecall-unsafe)
+        (i-ecall a)
+        (label a ok))))
+
+(define (checked-ref k)
+  (let ((ref (fixed-ref k t-symbol)))
+    (lambda (c) (emit-name-check c) (%funcall ref c))))
+
+(define (checked-set k)
+  (let ((set (fixed-set k t-symbol)))
+    (lambda (c) (emit-name-check c) (%funcall set c))))
+
+;; ---------------------------------------------------------------- declarations
+;; `(declare unsafe)` as the first form after a definition's name makes the
+;; name unsafe: `(define (f x) (declare unsafe) ...)`, `(define *v* (declare
+;; unsafe) 0)`. The bit is set before the body is compiled, so a body that
+;; calls itself says `unsafe` too. A name that is unsafe can be defined again
+;; only by a definition that says so, and a name that is already defined, and
+;; safe, cannot become unsafe: code compiled against it calls it without
+;; `unsafe`. Neither can a name compiled code has already called, outside
+;; `unsafe`, before it was defined.
+(define (declares-unsafe? rest)
+  (if (%cons? rest)
+      (let ((f (%car rest)))
+        (if (%cons? f)
+            (if (%eq? (%car f) 'declare)
+                (if (unsafe-declaration? (%cdr f))
+                    t
+                    (error "declare: only (declare unsafe) is known:" f))
+                nil)
+            nil))
       nil))
+
+(define (unsafe-declaration? args)
+  (if (%cons? args) (if (%eq? (%car args) 'unsafe) (%null? (%cdr args)) nil) nil))
+
+(define (check-definition name raw)
+  (if raw
+      (begin
+        (if (symbol-unsafe? name)
+            nil
+            (begin
+              (if (%eq? (unsafe (image-value name)) (%unbound))
+                  nil
+                  (error "declare unsafe: already defined, and safe:" name))
+              (let ((sites (safe-refs-to name)))
+                (cond ((%null? sites) nil)
+                      (*unsafe-warn* (display (list 'UNSAFE-AHEAD name 'in sites)) (newline))
+                      (else (error "declare unsafe: called outside unsafe before it was defined:" name "in" sites))))))
+        (mark-unsafe! name))
+      (if (symbol-unsafe? name)
+          (error "define: an unsafe name is defined again only by a definition that says (declare unsafe):" name)
+          nil))
+  (forget-safe-refs name))
+
+;; The bit here, and in the image being built during genesis, which keeps
+;; the flags its entries carry.
+(define (mark-unsafe! name)
+  (unsafe (%set-symbol-flags! name (%logior (%symbol-flags name) sym-unsafe)))
+  (if *image*
+      (let ((e (image-entry name)))
+        (%vector-set! e 2 (%logior (%vector-ref e 2) sym-unsafe)))
+      nil))
+
+;; A directive for the intrinsics, which have no definition to declare: the
+;; names are marked now, here and in an image being built, and nothing is
+;; left to run at boot, because the image keeps the bit.
+(define (unsafe-names names)
+  (dolist (s names) (mark-unsafe! s))
+  nil)
+
+;; Names compiled code calls, or reads, outside `unsafe` while nothing
+;; defines them yet, each with the function that does: (name . where).
+(define *safe-refs* nil)
+
+(define (note-safe-ref c sym)
+  (if *unsafe-ok*
+      nil
+      (if (unbound? sym)
+          (if (assq sym *safe-refs*)
+              nil
+              (set! *safe-refs* (%cons (%cons sym (cx-name c)) *safe-refs*)))
+          nil)))
+
+(define (safe-refs-to name)
+  (let ((acc nil))
+    (dolist (r *safe-refs*) (if (%eq? (%car r) name) (set! acc (%cons (%cdr r) acc)) nil))
+    acc))
+
+(define (forget-safe-refs name)
+  (if (assq name *safe-refs*)
+      (set! *safe-refs* (filter (lambda (r) (not (%eq? (%car r) name))) *safe-refs*))
+      nil))
+
+;; Whether nothing has been stored in the name yet, whatever the name is.
+(define (unbound? sym) (unsafe (%eq? (%symbol-value sym) (%unbound))))
 
 ;; ---------------------------------------------------------------- expressions
 (define (compile-expr c form tail)
@@ -1980,6 +2183,7 @@
          ((%eq? h 'if) (compile-if c form tail))
          ((%eq? h 'begin) (compile-body c (%cdr form) tail))
          ((%eq? h 'unsafe) (compile-unsafe c form tail))
+         ((%eq? h 'declare) (error "declare: only first in a definition:" form))
          ((%eq? h 'let) (compile-let c form tail))
          ((%eq? h 'while) (compile-while c form tail))
          ((%eq? h 'set!) (compile-set c form tail))
@@ -2156,6 +2360,7 @@
 (define (compile-assign c form want tail)
   (let* ((name (cadr form))
          (home (in-place-reg c name)))
+    (if (if (cx-lookup c name) nil (symbol-unsafe? name)) (check-unsafe c name) nil)
     (if (if home (compile-operation c (caddr form) home) nil)
         (if want (i-mv (cx-asm c) $a0 home) nil)
         (begin
@@ -2193,7 +2398,7 @@
          ;; closure, so the inner function has to know which of its free
          ;; variables to dereference.
          (free-boxed (map (lambda (s) (boxed-location? (location-of c s))) free))
-         (code (%cdr (compile-function params body name free free-boxed)))
+         (code (%cdr (unsafe (compile-function params body name free free-boxed))))
          (nfree (length free))
          (i 0))
     (if (%> (free-off nfree) 2048)
@@ -2293,7 +2498,10 @@
             (leaf-body? forms bound)))))
 
 ;; Compile a lambda body into fresh code. Returns (entry . code-object).
+;; Unsafe: the code object is writable, and its literals and islands are
+;; what its code trusts. `eval` and `compile-top` are the safe ways in.
 (define (compile-function params body name free . free-boxed-opt)
+  (declare unsafe)
   (let* ((a (make-assembler))
          (c (make-context a name nil))
          (nreq (param-required params))
@@ -2350,8 +2558,12 @@
         (set! i (%+ i 1))))
     (compile-body c expanded t)
     (finish-frame c)
-    (let ((entry (place a)))
-      (%cons entry (code-object a (cx-name c))))))
+    ;; The code came out of this compiler, which checked every raw name in
+    ;; it, so placing it is sound.
+    (let* ((entry (unsafe (place a)))
+           (code (unsafe (code-object a (cx-name c)))))
+      (own-islands c code)
+      (%cons entry code))))
 
 ;; Collect arguments nreq.. into a list. The eight argument registers are
 ;; spilled so the loop can index them uniformly with anything on the stack.
@@ -2405,10 +2617,10 @@
 ;; `make-closure` fills in its entry and its code object, and it is sealed
 ;; here, like every closure the compiler makes.
 (define (top-level-closure code)
-  (%cap-seal-closure (make-closure code 0)))
+  (unsafe (%cap-seal-closure (make-closure code 0))))
 
 (define (add-boot-thunk form)
-  (let* ((r (compile-function nil (list form) 'toplevel nil))
+  (let* ((r (unsafe (compile-function nil (list form) 'toplevel nil)))
          (clo (top-level-closure (%cdr r))))
     (set! *boot-thunks* (%cons clo *boot-thunks*))
     clo))
@@ -2437,15 +2649,21 @@
           v))))
 
 (define (image-value sym)
+  (declare unsafe)
   (if *image*
       (let ((e (table-ref *image* sym nil))) (if e (%vector-ref e 0) (%unbound)))
-      (%symbol-value sym)))
+      (unsafe (%symbol-value sym))))
 
+;; These two give any name anything, unsafe ones included: `compile-top`
+;; asks `check-definition` first.
 (define (image-set-value! sym v)
-  (if *image* (%vector-set! (image-entry sym) 0 v) (%set-symbol-value! sym v))
+  (declare unsafe)
+  (if *image* (%vector-set! (image-entry sym) 0 v) (unsafe (%set-symbol-value! sym v)))
   v)
 
 (define (image-set-macro! sym expander)
+  (declare unsafe)
+  (unsafe
   (if *image*
       (let ((e (image-entry sym)))
         (%vector-set! e 1 expander)
@@ -2453,7 +2671,7 @@
       (begin
         (%set-symbol-function! sym expander)
         (%set-symbol-flags! sym (%logior (%symbol-flags sym) sym-macro))))
-  expander)
+  expander))
 
 (define (image-set-constant! sym v)
   (let ((e (image-entry sym)))
@@ -2479,23 +2697,22 @@
             nil)
         (%cons 'let* (%cons binds body)))))
 
-;; Four forms are directives to the compiler as much as code. `defrecord` is
-;; a macro, so that the interpreter has one to expand, and is caught here
+;; Three forms are directives to the compiler as much as code. `defrecord`
+;; is a macro, so that the interpreter has one to expand, and is caught here
 ;; before expansion, so the shape is registered and the accessors are
-;; open-coded from here on. `in-package` ends an unsafe file, and is then
-;; compiled as usual; `(unsafe-file)` begins one and compiles to nothing;
-;; `unsafe-names` marks its names now, for the code compiled after it here,
-;; as well as at boot for the machine.
+;; open-coded from here on. `unsafe-names` marks the raw intrinsics, now and
+;; in an image being built, and leaves nothing to run at boot. A definition
+;; may begin with `(declare unsafe)`; see `check-definition`.
 (define (compile-top form)
   (set! *unsafe-ok* nil)
   (let ((h (if (%cons? form) (%car form) nil)))
     (cond
      ((%eq? h 'defrecord) (compile-defrecord form))
-     ((%eq? h 'in-package) (set! *unsafe-file* nil) (compile-top-1 form))
-     ((%eq? h 'unsafe-file) (set! *unsafe-file* t) 'unsafe-file)
-     ((%eq? h 'unsafe-names) (compile-time-eval form) (compile-top-1 form))
+     ((%eq? h 'unsafe-names) (unsafe-names (compile-time-eval (cadr form))) 'unsafe-names)
      (else (compile-top-1 form)))))
 
+;; Whatever a definition replaces it replaces through `image-set-value!`,
+;; once `check-definition` has said the name may be defined so.
 (define (compile-top-1 form)
   (set! form (macroexpand form))
   (if (%cons? form)
@@ -2503,46 +2720,51 @@
         (cond
          ((%eq? h 'defconstant) (compile-defconstant form))
          ((%eq? h 'define)
-          (let ((name (if (%cons? (cadr form)) (caadr form) (cadr form))))
-            (if (constant? name) (error "define: a constant cannot change:" name) nil))
-          (if (%cons? (cadr form))
-              (let* ((name (caadr form))
-                     (r (compile-function (cdadr form) (cddr form) name nil))
-                     (clo (top-level-closure (%cdr r))))
-                (image-set-value! name clo)
-                name)
-              ;; A variable definition is given its value now, because code
-              ;; compiled later in the same build reads it as a constant, and
-              ;; the initialiser is recorded so that a booting image runs it
-              ;; again in source order.
-              ;;
-              ;; `(define name)` with no initialiser is a declaration: it
-              ;; names the variable, leaves any value already there alone,
-              ;; and puts nothing on the boot list. A machine recompiling its
-              ;; own sources must not knock out the allocator it is
-              ;; allocating through.
-              (let ((name (cadr form)))
-                (if (%cons? (cddr form))
-                    (let ((expr (caddr form)))
-                      (image-set-value! name (compile-time-eval expr))
-                      (record-initialiser name expr))
-                    (if (%eq? (image-value name) (%unbound))
-                        (image-set-value! name nil)
-                        nil))
-                name)))
+          (let* ((target (cadr form))
+                 (name (if (%cons? target) (%car target) target))
+                 (rest (cddr form))
+                 (raw (declares-unsafe? rest)))
+            (if (constant? name) (error "define: a constant cannot change:" name) nil)
+            (if raw (set! rest (%cdr rest)) nil)
+            (check-definition name raw)
+            (if (%cons? target)
+                (let* ((r (unsafe (compile-function (%cdr target) rest name nil)))
+                       (clo (top-level-closure (%cdr r))))
+                  (unsafe (image-set-value! name clo))
+                  name)
+                ;; A variable definition is given its value now, because code
+                ;; compiled later in the same build reads it as a constant, and
+                ;; the initialiser is recorded so that a booting image runs it
+                ;; again in source order.
+                ;;
+                ;; `(define name)` with no initialiser is a declaration: it
+                ;; names the variable, leaves any value already there alone,
+                ;; and puts nothing on the boot list. A machine recompiling its
+                ;; own sources must not knock out the allocator it is
+                ;; allocating through.
+                (begin
+                  (if (%cons? rest)
+                      (let ((expr (%car rest)))
+                        (unsafe (image-set-value! name (compile-time-eval expr)))
+                        (record-initialiser (initialiser name expr raw)))
+                      (if (%eq? (unsafe (image-value name)) (%unbound))
+                          (unsafe (image-set-value! name nil))
+                          nil))
+                  name))))
          ;; A macro is needed twice: by the compiler running now, and by the
          ;; machine's compiler once the image boots. It is registered with
          ;; whatever expander is in charge here, and compiled into the
          ;; function cell where the other one will look for it.
          ((%eq? h 'defmacro)
+          (forget-safe-refs (cadr form))
           (register-macro form)
           (let* ((name (cadr form))
-                 (r (compile-function (list 'macro-args)
-                                      (list (macro-binder (caddr form) 'macro-args
-                                                          (cdddr form)))
-                                      name nil))
+                 (r (unsafe (compile-function (list 'macro-args)
+                                              (list (macro-binder (caddr form) 'macro-args
+                                                                  (cdddr form)))
+                                              name nil)))
                  (clo (top-level-closure (%cdr r))))
-            (image-set-macro! name clo)
+            (unsafe (image-set-macro! name clo))
             name))
          ((%eq? h 'begin)
           (let ((last nil))
@@ -2551,10 +2773,20 @@
          (else (top-level-form form))))
       (top-level-form form)))
 
+;; The assignment a booting image makes to give a variable its value. The
+;; value is worked out as any code is, and only the store into an unsafe
+;; name is inside `unsafe`.
+(define (initialiser name expr raw)
+  (if raw
+      (let ((v (gensym)))
+        (list 'let (list (list v expr)) (list 'unsafe (list 'set! name v))))
+      (list 'set! name expr)))
+
 ;; A constant is known from here on to the compiler doing the compiling, and
 ;; during genesis it is given to the image as well. Nothing goes on the boot
 ;; list: the value is in the symbol, and in the code that uses it.
 (define (compile-defconstant form)
+  (check-definition (cadr form) nil)
   (let ((name (cadr form))
         (v (compile-time-eval (caddr form))))
     (define-constant! name v)
@@ -2576,22 +2808,25 @@
 
 (setup-intrinsics)
 
-;; The raw vocabulary: what names memory by number through the root, hands
-;; out the root or the kernel block and what it holds, or reads or sets the
-;; machine's own state, all of which the processor refuses to code without SR, and
-;; `open-closure` and `sealing-key`, the escape hatch and the keys made
-;; from the otypes the kernel block holds. The operations on a capability the caller
-;; already holds are not here, and neither is `%addr-of`, whose answer
-;; cannot be followed without one of these.
+;; The raw intrinsics, which have no definition to say `(declare unsafe)`:
+;; what names memory by number through the root, hands out the root or the
+;; kernel block, or reads or sets the machine's own state, all of which the
+;; processor refuses to code without SR; `%slot`, which reads any object,
+;; a symbol's cells and a code object's literals among them; the stack
+;; pointer, which reaches every frame of the task; and the symbol flags,
+;; which say which names are unsafe. Every other raw name is declared at its
+;; definition. The operations on a capability the caller already holds are
+;; not here, and neither is `%addr-of`, whose answer cannot be followed
+;; without one of these.
 (unsafe-names
- '(%root %kernel kernel-ref kernel-set! all-symbols
+ '(%root %kernel
    %ld-word %st-word! %ld-half %st-half! %ld-byte %st-byte! %ld-cap %st-cap!
    %slot %set-slot!
    %context %set-context! %stack-limit %set-stack-limit! %set-gc-mode!
-   %set-this-task!
+   %set-this-task! %stack-pointer %set-symbol-flags!
    %ecall %halt %disable %enable %restore-interrupts %enable-after-trap
    %enable-interrupt-lines %wait-for-interrupt
-   %cons-run %set-cons-run! open-closure sealing-key))
+   %cons-run %set-cons-run!))
 
 ;; From here on a record's accessors are open-coded as the record is
 ;; declared. The shapes declared before this line get done now.

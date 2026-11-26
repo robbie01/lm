@@ -2,7 +2,6 @@
 ;;; and what the machine does when it wakes up.
 
 (in-package sys)
-(unsafe-file)
 
 ;; ---------------------------------------------------------------- banner
 (define system-name "LM")
@@ -86,6 +85,7 @@
 (defconstant trap-nest-limit 8)
 
 (define (trap-spiral cause epc tval)
+  (unsafe
   (uart-string "\n*** the trap handler is faulting in a loop: ")
   (uart-string (cause-name cause))
   (uart-string " at pc ")
@@ -93,11 +93,13 @@
   (uart-string ", value ")
   (uart-hex tval)
   (uart-nl)
-  (%halt exit-trap-spiral))
+  (%halt exit-trap-spiral)))
 
 ;; The stub passes mcause, the pc and mtval as integers, and the capability
 ;; to the frame it saved the registers into.
 (define (handle-trap cause epc tval ctx)
+  (declare unsafe)
+  (unsafe
   (if (%>= (trap-depth) trap-nest-limit) (trap-spiral cause epc tval) nil)
   (if (cons-refill? cause tval)
       (refill-run ctx)
@@ -120,7 +122,7 @@
                    (capability-trap cause epc tval ctx))
                   ((%= cause cause-illegal) (illegal-trap epc tval ctx))
                   (else (fatal-trap cause epc tval ctx))))
-        (keep-cons-run ctx))))
+        (keep-cons-run ctx)))))
 
 ;; ---------------------------------------------------------------- the cons run
 ;; The inline allocator carves the next pair out of gp with `npair`, and when
@@ -135,10 +137,12 @@
 ;; puts back and the task resumes with at the same instruction, and into the
 ;; live one, so that nothing is left holding the run that ran out.
 (define (refill-run ctx)
+  (declare unsafe)
+  (unsafe
   (let ((run (refill-cons-run)))
     (%set-cons-run! run)
     (ctx-set! ctx reg-gp run)
-    nil))
+    nil)))
 
 ;; The handler conses out of the cons run of the task it interrupted, and the
 ;; stub restores the gp it saved on the way in. So the run goes back into the
@@ -147,8 +151,10 @@
 ;; task switch points `mscratch` at the next task's frame and leaves this one
 ;; to be resumed later, with this run.
 (define (keep-cons-run ctx)
+  (declare unsafe)
+  (unsafe
   (ctx-set! ctx reg-gp (%cons-run))
-  nil)
+  nil))
 
 ;; ------------------------- the instruction that trapped
 ;; The report says which operation failed and what it was handed: the
@@ -159,6 +165,8 @@
 ;; instruction to read, and reads as 0. An instruction is only aligned to
 ;; two bytes, and a compressed one is the low half alone.
 (define (insn-at pc)
+  (declare unsafe)
+  (unsafe
   (let ((space (cond ((if (%>= pc obj-base) (%<= pc (%- obj-limit 4)) nil) (kernel-ref kb-objects))
                      ((if (%>= pc 0) (%<= pc (%- low-end 4)) nil) (kernel-ref kb-low))
                      (else nil))))
@@ -168,7 +176,7 @@
           (if (%= (%logand lo 3) 3)
               (%logior lo (%lsh (%logior (%cap-ld-byte at 2) (%lsh (%cap-ld-byte at 3) 8)) 16))
               lo))
-        0)))
+        0))))
 
 (define (compressed? w) (if (%= (%logand w 3) 3) nil t))
 (define (insn-op w)  (%logand w 127))
@@ -415,6 +423,8 @@
 ;; nothing left names the register that held the offending value, and the
 ;; instruction at the pc says what the value was for.
 (define (check-trap cause epc tval ctx)
+  (declare unsafe)
+  (unsafe
   (fault-report epc ctx
     (lambda ()
       (let ((w (insn-at epc)))
@@ -422,7 +432,7 @@
               ((fixnum-op? w) (emit-arith-fault w cause (fault-value ctx tval)))
               ((if (%= (insn-op w) op-xlm) (if (%= cause cause-wrong-type) t (%= cause cause-run)) nil)
                (emit-ref-fault w (fault-value ctx tval)))
-              (else (emit-str (op-name w)) (emit-str ": ") (emit-str (cause-name cause))))))))
+              (else (emit-str (op-name w)) (emit-str ": ") (emit-str (cause-name cause)))))))))
 
 ;; ------------------------- capability faults
 ;; Causes 32, 33 and 34 say that a check on the pc, on a load's authority or
@@ -447,12 +457,14 @@
         (else nil)))
 
 (define (capability-trap cause epc tval ctx)
+  (declare unsafe)
+  (unsafe
   (fault-report epc ctx
     (lambda ()
       (let ((w (insn-at epc)))
         (if (%= cause cause-cap-fetch)
             (emit-fetch-fault w epc tval ctx)
-            (emit-access-fault w (access-authority w) (%= cause cause-cap-store) tval ctx))))))
+            (emit-access-fault w (access-authority w) (%= cause cause-cap-store) tval ctx)))))))
 
 ;; Whether the capability stores data, or loads it, at all.
 (define (stores-data? c) (%= perm-sd (%logand (%cap-perms c) perm-sd)))
@@ -496,6 +508,8 @@
 ;; The pc itself refused at the fetch, a jump or a branch out of its code,
 ;; or a jump or a call to a capability that cannot run there.
 (define (emit-fetch-fault w epc t ctx)
+  (declare unsafe)
+  (unsafe
   (let ((reg (if (%= t epc) nil (jump-register w))))
     (cond
      ((%= t epc)
@@ -508,7 +522,7 @@
       (write (fault-value ctx (insn-rs1 w)))
       (emit-str " cannot run: ")
       (emit-entry-refusal (%cap-ld (open-closure (fault-value ctx (insn-rs1 w))) 0)))
-     (else (emit-str (op-name w)) (emit-str ": the target is outside the code")))))
+     (else (emit-str (op-name w)) (emit-str ": the target is outside the code"))))))
 
 ;; An illegal instruction. Without SR in the pc the privileged instructions
 ;; are illegal: a CSR and `mret`. A load or a store through x0, which RVY
@@ -518,12 +532,14 @@
   (if (compressed? w) nil (%= (insn-op w) op-sys)))
 
 (define (illegal-trap epc tval ctx)
+  (declare unsafe)
+  (unsafe
   (if (if (privileged-insn? tval) (not (%= perm-sr (%logand (%cap-perms (ctx-ref ctx reg-pc)) perm-sr))) nil)
       (fault-report epc ctx
         (lambda ()
           (emit-str (op-name tval))
           (emit-str ": privileged operation in code compiled without unsafe")))
-      (fatal-trap cause-illegal epc tval ctx)))
+      (fatal-trap cause-illegal epc tval ctx))))
 
 ;; ---------------------------------------------------------------- widening
 ;; Overflow and mixed-mode arithmetic both arrive as traps, and neither is an
@@ -575,19 +591,23 @@
 ;; emits none; this keeps a corrupt word read as an instruction from
 ;; scribbling on the pc.
 (define (try-widen epc ctx)
+  (declare unsafe)
+  (unsafe
   (let ((w (insn-at epc)))
     (if (if (%= (insn-op w) op-xlm) (if (%> (insn-rd w) 0) (%>= (insn-f3 w) 5) nil) nil)
         (let ((v (widened w ctx)))
           (if v
               (begin (ctx-set! ctx (insn-rd w) v) (step-past ctx 4) t)
               nil))
-        nil)))
+        nil))))
 
 ;; ---------------------------------------------------------------- ecalls
 ;; The compiler emits `ecall` for the conditions it detects inline, with the
 ;; reason in a7. The saved pc is stepped over the instruction first: the stub
 ;; reloads `mepc` from the context on its way out.
 (define (handle-ecall epc ctx)
+  (declare unsafe)
+  (unsafe
   (step-past ctx 4)
   (let ((code (ctx-ref ctx reg-a7)))
     (if (%= code ecall-reschedule)
@@ -610,6 +630,14 @@
             (emit-str ", at ")
             (emit-str (number->hex epc))
             (emit-str "\n"))
+           ((%= code ecall-unsafe)
+            ;; A name given as data was to be resolved outside `unsafe`, and
+            ;; the name is unsafe. The symbol is in a0.
+            (emit-str "\n*** ")
+            (write (ctx-ref ctx reg-a0))
+            (emit-str " is unsafe: given as data it names nothing outside an unsafe form, at ")
+            (emit-str (number->hex epc))
+            (emit-str "\n"))
            ((%= code ecall-record)
             ;; A record accessor was handed the wrong kind of record. It left
             ;; the tag it wanted in t3 and what it was given in a0.
@@ -626,7 +654,7 @@
            ;; where, and the restart.
            ((%= code ecall-error) nil)
            (else (emit-str "\nunknown ecall\n")))
-          (backtrace-from-context epc ctx)))))))
+          (backtrace-from-context epc ctx))))))))
 
 ;; ---------------------------------------------------------------- backtrace
 ;; Every prologue saves its return address, its caller's frame and its own
@@ -642,7 +670,9 @@
 
 ;; The closure a call was about to enter.
 (define (emit-callee f)
-  (if (%closure? f) (emit-code-label (%slot f clo-code)) (emit-str "a non-function")))
+  (declare unsafe)
+  (unsafe
+  (if (%closure? f) (emit-code-label (%slot f clo-code)) (emit-str "a non-function"))))
 
 ;; A frame link the trace may follow: a stack capability, unsealed, that
 ;; loads values, aligned to a slot, with the four fixed slots below it inside
@@ -664,11 +694,13 @@
 
 ;; The code object whose text the pc is in, or nil: `s1` if that is the one.
 (define (code-of pc s1)
+  (declare unsafe)
+  (unsafe
   (cond ((%cap-tag? pc)
          (if (if (code-object? s1) (%= (%cap-base (%cap-ld s1 0)) (%cap-base pc)) nil)
              s1
              (code-object-at (%cap-base pc))))
-        (else nil)))
+        (else nil))))
 
 ;; The code object of the closure that built the frame `f`, or nil.
 (define (frame-code f)
@@ -677,10 +709,18 @@
         (if (%= (%obj-type clo) t-closure) (%cap-ld clo (%* value-bytes clo-code)) nil)
         nil)))
 
+;; The function a code object's code runs as: its own, or for an island the
+;; function it belongs to, whose frame it runs on.
+(define (code-owner code)
+  (let ((name (%cap-ld code (%* value-bytes code-name))))
+    (if (if (%cons? name) (%eq? (%car name) 'unsafe) nil)
+        (%cap-ld code (%* value-bytes code-lits))
+        code)))
+
 ;; Whether the function whose code object is `code` built the frame `f`.
 (define (frame-built-by? f code)
   (let ((built (frame-code f)))
-    (if (if code built nil) (%= (%cap-base built) (%cap-base code)) nil)))
+    (if (if code built nil) (%= (%cap-base built) (%cap-base (code-owner code))) nil)))
 
 (define (emit-frame-line pc code)
   (emit-str "  ")
@@ -695,12 +735,15 @@
 ;; the pc or return address in the function that built it.
 (define (print-backtrace pc ra s0 s1)
   (emit-str "backtrace:\n")
-  (let ((f s0) (p pc) (i 0) (code (code-of pc s1)))
+  (let ((f s0) (p pc) (i 0) (code (unsafe (code-of pc s1))) (first nil))
+    ;; The pc's own frame, or its island's function's, is named by the code
+    ;; the pc is in.
     (if (if (frame-readable? f) (frame-built-by? f code) nil)
-        nil
+        (set! first code)
         (begin (emit-frame-line pc code) (set! p ra)))
     (while (if (%< i backtrace-limit) (frame-readable? f) nil)
-      (emit-frame-line p (frame-code f))
+      (emit-frame-line p (if first first (frame-code f)))
+      (set! first nil)
       (set! p (%cap-ld f compiler::ra-slot))
       (set! f (%cap-ld f compiler::link-slot))
       (set! i (%+ i 1)))
@@ -715,6 +758,8 @@
 
 ;; One line for the fault, made by `what`, and the trace below it.
 (define (fault-report epc ctx what)
+  (declare unsafe)
+  (unsafe
   (abort-to-repl ctx
     (compose-report
       (lambda ()
@@ -723,9 +768,11 @@
         (emit-str ", at pc ")
         (emit-str (number->hex epc))
         (emit-str "\n")
-        (backtrace-from-context epc ctx)))))
+        (backtrace-from-context epc ctx))))))
 
 (define (fatal-trap cause epc tval ctx)
+  (declare unsafe)
+  (unsafe
   (abort-to-repl ctx
     (compose-report
       (lambda ()
@@ -736,7 +783,7 @@
         (emit-str ", value ")
         (emit-str (number->hex tval))
         (emit-str "\n")
-        (backtrace-from-context epc ctx)))))
+        (backtrace-from-context epc ctx))))))
 
 ;; ---------------------------------------------------------------- reports
 ;; A fault is reported by the task it happened in, once that task is back on
@@ -793,15 +840,18 @@
 
 ;; What `error` calls once it has printed its message: a trap, so that the
 ;; rest happens where every other failure goes.
-(define (error-trap args) (%ecall ecall-error))
+(define (error-trap args)
+  (unsafe (%ecall ecall-error)))
 
 ;; A task restarts on its own stack, which is a capability standing at its
 ;; top. Before there are tasks, on the boot stack, which the kernel block
 ;; holds the same way.
 (define (restart-stack)
+  (declare unsafe)
+  (unsafe
   (if *stack-top-fn*
       (%funcall *stack-top-fn*)
-      (kernel-ref kb-boot-stack)))
+      (kernel-ref kb-boot-stack))))
 
 ;; Where a restarted closure returns to when it finally does: on the machine
 ;; the sentry for the task exit stub, so a prompt in a window that is
@@ -818,9 +868,11 @@
 (define *enter-stub*)
 
 (define (build-enter-stub)
+  (declare unsafe)
+  (unsafe
   (let ((a (make-assembler)))
     (i-jcl a $zero $t0)
-    (set! *enter-stub* (place a))))
+    (set! *enter-stub* (place a)))))
 
 ;; A call to a closure set up by hand in a context: the closure goes in t0,
 ;; still sealed, and the pc is the enter stub. The closure takes one
@@ -829,6 +881,8 @@
 ;; s2 and its cons run in gp, and the NULL left in s0 is the bottom of the
 ;; new stack.
 (define (enter-closure ctx f sp . arg)
+  (declare unsafe)
+  (unsafe
   (let ((r 1))
     (while (%< r 32)
       (if (if (%= r reg-gp) t (%= r reg-s2)) nil (ctx-set! ctx r 0))
@@ -842,7 +896,7 @@
     (ctx-set! ctx reg-sp sp)                                   ; a whole stack
     (ctx-set! ctx reg-ra (restart-ra))                         ; where it ends up
     (ctx-set! ctx reg-tp nil))                                 ; and nil, as ever
-  nil)
+  nil))
 
 ;; Nothing is unwound: the stack the fault happened on is abandoned where it
 ;; stands, so the interrupt state is re-established rather than restored, or
@@ -853,6 +907,8 @@
 ;; trap saved belongs to the handler, and the outer trap would never finish.
 ;; The machine stops and says so.
 (define (abort-to-repl ctx . report)
+  (declare unsafe)
+  (unsafe
   (let ((r (if (%cons? report) (%car report) nil)))
     (if (%> (trap-depth) 1)
         (begin
@@ -867,14 +923,15 @@
           (*task-abort-fn* (enter-closure ctx *task-abort-fn* (restart-stack) r))
           (else (if r (uart-string r) nil)
                 (uart-string "no prompt to return to; halting\n")
-                (%halt exit-error)))))
+                (%halt exit-error))))))
 
 ;; ---------------------------------------------------------------- eval
 ;; There is no interpreter on the machine. A form is compiled to native code
 ;; as the body of a function of no arguments, and called.
 (define (eval-thunk form)
-  (let* ((r (compile-function nil (list form) 'repl nil))
-         (clo (%cap-seal-closure (make-closure (%cdr r) 0))))
+  (let ((clo (unsafe
+              (let ((r (compile-function nil (list form) 'repl nil)))
+                (%cap-seal-closure (make-closure (%cdr r) 0))))))
     (%funcall clo)))
 
 ;; A top level form is normally run. During a rebuild it is also compiled
@@ -890,8 +947,8 @@
 
 ;; compile-top has already given the variable its value; this is so that the
 ;; image being built gives it that value again when it boots.
-(define (record-initialiser name expr)
-  (if (if *recording* t *image*) (add-boot-thunk (list 'set! name expr)) nil))
+(define (record-initialiser form)
+  (if (if *recording* t *image*) (add-boot-thunk form) nil))
 
 (define (register-macro form) nil)
 
@@ -1056,6 +1113,8 @@
       (set! l (%cdr l)))))
 
 (define (kickstart)
+  (declare unsafe)
+  (unsafe
   ;; The allocator first: the first thing the boot list does is allocate.
   (install-allocator)
   ;; The object-start map is scratch memory, which no image carries: built
@@ -1082,7 +1141,6 @@
   ;; machine. One in a window is a task, and only ends its task.
   (repl (lambda () (%halt exit-ok)))
   (%halt exit-ok)
-  0)
+  0))
 
 ;; This sets a context's registers.
-(unsafe-names (quote (enter-closure)))

@@ -14,12 +14,22 @@
   (if (%object? v) (%= (%obj-type v) t-code) nil))
 
 ;; A symbol for a named function; (lambda . home) for one that never had a
-;; name, so an anonymous frame still says where it came from.
+;; name, so an anonymous frame still says where it came from; and (unsafe k
+;; . name) for the island of a function's kth unsafe block.
 (define (emit-name n)
   (cond ((%null? n) (emit-str "anonymous"))
+        ((if (%cons? n) (%eq? (%car n) 'unsafe) nil)
+         (emit-name (cddr n))
+         (emit-str ", unsafe block ")
+         (emit-digits (cadr n)))
         ((%cons? n) (emit-str "lambda in ") (emit-name (%cdr n)))
         ((%symbol? n) (emit-str (%symbol-name n)))
         (else (emit-str "anonymous"))))
+
+;; A small number's digits, without making a string.
+(define (emit-digits k)
+  (if (%>= k 10) (emit-digits (%/ k 10)) nil)
+  (emit-ch (%int->char (%+ 48 (%rem k 10)))))
 
 (define (emit-code-label c)
   (unsafe
@@ -112,7 +122,18 @@
 ;;
 ;;   #<capability 0x2040 [0x2000,0x3000) rwRWm>
 ;;   #<capability 0x10002a4 [0x1000200,0x1000400) xs sentry>
+;;
+;; A device, a page sealed with the devices' otype, is named by its page's
+;; base: #<device disk>.
 (define (print-capability x)
+  (let ((name (if (%cap-sealed? x)
+                  (if (%= (%cap-otype x) otype-device) (device-name x) nil)
+                  nil)))
+    (if name
+        (begin (emit-str "#<device ") (emit-str name) (emit-ch #\>))
+        (print-raw-capability x))))
+
+(define (print-raw-capability x)
   (emit-str "#<capability ")
   (emit-cap-summary x)
   (if (%cap-sealed? x)

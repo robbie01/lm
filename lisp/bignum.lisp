@@ -54,7 +54,8 @@
 
 ;; The limbs of a fresh bignum are zero.
 (define (bn-alloc nlimbs sign)
-  (let ((b (alloc-object t-bignum (%+ nlimbs 1))))
+  (check-length (%+ nlimbs 1))
+  (let ((b (unsafe (alloc-object t-bignum (%+ nlimbs 1)))))
     (%cap-st! b 0 sign)
     b))
 

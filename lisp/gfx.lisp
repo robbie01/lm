@@ -16,8 +16,9 @@
 ;;;   (present)          put the frame in front of the viewer now
 ;;;
 ;;; The screen bitmap is `*screen*`, which anybody may draw into with the
-;;; blitter; that is what compositing is. The chip's page is the driver's
-;;; alone, kept in its closures.
+;;; blitter; that is what compositing is. The driver holds the display's
+;;; device, its page sealed, and reaches the registers through the accessors
+;;; generated into devices.lisp.
 
 (in-package gfx)
 
@@ -28,28 +29,29 @@
 (define *sleeps* 0)
 
 ;; ---------------------------------------------------------------- the driver
-(define (serve page body)
+;; `dev` is the display: its page sealed, which only the accessors open.
+(define (serve dev body)
   (let ((op (%car body)))
-    (cond ((%eq? op 'screen) (show-screen page (alloc-bitmap (cadr body) (caddr body))))
-          ((%eq? op 'show) (show-screen page *screen*))
+    (cond ((%eq? op 'screen) (show-screen dev (alloc-bitmap (cadr body) (caddr body))))
+          ((%eq? op 'show) (show-screen dev *screen*))
           ((%eq? op 'colours)
-           (dolist (p (cadr body)) (gfx-colour! page (%car p) (%cdr p)))
+           (dolist (p (cadr body)) (gfx-colour! dev (%car p) (%cdr p)))
            t)
-          ((%eq? op 'present) (gfx-present! page) t)
+          ((%eq? op 'present) (gfx-present! dev) t)
           (else (error "gfx.driver: no such request:" op)))))
 
-(define (show-screen page b)
+(define (show-screen dev b)
   (if (%null? b)
       nil
       (begin
         (set! *screen* b)
-        (gfx-show page b)
-        (default-palette page)
+        (gfx-show dev b)
+        (default-palette dev)
         (set! *screen-rp* (make-bitmap-rastport b))
         b)))
 
 ;; Sixteen readable colours, then a grey ramp over the rest.
-(define (default-palette page)
+(define (default-palette dev)
   (let ((i 0)
         (first (list (rgb 0 0 0) (rgb 255 255 255) (rgb 200 40 40) (rgb 40 200 60)
                      (rgb 60 100 230) (rgb 230 200 40) (rgb 220 120 30)
@@ -57,27 +59,28 @@
                      (rgb 120 90 50) (rgb 90 90 110) (rgb 150 150 170)
                      (rgb 60 70 90) (rgb 30 40 55) (rgb 20 24 34))))
     (dolist (c first)
-      (gfx-colour! page i c)
+      (gfx-colour! dev i c)
       (set! i (%+ i 1)))
     (while (%< i 256)
       (let ((v (%+ 16 (%lsh (%* (%- i 16) 239) -8))))
-        (gfx-colour! page i (rgb v v v)))
+        (gfx-colour! dev i (rgb v v v)))
       (set! i (%+ i 1)))))
 
 (define (running?) (server-running? *driver*))
 
-;; The page goes into the handler before the task exists; see `disk:start`.
+;; The display's device, its page sealed, is what the driver's start takes,
+;; the one unsafe act here, and what its handler is handed.
 (define (start)
   (if (running?)
       *driver*
-      (let* ((page (unsafe (device-page dev-gfx)))
-             (s (make-server "gfx.driver" 15 (lambda (body) (serve page body))))
+      (let* ((dev (unsafe (device dev-gfx)))
+             (s (make-server "gfx.driver" 15 (lambda (body) (serve dev body))))
              (task (server-task s))
              (int (make-interrupt "blit" 0 (lambda (d) (blit-server d)) nil)))
         (detach-task task)
         ;; Exec's vblank server is already installed and waits on a chip that
         ;; has to be told to raise it.
-        (gfx-vblank-irq! page t)
+        (gfx-vblank-irq! dev t)
         ;; After a resume the list names tasks of the Exec before this one.
         (set! *blit-waiters* nil)
         (add-int-server int-blit int)

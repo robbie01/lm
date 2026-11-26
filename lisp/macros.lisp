@@ -403,11 +403,19 @@
 ;; arguments bound by `let`: each argument is evaluated once, in the caller's
 ;; scope. Not for anything recursive or large, since the body is copied to
 ;; every call site.
+;;
+;; A body that begins `(declare unsafe)` is raw: the definition says so and
+;; wraps the body in `unsafe`, and a call is the bare body, so the raw names
+;; in it are the call site's to answer for.
 (defmacro defsubst (spec . body)
-  (let ((name (%car spec))
-        (params (%cdr spec)))
+  (let* ((name (%car spec))
+         (params (%cdr spec))
+         (raw (if (%cons? (%car body)) (%eq? (%car (%car body)) 'declare) nil))
+         (inline (if raw (%cdr body) body)))
     (list 'begin
-          (%cons 'define (%cons spec body))
+          (if raw
+              (list 'define spec (%car body) (%cons 'unsafe inline))
+              (%cons 'define (%cons spec body)))
           (list 'defmacro name params
                 (%cons 'list
                        (%cons (list 'quote 'let)
@@ -415,7 +423,7 @@
                                             (map (lambda (v)
                                                    (list 'list (list 'quote v) v))
                                                  params))
-                                     (map (lambda (f) (list 'quote f)) body))))))))
+                                     (map (lambda (f) (list 'quote f)) inline))))))))
 
 (defmacro defrecord spec
   (%cons 'begin (record-forms (%cons 'defrecord spec))))
@@ -514,8 +522,7 @@
 ;; and `abort-to-repl` re-establishes the interrupt state.
 (defmacro without-interrupts body
   (let ((saved (gensym)) (result (gensym)))
-    `(unsafe
-       (let ((,saved (%disable)))
-         (let ((,result (begin ,@body)))
-           (%restore-interrupts ,saved)
-           ,result)))))
+    `(let ((,saved (unsafe (%disable))))
+       (let ((,result (begin ,@body)))
+         (unsafe (%restore-interrupts ,saved))
+         ,result))))

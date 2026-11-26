@@ -8,12 +8,6 @@
 
 (in-package lm)
 
-;; `(unsafe-file)` at the top of a file, after its `in-package`, tells the
-;; compiler that everything to the next `in-package` may say raw things
-;; without an `unsafe` form around each. It does nothing when run: the
-;; compiler takes it as a directive and compiles nothing for it.
-(define (unsafe-file) nil)
-
 ;; ---------------------------------------------------------------- identity
 (define (not x) (if x nil t))
 (define (eq? a b) (%eq? a b))
@@ -764,10 +758,14 @@
 (define (bytes-set! b i v) (%bytes-set! b i v))
 
 ;; ---------------------------------------------------------------- symbols
+;; A name given as data: what it names, and how to change that. This is a
+;; Lisp-1, so a name's function is its value. An unsafe name is refused, as
+;; it would be written down; a call written inside `unsafe` is open-coded
+;; without the test, and is not refused.
 (define (symbol-value s) (%symbol-value s))
 (define (set-symbol-value! s v) (%set-symbol-value! s v))
-(define (symbol-function s) (%symbol-function s))
-(define (set-symbol-function! s v) (%set-symbol-function! s v))
+(define (symbol-function s) (%symbol-value s))
+(define (set-symbol-function! s v) (%set-symbol-value! s v))
 (define (symbol-plist s) (%symbol-plist s))
 
 (define (get sym key)
@@ -794,7 +792,9 @@
 ;; A function may be named by its symbol wherever one is called for, so
 ;; (funcall 'car x) and (apply '+ xs) work. This is a Lisp-1: the function is
 ;; the symbol's value. `%fluid-value` rather than `%symbol-value` because the
-;; forge keeps its globals somewhere else.
+;; forge keeps its globals somewhere else. Like every name given as data, an
+;; unsafe one is refused: `(funcall 'peek a)` is, and `(unsafe (funcall peek
+;; a))` is not.
 (define (resolve-function f)
   (let ((g (if (%symbol? f) (%fluid-value f) f)))
     (if (%closure? g) g (error "not a function:" f))))

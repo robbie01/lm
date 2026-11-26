@@ -40,7 +40,7 @@
 ;; its interface is most of what it defines.
 (in-package lm)
 (export '(
-  alloc-object *object-allocator* *collector* *pacer*
+  alloc-object check-length *object-allocator* *collector* *pacer*
   ;; the generated layout: the names another package reads
   low-end reset-vector reset-reserve cons-base cons-limit obj-base obj-limit
   gc-bitmap gc-bitmap-bytes obj-starts obj-starts-bytes scratch-base scratch-bytes obj-starts-magic
@@ -56,10 +56,10 @@
   otype-sentry otype-closure
   obj-bin-count t-free t-symbol t-string t-vector t-bytes t-closure t-record t-float
   t-port t-bignum t-code t-text t-stack t-context t-kernel code-entry code-name code-lits clo-entry clo-code clo-free
-  sym-name sym-value sym-function sym-plist sym-flags sym-package sym-macro sym-constant sym-detached pkg-tag
+  sym-name sym-value sym-function sym-plist sym-flags sym-package sym-macro sym-constant sym-detached sym-unsafe pkg-tag
   ctx-slots ctx-bytes reg-pc reg-ra reg-sp reg-gp reg-tp reg-t0 reg-t1 reg-t3 reg-s0 reg-s1 reg-s2
   reg-a0 reg-a7
-  ecall-arity ecall-oom ecall-error ecall-reschedule ecall-record
+  ecall-arity ecall-oom ecall-error ecall-reschedule ecall-record ecall-unsafe
   cause-misaligned-fetch cause-fetch-fault cause-illegal cause-breakpoint
   cause-misaligned-load cause-load-fault cause-misaligned-store cause-store-fault
   cause-ecall cause-wrong-type cause-range cause-overflow cause-divzero cause-run
@@ -70,7 +70,7 @@
   dev-sys dev-uart dev-timer dev-gfx dev-input dev-blit dev-disk
   int-uart int-vblank int-input int-blit int-disk int-soft
   disk-busy disk-refused disk-cmd-read disk-cmd-write disk-cmd-flush
-  blit-list-reg blit-status-reg blit-ctrl-reg blit-status-busy blit-status-refused blit-list-size
+  blit-status-busy blit-status-refused blit-list-size
   bl-src bl-dst bl-next bl-w bl-h bl-smod bl-dmod bl-val bl-op bl-x0 bl-y0 bl-x1 bl-y1 bl-status
   blit-done blit-pending blit-refused-src blit-refused-dst
   op-copy op-fill op-line
@@ -120,7 +120,7 @@
   defrecord record-shape record-shape! record-forms record-field record-tag
   set-record-field! record-fault shape-prefix shape-open? shape-fields word?
   *record-shapes* *record-inline-hook*
-  unsafe unsafe-file unsafe-names symbol-unsafe?
+  unsafe declare unsafe-names symbol-unsafe?
   digit->int display display-to-string do dolist dotimes else emit-ch
   emit-code-label emit-name emit-str eq-hash eq? equal? eqv? error even?
   clamp isqrt
@@ -189,8 +189,8 @@
 (export '(
   bm-pixels bitmap? make-bitmap alloc-bitmap
   blit-busy? blit-drain blit-sync blit-wait-descriptor blit-wait-ring
-  device-page device-page-bytes reset-processor
-  disk-go disk-status disk-busy? disk-blocks disk-interrupts!
+  device-page device device-seal device-open otype-device device-page-bytes
+  reset-processor disk-go disk-busy? blitter
   *blit-ring* *gc-blit-ring* *in-interrupt*
   blit-descriptor gc-blit-descriptor ensure-gc-blit-ring blit-go
   *screen* bm-blit-rect bm-fill-rect
@@ -209,7 +209,7 @@
   rgb
   int-ack int-disable int-enable int-pending int-raise millis timer-hz
   peek peek8 plot poke poke8
-  input-take input-inject input-interrupts! input-buttons input-mods
+  input-take input-type
   random screen-height
   screen-width
   timer-never timer-set-in
@@ -227,6 +227,7 @@
   ;; the assembler and placing its code
   make-assembler asm-buf asm-len asm-labels asm-fixups asm-origin asm-nlits
   asm-privileged set-asm-len! set-asm-origin! set-asm-privileged!
+  asm-literals set-asm-literals! set-asm-nlits! island-object island-owner!
   label label-offset gensym-label literal literal-offset place code-object resolve
   ;; CSRs, and the opcodes a trap handler decodes
   csr-cycle csr-cycleh csr-gcmarks csr-gcstarts csr-root csr-gcmode csr-mcause csr-mepc csr-mie csr-mip

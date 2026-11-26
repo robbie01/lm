@@ -222,7 +222,7 @@
   (emit-str "  (life 200)             life, with the blitter for the copy\n")
   (emit-str "  (check)                every suite, counted; the machine stops with the verdict\n")
   (emit-str "  (numbers) (words) (nesting) (talking) (locking) (blitting)\n")
-  (emit-str "  (devices) (drivers) (capabilities)\n")
+  (emit-str "  (devices) (drivers) (capabilities) (unsafety)\n")
   (emit-str "                         check one part of the machine each\n")
   (emit-str "  (save-image)           write this machine to the disk\n")
   (emit-str "  bye                    stop the machine\n")
@@ -251,7 +251,7 @@
   (set! *check-count* 0)
   (set! *check-failures* 0)
   (numbers) (words) (nesting) (talking) (locking) (blitting) (devices)
-  (drivers) (capabilities) (tables)
+  (drivers) (capabilities) (tables) (unsafety)
   (princ *check-count*) (princ " checks, ")
   (princ *check-failures*) (princ " failed") (newline)
   (%halt (if (= *check-failures* 0) exit-ok exit-error))))
@@ -742,7 +742,7 @@
       (num-check 'is-kept-by-its-descriptor
                  (list (blit-busy?) (unsafe (gc::marked? (gc::mark-map) (- a 8))))
                  (list t t))
-      (while (= gc::*phase* gc::phase-marking) (gc::step))
+      (while (= gc::*phase* gc::phase-marking) (unsafe (gc::step)))
       (gc)
       (blit-sync)
       (num-check 'and-the-fill-landed-in-it
@@ -752,15 +752,18 @@
   (newline))
 
 ;; ---------------------------------------------------------------- devices
-;; `(devices)` checks that possession is ownership. A device is reached only
-;; through a capability to its page, which only code that says `unsafe` can
-;; make. A driver makes its own when it starts and keeps it in its closures,
-;; which are sealed, so nothing a program can name leads to one, and a task
-;; without it cannot touch the device.
+;; `(devices)` checks that a page stays the kernel's and a device is what
+;; everything else holds. The reset stub mints every page into the kernel
+;; block, which only code that says `unsafe` reads; a driver's start, under
+;; `unsafe`, seals its page into a device, which anyone may hold and pass
+;; and only the accessors open, each for its own device. So a safe accessor
+;; only ever touches a register of the device it was written for, and
+;; nothing a program can name leads to a page.
 
-;; Whether `c` is a capability to a device's page.
+;; Whether `c` is a capability to a device's page, unsealed: what a program
+;; could load or store through.
 (define (device-cap? c)
-  (if (%cap-tag? c)
+  (if (if (%cap-tag? c) (not (%cap-sealed? c)) nil)
       (let ((b (%cap-base c)))
         (if (>= b mmio-base) (< b (+ mmio-base (* 16 device-page-bytes))) nil))
       nil))
@@ -777,7 +780,7 @@
                 nil)))
       nil))
 
-;; The first device capability reachable from `roots` by loading through
+;; The first device page reachable from `roots` by loading through
 ;; capabilities the way such a program can, or nil.
 (define (loads-reach roots)
   (let ((seen (make-table 65536)) (todo roots) (found nil))
@@ -795,8 +798,8 @@
               (else nil))))
     found))
 
-;; The first device capability in a closure, or in the closures it holds,
-;; opening each with the root: what the closure's own code can reach.
+;; The first device page, unsealed, in a closure, or in the closures it
+;; holds, opening each with the root: what the closure's own code can reach.
 (define (opened-reach f)
   (unsafe
    (let ((o (open-closure f)) (i clo-free) (found nil))
@@ -812,32 +815,53 @@
 ;; A bitmap put on show and dropped: only the display holds it.
 (define (show-and-drop gfx)
   (let ((b (alloc-bitmap 64 64)))
-    (%cap-st! gfx hw::gfx-base (bm-pixels b))
+    (gfx-base! gfx (bm-pixels b))
     (%addr-of (bm-pixels b))))
 
 (define (devices)
   (let ((sys (unsafe (device-page dev-sys)))
         (disk (unsafe (device-page dev-disk)))
+        (gfx (unsafe (device dev-gfx)))
         (task (server-task disk:*driver*)))
     ;; A page is the device and no more, and only the chips with a
-    ;; capability register get LC and SC.
+    ;; capability register get LC and SC. Holding it is the authority.
     (num-check 'a-page-is-the-device
                (list (%cap-len sys) (logand (%cap-perms sys) perms-all) (logand (%cap-perms disk) perms-all))
                (list device-page-bytes (logior perm-ld perm-sd)
                      (logior perm-ld perm-sd perm-lc perm-sc)))
     (num-check 'reading-a-register-through-it (> (%cap-ld-word sys hw::sys-ramsize) 0) t)
-    ;; Making one is unsafe, and a number is no authority.
-    (num-check 'the-compiler-will-not-make-a-page
-               (refused? (lambda () (eval '(device-page dev-disk)))) t)
+    ;; Taking a page is unsafe, and so are sealing one into a device and
+    ;; opening a device without an accessor; and a number is no authority.
+    (num-check 'the-compiler-will-not-take-a-page
+               (list (refused? (lambda () (eval '(device-page dev-disk))))
+                     (refused? (lambda () (eval '(device dev-disk)))))
+               (list t t))
+    (num-check 'nor-seal-or-open-one
+               (list (refused? (lambda () (eval '(device-seal (%cap-set-addr nil 0)))))
+                     (refused? (lambda () (eval '(device-open nil gfx-page-base)))))
+               (list t t))
     (num-check 'an-address-is-not-a-device
-               (refused? (lambda () (disk-status (+ mmio-base (* dev-disk device-page-bytes)))))
+               (refused? (lambda () (%cap-ld-word (+ mmio-base (* dev-disk device-page-bytes)) 0)))
                t)
-    ;; The driver holds its page in its closures and nowhere else, and a
-    ;; task's stack and saved registers are sealed in its record.
-    (num-check 'the-driver-holds-its-page
-               (let ((p (opened-reach (exec::tc-fn task))))
-                 (if p (list (%cap-base p) (%cap-len p)) nil))
-               (list (%cap-base disk) device-page-bytes))
+    ;; A device is its page sealed: nothing loads or stores through it, and
+    ;; an accessor opens it only for its own device.
+    (num-check 'a-device-is-its-page-sealed
+               (list (%cap-otype gfx) (%cap-base gfx) (%cap-len gfx))
+               (list hw::otype-device gfx-page-base device-page-bytes))
+    (num-check 'nothing-loads-through-a-device
+               (refused? (lambda () (%cap-ld-word gfx g-hz))) t)
+    (num-check 'or-stores-through-one
+               (refused? (lambda () (%cap-st-word! gfx g-sync 1))) t)
+    (num-check 'its-own-accessor-reads-it (gfx-hz gfx) 60)
+    (num-check 'another-devices-accessor-traps
+               (list (refused? (lambda () (disk-status gfx)))
+                     (refused? (lambda () (disk-block! gfx 7))))
+               (list t t))
+    (num-check 'and-so-does-a-bare-page (refused? (lambda () (gfx-hz (unsafe (device-page dev-gfx))))) t)
+    (num-check 'the-printer-names-it (write-to-string gfx) "#<device gfx>")
+    ;; The driver holds its device, sealed, and no page; and a task's stack
+    ;; and saved registers are sealed in its record.
+    (num-check 'the-driver-holds-no-page (opened-reach (exec::tc-fn task)) nil)
     (num-check 'a-tasks-registers-are-sealed
                (list (%cap-sealed? (exec::tc-context task)) (%cap-sealed? (exec::tc-stack task)))
                (list t t))
@@ -845,27 +869,31 @@
                (refused? (lambda () (%cap-ld (exec::tc-context task) 0))) t)
     (num-check 'the-walk-finds-a-page-left-lying-about
                (device-cap? (loads-reach (list (list 1 (vector 2 sys))))) t)
-    (num-check 'nothing-a-program-can-name-leads-to-one
+    (num-check 'but-not-a-device
+               (loads-reach (list (list 1 (vector 2 gfx)))) nil)
+    (num-check 'nothing-a-program-can-name-leads-to-a-page
                (loads-reach (list (unsafe (all-symbols)) (this-task)))
-               nil))
-  ;; The display is handed its bitmap as a capability and keeps it: a bitmap
-  ;; on show that nothing else holds survives collections, because the
-  ;; scan-out register hands its capability back to the collector's roots.
-  (let* ((gfx (unsafe (device-page dev-gfx)))
-         (was (%cap-ld gfx hw::gfx-base))
-         (a (show-and-drop gfx)))
-    (gc)
-    (gc)
-    (num-check 'the-display-hands-its-bitmap-back
-               (%addr-of (%cap-ld gfx hw::gfx-base)) a)
-    (num-check 'and-keeps-it
-               (unsafe (gc::object-start-at (gc::start-map) (- a 8))) (- a 8))
-    ;; A number is no bitmap: the chip shows nothing and says why.
-    (%cap-st-word! gfx hw::gfx-base (%addr-of (bm-pixels (screen))))
-    (num-check 'the-display-refuses-a-number (%cap-ld-word gfx hw::gfx-status) refuse-tag)
-    (%cap-st! gfx hw::gfx-base (bm-pixels (screen)))
-    (num-check 'and-shows-what-it-may-read (%cap-ld-word gfx hw::gfx-status) 0)
-    (%cap-st! gfx hw::gfx-base was))
+               nil)
+    ;; The display is handed its bitmap as a capability and keeps it: a
+    ;; bitmap on show that nothing else holds survives collections, because
+    ;; the scan-out register hands its capability back to the collector's
+    ;; roots.
+    (let* ((was (gfx-base gfx))
+           (a (show-and-drop gfx)))
+      (gc)
+      (gc)
+      (num-check 'the-display-hands-its-bitmap-back (%addr-of (gfx-base gfx)) a)
+      (num-check 'and-keeps-it
+                 (unsafe (gc::object-start-at (gc::start-map) (- a 8))) (- a 8))
+      ;; A number is no bitmap: the chip shows nothing and says why.
+      (gfx-base! gfx (%addr-of (bm-pixels (screen))))
+      (num-check 'the-display-refuses-a-number (gfx-status gfx) refuse-tag)
+      (gfx-base! gfx (bm-pixels (screen)))
+      (num-check 'and-shows-what-it-may-read (gfx-status gfx) 0)
+      ;; Nor will a chip take a sealed capability for memory.
+      (gfx-base! gfx gfx)
+      (num-check 'a-chip-refuses-a-sealed-capability (gfx-status gfx) refuse-seal)
+      (gfx-base! gfx was)))
   (princ "devices: done (nothing above = all correct)")
   (newline))
 
@@ -903,26 +931,26 @@
     (while (%< i 1024)
       (bytes-set! out i (%logand (%+ (%* i 7) 3) 255))
       (set! i (%+ i 1)))
-    (let ((st (disk:write-blocks 40 2 out)))
+    (let ((st (unsafe (disk:write-blocks 40 2 out))))
       (if (%= st 1)
           (begin
             (princ "drivers: no disk attached, so no transfers - start with --disk FILE")
             (newline))
           (begin
             (num-check 'write-through-the-driver st 0)
-            (num-check 'read-through-the-driver (disk:read-blocks 40 2 in) 0)
+            (num-check 'read-through-the-driver (unsafe (disk:read-blocks 40 2 in)) 0)
             (num-check 'the-same-bytes-came-back (bytes-same? out in) t)
             ;; The controller is handed the buffer's capability and refuses a
             ;; transfer it does not cover, and moves nothing.
             (let ((small (make-bytes 600)))
               (bytes-set! small 0 7)
               (num-check 'a-read-past-its-buffer-is-refused
-                         (disk:read-blocks 40 2 small) disk-refused)
+                         (unsafe (disk:read-blocks 40 2 small)) disk-refused)
               (num-check 'and-nothing-was-read (bytes-ref small 0) 7)
               (num-check 'a-write-from-a-narrowed-buffer-too
-                         (disk:write-blocks 40 1 (%cap-bounds-exact out 256)) disk-refused)
+                         (unsafe (disk:write-blocks 40 1 (%cap-bounds-exact out 256))) disk-refused)
               (num-check 'and-the-disk-is-unchanged
-                         (list (disk:read-blocks 40 2 in) (bytes-same? out in)) (list 0 t)))
+                         (list (unsafe (disk:read-blocks 40 2 in)) (bytes-same? out in)) (list 0 t)))
             ;; And the machine runs while a transfer does: the driver sleeps
             ;; on the controller, and another task counts in the meantime.
             (let ((big (make-bytes (* 512 256)))
@@ -931,7 +959,7 @@
                                   (lambda ()
                                     (while t (set! *drv-count* (%+ *drv-count* 1)))))))
               (set! *drv-count* 0)
-              (num-check 'a-big-write (disk:write-blocks 100 256 big) 0)
+              (num-check 'a-big-write (unsafe (disk:write-blocks 100 256 big)) 0)
               (num-check 'the-driver-slept-through-it (%> disk:*sleeps* sleeps) t)
               (num-check 'another-task-ran-meanwhile (%> *drv-count* 0) t)
               (remove-task counter))))))
@@ -940,7 +968,7 @@
   (num-check 'input-driver-running (input:running?) t)
   (let ((a (input:listen)) (b (input:listen)))
     ;; A key with no ascii, so that a workbench, if one is up, lets it go by.
-    (input:inject 1 0 200 0)
+    (unsafe (input:inject 1 0 200 0))
     (let ((ea (input:next-event a)) (eb (input:next-event b)))
       (num-check 'one-listener-hears
                  (list (%car ea) (cadr ea) (caddr ea) (cadddr ea))
@@ -1232,7 +1260,7 @@
     (num-check 'a-device-hands-out-no-capability (refused? (lambda () (%cap-ld page 0))) t)
     (num-check 'only-a-capability-register-takes-one
                (list (refused? (lambda () (%cap-st! page hw::sys-ramsize v)))
-                     (refused? (lambda () (%cap-st! blit blit-status-reg v))))
+                     (refused? (lambda () (%cap-st! blit b-status v))))
                (list t t))
     ;; A chip is handed capabilities, not numbers.
     (num-check 'a-chip-refuses-a-number
@@ -1314,7 +1342,7 @@
     (set! i 0)
     (dolist (k keys) (table-set! *kept-table* k i) (set! i (+ i 1)))
     (num-check 'a-table-finds-its-keys (kept-keys-found) (length keys))
-    (if (= (disk:read-blocks 0 1 (make-bytes 512)) 1)
+    (if (= (unsafe (disk:read-blocks 0 1 (make-bytes 512))) 1)
         (begin
           (princ "tables: no disk attached, so no saving - start with --disk FILE")
           (newline))
@@ -1336,3 +1364,99 @@
   (princ *check-count*) (princ " checks, ")
   (princ *check-failures*) (princ " failed") (newline)
   (unsafe (%halt (if (= *check-failures* 0) exit-ok exit-error))))
+
+;; ---------------------------------------------------------------- unsafety
+;; `(unsafety)` checks what `unsafe` is. A block runs with SR, in an island
+;; of its own, and the function around it does not; a raw name is refused
+;; outside a block, written down or given as data; a function that declares
+;; itself unsafe is called only from inside one; and a block may hand what it
+;; holds out on purpose.
+(define (with-a-block x) (list x (unsafe (%cap-tag? (%root)))))
+(define (all-a-block) (unsafe (%cap-tag? (%root))))
+(define (hands-out-the-root) (unsafe (lambda () (%root))))
+
+(define (sr? c) (= (logand (%cap-perms c) perm-sr) perm-sr))
+
+;; The islands among a function's literals: each a code object named
+;; (unsafe k . name).
+(define (islands-of f)
+  (unsafe
+   (let* ((code (%slot (open-closure f) clo-code))
+          (i code-lits) (n (%obj-len code)) (acc nil))
+     (while (< i n)
+       (let ((l (%slot code i)))
+         (if (code-object? l)
+             (let ((name (%slot l code-name)))
+               (if (if (pair? name) (eq? (car name) 'unsafe) nil)
+                   (set! acc (cons l acc))
+                   nil))
+             nil))
+       (set! i (+ i 1)))
+     acc)))
+
+(define (unsafety)
+  ;; Blocks and islands.
+  (num-check 'a-raw-name-outside-a-block-is-refused
+             (refused? (lambda () (eval '(define (no-block) (%root))))) t)
+  (num-check 'the-block-does-its-work (with-a-block 1) (list 1 t))
+  (num-check 'the-function-around-it-has-no-sr (sr? (entry-of with-a-block)) nil)
+  (let ((is (islands-of with-a-block)))
+    (num-check 'the-block-is-an-island-with-sr
+               (if (= (length is) 1)
+                   (let ((i (car is)))
+                     (list (sr? (unsafe (%slot i code-entry)))
+                           (unsafe (%slot i code-name))
+                           (eq? (unsafe (%slot i code-lits))
+                                (unsafe (%slot (open-closure with-a-block) clo-code)))))
+                   is)
+               (list t (cons 'unsafe (cons 1 'with-a-block)) t)))
+  (num-check 'a-body-that-is-one-block-has-sr-whole
+             (list (all-a-block) (sr? (entry-of all-a-block)) (islands-of all-a-block))
+             (list t t nil))
+  ;; A lambda written inside a block is the block's authority handed out.
+  (let ((f (hands-out-the-root)))
+    (num-check 'a-lambda-in-a-block-has-sr (sr? (entry-of f)) t)
+    (num-check 'and-hands-out-what-it-holds (%cap-tag? (f)) t))
+  ;; Names given as data are refused as names written down are, except
+  ;; inside a block, which may hand them out.
+  (num-check 'funcall-of-an-unsafe-name-is-refused
+             (refused? (lambda () (funcall 'peek cons-base))) t)
+  (num-check 'and-apply (refused? (lambda () (apply 'peek (list cons-base)))) t)
+  (num-check 'and-symbol-function
+             (list (refused? (lambda () (symbol-function 'peek)))
+                   (refused? (lambda () (funcall symbol-function 'peek)))
+                   (refused? (lambda () (symbol-value '*pacer*))))
+             (list t t t))
+  (num-check 'and-setting-one
+             (list (refused? (lambda () (set-symbol-value! 'peek car)))
+                   (refused? (lambda () (eval '(set! peek car))))
+                   (refused? (lambda () (eval '(define (peek a) a)))))
+             (list t t t))
+  (num-check 'and-its-flags (refused? (lambda () (eval '(%set-symbol-flags! 'peek 0)))) t)
+  (let ((p (unsafe (symbol-function 'peek))))
+    (num-check 'a-block-may-hand-one-out
+               (list (%closure? p) (fixnum? (p cons-base)))
+               (list t t)))
+  ;; A declared function is called only from inside a block, and stays
+  ;; declared.
+  (eval '(define (declared-probe) (declare unsafe) 7))
+  (num-check 'a-declared-function-is-unsafe-to-call
+             (refused? (lambda () (eval '(declared-probe)))) t)
+  (num-check 'but-not-from-a-block (eval '(unsafe (declared-probe))) 7)
+  (num-check 'it-is-defined-again-only-as-unsafe
+             (list (refused? (lambda () (eval '(define (declared-probe) 8))))
+                   (eval '(define (declared-probe) (declare unsafe) 9))
+                   (eval '(unsafe (declared-probe))))
+             (list t 'declared-probe 9))
+  (eval '(define (safe-probe) 1))
+  (num-check 'a-safe-name-cannot-become-unsafe
+             (refused? (lambda () (eval '(define (safe-probe) (declare unsafe) 2))))
+             t)
+  ;; And a device: taking its page is unsafe, and the page a block hands
+  ;; out is the device to whoever holds it.
+  (num-check 'taking-a-page-is-unsafe
+             (refused? (lambda () (eval '(device-page dev-timer)))) t)
+  (let ((timer (unsafe (device-page dev-timer))))
+    (num-check 'and-holding-one-is-the-device (> (%cap-ld-word timer hw::tmr-freq) 0) t))
+  (princ "unsafety: done (nothing above = all correct)")
+  (newline))
