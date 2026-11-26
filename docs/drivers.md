@@ -66,7 +66,8 @@ a page is the authority over the device, and whatever holds one is part of
 that device's trusted base. A register offset that leaves the page is a
 bounds fault, never a store into the next device, and a capability store
 through it writes a capability register; every other register refuses a
-capability, and only the display's scan-out register hands one back.
+capability, and only the display's scan-out register and the blitter's
+list register, the descriptor it is working on, hand one back.
 
 **A device is its page sealed.** hw.lisp mints one key to otype 5, the
 devices' otype, as it mints the blitter's to otype 4, and keeps it in two
@@ -89,10 +90,10 @@ from the register tables in src/dev/*.rs: for the display, the input chip,
 the blitter and the disk, the base of the page and, for each register, a
 reader, a setter or both, by what the register does:
 
-    (define (disk-block! dev v) (%cap-st-word! (unsafe (device-open dev disk-page-base)) d-block v))
+    (define (disk-block! dev v) (unsafe (%cap-st-word! (device-open dev disk-page-base) d-block v)))
 
-Each opens the device it is handed for its own chip, in a small block of
-its own, and touches one register. Handed another chip's device, or a bare
+Each opens the device it is handed for its own chip and touches one
+register, both in a block of its own, which is the accessor's whole body. Handed another chip's device, or a bare
 page, it traps; so a device can be passed anywhere, as an argument, in a
 message or in a closure, and the worst it can do in the wrong hands is make
 an accessor trap. A driver uses nothing but the accessors and the helpers
@@ -148,10 +149,13 @@ each written with a capability store so that it keeps its tag; then width,
 height, the two strides, a value, the operation, a line's two ends and a
 done word, each a machine word in the low half of its slot, so the slot
 reads as a fixnum. The list register is a capability register: a capability
-store of a descriptor's capability starts the chain there. Each task has a
-ring of eight, a vector of a slot saying which is next and the eight
-descriptors after it, held by the task's binding of `*blit-ring*`, and the
-collector has one of its own.
+store of a descriptor's capability starts the chain there, and a capability
+load hands back the descriptor the chip is working on, which the
+collector's roots read. Each task has a ring of eight, a vector of a slot
+saying which is next, the eight descriptors after it and the task it is
+for, held by the task's binding of `*blit-ring*`: a binding is anybody's
+to set, so a ring made for another task is not used. The collector has
+one of its own.
 
 The chip checks what it is handed, as the processor would. It loads each
 slot the way `LY` does through the descriptor's own capability, which must

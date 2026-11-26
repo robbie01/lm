@@ -305,7 +305,7 @@ refused, and names the operation and the value:
 w
 > (vector-set! w 0 9)
 *** vector-set!: #(1 2 3) is read-only, at pc 9195746
-> (%cap-ld-word (make-bytes 8) 8)
+> (unsafe (%cap-ld-word (make-bytes 8) 8))
 *** load: outside the bounds of #<bytes 8>, at pc 9195f88
 > (define (deep n) (+ 1 (deep (+ n 1))))
 deep
@@ -383,7 +383,7 @@ layout.lisp. Lisp state that is not the kernel's is in ordinary globals.
 Every slot is 8 bytes: a value slot of an object, a frame slot, a saved
 register. Tags exist for RAM only: of the device registers, only the chips'
 three capability registers take one, and only the display's scan-out
-register hands one back.
+register and the blitter's list register hand one back.
 
 ## Calling
 
@@ -575,9 +575,11 @@ A name given as data is checked where it becomes a value: `(funcall 'peek
 a)`, `(apply 'peek ...)`, `(symbol-value 'peek)` and `(symbol-function
 'peek)` refuse an unsafe name outside a block, and a block may hand one out,
 `(unsafe (symbol-function 'peek))`, on purpose. The operations on a
-capability already held, reading its fields, loading and storing within its
-bounds, narrowing it, dropping permissions, sealing a closure, are safe and
-unmarked: they cannot reach past what was handed over. There are no unsafe
+capability already held that reach nothing, reading its fields, narrowing
+it, dropping permissions, sealing a closure, are safe and unmarked; loading
+and storing within its bounds is a dereference, and unsafe, since what a
+capability bounds, a symbol's cells or a code object's literals, is not
+data to every holder: a program reaches a slot through its type. There are no unsafe
 files: every raw act is in a block, and every function that is unsafe to
 call says so where it is defined, so every such place can be found. The
 rule in one sentence: every raw authority that safe code holds was handed
@@ -918,9 +920,12 @@ symbols, a symbol onto its value, function and property list, and a value
 onto its parts: the elements of a list or vector, the fields of a record by
 name, the code and free variables of a function, the literals of a code
 object, and any pointer onto its capability: address, bounds, permissions
-and seal. A sealed closure is opened through the escape hatch. `(explore x)`
-opens the same outline on any object, and return or a double click on a row
-opens another explorer on what the row holds. The arrows move and open rows,
+and seal. A sealed closure is opened through the escape hatch. What only an
+`unsafe` block may hold, an unsafe name's value, a closure's slots and what
+they lead to, the window shows by its kind and its capability and keeps to
+itself: its rows hold a token for it, and `parts` says it is there and
+withholds it. `(explore x)` opens the same outline on any object, and return
+or a double click on a row opens another explorer on what the row holds. The arrows move and open rows,
 and the wheel scrolls.
 
 The interface is set in Charcoal (the Virtue strike, 12 ppem) and shells in
@@ -1029,7 +1034,15 @@ none, that a body of one block and a lambda inside a block have SR whole,
 that `funcall`, `apply`, `symbol-value` and `symbol-function` of an unsafe
 name are refused outside a block and that a block may hand one out, that a
 declared function is called only from a block and is defined again only as
-unsafe, and that a safe name cannot become unsafe. `(tables)`,
+unsafe, that a safe name cannot become unsafe, that a raw name handed to a
+call as an argument is refused, that a load or a store through a
+capability is a raw name, written down or given as data, that no chip
+writes a symbol, that the explorer withholds an unsafe name's value and its
+window still browses it, that the collector's state and the helpers the kernel hands
+a raw capability to are unsafe names, that a length is checked where an
+object is made whatever `check-length` says, that a task taken off every
+list keeps its frames, that a blitter ring serves only its own task, and
+that a sleeper answering early is not believed. `(tables)`,
 the last suite, keys a table by pairs, objects of every kind, symbols and
 numbers, saves the machine to the disk, which slides the pairs down, and
 checks that the table finds every key; `lmdev check` then resumes the

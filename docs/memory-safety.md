@@ -49,14 +49,25 @@ byte the transfer touches, a rectangle's rows and stride included.
 Otherwise the chip moves nothing: a blit's done word says which capability
 refused it and why, and the blitter's status keeps a bit until it is
 cleared; a disk command answers `disk-refused`. What either chip writes is
-data, its tags cleared.
+data, its tags cleared. In object space a chip goes no further than the
+typed operations a program that says nothing unsafe is left with (below):
+it moves data only in and out of a byte object or a string, and reads a
+descriptor only from a vector, so a symbol, a closure, a code object or a
+task's state is no transfer's memory, `refuse-object`, whoever holds the
+blitter's device. The one exception is a
+capability based at object space's first byte, which only the kernel's
+region narrows to: the image writer hands the disk object space that way.
 
 **And in time.** A capability a chip holds for a transfer it has not
 finished keeps its object alive. A blitter descriptor is a run of slots in
-its task's ring, a vector the task's binding holds, so the collector marks
-what a blit in flight names as it marks through any vector; the chip clears
-a descriptor's capability slots only once it has finished with them, and a
-task that ends waits for its ring to drain before it lets go of it. A
+its task's ring, a vector, and the chip's list register hands the
+descriptor it is working on back to a capability load, as the display's
+scan-out register hands back its bitmap; the collector's roots read it
+there, so the ring, every descriptor linked after it and what each blit in
+flight names stay alive even when the task has let go of its ring. The
+chip clears a descriptor's capability slots only once it has finished with
+them, a ring serves only the task it was made for, so no two tasks fill
+one descriptor, and a task that ends waits for its ring to drain. A
 bitmap dropped while a blit into it is still running is freed by a later
 collection, after the blit has landed. The disk takes its buffer out of the
 register when a command starts and drops it when the command ends, and the
@@ -77,11 +88,9 @@ is through the root, which is in a CSR that only code with SR can read.
 with `jcl`, which unseals it into the callee's `t0`, and it cannot be loaded
 from, stored into, narrowed or moved; its free variables are the closure's
 own code's. A return address is a sentry: it can be jumped to, at its own
-address, and nothing else. A task's stack and saved registers are sealed in
-its record with an otype of the kernel's, so anyone can name a task and
-only the task and the kernel can read its frames. A task's descriptor ring,
-and a descriptor anywhere but in the hands of the code filling it, is
-sealed with an otype of the chips' the same way. Each seals with a key to
+address, and nothing else. A task's descriptor ring, and a descriptor
+anywhere but in the hands of the code filling it, is sealed with an otype
+of the chips'. Each seals with a key to
 its own otype, which it mints once and keeps in its own closures, so
 opening a sealed capability by other means takes the root, the escape
 hatch.
@@ -168,7 +177,22 @@ code is a report and not a word of cons space. The test is one load and a
 branch on that dynamic path only; a compiled reference to a global by name
 pays nothing, since the compiler checked it. Written inside a block, a call
 to `symbol-value` or `symbol-function` is open-coded without the test.
-`%set-symbol-flags!`, which could clear the bit, is itself a raw name.
+`%set-symbol-flags!`, which could clear the bit, is itself a raw name, and
+so is every load and store through a capability (below), which would reach
+a symbol's cells through the symbol.
+
+**A block relies on no name a program can define again.** Every global is
+public, a function's name among them, so what a block hands a raw
+capability to, a context, a frame, a region, a descriptor, and what it
+takes an answer from that its soundness rests on, is an unsafe name or is
+open-coded, and so is the state it keeps between calls: the collector's
+phase, its sweeps' bounds, its holes and its marks are unsafe names, its
+helpers that are handed a region are declared, and its arithmetic, a
+length's check, an object's size, are `defsubst`s. A hook a block calls,
+an interrupt server, a sleeper, a restart, is handed nothing raw, and what
+it answers is not believed: the scheduler runs a task, and the collector
+keeps its frames, by Exec's own table of every task's stack and context
+(`*tasks*`), not by the lists a task is on or its record, both anybody's.
 
 `unsafe` is `begin` to the interpreter, `(declare unsafe)` nothing, and both
 a permission to the compiler and the processor.
@@ -179,24 +203,35 @@ a permission to the compiler and the processor.
 | `%ld-word` `%st-word!` `%ld-half` `%st-half!` `%ld-byte` `%st-byte!` `%ld-cap` `%st-cap!`, and `peek`/`poke` over them | memory by number, through the root | any RAM word, live heap, headers and code included |
 | `%kernel`, `kernel-ref` `kernel-set!` `all-symbols` | the kernel block and its slots: the trap stub's state, the symbol list, the region and device capabilities | every region the reset stub minted, every device |
 | `%slot` `%set-slot!` | any type of object, by index | a symbol's cells, a code object's literals, a closure's slots once opened |
+| `%cap-ld` `%cap-st!`, their `-word`, `-byte` and `-at` forms, `%bit-ref` `%bit-set!` | whatever a capability the caller holds bounds, by offset or address | a symbol's value cell and flags, a code object's literals, a frame, a region |
 | `%stack-pointer` | the running task's stack, from its top down | every frame of the task |
 | `%set-symbol-flags!` | a symbol's flags | the bit that makes a name unsafe |
 | `open-closure` | a closure unsealed with the root | its free variables and entry |
 | `sealing-key` | a key to an otype, made from the kernel block's otypes | to seal and unseal with that otype, as its manager does |
 | `%set-context!` `%set-stack-limit!` `%set-gc-mode!` `%ecall` `%disable` `%enable` `%cons-run` `%set-cons-run!` `%set-this-task!` `%halt` | the machine's own state | arbitrary machine state |
 | `alloc-object` `make-closure` `compile-function` `place` `code-object` | an object of any type; a closure open to stores; code and its placement | a forged closure, code object or stack; machine code nobody checked |
-| `task-stack` `task-context` `task-seal` `task-unseal` | a task's stack or saved registers, unsealed, or a seal with Exec's key | another task's frames and registers |
+| `task-stack` `task-context` `*tasks*` | a task's stack or saved registers, from Exec's own table | another task's frames and registers |
 | `device-page` `device` `device-seal` `device-open` | any device's page, from the kernel block, sealed or opened | any register of any device |
 | `blit-descriptor` `blit-go` `blit-seal` `blit-unseal` | a descriptor the chip reads, unsealed, or a seal with the chips' key | a descriptor written after it was linked, under the chip |
-| the collector's internals, `code-object-at` and `refill-cons-run` among them, and its hooks `*object-allocator*` `*collector*` `*pacer*` | a code object by its text's address, a fresh cons run, where a header goes | the collector's invariants |
+| the collector's internals, `code-object-at`, `refill-cons-run` and `blank` among them, its state, `*phase*`, `*holes*`, the sweeps' bounds and `*keep-marks*` among it, and its hooks `*object-allocator*` `*collector*` `*pacer*` `extra-roots` `invalidate-runs` | a code object by its text's address, a fresh cons run, where a header goes, a region, what the next sweep frees | the collector's invariants |
+| the trap handler's internals, `ctx-ref` `ctx-set!` `fault-value` `print-backtrace` and `compose-report` among them | a saved context, a register, a frame | the frames and registers of the code that trapped |
 | `disk-go` `disk:read-blocks` `disk:write-blocks` `disk:exclusive` `input:inject` | raw block numbers, a job run with interrupts off, a keystroke | the image on the disk, the person at the keyboard |
 
-What is not on the list: `%addr-of` is safe, because a number is no
-authority; the operations on a capability already held, `%cap-ld`,
-`%cap-st!`, the field readers, narrowing, dropping permissions and sealing,
-are safe, because they cannot reach past it; `%ld-fixnum` and `%st-fixnum!`
-are gone, a word being a fixnum. The generated accessors are safe, since
-each opens a device only for its own chip.
+**A dereference is unsafe.** A capability is bounded, so a load or a store
+through one cannot reach past it, but what it bounds is not data to every
+holder: a symbol's capability bounds its value cell and its flags, a code
+object's its literals, a region's everything in it. So the loads and
+stores through a capability the caller holds are raw names, as
+dereferencing a raw pointer is unsafe in Rust, and a program that says
+nothing unsafe reaches a slot or a byte only through the typed operations,
+which check the type in the header: `vector-ref`, `bytes-ref`,
+`%record-ref`, `%bignum-ref` and the rest. What is not on the list:
+`%addr-of` is safe, because a number is no authority; the field readers,
+narrowing, dropping permissions, and sealing and unsealing with a key are
+safe, because without a dereference none of them reaches anything;
+`%ld-fixnum` and `%st-fixnum!` are gone, a word being a fixnum. The
+generated accessors are safe, since each opens a device only for its own
+chip, and opens it and touches its one register in a block of its own.
 
 Where it is said: there are no unsafe files. Every raw act in the system is
 inside a block, and every function that is unsafe to call says so at its
@@ -207,8 +242,13 @@ declared unsafe and are blocks whole; their public entry points, `gc`,
 calls among them, are blocks that anyone may call. Outside them the sites
 are blocks where they stand: the printer and the explorer walking objects
 by slot and opening closures, the console's wait, each driver's start
-taking its device, the accessors opening theirs, and the suites that
-exercise raw memory on purpose. The
+taking its device, the accessors opening theirs, a float's comparison, and
+the suites that exercise raw memory on purpose. The explorer shows what
+only a block may hold, an unsafe name's value, a closure's slots, a code
+object's literals and what is reached through them, but keeps each in a
+table only its window's closures hold, its rows holding a token and naming
+the value by its kind and its capability's fields; what it hands a caller
+says such a value is there and holds nothing. The
 UI stack, wb, ui, platinum, eyes and the fonts, has none: glyphs and plots
 store into a bitmap's pixels through their byte object, which is the design
 working.
@@ -273,7 +313,9 @@ LM has the same kind of door, and the same position. These are outside what
   among them, its globals and tables included, and patching the compiler
   that checks raw names, or a macro the kernel's blocks expand, changes what
   the next compiled block means. A raw name cannot be redefined or assigned
-  without `unsafe`; anything else can be, by design.
+  without `unsafe`; anything else can be, by design, and that is why no
+  block hands a safe name anything raw or rests on its answer: defining one
+  again changes what the system does, not what a block reaches.
 
 None is a hole in a block: each is a safe program changing the system it
 runs on, through a door the system leaves open on purpose.

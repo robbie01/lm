@@ -189,8 +189,9 @@ handler finding the jump from the link register.
 store access fault except at the three capability registers, the blitter's
 list register, the disk's buffer register and the display's scan-out
 register, and `LY` from one is a load access fault except at the scan-out
-register, which hands back the capability it holds as `LY` would load it
-through the page. This is a platform's choice of supported access widths
+register and the list register, which hand back the capability they hold
+as `LY` would load it through the page: the bitmap on show, and the
+descriptor the blitter is working on. This is a platform's choice of supported access widths
 for a region, which RISC-V lets a PMA make; RVY's "tag strip" and "tag store
 fault" PMAs are about regions that take such an access.
 

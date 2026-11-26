@@ -49,9 +49,9 @@ unsigned families are gone with it: `peek` is `%ld-word`, `poke` is
 `%st-word!` that refuses anything but a fixnum, and every one of them is a
 load or store through the root, which the processor refuses to code without
 SR. What is left is two sets named for their authority, not their checks:
-the loads and stores by number, which are unsafe, and `%cap-ld-word` and
-its kin, which load and store within a capability already held and are
-not. `setter-form` writes through `poke`, `poke8`, the raw stores and the
+the loads and stores by number, and `%cap-ld-word` and its kin, which load
+and store within a capability already held; both are unsafe, a dereference
+being one. `setter-form` writes through `poke`, `poke8`, the raw stores and the
 capability stores.
 
 **Record prefixes are abbreviations. WONTFIX.** The abbreviated ones are

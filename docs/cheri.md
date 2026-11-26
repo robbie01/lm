@@ -108,9 +108,10 @@ otype is sealed and unsealed with a key: a capability with SE whose address,
 inside its bounds, is the otype (`YSEALT` and `YUNSEALT`). A manager of
 sealed things mints one key to its own otype, the reset stub's capability
 to every otype narrowed to that one (`sealing-key`), and keeps it in its own
-closures and nowhere else: Exec seals a task's stack and context in its record with otype 3, and
-hw seals a blitter ring, and a descriptor anywhere another task could read
-it, with otype 4, and a device's page with otype 5. `YUNSEALS` unseals any sealed capability that lies inside
+closures and nowhere else: hw seals a blitter ring, and a descriptor
+anywhere another task could read it, with otype 4, and a device's page
+with otype 5. Otype 3 is no longer anybody's: a task's stack and context
+are in no record at all, but in Exec's own table. `YUNSEALS` unseals any sealed capability that lies inside
 an unsealed authority, and with the root that is the escape hatch:
 `open-closure`.
 
@@ -132,11 +133,16 @@ either.
 **Public and private.** A global name is public: anything compiled can name
 it. A lexical binding is private: only the code inside its scope can name
 it, and once that code is a sealed closure, nothing else can reach it.
-Sealing is how private state lives inside a public record: a task record is
-anybody's to read, and its stack and context are sealed with a key only
-Exec's closures hold. The root is the escape hatch, for debugging, where the
+Sealing is how private state lives inside a public record: a binding is
+anybody's to read, and the blitter ring it holds is sealed with a key only
+hw's closures hold. Private state can also be an unsafe name: Exec's table
+of every task's stack and context, `*tasks*`, which no record holds, since
+a record is anybody's to write and the lists it is on anybody's to splice.
+A record's type is its slot 0, so no block trusts a record to be what its
+type says, nor a hook, nor a safe name it calls, to answer truly. The root is the escape hatch, for debugging, where the
 printer and the explorer open sealed things and `peek` and `poke` name
-memory by number. The system's own floor, the trap handler, the collector
+memory by number; the explorer keeps what it opens in its window's own
+closures. The system's own floor, the trap handler, the collector
 and the image writer, works through the capabilities the reset stub minted
 from it, each to its own region.
 
@@ -317,9 +323,11 @@ processor refuses the act to code outside one.
 **The escape hatch is the root.** Everything a program can reach it reaches
 through a capability someone handed it, and every capability is bounded,
 except the root. `%root` and the operations that work through it are the
-raw vocabulary. Bounded operations on a capability you hold, loading a word
-from a byte object, narrowing bounds, dropping permissions, sealing your
-own closure, are safe, because they cannot reach past what you were given.
+raw vocabulary. Operations on a capability you hold that reach nothing,
+reading its fields, narrowing bounds, dropping permissions, sealing your
+own closure, are safe; a load or a store through it is a dereference, and
+unsafe, since what it bounds, a symbol's cells among them, is not data to
+every holder.
 
 ## The processor
 
@@ -617,9 +625,12 @@ the blitter's list register, the disk's buffer register and the display's
 scan-out register, each 8 bytes at the start of its page. An `SY` to one
 writes the capability, tag and all, into the chip; an `SY` to any other
 register is a store fault, and a word store to one of the three writes a
-number, which the chip refuses. The scan-out register alone hands back
-what it holds: an `LY` from it loads the bitmap's capability as `LY` would
-through the page, because the display keeps its bitmap for as long as it
+number, which the chip refuses. The blitter's list register, while the
+chip is working, hands back the descriptor it is working on, so that the
+collector keeps it and the chain after it alive, and NULL when the chip is
+idle. The scan-out register hands back what it holds: an `LY` from it
+loads the bitmap's capability as `LY` would through the page, because the
+display keeps its bitmap for as long as it
 shows it, and the collector's roots read it there; an `LY` from any other
 register is a load fault. DMA goes through capabilities: a blitter
 descriptor's source, destination and link are capability slots, which the
@@ -672,10 +683,11 @@ The checked vocabulary is unchanged in meaning. The raw vocabulary:
 | `(%ld-word a)` `(%ld-half a)` `(%ld-byte a)` `(%ld-cap a)` | memory by number, through the root | unsafe |
 | `(%st-word! a v)` `(%st-half! a v)` `(%st-byte! a v)` `(%st-cap! a v)` | likewise | unsafe |
 | `(%kernel)` `kernel-ref` `kernel-set!` `all-symbols` | the kernel block, from `mscratch`, and its slots | unsafe |
-| `(%cap-ld c off)` `(%cap-st! c off v)` | a capability at byte offset off within c | safe |
-| `(%cap-ld-word c off)` `(%cap-st-word! c off v)` `(%cap-ld-byte c off)` `(%cap-st-byte! c off v)` | data within c | safe |
-| `(%cap-ld-at c a)` `(%cap-st-at! c a v)`, and `-word` and `-byte` forms | the same at address a, which c must cover | safe |
-| `(%bit-ref c i)` `(%bit-set! c i)` | bit i of the bit array c stands at | safe |
+| `(%cap-ld c off)` `(%cap-st! c off v)` | a capability at byte offset off within c | unsafe |
+| `(%cap-ld-word c off)` `(%cap-st-word! c off v)` `(%cap-ld-byte c off)` `(%cap-st-byte! c off v)` | data within c | unsafe |
+| `(%cap-ld-at c a)` `(%cap-st-at! c a v)`, and `-word` and `-byte` forms | the same at address a, which c must cover | unsafe |
+| `(%bit-ref c i)` `(%bit-set! c i)` | bit i of the bit array c stands at | unsafe |
+| `(%bignum-ref b i)` `(%bignum-set! b i v)` | slot i of a bignum, its sign and then its limbs | safe |
 | `(%addr-of x)` | the address; an immediate's payload | safe |
 | `%cap-base` `%cap-len` `%cap-top` `%cap-perms` `%cap-otype` `%cap-offset` `%cap-tag?` `%cap-sealed?` `%cap-high` | reading a capability | safe |
 | `%cap-set-addr` `%cap-inc` `%cap-bounds` `%cap-bounds-exact` `%cap-and-perms` `%cap-clear-tag` `%cap-seal-entry` `%cap-seal-closure` | narrowing or sealing one | safe |
