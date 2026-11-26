@@ -104,7 +104,7 @@ fn main() -> std::process::ExitCode {
         }
         Cmd::Layout => {
             lm::forge::write_layout();
-            println!("wrote lisp/layout.lisp");
+            println!("wrote lisp/layout.lisp and lisp/devices.lisp");
             0
         }
     };

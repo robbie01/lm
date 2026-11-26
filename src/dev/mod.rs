@@ -18,6 +18,30 @@ use crate::cap::*;
 use crate::mach::*;
 use crate::map::*;
 
+/// A register as the Lisp side names it, from which `lmforge layout`
+/// generates its accessors (lisp/devices.lisp): its name, its offset, whether
+/// a load reads it and a store writes it, and whether it holds a capability,
+/// which is moved with a capability load or store.
+pub struct Reg {
+    pub name: &'static str,
+    pub off: u32,
+    pub read: bool,
+    pub write: bool,
+    pub cap: bool,
+}
+
+/// A word register that loads and stores, one that only loads, and one that
+/// only stores.
+pub const fn rw(name: &'static str, off: u32) -> Reg {
+    Reg { name, off, read: true, write: true, cap: false }
+}
+pub const fn ro(name: &'static str, off: u32) -> Reg {
+    Reg { name, off, read: true, write: false, cap: false }
+}
+pub const fn wo(name: &'static str, off: u32) -> Reg {
+    Reg { name, off, read: false, write: true, cap: false }
+}
+
 // ------------------------------------------------------------- SYS registers
 pub const SYS_HALT: u32 = 0x00; // w: power down, value becomes the exit code
 pub const SYS_DEBUG: u32 = 0x04; // w: byte straight to the host's stderr

@@ -123,6 +123,9 @@ pub const E_OOM: u32 = 3;
 pub const E_ERROR: u32 = 4;
 pub const E_RESCHEDULE: u32 = 5;
 pub const E_RECORD: u32 = 6;
+/// A symbol given as data was resolved outside `unsafe` and its name is
+/// unsafe: `symbol-value` and its relatives refuse it, with the symbol in a0.
+pub const E_UNSAFE: u32 = 7;
 
 /// Exit codes the machine halts with. Shared with the Lisp side through
 /// layout.lisp.

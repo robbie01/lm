@@ -42,6 +42,24 @@ pub const G_HZ: u32 = 0x34; // r: vblanks per second
 /// code.
 pub const G_STATUS: u32 = 0x38;
 
+/// The registers, as the Lisp side names them.
+pub const REGS: &[super::Reg] = &[
+    super::Reg { name: "base", off: G_BASE, read: true, write: true, cap: true },
+    super::rw("width", G_WIDTH),
+    super::rw("height", G_HEIGHT),
+    super::rw("pitch", G_PITCH),
+    super::rw("mode", G_MODE),
+    super::rw("palidx", G_PALIDX),
+    super::rw("paldat", G_PALDAT),
+    super::rw("ctrl", G_CTRL),
+    super::ro("vcount", G_VCOUNT),
+    super::wo("sync", G_SYNC),
+    super::ro("winw", G_WINW),
+    super::ro("winh", G_WINH),
+    super::ro("hz", G_HZ),
+    super::ro("status", G_STATUS),
+];
+
 pub const CTRL_ON: u32 = 1;
 pub const CTRL_VBIRQ: u32 = 2;
 

@@ -29,6 +29,19 @@ pub const I_MODS: u32 = 0x18; // bit0 shift, bit1 ctrl, bit2 alt
 /// A loopback: a test can drive the input path end to end without a window.
 pub const I_INJECT: u32 = 0x1c;
 
+/// The registers, as the Lisp side names them. Reading the event register
+/// takes an event off the queue, and writing it empties the queue.
+pub const REGS: &[super::Reg] = &[
+    super::rw("event", I_EVENT),
+    super::ro("count", I_COUNT),
+    super::ro("mousex", I_MOUSEX),
+    super::ro("mousey", I_MOUSEY),
+    super::ro("buttons", I_BUTTONS),
+    super::rw("ctrl", I_CTRL),
+    super::ro("mods", I_MODS),
+    super::wo("inject", I_INJECT),
+];
+
 pub const EV_KEYDOWN: u32 = 1;
 pub const EV_KEYUP: u32 = 2;
 pub const EV_MOUSEMOVE: u32 = 3;

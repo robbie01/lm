@@ -2078,14 +2078,24 @@ pub fn name_of(m: &Machine, code: Cap) -> String {
     if header(m, code).map(|hd| hd & 0xff) != Some(crate::heap::T_CODE) {
         return String::from("?");
     }
-    let name = slot(code, crate::heap::CODE_NAME);
-    if crate::heap::is_cons(name) {
-        return match atom(slot(name, 1)) {
+    // (lambda . home) reads "lambda in home"; an island's (unsafe k . name)
+    // reads "name, unsafe block k".
+    fn named(m: &Machine, name: Cap, atom: &dyn Fn(Cap) -> Option<String>) -> String {
+        let slot = |c: Cap, i: u32| m.load_cap(c.base().wrapping_add(8 * i));
+        if !crate::heap::is_cons(name) {
+            return atom(name).unwrap_or_else(|| String::from("?"));
+        }
+        let (head, rest) = (slot(name, 0), slot(name, 1));
+        if atom(head).as_deref() == Some("unsafe") && crate::heap::is_cons(rest) {
+            let k = slot(rest, 0).addr;
+            return format!("{}, unsafe block {k}", named(m, slot(rest, 1), atom));
+        }
+        match atom(rest) {
             Some(home) => format!("lambda in {home}"),
             None => String::from("lambda"),
-        };
+        }
     }
-    atom(name).unwrap_or_else(|| String::from("?"))
+    named(m, slot(code, crate::heap::CODE_NAME), &atom)
 }
 
 // ===================================================================== table

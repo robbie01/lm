@@ -32,6 +32,18 @@ pub const D_STATUS: u32 = 0x14; // STATUS_BUSY while a command runs, then its re
 pub const D_BLOCKS: u32 = 0x18; // r: size of the attached file, in blocks
 pub const D_CTRL: u32 = 0x1c; // bit0: raise INT_DISK on completion
 
+/// The registers, as the Lisp side names them. The buffer register takes a
+/// capability and hands none back.
+pub const REGS: &[super::Reg] = &[
+    super::Reg { name: "buf", off: D_BUF, read: false, write: true, cap: true },
+    super::rw("block", D_BLOCK),
+    super::rw("count", D_COUNT),
+    super::wo("cmd", D_CMD),
+    super::ro("status", D_STATUS),
+    super::ro("blocks", D_BLOCKS),
+    super::rw("ctrl", D_CTRL),
+];
+
 pub const CMD_READ: u32 = 1;
 pub const CMD_WRITE: u32 = 2;
 pub const CMD_FLUSH: u32 = 3;

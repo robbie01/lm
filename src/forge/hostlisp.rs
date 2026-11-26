@@ -87,6 +87,7 @@ pub struct Syms {
     pub let_: V,
     pub defmacro: V,
     pub unsafe_: V,
+    pub declare: V,
     pub t: V,
     pub optional: V,
     pub rest: V,
@@ -229,6 +230,7 @@ impl<'a> Lisp<'a> {
             let_: h.intern("let"),
             defmacro: h.intern("defmacro"),
             unsafe_: h.intern("unsafe"),
+            declare: h.intern("declare"),
             t: h.intern("t"),
             optional: h.intern("&optional"),
             rest: h.intern("&rest"),
@@ -418,6 +420,11 @@ impl<'a> Lisp<'a> {
                         Err(e) => return self.pop_err(e),
                     };
                     continue;
+                }
+                // `(declare unsafe)` says what a definition is to the
+                // compiler, which reads it before the body; run, it is nothing.
+                if head == self.s.declare {
+                    break Ok(NIL);
                 }
                 if head == self.s.set {
                     let name = self.h.car(args);
@@ -745,11 +752,13 @@ impl<'a> Lisp<'a> {
             self.set_global(name, c);
             return Ok(name);
         }
-        let val = if self.h.cdr(args) == NIL {
-            NIL
-        } else {
-            self.eval(self.h.cadr(args), env)?
-        };
+        // (define name (declare unsafe) value): the declaration is the
+        // compiler's, and the value follows it.
+        let mut rest = self.h.cdr(args);
+        if is_cons(rest) && is_cons(self.h.car(rest)) && self.h.car(self.h.car(rest)) == self.s.declare {
+            rest = self.h.cdr(rest);
+        }
+        let val = if rest == NIL { NIL } else { self.eval(self.h.car(rest), env)? };
         if env.is_some() {
             self.mark_lexical(target);
         }

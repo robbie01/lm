@@ -28,6 +28,14 @@ pub const B_STATUS: u32 = 0x08;
 /// Raise INT_BLIT: bit 0 when the chain runs dry, bit 1 after every
 /// descriptor.
 pub const B_CTRL: u32 = 0x0c;
+/// The registers, as the Lisp side names them. The list register takes a
+/// capability and hands none back.
+pub const REGS: &[super::Reg] = &[
+    super::Reg { name: "list", off: B_LIST, read: false, write: true, cap: true },
+    super::rw("status", B_STATUS),
+    super::rw("ctrl", B_CTRL),
+];
+
 pub const STATUS_BUSY: u32 = 1;
 pub const STATUS_REFUSED: u32 = 2;
 pub const CTRL_DRAINED: u32 = 1;

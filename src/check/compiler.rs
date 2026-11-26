@@ -85,6 +85,25 @@ fn cases() -> Vec<Case> {
         Case("(%ld-word 0)", "COMPILE ERROR: unsafe"),
         Case("(define (f) peek8) (f)", "COMPILE ERROR: unsafe"),
         Case("(%root)", "COMPILE ERROR: unsafe"),
+        // A block is an island: its body runs on the function's frame and
+        // registers, with SR, wherever it stands in the function.
+        Case("(define (g x) (list x (unsafe (%ld-word 0)))) (g 1)", "(1 0)"),
+        Case("(define (g x) (%+ x (unsafe (%ld-word 0)))) (g 5)", "5"),
+        Case("(define (g x) (let ((r (unsafe (list x (%ld-word 0))))) r)) (g 3)", "(3 0)"),
+        Case("(define (g x) (if x (unsafe (list (%ld-word 0) x)) nil)) (list (g 2) (g nil))", "((0 2) nil)"),
+        Case("(define (g n) (if (%= n 0) 0 (unsafe (%+ (%ld-word 0) (g (%- n 1)))))) (g 3)", "0"),
+        Case(
+            "(define (g n) (let ((s 0)) (while (%> n 0) (set! s (%+ s (unsafe (%+ 1 (%ld-word 0))))) (set! n (%- n 1))) s)) (g 4)",
+            "4",
+        ),
+        Case("(define (g) (let ((f (lambda () (unsafe (%ld-word 0))))) (f))) (g)", "0"),
+        Case("(define (g x) (unsafe (define y (%ld-word 0)) (list x y))) (g 7)", "(7 0)"),
+        // A declared name is a raw name; given as data, it is refused.
+        Case("(define (d) (declare unsafe) 1) (d)", "COMPILE ERROR: unsafe"),
+        Case("(define (d) (declare unsafe) 1) (unsafe (d))", "1"),
+        Case("(define (d) (declare unsafe) 1) (%symbol-value 'd)", "TRAP: unsafe name"),
+        Case("(define (d) (declare unsafe) 1) (%funcall (unsafe (%symbol-value 'd)))", "1"),
+        Case("(define (d) (declare unsafe) 1) (define (d) 2) 0", "COMPILE ERROR: define"),
         // A wrong-type trap names the register that held the value: a0 is 10.
         Case("(vector-length 5)", "TRAP: wrong type: 0xa"),
         Case("(%symbol-value 5)", "TRAP: wrong type: 0xa"),
@@ -439,11 +458,11 @@ fn cases() -> Vec<Case> {
         // stack pointer after a thousand of them is the same capability as the
         // pointer after one.
         Case(
-            "(define (down n) (if (%= n 0) (%stack-pointer) (apply down (list (%- n 1))))) (let ((sp (down 1))) (%cap=? sp (down 1000)))",
+            "(define (down n) (if (%= n 0) (unsafe (%stack-pointer)) (apply down (list (%- n 1))))) (let ((sp (down 1))) (%cap=? sp (down 1000)))",
             "t",
         ),
         Case(
-            "(define (down n) (if (%= n 0) (%stack-pointer) (funcall 'down (%- n 1)))) (let ((sp (down 1))) (%cap=? sp (down 1000)))",
+            "(define (down n) (if (%= n 0) (unsafe (%stack-pointer)) (funcall 'down (%- n 1)))) (let ((sp (down 1))) (%cap=? sp (down 1000)))",
             "t",
         ),
         // An improper list is caught rather than walked off the end.
@@ -570,11 +589,12 @@ pub fn run_one(l: &mut Lisp, src: &str) -> String {
         if let Some((_, kind)) = kinds.iter().find(|(c, _)| *c == cause) {
             return format!("TRAP: capability {kind} fault");
         }
-        use crate::mach::{E_ARITY, E_OOM, E_RECORD};
+        use crate::mach::{E_ARITY, E_OOM, E_RECORD, E_UNSAFE};
         let what = match (cause, a7) {
             (C_ECALL, E_ARITY) => "arity error".to_string(),
             (C_ECALL, E_OOM) => "out of memory".to_string(),
             (C_ECALL, E_RECORD) => "wrong record".to_string(),
+            (C_ECALL, E_UNSAFE) => "unsafe name".to_string(),
             (C_ECALL, n) => format!("ecall {n}"),
             _ => format!("{} (mtval {tval:#x})", run::cause_name(cause)),
         };
@@ -615,7 +635,7 @@ pub fn eval_one(exprs: &[String]) -> i32 {
         eprint!("{e}");
         return 1;
     }
-    run_one(&mut l, "(gc:install-allocator)");
+    run_one(&mut l, "(unsafe (gc:install-allocator))");
     for e in exprs {
         println!("{}", run_one(&mut l, e));
     }
@@ -650,7 +670,7 @@ pub fn run_all(verbose: bool) -> bool {
     // The image installs the allocator from `kickstart`, which does not run
     // here. Without this the first test to make a vector would find nothing
     // in `*object-allocator*` to call.
-    let r = run_one(&mut l, "(gc:install-allocator)");
+    let r = run_one(&mut l, "(unsafe (gc:install-allocator))");
     if r != "nil" {
         println!("installing the allocator: {r}");
         return false;

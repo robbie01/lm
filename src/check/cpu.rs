@@ -1338,6 +1338,16 @@ pub fn run_all() -> bool {
         let mut c2 = code[..code.len() - 1].to_vec();
         c2.push(ly(A1, A0, 0));
         ok("a device holds no capabilities", go(&c2).took(C_LFAULT, MMIO_BASE + (DEV_UART << 12)));
+        // Holding the page is the authority: a load or a store through it
+        // needs nothing more, SR included.
+        use crate::dev::{TIMER_HZ, TMR_CMPHI, TMR_FREQ};
+        let timer = MMIO_BASE + (DEV_TIMER << 12);
+        let nosr = |m: &mut Machine| {
+            m.set_reg(A1, region(timer, 4096, P_LD | P_SD));
+            m.set_pcc(Cap::ROOT.and_perms(P_ALL & !P_SR).with_addr(BASE));
+        };
+        let o = go_with(&[lw(A0, A1, TMR_FREQ as i32), addi(A2, ZERO, 1), sw(A2, A1, TMR_CMPHI as i32), lw(A3, A1, TMR_CMPHI as i32)], nosr);
+        ok("a device page needs no SR", o.x(A0) == TIMER_HZ && o.x(A3) == 1);
     }
     {
         // The blitter is handed a descriptor's capability with a capability
