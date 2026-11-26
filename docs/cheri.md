@@ -35,7 +35,7 @@ Metadata, in LM's encoding:
 28  SC   store capabilities        24  SE   seal and unseal (authority over otypes)
                                    23  HD   headed: a Lisp object with a header
 22..19  otype   0 unsealed, 1 sentry, 2 closure, 3 a task's stack or context,
-                4 a blitter ring or descriptor; 5..15 unused
+                4 a blitter ring or descriptor, 5 a device; 6..15 unused
 18      IE      internal exponent
 17..10  T[7:0]  top mantissa
 9..0    B[9:0]  base mantissa
@@ -110,9 +110,24 @@ sealed things mints one key to its own otype, the reset stub's capability
 to every otype narrowed to that one (`sealing-key`), and keeps it in its own
 closures and nowhere else: Exec seals a task's stack and context in its record with otype 3, and
 hw seals a blitter ring, and a descriptor anywhere another task could read
-it, with otype 4. `YUNSEALS` unseals any sealed capability that lies inside
+it, with otype 4, and a device's page with otype 5. `YUNSEALS` unseals any sealed capability that lies inside
 an unsealed authority, and with the root that is the escape hatch:
 `open-closure`.
+
+**Devices.** A device's page stays in the kernel block, and what anything
+else holds is a device: the page sealed with otype 5, by hw's key, which
+two closures hold, `device-seal` and `device-open`, both unsafe names.
+`device-open` unseals a device and checks that its page's base is the one
+asked for, and traps otherwise; the accessors generated from src/dev/*.rs
+are the only safe code that calls it, each for its own chip, so a safe
+accessor only ever touches a register of the device it was written for.
+One otype serves every device, because the base is the class, which is
+sound while every device has a fixed address, as here. The upgrade for
+devices whose addresses cannot be known is to seal a {class, page} pair
+instead; only `device-open` and the accessors' generator would change. A
+chip refuses a sealed capability as a transfer's memory, `refuse-seal`, so
+a device is no use to a blitter descriptor or the disk's buffer register
+either.
 
 **Public and private.** A global name is public: anything compiled can name
 it. A lexical binding is private: only the code inside its scope can name
@@ -211,7 +226,7 @@ with `perms-pair`, standing at its top.
 bytes in the header, allocated and aligned as any byte object is. A code
 object's entry capability is derived from object space's capability at the
 text's payload:
-EX, and SR when the source said `unsafe`, and nothing else, with bounds
+EX, and SR for the code of an `unsafe` block, and nothing else, with bounds
 exactly the code, so the code's length is the capability's length. The
 text's own headed capability goes no further than the assembler that fills
 it. Every return address is a sentry, so a frame's saved `ra` can only be
@@ -284,14 +299,20 @@ and `open-closure` read it, and nothing else does. `(%root)` reads it. A
 load or store whose base register is `x0`, an encoding RVY reserves, is an
 illegal instruction, with SR or without: `x0` is NULL, no authority.
 
-**SR is `unsafe`.** SR is RVY's ASR. The compiler gives a code object SR
-when its source was compiled in an `(unsafe-file)` or contains an
-`(unsafe ...)` form, and no other. Without SR in PCC these are illegal
-instructions, as RVY has them without ASR: writing any CSR; reading a
-privileged CSR, which is any whose number's bits 9 and 8 are not 0, the
-root's among them, but `mtidc`; and `mret`. `wfi`, `ecall` and `ebreak` need
-nothing. So `unsafe` is enforced twice: the compiler refuses a raw name
-outside it, and the processor refuses the act to code that did not say it.
+**SR is `unsafe`.** SR is RVY's ASR. The compiler gives SR to the code of
+an `(unsafe ...)` block and to no other: a block is an island, a text of its
+own whose entry has SR, which the function around it enters with a jump and
+link and which jumps back, on the function's own frame and registers; the
+function has no SR. A function whose whole body is one block, and a lambda
+written inside a block, are placed with SR whole. The island's entry is in a
+code object of its own, a literal of the function's code object, which only
+the function's sealed closure leads to, so only a running activation of the
+function can enter it. Without SR in PCC these are illegal instructions, as
+RVY has them without ASR: writing any CSR; reading a privileged CSR, which
+is any whose number's bits 9 and 8 are not 0, the root's among them, but
+`mtidc`; and `mret`. `wfi`, `ecall` and `ebreak` need nothing. So `unsafe`
+is enforced twice: the compiler refuses a raw name outside a block, and the
+processor refuses the act to code outside one.
 
 **The escape hatch is the root.** Everything a program can reach it reaches
 through a capability someone handed it, and every capability is bounded,
@@ -589,7 +610,9 @@ holds it as capabilities and names nothing in it by number.
 
 Tags exist for RAM only. A device page is a region of 32-bit registers, and
 an 8-byte access there is an access fault, as a RISC-V platform refuses an
-access width a region does not support. Three registers take a capability:
+access width a region does not support. Any other access through a page is
+an ordinary load or store: holding the page is the authority over the
+device. Three registers take a capability:
 the blitter's list register, the disk's buffer register and the display's
 scan-out register, each 8 bytes at the start of its page. An `SY` to one
 writes the capability, tag and all, into the chip; an `SY` to any other
@@ -660,10 +683,13 @@ The checked vocabulary is unchanged in meaning. The raw vocabulary:
 | `(%cap-unseal-within c outer)` | c unsealed if it lies within outer | safe |
 | `(%cap-set-high c n)` `(%cap=? a b)` `(%cap-subset? a b)` `(%rrl n)` `(%ram n)` | | safe |
 | `%slot` `%set-slot!` | any-type indexed access | unsafe |
+| `%stack-pointer` | `sp`, the task's whole stack | unsafe |
+| `%set-symbol-flags!` | a symbol's flags, the unsafe bit among them | unsafe |
 | `%cons-run` `%set-cons-run!` | read and write `gp` | unsafe |
 | `open-closure` | a closure unsealed with the root | unsafe |
 | `(sealing-key ot)` | a key to otype ot, made from the kernel block's otypes | unsafe |
 | the machine-state operations | contexts, the stack limit, `gcmode`, interrupts, `ecall`, halt | unsafe |
+| `%symbol-value` `%set-symbol-value!` `%fluid-value` `%set-fluid-value!` | a symbol's value cell, refusing an unsafe name outside a block | safe |
 
 `%cap-perms` answers `YPERMR`'s bit field, reserved bits and all, and
 `(%cap-and-perms c mask)` keeps the permissions `mask` names, which is
@@ -673,4 +699,6 @@ alignment `YAMASK` gives. A word loaded by number is a fixnum, so there is
 no `%ld-fixnum`, and `peek` and `poke` need no signed and unsigned family.
 `peek` and `poke` are the gun in the safe: memory by number through the
 root, which nothing gets in the way of, and which only code that says
-`unsafe` can reach for.
+`unsafe` can reach for. The intrinsics marked unsafe are named by
+`unsafe-names` in compile.lisp, because they have no definition; every
+other unsafe name says `(declare unsafe)` where it is defined.

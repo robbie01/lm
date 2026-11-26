@@ -117,7 +117,7 @@ where it goes after that to software. LM keeps it in a read-only CSR, so
 that nothing need hold it in a register or in memory: the reset stub reads
 it to mint the memory map into capabilities, once each time the machine
 starts, and after that only `peek`, `poke`, the debugging views and the
-escape hatch that opens a sealed capability read it, all compiled `unsafe`.
+escape hatch that opens a sealed capability read it, each inside an `unsafe` block.
 *Alternative:* the reset stub keeping the root sealed in memory with a key
 only the trap handler holds, at the cost of an unseal at each use; or the
 root dropped after boot, and `peek` and `poke` bounded to the regions.

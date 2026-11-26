@@ -1,18 +1,21 @@
 # Devices and drivers
 
-A peripheral is reached through a capability to its page, holding that
-capability is owning the peripheral, and the way to reach one you do not
-hold is the way the rest of the system talks to anything: a message to a
-task.
+A peripheral is reached through a capability to its page, which stays in
+the kernel's hands. What a driver holds, and anything may hold and pass, is
+a device: the page sealed with otype 5. Only the accessors generated for
+each chip open a device, each for its own chip, so **a safe accessor only
+ever touches a register of the device it was written for.** A driver is
+the task that holds its device, and the way for anything else to reach one
+is the way the rest of the system talks to anything: a message to a task.
 
 ## Four kinds of peripheral
 
 The mechanism a peripheral gets depends on the shape of its traffic.
 
 **Kernel-owned: `sys` and `timer`.** The timer is the scheduler's quantum
-and the timebase; `sys` is interrupt control and the halt line. No task
-holds their pages: hw.lisp's own functions make one for each use, and
-exec.lisp calls those.
+and the timebase; `sys` is interrupt control and the halt line. Their pages
+stay in the kernel block, hw.lisp's functions reach them there inside
+`unsafe`, and exec.lisp calls those. They have no accessors and no device.
 
 **Driver-owned, request and reply: `disk`, and the mode-setting half of
 `gfx`.** Traffic is infrequent and each operation is large, so a request
@@ -26,7 +29,9 @@ everything else it is waiting for.
 **Shared, and made safe by its arguments: `blit`.** Sixty or more blits a
 frame from several tasks into disjoint memory. Safety comes from a blit
 naming bitmaps rather than addresses, and the chip being handed their
-capabilities; arbitration is the chip walking a chain of descriptors.
+capabilities; arbitration is the chip walking a chain of descriptors. Its
+device is anybody's: hw.lisp takes it once, and the chip checks every
+capability a descriptor hands it.
 
 ## The two numbers that shape the design
 
@@ -48,45 +53,61 @@ wrong tool and the safety has to come from the arguments.
 ## Enforcement is the processor
 
 A device page is memory above the top of RAM, and the only way to it is its
-capability. The reset stub mints one for every device, from the root, and
-the kernel block holds them, which only code compiled `unsafe` can reach
-(see [cheri.md](cheri.md)). `mmio-base` and the device numbers are exported
-with the rest of the memory map, so a program can compute a register's
-address, but an address is a number, and a program that says nothing
-unsafe can store only through capabilities it was handed. None of those
-reaches a device.
+capability. The reset stub mints one for every device, from the root, into
+the kernel block, which only code inside `unsafe` can reach (see
+[cheri.md](cheri.md)). `mmio-base` and the device numbers are exported with
+the rest of the memory map, so a program can compute a register's address,
+but an address is a number, and a number is no authority.
 
-A device's page is a capability, and holding it is owning the device:
-
-    (define (device-page dev) ...)
-
-`device-page` narrows the root to the device's page, with LD and SD, and SC
-too for the two chips with a capability register, the blitter and the
-disk; it is an unsafe name, so making one is a privilege. A register is one
-load or store through the page, so a register offset that leaves the page is
-a bounds fault, never a store into the next device, and a capability store
+A device's page is a capability bounded to its 4 KiB, with LD and SD, and SC
+too for the two chips with a capability register, the blitter and the disk.
+A register is an ordinary load or store through it, as RVY has it: holding
+a page is the authority over the device, and whatever holds one is part of
+that device's trusted base. A register offset that leaves the page is a
+bounds fault, never a store into the next device, and a capability store
 through it writes a capability register; every other register refuses a
-capability, and no register hands one out.
+capability, and only the display's scan-out register hands one back.
 
-Nothing records who holds a page. A driver makes its own once, when it
-starts, before its task exists, and keeps it in the closures it hands
-`make-server`: its handler and its poll. A closure is sealed and only the
-root opens one, a task's stack and saved registers are sealed in its record,
-and no global, record field or message holds the page, so no other task can
-name it. A task that does not hold a page cannot touch the device, and with
-no driver running there is no way to the device but unsafe code. The page
-lives as long as the driver's closures: a driver that fails restarts on a
-clean stack with the same closures, and one that ends takes its page with
-it, so nothing has to be given back or revoked.
+**A device is its page sealed.** hw.lisp mints one key to otype 5, the
+devices' otype, as it mints the blitter's to otype 4, and keeps it in two
+closures, both unsafe names: `device-seal`, which seals a page, and
+`device-open`, which unseals a device and checks that its page's base is
+the one asked for, and traps otherwise. One otype serves every device: the
+base is the class, which is sound while every device has a fixed address,
+as on this machine, which has no PCI and plans none. A device whose address
+could not be known would be sealed as a {class, page} pair instead, and
+only `device-open` and the accessors' generator would change.
 
-The few users that are not drivers are privileged and make a page where
-they use it. hw.lisp's functions for `sys`, the timer and the blitter make
-one for each register access, a few instructions and no allocation, which
-is what lets the trap handler and interrupt servers use them. The image
-writer makes the disk's from the root. Such a page lives in a frame of the
-code that made it, so it goes when that code returns, or with the task's
-stack if the task ends first, which the collector takes back once nothing
-holds it.
+A driver's start takes its device, the one unsafe act in a driver:
+
+    (let* ((dev (unsafe (device dev-disk)))
+           (s (make-server "disk.driver" 10 (lambda (body) (serve dev body)))))
+      ...)
+
+**The accessors are generated.** `lmforge layout` writes lisp/devices.lisp
+from the register tables in src/dev/*.rs: for the display, the input chip,
+the blitter and the disk, the base of the page and, for each register, a
+reader, a setter or both, by what the register does:
+
+    (define (disk-block! dev v) (%cap-st-word! (unsafe (device-open dev disk-page-base)) d-block v))
+
+Each opens the device it is handed for its own chip, in a small block of
+its own, and touches one register. Handed another chip's device, or a bare
+page, it traps; so a device can be passed anywhere, as an argument, in a
+message or in a closure, and the worst it can do in the wrong hands is make
+an accessor trap. A driver uses nothing but the accessors and the helpers
+in hw.lisp built on them, and a raw page never leaves hw.lisp and the
+kernel. An interrupt server captures the device it needs when it is made,
+as any closure captures what it uses.
+
+What this promises is exactly that a safe accessor only ever touches a
+register of the device it was written for. It keeps a driver from touching
+the wrong chip by accident; it does not keep a program from escalating on
+purpose, which is what `unsafe` is for, and opening a device without an
+accessor takes `unsafe`. Whoever holds a device holds as much as its chip
+gives: the disk's reaches every block, so it is as much as a file system,
+and the input chip's types for whoever is at the keyboard, so it is as much
+as `eval`. See "Around the model" in [memory-safety.md](memory-safety.md).
 
 ## A bitmap is a value
 
@@ -190,12 +211,12 @@ pixels directly calls `blit-sync` first.
 ## The uart is the exception
 
 The raw serial functions in runtime.lisp (`uart-string`, `uart-num`,
-`uart-hex`, `uart-nl`) write the registers directly, and a stream of nil
-means the raw line. They work before Exec exists, inside a trap handler, and
-with the scheduler in pieces, and they are what the collector and the fault
-reports use. `console.driver` owns the ordinary console: it writes whole
-lines and owns the receive side, as the line's one reader. It holds no
-page: it writes and reads through the raw path too, which stays open.
+`uart-hex`, `uart-nl`) write the registers directly, each a block, and a
+stream of nil means the raw line. They work before Exec exists, inside a
+trap handler, and with the scheduler in pieces, and they are what the
+collector and the fault reports use. `console.driver` owns the ordinary
+console: it writes whole lines and owns the receive side, as the line's one
+reader. It writes and reads through the raw path too, which stays open.
 
 The prompt's stream collects a line and hands it to the driver whole.
 Wherever handing it over is impossible, in a trap handler, with interrupts
@@ -211,7 +232,21 @@ its input is already in the stream, which it puts back before every form.
 ## What each driver is
 
 A driver is a task with a port, and its request vocabulary is a small
-language.
+language. Every driver has the same shape:
+
+- **The device** is taken when the driver starts, `(unsafe (device
+  dev-disk))`, and handed to the handler, the poll and anything else that
+  needs it.
+- **Register access** is through the generated accessors, each opening the
+  device for its own chip.
+- **Logic**, parsing a request and keeping the driver's books, is public,
+  handed the device, and called by name so that it can be patched while the
+  driver runs: `serve`, `poll`, `decode`, `show-screen`.
+- **The task loop is thin**: `make-server` runs `server-loop`, and the
+  handler it is given calls a named step, `(lambda (body) (serve dev
+  body))`.
+- **Clients only send messages**, carrying data and capabilities to
+  memory, never a device's page.
 
 **disk.driver** (lisp/disk.lisp): `(read block n bytes)`, `(write block n
 bytes)`, `(flush)`, `(size)`, `(exclusive job)`. Synchronous to the caller,
@@ -223,12 +258,14 @@ write from it LD, and every byte of the blocks must lie inside its bounds,
 or the command moves nothing and answers `disk-refused`. A read clears the
 tags of what it fills. A command takes the capability out of the register
 and drops it when it ends, and its caller is blocked holding the buffer
-until then, so the buffer cannot be collected under it. The one unsafe
-form in disk.lisp makes the driver's page. `exclusive` runs a job in the
-driver's task with interrupts off, with every transfer watched rather than
-slept through; saving an image is one such job, since the collection and
-every region's write must happen with nothing else running. The job is not
-handed the driver's page: the image writer makes its own.
+until then, so the buffer cannot be collected under it. A block number is
+the whole disk's, the image's blocks included, so `read-blocks` and
+`write-blocks` are declared unsafe, and the image writer is the site that
+says `unsafe` to take the disk's device and write raw blocks. `exclusive`, declared unsafe
+too, runs a job in the driver's task with interrupts off, with every
+transfer watched rather than slept through; saving an image is one such
+job, since the collection and every region's write must happen with nothing
+else running.
 
 **input.driver** (lisp/input.lisp): holds the input chip, decodes raw
 events into lists and sends every subscriber a copy: `(key down ascii code
@@ -236,7 +273,8 @@ mods)`, `(key up ...)`, `(mouse moved x y)`, `(button down n x y)`,
 `(button up n x y)`, `(wheel delta x y)`. A pointer event carries the
 position it happened at. Where the pointer is now is not a message: the
 driver keeps it in variables anybody may read. The chip has a loopback
-register, so a test can type a key.
+register, so a test can type a key, and `inject` is declared unsafe, since
+it types for whoever is at the keyboard.
 
 **gfx.driver** (lisp/gfx.lisp): holds the display chip: `(screen w h)`,
 `(show)` after a resume, `(colours pairs)`, `(present)`. It turns the
@@ -254,33 +292,35 @@ of this Exec that has not ended, which covers a driver that ended and a
 resumed image whose driver belonged to an Exec that no longer exists. While
 no driver is running, a call is an error.
 
-## Ownership lifecycle
+## A driver's life
 
-- **Take** before the task exists: `start` makes the page and closes the
-  server's handler over it, and `make-server` makes the task, gives it its
-  port and only then starts it. A client that can reach the port is asking
-  a task that holds the device.
-- **Keep** for the driver's life. A handler that fails answers with the
-  failure and the server starts again on a clean stack, with the same
-  closures and so the same page.
-- **End** with the task. Its closures go with it and the page with them;
-  anything else a driver put outside itself, its interrupt server, comes
-  back through `on-task-end`. A message to a task that has ended is answered
-  with a failure at once, `remove-task` answers everything still queued on
-  the dead task's ports, and a message stays on its port until it is
-  answered, so the one the driver was working on is answered too. `request`
-  turns a failure into an error in the caller. The next `start` makes a new
-  page for a new task.
+- **Start**: `start` makes the server, and `make-server` makes the task,
+  gives it its port and only then starts it, so a client that can reach the
+  port is asking a running driver.
+- **Run** for the driver's life. A handler that fails answers with the
+  failure and the server starts again on a clean stack.
+- **End** with the task. Anything a driver put outside itself, its
+  interrupt server, comes back through `on-task-end`. A message to a task
+  that has ended is answered with a failure at once, `remove-task` answers
+  everything still queued on the dead task's ports, and a message stays on
+  its port until it is answered, so the one the driver was working on is
+  answered too. `request` turns a failure into an error in the caller.
+  Nothing has to be given back: the device is a value, and the page stays
+  in the kernel block.
 
 ## What this does not do
 
 - Privileged code holds whole regions. The collector, the kernel and the
   image writer can write anywhere in theirs, can take any device's page,
   and can hand a chip a capability to a region; the chip then moves
-  whatever that capability covers. What keeps that to those few files is
+  whatever that capability covers. What keeps that to those few places is
   that the kernel block and the root are unsafe names. Nothing stops
-  privileged code taking a page a driver holds: two holders of one device
+  unsafe code reaching a device a driver serves: two users of one device
   is a bug only unsafe code can write.
+- A driver's port is anybody's to send to, so a safe program can send the
+  request a declared call would have sent; see "Around the model" in
+  [memory-safety.md](memory-safety.md). Availability is not a goal: anyone
+  can send a driver garbage, and the driver answers with an error.
 - Ports have no priority, so a low-priority client's request sits in front
   of a high-priority client's. `wait-ports` starts its scan one port further
   along on each call, so a busy client cannot starve a quiet one.
@@ -290,11 +330,14 @@ no driver is running, a call is an error.
 - Two context switches per operation more than a direct call, which is why
   the granularity rule above matters.
 
-`(devices)` checks ownership at the prompt: a page is its device and no
-more, the compiler will not make one outside `unsafe`, an address is no
-device, the disk driver holds its page in its closures, a task's registers
-are sealed, and nothing reachable from any global by loading through
-capabilities, the way a program that says nothing unsafe can, is a device's
+`(devices)` checks this at the prompt: a page is its device and no more,
+the compiler will not take a page, seal one or open a device outside
+`unsafe`, an address is no device, a device is its page sealed and nothing
+loads or stores through it, its own accessor reads it and another chip's
+traps, as does a bare page, the printer names it, no driver holds a page, a
+chip refuses a sealed capability for memory, a task's registers are sealed,
+and nothing reachable from any global by loading through capabilities, the
+way a program that says nothing unsafe can, is a device's
 page. `(drivers)` checks the drivers end to end, a disk read into a buffer
 too small for it among them, and that with the driver gone there is no
 disk; it needs a disk. `(blitting)` checks that the blitter refuses a

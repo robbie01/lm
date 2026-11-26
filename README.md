@@ -13,9 +13,9 @@ past the end of a vector is a fault, not a write into its neighbour.
 Sealing is the closure: a closure can be called and cannot be opened, so
 its environment is its own. There is one address space and no MMU, and
 everything in it is reached through a capability somebody was handed,
-except by way of the root, the one capability to all of memory. Only code
-compiled `unsafe` may use the root, because `unsafe` is the processor's SR
-permission.
+except by way of the root, the one capability to all of memory. Only the
+code of an `unsafe` block may use the root, because `unsafe` is the
+processor's SR permission.
 
 ```
 $ cargo build --release
@@ -256,10 +256,10 @@ printer's raw views, and the escape hatch that opens a sealed closure.
 
 SR is the privilege, RVY's ASR. Writing a CSR, reading a privileged one, the
 root's and `mscratch`'s among them, and `mret` are illegal instructions
-without SR in PCC. The compiler gives a code object's entry SR when its
-source was compiled `unsafe`, and no other. So reaching the root, the
-kernel block or the machine's state is a permission the processor checks
-on every instruction that does it.
+without SR in PCC. The compiler gives SR to the code of an `unsafe` block
+and to no other. So reaching the root, the kernel block or the machine's
+state is a permission the processor checks on every instruction that does
+it.
 
 ### Traps
 
@@ -414,9 +414,13 @@ backtrace.
 Compiled code holds no heap addresses. A function reaches its symbols and
 constants through its code object, which the prologue loads into `s1`, so a
 constant is one `ly` and an object can move without any instruction being
-patched. A code object's entry capability has EX, SR if the source was
-`unsafe`, and bounds that are exactly its text; a jump within the code is
-relative to it, so the text can move too.
+patched. A code object's entry capability has EX, SR if its code is an
+`unsafe` block, and bounds that are exactly its text; a jump within the
+code is relative to it, so the text can move too. A block inside a function
+is an island: a text and code object of its own, held as a literal of the
+function's code object, entered with a jump and link from the function and
+jumping back, on the function's frame and registers. A backtrace names it
+"foo, unsafe block 1".
 
 **Closures are sealed.** The compiler makes a closure, copies its captured
 values in and seals it with `sealcl`: anyone may seal their own closure,
@@ -541,12 +545,11 @@ the end, a store through a read-only reference is a report naming the
 value, never a corrupted word. The raw vocabulary is what reaches memory by
 number or touches the machine's state: `%root`, the loads and stores
 through it, `%kernel` and the kernel block's slots, `%slot`, the CSR and
-context operations, `open-closure`, and the functions that reach memory by
-number or hand out a device's page, such as `peek`, `poke` and
-`device-page`. Each such name carries a bit in
-its symbol, and the compiler refuses a call to one, or a reference to one as
-a value, unless the site is inside an `unsafe` form or the file said
-`(unsafe-file)` after its `in-package`:
+context operations, `open-closure`, and the functions that are unsafe to
+call, such as `peek`, `poke`, `alloc-object` and `device-page`. Each such
+name carries a bit in its symbol, and the compiler refuses a call to one, a
+reference to one as a value or an assignment to one, unless the site is
+inside an `unsafe` form:
 
 ```
 > (%root)
@@ -555,18 +558,30 @@ error: unsafe: not inside an unsafe form: %root in repl
 #<capability 0x0 [0x0,0x100000000) rwRWmxseh>
 ```
 
-Code that says `unsafe` is placed with SR in its entry capability, and code
-that does not is placed without it, so the processor refuses the raw act to
-code that never said it even if the compiler were bypassed. The operations on
-a capability already held, reading its fields, loading and storing within
-its bounds, narrowing it, dropping permissions, sealing a closure, are safe
-and unmarked: they cannot reach past what was handed over. The collector,
-the kernel, the chips, the trap handler, the image writer, the core
-runtime, the bignums and the compiler are unsafe files; everything else
-writes `(unsafe ...)` at the place it says a raw thing, about forty sites,
-so every such place can be found. `unsafe-names` marks a package's own raw
-functions. The rule in one sentence: code that does not say it is unsafe
-reaches only what it was handed.
+As in Rust, there are two words. `(unsafe ...)` is a block: "I use raw
+things soundly here, and anyone may call me". Only the block's code runs
+with SR, so the processor refuses the raw act everywhere else, whatever the
+compiler did. `(declare unsafe)`, first in a definition, is a contract:
+"calling me is unsafe". It gives the name the bit, and the body still says
+`unsafe` around its raw operations:
+
+```
+(define (peek a) (declare unsafe) (unsafe (%ld-word a)))
+```
+
+A block relies only on what it established or checked itself, never on a
+safe caller's promise; that is what makes it sound to call from anywhere.
+A name given as data is checked where it becomes a value: `(funcall 'peek
+a)`, `(apply 'peek ...)`, `(symbol-value 'peek)` and `(symbol-function
+'peek)` refuse an unsafe name outside a block, and a block may hand one out,
+`(unsafe (symbol-function 'peek))`, on purpose. The operations on a
+capability already held, reading its fields, loading and storing within its
+bounds, narrowing it, dropping permissions, sealing a closure, are safe and
+unmarked: they cannot reach past what was handed over. There are no unsafe
+files: every raw act is in a block, and every function that is unsafe to
+call says so where it is defined, so every such place can be found. The
+rule in one sentence: every raw authority that safe code holds was handed
+to it by a site that says `unsafe`.
 
 **Errors.** There is no condition system. `error` prints its message and
 traps; the handler composes a report with a backtrace into a string, then
@@ -795,20 +810,24 @@ every task is waiting costs nothing.
 
 Every device is a 4 KiB page of 32-bit registers at `0xF0000000` and up:
 `sys` (halt, interrupt control, entropy), `uart`, `timer`, `gfx`, `input`,
-`blit`, `disk`. Their register offsets are in the generated layout.
+`blit`, `disk`. Their registers' offsets and accessors are generated into
+lisp/devices.lisp, and the kernel's own into lisp/layout.lisp.
 
 A device page lies outside RAM, and the only way to it is its capability,
-which the reset stub mints for every device and the kernel block holds.
-Possession is ownership: `device-page`, an unsafe name, hands out a
-capability bounded exactly to a device's page, with LD and SD, and LC and
-SC for the three chips with a capability register, and a register is one
-load or store through it, so a register offset past the page is a bounds fault, not
-a store into the next device. A driver makes its page once, when it starts,
-and keeps it in its own closures, which are sealed; no global or record holds
-it, so no other task can name it, and it lives and ends with the driver,
-with nothing to give back. `sys`, `timer` and the blitter are the kernel's,
-reached through the page each use takes from the kernel block. The uart is reachable raw
-by design, for the collector, the trap handler and a rebuild.
+which the reset stub mints into the kernel block. A page is bounded exactly
+to a device's 4 KiB, with LD and SD, and LC and SC for the three chips with
+a capability register, and a register is an ordinary load or store through
+it, so a register offset past the page is a bounds fault, not a store into
+the next device. Pages stay in the kernel's hands. A driver holds a device:
+its page sealed with otype 5, which anything may hold and pass, and which
+only the accessors generated from src/dev/*.rs into lisp/devices.lisp open,
+each for its own chip, `(disk-block! dev 40)` or `(gfx-ctrl dev)`. So a safe
+accessor only ever touches a register of the device it was written for: a
+display handed to a disk accessor traps. A driver's start takes its device,
+`(unsafe (device dev-disk))`, the one unsafe act in a driver. `sys` and the
+timer are the kernel's, reached through their pages in the kernel block.
+The uart is reachable raw by design, for the collector, the trap handler
+and a rebuild.
 
 | driver | holds | requests |
 |---|---|---|
@@ -979,7 +998,7 @@ is a function, and `(drivers)` and `(tables)` need a disk:
 
 ```
 lm kick.img --no-window --batch --disk scratch.disk \
-   --script '(numbers)\n(talking)\n(locking)\n(blitting)\n(drivers)\n(capabilities)\nbye'
+   --script '(numbers)\n(talking)\n(locking)\n(blitting)\n(drivers)\n(capabilities)\n(unsafety)\nbye'
 ```
 
 `(capabilities)` checks what the processor guarantees: that nil is the
@@ -998,8 +1017,19 @@ hundred times over leaves the code and the objects in use as they were
 once the collector has run, while an entry still held keeps its text, and
 that a walk which finds that text's old code object keeps it if the cycle
 is marking and passes over it if the cycle is sweeping.
-`(devices)` checks that the display refuses a number for a bitmap and
-keeps the bitmap it shows alive when nothing else holds it. `(tables)`,
+`(devices)` checks that the compiler will not take a page, seal one or open
+a device outside `unsafe`, that a device is its page sealed and nothing
+loads or stores through it, that its own accessor reads it and another
+chip's traps, that the printer names it, that no driver holds a page, that
+a chip refuses a sealed capability for memory, and that the display refuses a number for a
+bitmap and keeps the bitmap it shows alive when nothing else holds it.
+`(unsafety)` checks what `unsafe` is: that a raw name outside a block is
+refused, that a block is an island with SR while the function around it has
+none, that a body of one block and a lambda inside a block have SR whole,
+that `funcall`, `apply`, `symbol-value` and `symbol-function` of an unsafe
+name are refused outside a block and that a block may hand one out, that a
+declared function is called only from a block and is defined again only as
+unsafe, and that a safe name cannot become unsafe. `(tables)`,
 the last suite, keys a table by pairs, objects of every kind, symbols and
 numbers, saves the machine to the disk, which slides the pairs down, and
 checks that the table finds every key; `lmdev check` then resumes the
@@ -1048,7 +1078,7 @@ drawn it.
 - Nothing is freed by hand, so a capability always names the block it was
   made for; an address held as a number does not, and `unsafe` code that
   makes one a capability again reaches whatever is there now.
-- The root is everything. Code compiled `unsafe` can make any capability,
+- The root is everything. A block of `unsafe` code can make any capability,
   including one that writes an object's header or opens any closure.
 - `eq?` is exact: two capabilities to the same object with different
   permissions are different values.
