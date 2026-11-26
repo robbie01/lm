@@ -1716,7 +1716,7 @@
 
 (define (compile-simple-into c form reg)
   (cond
-   ((%symbol? form) (emit-load c (location-of c form) reg))
+   ((%symbol? form) (check-head c form) (emit-load c (location-of c form) reg))
    ((if (%cons? form) (%eq? (%car form) 'quote) nil)
     (emit-const c (cadr form) reg))
    (else (emit-const c form reg))))
@@ -2230,7 +2230,8 @@
          (else (compile-call c form tail))))))))
 
 ;; Whatever the head of a form turns out to be, an open-coded operation, an
-;; operator with a constant, an indexed access or a call, a raw name is
+;; operator with a constant, an indexed access or a call, and wherever an
+;; operand is read without going through `compile-expr`, a raw name is
 ;; refused unless the site is allowed to say it.
 (define (check-head c h)
   (if (if (%symbol? h) (if (cx-lookup c h) nil (symbol-unsafe? h)) nil)

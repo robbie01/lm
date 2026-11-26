@@ -1398,6 +1398,12 @@
   ;; Blocks and islands.
   (num-check 'a-raw-name-outside-a-block-is-refused
              (refused? (lambda () (eval '(define (no-block) (%root))))) t)
+  ;; And as a value handed to a call, where the compiler reads an operand
+  ;; without compiling it as an expression first.
+  (num-check 'a-raw-name-as-an-argument-is-refused
+             (list (refused? (lambda () (eval '(define (hands-on) (list peek)))))
+                   (refused? (lambda () (eval '(define (hands-on x) (vector x exec::task-unseal))))))
+             (list t t))
   (num-check 'the-block-does-its-work (with-a-block 1) (list 1 t))
   (num-check 'the-function-around-it-has-no-sr (sr? (entry-of with-a-block)) nil)
   (let ((is (islands-of with-a-block)))

@@ -1569,11 +1569,12 @@
   (if (tc-context task) (drop-context-run (task-context task)) nil)))
 
 (define (invalidate-runs)
+  (unsafe
   (if *ready-list*
       (begin
         (scan-list-of *ready-list* drop-task-run)
         (scan-list-of *wait-list* drop-task-run))
-      nil)
+      nil))
   nil)
 
 ;; The run a task was handed is owed by that task, not by whoever refills
@@ -1603,11 +1604,12 @@
       (set! p (node-next p)))))
 
 (define (extra-roots)
+  (unsafe
   (if *ready-list*
       (begin
         (scan-list-of *ready-list* scan-task)
         (scan-list-of *wait-list* scan-task))
-      nil))
+      nil)))
 
 (define (task-count) *task-count*)
 
