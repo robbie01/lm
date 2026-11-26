@@ -138,7 +138,7 @@
   object-payload byte-payload? odd? or out-char out-of-memory *names-seen* package package-name
   package-use package? pair? pop position positive? princ print print-list
   print-obj print-record print-symbol print-vector print-function print-capability
-  emit-cap-summary cap-top-hex cap-top-saturated? emit-capability-fields
+  emit-cap-summary cap-top-hex cap-top-saturated? emit-capability-fields emit-cap-fields
   push put qualified-hash
   quasiquote quote quotient reduce rem remainder remove-if rest revappend
   read-char-or-nil read-form read-toplevel read-forms-from-string read-from-string

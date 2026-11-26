@@ -1402,6 +1402,15 @@
        (set! i (+ i 1)))
      acc)))
 
+;; Whether string `s` begins with `p`, and whether `f` holds of every one of
+;; `xs`.
+(define (starts-with? s p)
+  (if (>= (string-length s) (string-length p))
+      (string=? (substring s 0 (string-length p)) p)
+      nil))
+(define (every? f xs)
+  (if (pair? xs) (if (f (car xs)) (every? f (cdr xs)) nil) t))
+
 ;; Run `thunk` as a task of its own and wait for it to end.
 (define (in-a-task thunk)
   (let ((c (exec::make-child "probe" 0 thunk)))
@@ -1560,6 +1569,21 @@
     (num-check 'a-sleeper-that-answers-early-is-not-believed (first-pixel b) 9))
 
   (num-check 'a-task-off-every-list-keeps-its-frames (hidden-task-keeps-its-frames) 'kept)
+  ;; The explorer hands an unsafe name's value to nobody who asks for it, and
+  ;; its window still browses it, holding a token in each row for what only
+  ;; its own closures may hold: here down to a task's stack.
+  (let ((asked (explorer::symbol-parts 'exec::*tasks*)))
+    (num-check 'the-explorer-withholds-an-unsafe-value
+               (list (car (car asked)) (cadr (car asked))) (list "value: withheld" nil)))
+  (let* ((b (unsafe (explorer::browser (cons nil nil))))
+         (value (cadr (b 'exec::*tasks*)))
+         (entry (b (cadr (cadr (b (cadr value))))))
+         (objects (map cadr entry)))
+    (num-check 'and-its-window-browses-it
+               (list (starts-with? (car value) "value: a pair")
+                     (starts-with? (car (car (last-pair entry))) ".: a capability")
+                     (every? (lambda (o) (if (pair? o) (null? (car o)) (null? o))) objects))
+               (list t t t)))
   ;; And a device: taking its page is unsafe, and the page a block hands
   ;; out is the device to whoever holds it.
   (num-check 'taking-a-page-is-unsafe
